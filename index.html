@@ -10,6 +10,16 @@
     <meta property="og:description" content="ZOVEX - צפייה ישירה בסרטים וסדרות בחינם." />
     <meta property="og:type" content="website" />
     <meta name="google-site-verification" content="XdUADDQ-XJdbdcdqNRbEP0d9iY3OATLmOST-VVPUK50" />
+    <script>
+      // GitHub Pages SPA redirect handler
+      (function() {
+        var search = window.location.search;
+        if (search.startsWith('?/')) {
+          var path = search.slice(2).replace(/&/, '?');
+          window.history.replaceState(null, '', '/zovex/' + decodeURIComponent(path) + window.location.hash);
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
