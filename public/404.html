@@ -5,7 +5,8 @@
     <title>ZOVEX</title>
     <script>
       var l = window.location;
-      l.replace(l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') + '/zovex-11/' + '?/' + l.pathname.slice(1) + (l.search ? '&' + l.search.slice(1) : '') + l.hash);
+      var path = l.pathname.replace('/zovex/', '').replace('/zovex', '');
+      l.replace(l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') + '/zovex/' + (path ? '?/' + path : '') + l.hash);
     </script>
   </head>
 </html>
