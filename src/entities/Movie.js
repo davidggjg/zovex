@@ -1,4 +1,4 @@
-const GITHUB_REPO = import.meta.env.VITE_GITHUB_REPO || 'davidggjg/zovex-11';
+const GITHUB_REPO = import.meta.env.VITE_GITHUB_REPO || 'davidggjg/zovex';
 const GITHUB_FILE = 'public/movies.json';
 const BASE_PATH = import.meta.env.BASE_URL || '/';
 
