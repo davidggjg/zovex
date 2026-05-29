@@ -7,6 +7,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/:slug" element={<Home />} />
+        <Route path="/:slug/:episode" element={<Home />} />
       </Routes>
     </Router>
   );
