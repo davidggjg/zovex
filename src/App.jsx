@@ -3,7 +3,7 @@ import Home from './pages/Home';
 
 export default function App() {
   return (
-    <Router basename="/zovex-11">
+    <Router basename="/zovex">
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/:slug" element={<Home />} />
