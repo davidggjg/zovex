@@ -118,7 +118,7 @@ export default function Home() {
   const [showDonation, setShowDonation] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
   const [showSeasonMenu, setShowSeasonMenu] = useState(false);
-  const [isDesktop, setIsDesktop] = useState(window.innerWidth >= 1024);
+  const [isDesktop, setIsDesktop] = useState(() => { try { return window.innerWidth >= 1024; } catch { return false; } });
 
   // admin
   const [showAdminLogin, setShowAdminLogin] = useState(false);
@@ -196,7 +196,7 @@ export default function Home() {
     }, { threshold: 0.1 });
     obs.observe(loadMoreRef.current);
     return () => obs.disconnect();
-  }, [filteredItems.length, visibleCount]);
+  });
 
   const loadMovies = async () => {
     setLoading(true);
