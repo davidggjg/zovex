@@ -129,7 +129,7 @@ function SkipAnim({ side }) {
 }
 
 // ─── Top bar (X + title + share) ─────────────────────────────
-function TopBar({ title, episode, onClose }) {
+function TopBar({ title, episode, onClose, visible }) {
   const handleShare = () => {
     try { navigator.share?.({ title, url: window.location.href }); } catch {}
   };
@@ -140,6 +140,9 @@ function TopBar({ title, episode, onClose }) {
       background: "linear-gradient(to bottom, rgba(0,0,0,0.82) 0%, transparent 100%)",
       display: "flex", alignItems: "flex-start", justifyContent: "space-between",
       direction: "rtl",
+      opacity: visible ? 1 : 0,
+      transition: "opacity 0.3s",
+      pointerEvents: visible ? "auto" : "none",
     }}>
       {/* X button — right side (RTL) */}
       <button
@@ -148,7 +151,7 @@ function TopBar({ title, episode, onClose }) {
           background: "none", border: "none", color: "#fff",
           cursor: "pointer", padding: 4, lineHeight: 1,
           display: "flex", alignItems: "center", justifyContent: "center",
-          WebkitTapHighlightColor: "transparent",
+          WebkitTapHighlightColor: "transparent", outline: "none",
         }}
       >
         <X size={28} strokeWidth={2.5} />
@@ -173,7 +176,7 @@ function TopBar({ title, episode, onClose }) {
           background: "none", border: "none", color: "#fff",
           cursor: "pointer", padding: 4, lineHeight: 1,
           display: "flex", alignItems: "center", justifyContent: "center",
-          WebkitTapHighlightColor: "transparent",
+          WebkitTapHighlightColor: "transparent", outline: "none",
         }}
       >
         <Share2 size={22} strokeWidth={2} />
@@ -350,8 +353,8 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
       onClick={handleOverlayClick}
       onDoubleClick={(e) => e.stopPropagation()}
     >
-      {/* TopBar — תמיד גלוי, לא נעלם */}
-      <TopBar title={title} episode={episode} onClose={onClose} />
+      {/* TopBar — נעלם/מופיע עם הכפתורים */}
+      <TopBar title={title} episode={episode} onClose={onClose} visible={visible} />
 
       {/* כפתורי skip + play צפים באמצע המסך */}
       <div style={{
@@ -363,24 +366,27 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
         pointerEvents: visible ? "auto" : "none",
         zIndex: 20,
       }}>
-        {/* skip -10 — ה-10 בתוך האיקון */}
+        {/* skip -10 — חץ שמאלה */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-            <path d="M16 4 A12 12 0 1 0 27 13" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
-            <polyline points="10,1 16,4 10,7" fill="white"/>
-            <text x="16" y="20" textAnchor="middle" fill="white" fontSize="8" fontWeight="bold" fontFamily="Arial">10</text>
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+            <path d="M18 5 A13 13 0 1 0 5 18" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
+            <polyline points="5,10 5,18 13,18" stroke="white" strokeWidth="2.2" strokeLinejoin="round" fill="none"/>
+            <text x="18" y="22" textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="Arial">10</text>
           </svg>
         </button>
-        {/* play/pause */}
+        {/* play/pause — סמל יוטיוב */}
         <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
-          {playing ? <Pause size={28} fill="#fff" /> : <Play size={28} fill="#fff" />}
+          {playing
+            ? <svg width="30" height="30" viewBox="0 0 30 30" fill="white"><rect x="4" y="4" width="8" height="22" rx="2"/><rect x="18" y="4" width="8" height="22" rx="2"/></svg>
+            : <svg width="30" height="30" viewBox="0 0 30 30" fill="white"><polygon points="6,3 27,15 6,27"/></svg>
+          }
         </button>
-        {/* skip +10 — ה-10 בתוך האיקון */}
+        {/* skip +10 — חץ ימינה */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-            <path d="M16 4 A12 12 0 1 1 5 13" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
-            <polyline points="22,1 16,4 22,7" fill="white"/>
-            <text x="16" y="20" textAnchor="middle" fill="white" fontSize="8" fontWeight="bold" fontFamily="Arial">10</text>
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+            <path d="M18 5 A13 13 0 1 1 31 18" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
+            <polyline points="31,10 31,18 23,18" stroke="white" strokeWidth="2.2" strokeLinejoin="round" fill="none"/>
+            <text x="18" y="22" textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="Arial">10</text>
           </svg>
         </button>
       </div>
@@ -477,43 +483,33 @@ function HlsPlayer({ src, movie, onClose }) {
 }
 
 // ─── Iframe player with X always on top ──────────────────────
-// FIX: iframe מוגבל לגובה שמשאיר מקום לכותרת — כתוביות לא יחתכו
 function IframePlayer({ src, movie, onClose }) {
   const [loaded, setLoaded] = useState(false);
-  // גובה ה-TopBar בפועל (כ-70px כולל padding)
-  const TOP_BAR_HEIGHT = 70;
+  const TOP_BAR_HEIGHT = 64;
 
   return (
-    <div style={{ flex: 1, position: "relative", background: "#000", display: "flex", flexDirection: "column" }}>
-      {/* X + title bar — תמיד מעל */}
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#000", overflow: "hidden" }}>
+      {/* X + title bar */}
       <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, zIndex: 9999,
-        height: TOP_BAR_HEIGHT,
-        padding: "14px 16px",
-        background: "linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, transparent 100%)",
-        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-        direction: "rtl", pointerEvents: "none",
+        height: TOP_BAR_HEIGHT, flexShrink: 0,
+        padding: "12px 16px",
+        background: "rgba(0,0,0,0.85)",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        direction: "rtl",
       }}>
-        {/* X — pointer-events back on */}
         <button
-          onClick={(e) => { e.stopPropagation(); onClose(); }}
+          onClick={onClose}
           style={{
-            background: "rgba(0,0,0,0.5)", backdropFilter: "blur(8px)",
-            border: "1px solid rgba(255,255,255,0.25)", color: "#fff",
+            background: "none", border: "none", color: "#fff",
             borderRadius: "50%", width: 42, height: 42,
             display: "flex", alignItems: "center", justifyContent: "center",
-            cursor: "pointer", pointerEvents: "auto",
-            WebkitTapHighlightColor: "transparent",
-            flexShrink: 0,
+            cursor: "pointer", WebkitTapHighlightColor: "transparent", outline: "none", flexShrink: 0,
           }}
         >
-          <X size={22} strokeWidth={2.5} />
+          <X size={24} strokeWidth={2.5} />
         </button>
-        {/* title */}
-        <div style={{ flex: 1, textAlign: "center", paddingTop: 6, pointerEvents: "none" }}>
-          <div style={{ color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "Arial", textShadow: "0 1px 6px rgba(0,0,0,0.9)" }}>
-            {movie.title}
-          </div>
+        <div style={{ flex: 1, textAlign: "center" }}>
+          <div style={{ color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "Arial" }}>{movie.title}</div>
           {movie.episode_number && (
             <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 12, fontFamily: "Arial", marginTop: 2 }}>
               פרק {movie.episode_number}{movie.episode_title ? ` - ${movie.episode_title}` : ""}
@@ -530,18 +526,12 @@ function IframePlayer({ src, movie, onClose }) {
         </div>
       )}
 
-      {/* FIX: iframe מתחיל מתחת ל-TopBar ולא מכסה אותו */}
+      {/* iframe תופס את כל השטח שנשאר מתחת לכותרת */}
       <iframe
         key={src}
         src={src}
         onLoad={() => setLoaded(true)}
-        style={{
-          width: "100%",
-          height: `calc(100% - ${TOP_BAR_HEIGHT}px)`,
-          marginTop: TOP_BAR_HEIGHT,
-          border: "none",
-          display: "block",
-        }}
+        style={{ flex: 1, width: "100%", border: "none", display: "block", minHeight: 0 }}
         allowFullScreen
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
       />
