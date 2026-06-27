@@ -353,8 +353,6 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
   return (
     <div
       style={{ position: "absolute", inset: 0, zIndex: 10 }}
-      onMouseMove={show}
-      onTouchStart={show}
       onClick={handleOverlayClick}
       onDoubleClick={(e) => e.stopPropagation()}
     >
@@ -373,8 +371,8 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
       }}>
         {/* skip -10 — אייקון Lucide תקין */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-          <RotateCcw size={32} color="white" strokeWidth={2.2} />
-          <span style={{ position: "absolute", bottom: 5, fontSize: 9, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
+          <RotateCcw size={36} color="white" strokeWidth={1.8} />
+          <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
         </button>
         {/* play/pause — ללא שינוי */}
         <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
@@ -385,8 +383,8 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
         </button>
         {/* skip +10 — אייקון Lucide תקין */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-          <RotateCw size={32} color="white" strokeWidth={2.2} />
-          <span style={{ position: "absolute", bottom: 5, fontSize: 9, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
+          <RotateCw size={36} color="white" strokeWidth={1.8} />
+          <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
         </button>
       </div>
 
