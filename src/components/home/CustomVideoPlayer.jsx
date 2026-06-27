@@ -340,10 +340,15 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
     if (v) v.paused ? v.play() : v.pause();
   }, [videoRef]);
 
-  // לחיצה בכל מקום על המסך — תמיד מציגה את הכפתורים
+  // לחיצה בכל מקום על המסך — Toggle: אם מוצג מסתיר, אם מוסתר מציג
   const handleOverlayClick = useCallback((e) => {
-    show();
-  }, [show]);
+    if (visible) {
+      clearTimeout(timer.current);
+      setVisible(false);
+    } else {
+      show();
+    }
+  }, [visible, show]);
 
   return (
     <div
@@ -366,28 +371,22 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
         pointerEvents: visible ? "auto" : "none",
         zIndex: 20,
       }}>
-        {/* skip -10 — חץ שמאלה עם 10 */}
+        {/* skip -10 — אייקון Lucide תקין */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M19 6C11.82 6 6 11.82 6 19C6 26.18 11.82 32 19 32C26.18 32 32 26.18 32 19" stroke="white" strokeWidth="2.2" strokeLinecap="round"/>
-            <polyline points="19,6 13,6 13,12" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-            <text x="19" y="23" textAnchor="middle" fill="white" fontSize="8.5" fontWeight="bold" fontFamily="Arial">10</text>
-          </svg>
+          <RotateCcw size={32} color="white" strokeWidth={2.2} />
+          <span style={{ position: "absolute", bottom: 5, fontSize: 9, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
         </button>
-        {/* play/pause */}
+        {/* play/pause — ללא שינוי */}
         <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
           {playing
             ? <svg width="28" height="28" viewBox="0 0 28 28" fill="white"><rect x="3" y="3" width="8" height="22" rx="2"/><rect x="17" y="3" width="8" height="22" rx="2"/></svg>
             : <svg width="28" height="28" viewBox="0 0 28 28" fill="white"><polygon points="5,2 26,14 5,26"/></svg>
           }
         </button>
-        {/* skip +10 — חץ ימינה עם 10 */}
+        {/* skip +10 — אייקון Lucide תקין */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M19 6C26.18 6 32 11.82 32 19C32 26.18 26.18 32 19 32C11.82 32 6 26.18 6 19" stroke="white" strokeWidth="2.2" strokeLinecap="round"/>
-            <polyline points="19,6 25,6 25,12" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-            <text x="19" y="23" textAnchor="middle" fill="white" fontSize="8.5" fontWeight="bold" fontFamily="Arial">10</text>
-          </svg>
+          <RotateCw size={32} color="white" strokeWidth={2.2} />
+          <span style={{ position: "absolute", bottom: 5, fontSize: 9, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
         </button>
       </div>
 
