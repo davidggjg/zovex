@@ -366,27 +366,27 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
         pointerEvents: visible ? "auto" : "none",
         zIndex: 20,
       }}>
-        {/* skip -10 — חץ שמאלה */}
+        {/* skip -10 — חץ שמאלה עם 10 */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-            <path d="M18 5 A13 13 0 1 0 5 18" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
-            <polyline points="5,10 5,18 13,18" stroke="white" strokeWidth="2.2" strokeLinejoin="round" fill="none"/>
-            <text x="18" y="22" textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="Arial">10</text>
+          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M19 6C11.82 6 6 11.82 6 19C6 26.18 11.82 32 19 32C26.18 32 32 26.18 32 19" stroke="white" strokeWidth="2.2" strokeLinecap="round"/>
+            <polyline points="19,6 13,6 13,12" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <text x="19" y="23" textAnchor="middle" fill="white" fontSize="8.5" fontWeight="bold" fontFamily="Arial">10</text>
           </svg>
         </button>
-        {/* play/pause — סמל יוטיוב */}
+        {/* play/pause */}
         <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
           {playing
-            ? <svg width="30" height="30" viewBox="0 0 30 30" fill="white"><rect x="4" y="4" width="8" height="22" rx="2"/><rect x="18" y="4" width="8" height="22" rx="2"/></svg>
-            : <svg width="30" height="30" viewBox="0 0 30 30" fill="white"><polygon points="6,3 27,15 6,27"/></svg>
+            ? <svg width="28" height="28" viewBox="0 0 28 28" fill="white"><rect x="3" y="3" width="8" height="22" rx="2"/><rect x="17" y="3" width="8" height="22" rx="2"/></svg>
+            : <svg width="28" height="28" viewBox="0 0 28 28" fill="white"><polygon points="5,2 26,14 5,26"/></svg>
           }
         </button>
-        {/* skip +10 — חץ ימינה */}
+        {/* skip +10 — חץ ימינה עם 10 */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-            <path d="M18 5 A13 13 0 1 1 31 18" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
-            <polyline points="31,10 31,18 23,18" stroke="white" strokeWidth="2.2" strokeLinejoin="round" fill="none"/>
-            <text x="18" y="22" textAnchor="middle" fill="white" fontSize="9" fontWeight="bold" fontFamily="Arial">10</text>
+          <svg width="38" height="38" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M19 6C26.18 6 32 11.82 32 19C32 26.18 26.18 32 19 32C11.82 32 6 26.18 6 19" stroke="white" strokeWidth="2.2" strokeLinecap="round"/>
+            <polyline points="19,6 25,6 25,12" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <text x="19" y="23" textAnchor="middle" fill="white" fontSize="8.5" fontWeight="bold" fontFamily="Arial">10</text>
           </svg>
         </button>
       </div>
@@ -410,8 +410,8 @@ function DirectVideoPlayer({ src, movie, onClose }) {
   }, []);
 
   return (
-    <div style={{ flex: 1, position: "relative", background: "#000" }}>
-      <video ref={videoRef} src={src} autoPlay playsInline style={{ width: "100%", height: "100%", display: "block", background: "#000" }} />
+    <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
+      <video ref={videoRef} src={src} autoPlay playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
       <ControlsLayer videoRef={videoRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} />
     </div>
   );
@@ -470,7 +470,7 @@ function HlsPlayer({ src, movie, onClose }) {
   }, []);
 
   return (
-    <div style={{ flex: 1, position: "relative", background: "#000" }}>
+    <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
       {loading && (
         <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center", background: "#000" }}>
           <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #e91e8c", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
