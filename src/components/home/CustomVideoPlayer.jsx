@@ -128,7 +128,7 @@ function SkipAnim({ side }) {
   );
 }
 
-// ─── Top bar (X + title + share) — כאן11 style ───────────────
+// ─── Top bar (X + title + share) ─────────────────────────────
 function TopBar({ title, episode, onClose }) {
   const handleShare = () => {
     try { navigator.share?.({ title, url: window.location.href }); } catch {}
@@ -182,7 +182,9 @@ function TopBar({ title, episode, onClose }) {
   );
 }
 
-// ─── Bottom controls bar — כאן11 style ───────────────────────
+// ─── Bottom controls bar ──────────────────────────────────────
+// FIX: כפתורים מסודרים: [skip-10] [מרווח] [play/pause] [מרווח] [skip+10]
+// עם מרווח גדול בין כפתורים ושורת ההתקדמות למעלה
 function BottomBar({ videoRef, onSkip, visible }) {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(false);
@@ -244,7 +246,7 @@ function BottomBar({ videoRef, onSkip, visible }) {
   return (
     <div style={{
       position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 30,
-      padding: "40px 14px 14px",
+      padding: "40px 20px 20px",
       background: "linear-gradient(to top, rgba(0,0,0,0.88) 0%, transparent 100%)",
       transition: "opacity 0.3s",
       opacity: visible ? 1 : 0,
@@ -252,7 +254,7 @@ function BottomBar({ videoRef, onSkip, visible }) {
       direction: "ltr",
     }}>
       {/* progress bar */}
-      <div style={{ marginBottom: 12, padding: "4px 0", cursor: "pointer" }}
+      <div style={{ marginBottom: 16, padding: "8px 0", cursor: "pointer" }}
         ref={progressRef}
         onClick={seek}
         onMouseDown={(e) => { setDragging(true); seek(e); }}
@@ -268,36 +270,41 @@ function BottomBar({ videoRef, onSkip, visible }) {
         </div>
       </div>
 
-      {/* controls row */}
+      {/* controls row — FIX: 3 zones: left=skip-10, center=play, right=skip+10 */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {/* skip -10 */}
+
+        {/* LEFT: skip -10 seconds */}
+        <div style={{ display: "flex", alignItems: "center", gap: 24, flex: 1, justifyContent: "flex-start" }}>
           <button onClick={() => onSkip("back")} style={iconBtn}>
-            <RotateCcw size={18} />
+            <RotateCcw size={22} />
             <span style={{ position: "absolute", fontSize: 9, fontWeight: 900, fontFamily: "Arial", bottom: 6, right: 7 }}>10</span>
           </button>
-          {/* play/pause */}
-          <button onClick={togglePlay} style={{ ...iconBtn, width: 46, height: 46 }}>
-            {playing ? <Pause size={22} fill="#fff" /> : <Play size={22} fill="#fff" />}
-          </button>
-          {/* skip +10 */}
-          <button onClick={() => onSkip("forward")} style={iconBtn}>
-            <RotateCw size={18} />
-            <span style={{ position: "absolute", fontSize: 9, fontWeight: 900, fontFamily: "Arial", bottom: 6, left: 7 }}>10</span>
-          </button>
-          {/* mute */}
+          {/* mute — רחוק מ-skip */}
           <button onClick={toggleMute} style={iconBtn}>
             {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}
           </button>
           {/* time */}
-          <span style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, fontFamily: "Arial", marginLeft: 6, whiteSpace: "nowrap" }}>
+          <span style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, fontFamily: "Arial", whiteSpace: "nowrap" }}>
             {formatTime(currentTime)} / {formatTime(duration)}
           </span>
         </div>
-        {/* fullscreen */}
-        <button onClick={goFullscreen} style={iconBtn}>
-          <Maximize size={19} />
+
+        {/* CENTER: play/pause — גדול יותר */}
+        <button onClick={togglePlay} style={{ ...iconBtn, width: 54, height: 54, background: "rgba(255,255,255,0.12)", borderRadius: "50%", margin: "0 24px" }}>
+          {playing ? <Pause size={26} fill="#fff" /> : <Play size={26} fill="#fff" />}
         </button>
+
+        {/* RIGHT: skip +10 seconds + fullscreen */}
+        <div style={{ display: "flex", alignItems: "center", gap: 24, flex: 1, justifyContent: "flex-end" }}>
+          <button onClick={goFullscreen} style={iconBtn}>
+            <Maximize size={19} />
+          </button>
+          <button onClick={() => onSkip("forward")} style={iconBtn}>
+            <RotateCw size={22} />
+            <span style={{ position: "absolute", fontSize: 9, fontWeight: 900, fontFamily: "Arial", bottom: 6, left: 7 }}>10</span>
+          </button>
+        </div>
+
       </div>
     </div>
   );
@@ -305,13 +312,14 @@ function BottomBar({ videoRef, onSkip, visible }) {
 
 const iconBtn = {
   background: "none", border: "none", color: "#fff",
-  width: 38, height: 38, borderRadius: "50%", cursor: "pointer",
+  width: 42, height: 42, borderRadius: "50%", cursor: "pointer",
   display: "flex", alignItems: "center", justifyContent: "center",
   position: "relative", flexShrink: 0,
   WebkitTapHighlightColor: "transparent",
 };
 
 // ─── Controls wrapper (auto-hide) ─────────────────────────────
+// FIX: לחיצה על כל מקום במסך (לא רק ה-div) מפעילה/מעצירה + מציגה כפתורים
 function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) {
   const [visible, setVisible] = useState(true);
   const timer = useRef(null);
@@ -324,17 +332,26 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
 
   useEffect(() => { show(); return () => clearTimeout(timer.current); }, [show]);
 
+  // FIX: לחיצה על המסך (לא על כפתורים) מציגה כפתורים ומשהה/מפעילה
+  const handleOverlayClick = useCallback((e) => {
+    // אם לחצו על כפתור או אלמנט אינטראקטיבי — לא נעצור
+    if (e.target !== e.currentTarget) return;
+    show();
+    const v = videoRef.current;
+    if (v) v.paused ? v.play() : v.pause();
+  }, [show, videoRef]);
+
   return (
     <div
       style={{ position: "absolute", inset: 0, zIndex: 10 }}
       onMouseMove={show}
       onTouchStart={show}
-      onClick={(e) => { if (e.target === e.currentTarget) { show(); videoRef.current?.paused ? videoRef.current?.play() : videoRef.current?.pause(); } }}
+      onClick={handleOverlayClick}
     >
       <TopBar title={title} episode={episode} onClose={onClose} />
       <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} />
       <SkipAnim side={skipAnim} />
-      {/* skip zones */}
+      {/* skip zones — double tap */}
       <div onDoubleClick={() => onSkip("back")} style={{ position: "absolute", top: "10%", left: 0, width: "25%", height: "75%", zIndex: 5 }} />
       <div onDoubleClick={() => onSkip("forward")} style={{ position: "absolute", top: "10%", right: 0, width: "25%", height: "75%", zIndex: 5 }} />
     </div>
@@ -427,20 +444,24 @@ function HlsPlayer({ src, movie, onClose }) {
 }
 
 // ─── Iframe player with X always on top ──────────────────────
+// FIX: iframe מוגבל לגובה שמשאיר מקום לכותרת — כתוביות לא יחתכו
 function IframePlayer({ src, movie, onClose }) {
   const [loaded, setLoaded] = useState(false);
+  // גובה ה-TopBar בפועל (כ-70px כולל padding)
+  const TOP_BAR_HEIGHT = 70;
 
   return (
-    <div style={{ flex: 1, position: "relative", background: "#000" }}>
-      {/* X button — always visible, above iframe using pointer-events */}
+    <div style={{ flex: 1, position: "relative", background: "#000", display: "flex", flexDirection: "column" }}>
+      {/* X + title bar — תמיד מעל */}
       <div style={{
         position: "absolute", top: 0, left: 0, right: 0, zIndex: 9999,
-        padding: "14px 16px 40px",
+        height: TOP_BAR_HEIGHT,
+        padding: "14px 16px",
         background: "linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, transparent 100%)",
         display: "flex", alignItems: "flex-start", justifyContent: "space-between",
         direction: "rtl", pointerEvents: "none",
       }}>
-        {/* X — pointer-events back on for the button itself */}
+        {/* X — pointer-events back on */}
         <button
           onClick={(e) => { e.stopPropagation(); onClose(); }}
           style={{
@@ -450,6 +471,7 @@ function IframePlayer({ src, movie, onClose }) {
             display: "flex", alignItems: "center", justifyContent: "center",
             cursor: "pointer", pointerEvents: "auto",
             WebkitTapHighlightColor: "transparent",
+            flexShrink: 0,
           }}
         >
           <X size={22} strokeWidth={2.5} />
@@ -465,7 +487,7 @@ function IframePlayer({ src, movie, onClose }) {
             </div>
           )}
         </div>
-        <div style={{ width: 42 }} />
+        <div style={{ width: 42, flexShrink: 0 }} />
       </div>
 
       {/* loading spinner */}
@@ -475,11 +497,18 @@ function IframePlayer({ src, movie, onClose }) {
         </div>
       )}
 
+      {/* FIX: iframe מתחיל מתחת ל-TopBar ולא מכסה אותו */}
       <iframe
         key={src}
         src={src}
         onLoad={() => setLoaded(true)}
-        style={{ width: "100%", height: "100%", border: "none", display: "block" }}
+        style={{
+          width: "100%",
+          height: `calc(100% - ${TOP_BAR_HEIGHT}px)`,
+          marginTop: TOP_BAR_HEIGHT,
+          border: "none",
+          display: "block",
+        }}
         allowFullScreen
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
       />
