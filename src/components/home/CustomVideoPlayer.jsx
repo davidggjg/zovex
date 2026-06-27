@@ -342,6 +342,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
     show();
   }, [show]);
 
+  return (
     <div
       style={{ position: "absolute", inset: 0, zIndex: 10 }}
       onMouseMove={show}
