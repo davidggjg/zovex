@@ -302,6 +302,7 @@ const centerBtn = {
   display: "flex", alignItems: "center", justifyContent: "center",
   position: "relative", flexShrink: 0,
   WebkitTapHighlightColor: "transparent",
+  outline: "none",
 };
 
 // ─── Controls wrapper (auto-hide) ─────────────────────────────
@@ -336,9 +337,8 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
     if (v) v.paused ? v.play() : v.pause();
   }, [videoRef]);
 
-  // לחיצה על המסך (לא על כפתורים) — רק מציגה את הכפתורים
+  // לחיצה בכל מקום על המסך — תמיד מציגה את הכפתורים
   const handleOverlayClick = useCallback((e) => {
-    if (e.target !== e.currentTarget) return;
     show();
   }, [show]);
 
@@ -379,9 +379,6 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
 
       <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} />
       <SkipAnim side={skipAnim} />
-      {/* skip zones — double tap */}
-      <div onDoubleClick={() => onSkip("back")} style={{ position: "absolute", top: "10%", left: 0, width: "25%", height: "75%", zIndex: 5 }} />
-      <div onDoubleClick={() => onSkip("forward")} style={{ position: "absolute", top: "10%", right: 0, width: "25%", height: "75%", zIndex: 5 }} />
     </div>
   );
 }
