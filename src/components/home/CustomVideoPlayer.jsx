@@ -270,41 +270,19 @@ function BottomBar({ videoRef, onSkip, visible }) {
         </div>
       </div>
 
-      {/* controls row — FIX: 3 zones: left=skip-10, center=play, right=skip+10 */}
+      {/* bottom row: mute + time + fullscreen */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-
-        {/* LEFT: skip -10 seconds */}
-        <div style={{ display: "flex", alignItems: "center", gap: 24, flex: 1, justifyContent: "flex-start" }}>
-          <button onClick={() => onSkip("back")} style={iconBtn}>
-            <RotateCcw size={22} />
-            <span style={{ position: "absolute", fontSize: 9, fontWeight: 900, fontFamily: "Arial", bottom: 6, right: 7 }}>10</span>
-          </button>
-          {/* mute — רחוק מ-skip */}
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <button onClick={toggleMute} style={iconBtn}>
             {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}
           </button>
-          {/* time */}
           <span style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, fontFamily: "Arial", whiteSpace: "nowrap" }}>
             {formatTime(currentTime)} / {formatTime(duration)}
           </span>
         </div>
-
-        {/* CENTER: play/pause — גדול יותר, בלי רקע */}
-        <button onClick={togglePlay} style={{ ...iconBtn, width: 54, height: 54, background: "none", borderRadius: "50%", margin: "0 36px" }}>
-          {playing ? <Pause size={26} fill="#fff" /> : <Play size={26} fill="#fff" />}
+        <button onClick={goFullscreen} style={iconBtn}>
+          <Maximize size={19} />
         </button>
-
-        {/* RIGHT: skip +10 seconds + fullscreen */}
-        <div style={{ display: "flex", alignItems: "center", gap: 24, flex: 1, justifyContent: "flex-end" }}>
-          <button onClick={goFullscreen} style={iconBtn}>
-            <Maximize size={19} />
-          </button>
-          <button onClick={() => onSkip("forward")} style={iconBtn}>
-            <RotateCw size={22} />
-            <span style={{ position: "absolute", fontSize: 9, fontWeight: 900, fontFamily: "Arial", bottom: 6, left: 7 }}>10</span>
-          </button>
-        </div>
-
       </div>
     </div>
   );
@@ -313,6 +291,14 @@ function BottomBar({ videoRef, onSkip, visible }) {
 const iconBtn = {
   background: "none", border: "none", color: "#fff",
   width: 42, height: 42, borderRadius: "50%", cursor: "pointer",
+  display: "flex", alignItems: "center", justifyContent: "center",
+  position: "relative", flexShrink: 0,
+  WebkitTapHighlightColor: "transparent",
+};
+
+const centerBtn = {
+  background: "none", border: "none", color: "#fff",
+  width: 48, height: 48, borderRadius: "50%", cursor: "pointer",
   display: "flex", alignItems: "center", justifyContent: "center",
   position: "relative", flexShrink: 0,
   WebkitTapHighlightColor: "transparent",
@@ -332,14 +318,29 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
 
   useEffect(() => { show(); return () => clearTimeout(timer.current); }, [show]);
 
-  // FIX: לחיצה על המסך (לא על כפתורים) מציגה כפתורים ומשהה/מפעילה
-  const handleOverlayClick = useCallback((e) => {
-    // אם לחצו על כפתור או אלמנט אינטראקטיבי — לא נעצור
-    if (e.target !== e.currentTarget) return;
-    show();
+  const [playing, setPlaying] = useState(true);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    v.addEventListener("play", onPlay);
+    v.addEventListener("pause", onPause);
+    return () => { v.removeEventListener("play", onPlay); v.removeEventListener("pause", onPause); };
+  }, [videoRef]);
+
+  const togglePlay = useCallback((e) => {
+    e.stopPropagation();
     const v = videoRef.current;
     if (v) v.paused ? v.play() : v.pause();
-  }, [show, videoRef]);
+  }, [videoRef]);
+
+  // לחיצה על המסך (לא על כפתורים) — רק מציגה את הכפתורים
+  const handleOverlayClick = useCallback((e) => {
+    if (e.target !== e.currentTarget) return;
+    show();
+  }, [show]);
 
   return (
     <div
@@ -349,6 +350,33 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
       onClick={handleOverlayClick}
     >
       <TopBar title={title} episode={episode} onClose={onClose} />
+
+      {/* כפתורי skip + play צפים באמצע המסך */}
+      <div style={{
+        position: "absolute", top: "50%", left: "50%",
+        transform: "translate(-50%, -50%)",
+        display: "flex", alignItems: "center", gap: 32,
+        opacity: visible ? 1 : 0,
+        transition: "opacity 0.3s",
+        pointerEvents: visible ? "auto" : "none",
+        zIndex: 20,
+      }}>
+        {/* skip -10 */}
+        <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
+          <RotateCcw size={26} />
+          <span style={{ position: "absolute", fontSize: 10, fontWeight: 900, fontFamily: "Arial", bottom: 7, right: 8 }}>10</span>
+        </button>
+        {/* play/pause */}
+        <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
+          {playing ? <Pause size={28} fill="#fff" /> : <Play size={28} fill="#fff" />}
+        </button>
+        {/* skip +10 */}
+        <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
+          <RotateCw size={26} />
+          <span style={{ position: "absolute", fontSize: 10, fontWeight: 900, fontFamily: "Arial", bottom: 7, left: 8 }}>10</span>
+        </button>
+      </div>
+
       <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} />
       <SkipAnim side={skipAnim} />
       {/* skip zones — double tap */}
