@@ -342,13 +342,14 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
     show();
   }, [show]);
 
-  return (
     <div
       style={{ position: "absolute", inset: 0, zIndex: 10 }}
       onMouseMove={show}
       onTouchStart={show}
       onClick={handleOverlayClick}
+      onDoubleClick={(e) => e.stopPropagation()}
     >
+      {/* TopBar — תמיד גלוי, לא נעלם */}
       <TopBar title={title} episode={episode} onClose={onClose} />
 
       {/* כפתורי skip + play צפים באמצע המסך */}
@@ -361,19 +362,25 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
         pointerEvents: visible ? "auto" : "none",
         zIndex: 20,
       }}>
-        {/* skip -10 */}
+        {/* skip -10 — ה-10 בתוך האיקון */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-          <RotateCcw size={26} />
-          <span style={{ position: "absolute", fontSize: 10, fontWeight: 900, fontFamily: "Arial", bottom: 7, right: 8 }}>10</span>
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+            <path d="M16 4 A12 12 0 1 0 27 13" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
+            <polyline points="10,1 16,4 10,7" fill="white"/>
+            <text x="16" y="20" textAnchor="middle" fill="white" fontSize="8" fontWeight="bold" fontFamily="Arial">10</text>
+          </svg>
         </button>
         {/* play/pause */}
         <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
           {playing ? <Pause size={28} fill="#fff" /> : <Play size={28} fill="#fff" />}
         </button>
-        {/* skip +10 */}
+        {/* skip +10 — ה-10 בתוך האיקון */}
         <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-          <RotateCw size={26} />
-          <span style={{ position: "absolute", fontSize: 10, fontWeight: 900, fontFamily: "Arial", bottom: 7, left: 8 }}>10</span>
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+            <path d="M16 4 A12 12 0 1 1 5 13" stroke="white" strokeWidth="2.2" strokeLinecap="round" fill="none"/>
+            <polyline points="22,1 16,4 22,7" fill="white"/>
+            <text x="16" y="20" textAnchor="middle" fill="white" fontSize="8" fontWeight="bold" fontFamily="Arial">10</text>
+          </svg>
         </button>
       </div>
 
