@@ -247,7 +247,7 @@ function BottomBar({ videoRef, onSkip, visible }) {
     <div style={{
       position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 30,
       padding: "40px 20px 20px",
-      background: "linear-gradient(to top, rgba(0,0,0,0.88) 0%, transparent 100%)",
+      background: "linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 100%)",
       transition: "opacity 0.3s",
       opacity: visible ? 1 : 0,
       pointerEvents: visible ? "auto" : "none",
@@ -289,8 +289,8 @@ function BottomBar({ videoRef, onSkip, visible }) {
           </span>
         </div>
 
-        {/* CENTER: play/pause — גדול יותר */}
-        <button onClick={togglePlay} style={{ ...iconBtn, width: 54, height: 54, background: "rgba(255,255,255,0.12)", borderRadius: "50%", margin: "0 24px" }}>
+        {/* CENTER: play/pause — גדול יותר, בלי רקע */}
+        <button onClick={togglePlay} style={{ ...iconBtn, width: 54, height: 54, background: "none", borderRadius: "50%", margin: "0 36px" }}>
           {playing ? <Pause size={26} fill="#fff" /> : <Play size={26} fill="#fff" />}
         </button>
 
