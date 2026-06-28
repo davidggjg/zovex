@@ -1,5 +1,7 @@
 import { X, Play, Pause, Volume2, VolumeX, Maximize, RotateCcw, RotateCw, Share2 } from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
+import Plyr from "plyr";
+import "plyr/dist/plyr.css";
 
 const spinStyle = `
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -55,8 +57,21 @@ function buildSrc(movie) {
     return `https://ok.ru/videoembed/${m ? m[1] : vid}`;
   }
   if (type === "telegram" || vid.includes("t.me")) {
-    const id = vid.replace(/.*t\.me\//, "");
-    return `https://t.me/${id}?embed=1&mode=tme`;
+    // Already a fully-formed proxy URL (stored in DB as type:"telegram" or type:"direct")
+    // → serve natively via <video> instead of an iframe embed.
+    if (vid.startsWith("http") && !vid.includes("t.me")) return vid;
+    // t.me/NUMERIC_CHANNEL_ID/MESSAGE_ID  →  route through the proxy bot so the
+    // browser never hits Telegram CDN directly (avoids CORS + referrer blocks).
+    // VITE_TELEGRAM_PROXY: set to your bot's base URL; falls back to the default bot.
+    // During local dev the Vite proxy rewrites /tg-proxy/* → the bot (see vite.config.js).
+    const tgId = vid.replace(/.*t\.me\//, "");
+    const [chan, msg] = tgId.split("/");
+    if (msg && /^\d+$/.test(chan)) {
+      const proxy = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
+      return `${proxy}/stream/${chan}/${msg}`;
+    }
+    // Named channel (non-numeric) — fall back to Telegram's own embed widget.
+    return `https://t.me/${tgId}?embed=1&mode=tme`;
   }
   if (type === "jellyfin") {
     const server = (movie.jellyfin_server || "").replace(/\/$/, "");
@@ -72,7 +87,9 @@ function isHlsUrl(src) {
 
 function isIframeUrl(src, type) {
   if (!src) return false;
-  const iframeTypes = ["youtube","drive","vimeo","dailymotion","streamable","rumble","archive","kan","okru","telegram","kaltura","jellyfin"];
+  // "telegram" is intentionally absent: buildSrc routes telegram URLs to either
+  // the proxy bot (→ native <video>) or a t.me embed widget (→ iframe via domain check).
+  const iframeTypes = ["youtube","drive","vimeo","dailymotion","streamable","rumble","archive","kan","okru","kaltura","jellyfin"];
   if (iframeTypes.includes(type)) return true;
   return ["youtube.com","youtu.be","drive.google.com","vimeo.com","dailymotion.com","streamable.com","rumble.com","archive.org","kan.org.il","ok.ru","t.me","kaltura.com"].some(d => src.includes(d));
 }
@@ -394,22 +411,87 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
   );
 }
 
-// ─── Direct video player ──────────────────────────────────────
-function DirectVideoPlayer({ src, movie, onClose }) {
-  const videoRef = useRef(null);
-  const [skipAnim, setSkipAnim] = useState(null);
+// ─── Plyr-based direct video player ──────────────────────────
+// Plays any direct video URL (MP4, WebM, Telegram proxy streams, etc.)
+// The `src` value is resolved from the movie record in movies.json via buildSrc().
+//
+// URL sources by example:
+//   Direct MP4   → "https://example.com/video.mp4"
+//   Telegram bot → "https://telegram-bot-8528.onrender.com/stream/{channelId}/{msgId}"
+//                  (set VITE_TELEGRAM_PROXY to override the bot base URL)
+function PlyrVideoPlayer({ src, movie, onClose }) {
+  const containerRef = useRef(null);
+  const plyrRef = useRef(null);
 
-  const handleSkip = useCallback((side) => {
-    const v = videoRef.current;
-    if (v) v.currentTime = Math.max(0, v.currentTime + (side === "forward" ? 10 : -10));
-    setSkipAnim(side);
-    setTimeout(() => setSkipAnim(null), 700);
-  }, []);
+  useEffect(() => {
+    if (!containerRef.current || !src) return;
+    let destroyed = false;
+
+    // Dynamically create the <video> element so Plyr owns its lifecycle.
+    const video = document.createElement("video");
+    video.setAttribute("playsinline", "");
+    // src comes from buildSrc(movie) which reads video_url / video_id from movies.json
+    video.src = src;
+    containerRef.current.appendChild(video);
+
+    plyrRef.current = new Plyr(video, {
+      autoplay: true,
+      controls: ["play-large", "play", "rewind", "fast-forward", "progress", "current-time", "duration", "mute", "volume", "fullscreen"],
+      seekTime: 10,
+      invertTime: false,
+    });
+    plyrRef.current.on("ready", () => {
+      if (!destroyed) plyrRef.current?.play().catch(() => {});
+    });
+
+    return () => {
+      destroyed = true;
+      plyrRef.current?.destroy();
+      plyrRef.current = null;
+      if (containerRef.current) containerRef.current.innerHTML = "";
+    };
+  }, [src]);
 
   return (
     <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
-      <video ref={videoRef} src={src} autoPlay playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
-      <ControlsLayer videoRef={videoRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} />
+      {/* Plyr theme + full-height layout overrides */}
+      <style>{`
+        .plyr--video { --plyr-color-main: #e91e8c; position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }
+        .plyr__video-wrapper { padding-bottom: 0 !important; height: 100% !important; background: #000; }
+        .plyr video { object-fit: contain; width: 100% !important; height: 100% !important; }
+      `}</style>
+
+      {/* Title bar always on top of Plyr's own controls */}
+      <div style={{
+        position: "absolute", top: 0, left: 0, right: 0, zIndex: 30,
+        padding: "14px 16px 40px",
+        background: "linear-gradient(to bottom, rgba(0,0,0,0.82) 0%, transparent 100%)",
+        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+        direction: "rtl", pointerEvents: "none",
+      }}>
+        <button
+          onClick={onClose}
+          style={{ pointerEvents: "auto", background: "none", border: "none", color: "#fff", cursor: "pointer", padding: 4, display: "flex", alignItems: "center", WebkitTapHighlightColor: "transparent", outline: "none" }}
+        >
+          <X size={28} strokeWidth={2.5} />
+        </button>
+        <div style={{ flex: 1, textAlign: "center", paddingTop: 2 }}>
+          <div style={{ color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "Arial", textShadow: "0 1px 6px rgba(0,0,0,0.9)" }}>
+            {movie.title}
+          </div>
+          {movie.episode_number && (
+            <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12, fontFamily: "Arial", marginTop: 2 }}>
+              {movie.episode_title
+                ? `פרק ${movie.episode_number} - ${movie.episode_title}`
+                : `פרק ${movie.episode_number}`}
+            </div>
+          )}
+        </div>
+        <div style={{ width: 36, flexShrink: 0 }} />
+      </div>
+
+      {/* Plyr mounts here */}
+      <div ref={containerRef} style={{ position: "absolute", inset: 0, background: "#000" }} />
     </div>
   );
 }
@@ -557,7 +639,7 @@ export default function CustomVideoPlayer({ movie, onClose }) {
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
-        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} />
+        <PlyrVideoPlayer src={src} movie={movie} onClose={onClose} />
       )}
     </div>
   );
