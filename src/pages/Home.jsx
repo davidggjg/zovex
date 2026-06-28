@@ -7,6 +7,14 @@ import CustomVideoPlayer from "@/components/home/CustomVideoPlayer.jsx";
 
 // ─── constants ────────────────────────────────────────────────
 const SECRET_TRIGGER = "ZovexAdmin2026";
+
+// מיפוי שמות ערוצי טלגרם → מזהה מספרי
+// כשמוסיפים קישור t.me/CHANNEL_NAME/123, המערכת ממירה אוטומטית לכתובת הפרוקסי
+const TELEGRAM_CHANNEL_IDS = {
+  "zove8": "7282626428",
+  "ZOVE8": "7282626428",
+};
+const TELEGRAM_PROXY = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
 // קודי כניסה לפאנל ניהול — מאוחסנים כ-SHA-256 hash (חד-כיווני) ולא כטקסט גלוי
 const PIN_HASH = "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92";
 const LETTER_HASH = "ec16ba3d1a06d5fc8356030cefd2cc72f654217c6260401afd25e02cac369a52";
@@ -71,11 +79,35 @@ function extractVideoInfo(url) {
     const m = url.match(/video\/(\d+)/);
     return { type: "okru", video_id: m?.[1] || url };
   }
-  if (url.includes("t.me")) return { type: "telegram", video_id: url.replace("https://t.me/", "") };
+  if (url.includes("t.me")) {
+    // פורמט ערוץ פרטי: t.me/c/NUMERIC_ID/MSG_ID
+    const privateMatch = url.match(/t\.me\/c\/(\d+)\/(\d+)/);
+    if (privateMatch) {
+      const proxyUrl = `${TELEGRAM_PROXY}/stream/${privateMatch[1]}/${privateMatch[2]}`;
+      return { type: "direct", video_id: proxyUrl, video_url: proxyUrl };
+    }
+    // פורמט ערוץ ציבורי: t.me/CHANNEL_NAME/MSG_ID
+    const publicMatch = url.match(/t\.me\/([^/?#]+)\/(\d+)/);
+    if (publicMatch) {
+      const chanName = publicMatch[1];
+      const msgId = publicMatch[2];
+      const numericId = TELEGRAM_CHANNEL_IDS[chanName] || TELEGRAM_CHANNEL_IDS[chanName.toLowerCase()];
+      if (numericId) {
+        const proxyUrl = `${TELEGRAM_PROXY}/stream/${numericId}/${msgId}`;
+        return { type: "direct", video_id: proxyUrl, video_url: proxyUrl };
+      }
+    }
+    // אם לא נמצא מיפוי — שמור כ-telegram (יוצג כ-iframe)
+    return { type: "telegram", video_id: url.replace("https://t.me/", "") };
+  }
   if (url.includes("kaltura.com") || url.match(/^\d+\/\d+\/[a-zA-Z0-9_]+$/)) {
     const m = url.match(/\/p\/(\d+).*uiconf_id\/(\d+).*entry_id=([^&]+)/);
     if (m) return { type: "kaltura", video_id: `${m[1]}/${m[2]}/${m[3]}` };
     return { type: "kaltura", video_id: url };
+  }
+  // כתובת פרוקסי טלגרם ישירה (כבר מעובדת)
+  if (url.includes("/stream/") && (url.includes("onrender.com") || url.includes(TELEGRAM_PROXY))) {
+    return { type: "direct", video_id: url, video_url: url };
   }
   return { type: "direct", video_id: url };
 }
