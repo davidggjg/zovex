@@ -9,6 +9,10 @@ const spinStyle = `
 @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
 `;
 
+// שמות ערוצי טלגרם → מזהה מספרי (חייב להיות זהה ל-Home.jsx)
+const TG_CHANNELS = { "zove8": "7282626428", "ZOVE8": "7282626428" };
+const TG_PROXY = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
+
 // ─── helpers ────────────────────────────────────────────────
 function buildSrc(movie) {
   const vid = (movie.video_id || movie.video_url || "").trim();
@@ -57,20 +61,24 @@ function buildSrc(movie) {
     return `https://ok.ru/videoembed/${m ? m[1] : vid}`;
   }
   if (type === "telegram" || vid.includes("t.me")) {
-    // Already a fully-formed proxy URL (stored in DB as type:"telegram" or type:"direct")
-    // → serve natively via <video> instead of an iframe embed.
+    // כתובת פרוקסי מוכנה כבר — נגן ישירות
     if (vid.startsWith("http") && !vid.includes("t.me")) return vid;
-    // t.me/NUMERIC_CHANNEL_ID/MESSAGE_ID  →  route through the proxy bot so the
-    // browser never hits Telegram CDN directly (avoids CORS + referrer blocks).
-    // VITE_TELEGRAM_PROXY: set to your bot's base URL; falls back to the default bot.
-    // During local dev the Vite proxy rewrites /tg-proxy/* → the bot (see vite.config.js).
-    const tgId = vid.replace(/.*t\.me\//, "");
-    const [chan, msg] = tgId.split("/");
-    if (msg && /^\d+$/.test(chan)) {
-      const proxy = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
-      return `${proxy}/stream/${chan}/${msg}`;
+    // נרמול: הסרת https://t.me/ אם קיים
+    const tgId = vid.replace(/^https?:\/\/t\.me\//, "");
+    // חילוץ שם ערוץ + מזהה הודעה (תומך ב-CHANNEL/MSG ו-CHANNEL/TOPIC/MSG)
+    const parts = tgId.split("/").filter(Boolean);
+    const chanRaw = parts[0] || "";
+    const msgId   = parts[parts.length - 1]; // המספר האחרון הוא תמיד מזהה ההודעה
+    // ערוץ מספרי ישירות (t.me/1234567/99)
+    if (/^\d+$/.test(chanRaw) && msgId) {
+      return `${TG_PROXY}/stream/${chanRaw}/${msgId}`;
     }
-    // Named channel (non-numeric) — fall back to Telegram's own embed widget.
+    // שם ערוץ → חיפוש במיפוי
+    const numericId = TG_CHANNELS[chanRaw] || TG_CHANNELS[chanRaw.toLowerCase()];
+    if (numericId && msgId) {
+      return `${TG_PROXY}/stream/${numericId}/${msgId}`;
+    }
+    // אין מיפוי — iframe כ-fallback
     return `https://t.me/${tgId}?embed=1&mode=tme`;
   }
   if (type === "jellyfin") {

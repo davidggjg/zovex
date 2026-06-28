@@ -86,13 +86,15 @@ function extractVideoInfo(url) {
       const proxyUrl = `${TELEGRAM_PROXY}/stream/${privateMatch[1]}/${privateMatch[2]}`;
       return { type: "direct", video_id: proxyUrl, video_url: proxyUrl };
     }
-    // פורמט ערוץ ציבורי: t.me/CHANNEL_NAME/MSG_ID
-    const publicMatch = url.match(/t\.me\/([^/?#]+)\/(\d+)/);
+    // פורמט ציבורי: t.me/CHANNEL/MSG או t.me/CHANNEL/TOPIC/MSG (עם נושאים)
+    const publicMatch = url.match(/t\.me\/([^/?#c][^/?#]*)/);
     if (publicMatch) {
       const chanName = publicMatch[1];
-      const msgId = publicMatch[2];
+      // המספר האחרון בנתיב = מזהה הודעה (תומך ב-3 רמות)
+      const allNums = url.match(/\/(\d+)/g) || [];
+      const msgId = allNums.length ? allNums[allNums.length - 1].slice(1) : null;
       const numericId = TELEGRAM_CHANNEL_IDS[chanName] || TELEGRAM_CHANNEL_IDS[chanName.toLowerCase()];
-      if (numericId) {
+      if (numericId && msgId) {
         const proxyUrl = `${TELEGRAM_PROXY}/stream/${numericId}/${msgId}`;
         return { type: "direct", video_id: proxyUrl, video_url: proxyUrl };
       }
