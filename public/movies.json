@@ -17092,9 +17092,9 @@
     "id": "e2cd4e15-9875-48c3-ad51-3807a7c9c655",
     "created_date": "2026-06-09T10:27:20.033505",
     "title": "פאודה",
-    "video_url": "https://drive.google.com/file/d/1SSttCgCZ7S-_YfzkOlaGtcucSB7z2bmQ/view",
-    "video_id": "1SSttCgCZ7S-_YfzkOlaGtcucSB7z2bmQ",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/83",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/83",
+    "type": "direct",
     "category": "סדרות ישראליות",
     "series_name": "פאודה",
     "season_number": 5,
@@ -17102,7 +17102,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/iTZX0noHJMYLhNHNj7r97mm9Zi.jpg",
     "description": "סוכן ישראלי בכיר לשעבר חוזר לפעולה כדי ללכוד מחבל פלסטיני שחשב שחיסל. חזרתו מפעילה שרשרת אירועים כאוטית.",
     "year": 2015,
-    "custom_slug": "fauda"
+    "custom_slug": "fauda",
+    "episode_title": ""
   },
   {
     "id": "0ef5b333-b32e-43c1-8aa2-bf6011cf7bff",
