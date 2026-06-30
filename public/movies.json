@@ -14519,9 +14519,9 @@
     "id": "f0ed3d8f-1a0d-4a61-bb03-c39f60ced574",
     "created_date": "2026-06-09T10:27:20.034627",
     "title": "סוניק הסרט 3",
-    "video_url": "https://drive.google.com/file/d/1HOvGW-hMOuf8Gcoo5W6UjvklAWIOlgzb/view",
-    "video_id": "1HOvGW-hMOuf8Gcoo5W6UjvklAWIOlgzb",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/57",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/57",
+    "type": "direct",
     "category": "מצוירים",
     "series_name": null,
     "season_number": null,
@@ -14529,7 +14529,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/kvbQzY4qkrSZF8gWNP5Gqf1pyEz.jpg",
     "description": "סוניק, נאקלס וטיילס מתאחדים נגד יריב חדש ועוצמתי בשם שאדו, בעל כוחות חדשים ומיסתוריים שלא נראו כמותם עד כה. כאשר כוחותיהם לא מספיקים לקרב מול שאדו, צוות סוניק חייב לחפש שותפות בלתי צפויה כדי לעצור את היריב ולהגן על כדור הארץ.",
     "year": 2024,
-    "custom_slug": "sonic-the-movie-3"
+    "custom_slug": "sonic-the-movie-3",
+    "episode_title": null
   },
   {
     "id": "56f472f0-4c5b-4c07-9dfe-e7aad6954000",
