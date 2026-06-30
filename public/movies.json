@@ -14458,9 +14458,9 @@
     "id": "b1626c9c-f3b1-494a-9df6-c0ee40f57793",
     "created_date": "2026-06-09T10:27:20.034678",
     "title": "יחידת העילית",
-    "video_url": "https://drive.google.com/file/d/1hmNxoFbqod8Gn1K-fRX6m0mhp67KhwEk/view",
-    "video_id": "1hmNxoFbqod8Gn1K-fRX6m0mhp67KhwEk",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/73",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/73",
+    "type": "direct",
     "category": "סרטים",
     "series_name": null,
     "season_number": null,
@@ -14468,7 +14468,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/h7BfMzxZgCyesJSFEWJkUIWDrbX.jpg",
     "description": "כשמשימה בלב שטח אויב מסתבכת, צוות לוחמים מוצאים עצמם לכודים, מבודדים ובלחץ גובר מול כוחות אויב. עכשיו, בלי גיבוי ועם כל תנועה שעלולה לחשוף אותם, הם חייבים לקבל החלטות קריטיות – ולהילחם כדי לשרוד.",
     "year": 2025,
-    "custom_slug": "yechidathaelyon"
+    "custom_slug": "yechidathaelyon",
+    "episode_title": null
   },
   {
     "id": "940d4ca3-ddd1-43c9-900e-97909aab467c",
