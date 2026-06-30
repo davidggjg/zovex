@@ -14426,9 +14426,9 @@
     "id": "cb62750e-7bf0-4882-a894-1a97dbe47448",
     "created_date": "2026-06-09T10:27:20.034698",
     "title": "המכה",
-    "video_url": "https://drive.google.com/file/d/1lC0NQuX3kx635h7M3eI9uax_g76MDXgT/view",
-    "video_id": "1lC0NQuX3kx635h7M3eI9uax_g76MDXgT",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/77",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/77",
+    "type": "direct",
     "category": "סרטים",
     "series_name": null,
     "season_number": null,
@@ -14436,7 +14436,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/qI10YBYiI3ZBD5Vn5yc77GDBLUX.jpg",
     "description": "שוטרים במיאמי מוצאים מיליוני דולרים במזומן בבית מסתור רעוע, והאמון ביניהם נסדק כשהם מתחילים לפקפק בכול – ובכולם.",
     "year": 2026,
-    "custom_slug": "hamaka"
+    "custom_slug": "hamaka",
+    "episode_title": null
   },
   {
     "id": "95e20280-977b-49f0-acf2-9c5e9114db2b",
