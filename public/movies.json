@@ -14504,9 +14504,9 @@
     "id": "31c2a8e9-875d-489a-a3a6-9b3ebf16e970",
     "created_date": "2026-06-09T10:27:20.034648",
     "title": "סוניק: הסרט",
-    "video_url": "https://drive.google.com/file/d/1aUetojGYJIJ21m-BTJPutosBW_hZhGgf/view",
-    "video_id": "1aUetojGYJIJ21m-BTJPutosBW_hZhGgf",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/65",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/65",
+    "type": "direct",
     "category": "מצוירים",
     "series_name": null,
     "season_number": null,
@@ -14514,7 +14514,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/qFMpGmDn4aA0cqI1SDovyvK5o7q.jpg",
     "description": "לאחר שהוענק לו כוח מדהים שלא לגמרי מובן לו, סוניק נשלח למחבוא בכדור הארץ וניתן לו חוק אחד: בשום אופן אל תיתן לעולם לדעת שאתה קיים. אך זו לא משימה פשוטה עבור נער בן 15 – במיוחד עם גישה ויכולות כשל סוניק. במהרה הוא מתגלה ע\"י טום – שוטר סרקסטי מעיירה קטנה ועם לב גדול. יחד הם יוצאים להרפתקה מדהימה ועמוסה באקשן, כשבעקבותיהם ד\"ר רובוטניק המטורף ויצירותיו המכאניות.",
     "year": 2020,
-    "custom_slug": "sonic-the-movie"
+    "custom_slug": "sonic-the-movie",
+    "episode_title": null
   },
   {
     "id": "00569dcf-43b5-49a8-9d07-8db2d5458270",
