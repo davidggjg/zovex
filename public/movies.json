@@ -1,5 +1,22 @@
 [
   {
+    "title": "פאודה",
+    "description": "דורון, מפקד צוות מסתערבים ואנשיו מנסים ללכוד את מבוקשי החמאס בשטחים. המרדף הבלתי פוסק גובה מחיר יקר - פיזי ונפשי מחברי הצוות והקרובים אליהם. אולם את המחיר משלם גם הצד השני, של \"האויב\". המבוקשים, שדם של יותר ממאות ישראלים על ידיהם, גורמים לפגיעה בחפים מפשע, ישראלים ופלסטינים כאחד. המאבק הקשה והמדמם בין הצדדים נפרש למול עינינו במלוא האכזריות שלו וחושף את פניה המכוערים של המלחמה, אך גם את הרעות ואחוות הלוחמים.",
+    "thumbnail_url": "https://image.tmdb.org/t/p/w500/iTZX0noHJMYLhNHNj7r97mm9Zi.jpg",
+    "category": "סדרות ישראליות",
+    "year": 2015,
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/59",
+    "type": "direct",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/59",
+    "series_name": "פאודה",
+    "season_number": 5,
+    "episode_number": 9,
+    "episode_title": "",
+    "custom_slug": null,
+    "id": "04d9b48b-f7e0-41b1-88c8-6104830306fc",
+    "created_date": "2026-06-30T21:03:41.576Z"
+  },
+  {
     "title": "צ'רלי וחצי",
     "description": "צ'רלי הוא נוכל קטן משכונת מצוקה, המתפרנס מרמאויות וניהול משחקי מזל בלתי-חוקיים ומסתייע במיקו הקטן והמופרע. מיקו הוא ילד יתום המתגורר בבקתה עלובה, עם אחותו הגדולה לילי, שהחבר שלה שוהה בארצות הברית.  צ'רלי מתאהב בגילה זוהר, נערה בלונדינית יפהפייה, בת להורים עשירים מצפון תל אביב, שהוריה מנסים לשדך לה את רוברט, בנו החנון של אחד משותפיו לעסקים של מר זוהר בחו\"ל. גם היא מואסת בנער השעשועים האמריקאי, שמתעניין בעיקר במוזיקה קלאסית, גולף וכדומה. צ'רלי וגילה מוצאים כל פעם דרך להתחמק מרוברט ולבלות בלעדיו.",
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/kS6IRhY66IzNP6zYBlWQos1vebk.jpg",
@@ -14519,9 +14536,9 @@
     "id": "f0ed3d8f-1a0d-4a61-bb03-c39f60ced574",
     "created_date": "2026-06-09T10:27:20.034627",
     "title": "סוניק הסרט 3",
-    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/57",
-    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/57",
-    "type": "direct",
+    "video_url": "https://drive.google.com/file/d/1HOvGW-hMOuf8Gcoo5W6UjvklAWIOlgzb/view",
+    "video_id": "1HOvGW-hMOuf8Gcoo5W6UjvklAWIOlgzb",
+    "type": "drive",
     "category": "מצוירים",
     "series_name": null,
     "season_number": null,
@@ -14529,8 +14546,7 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/kvbQzY4qkrSZF8gWNP5Gqf1pyEz.jpg",
     "description": "סוניק, נאקלס וטיילס מתאחדים נגד יריב חדש ועוצמתי בשם שאדו, בעל כוחות חדשים ומיסתוריים שלא נראו כמותם עד כה. כאשר כוחותיהם לא מספיקים לקרב מול שאדו, צוות סוניק חייב לחפש שותפות בלתי צפויה כדי לעצור את היריב ולהגן על כדור הארץ.",
     "year": 2024,
-    "custom_slug": "sonic-the-movie-3",
-    "episode_title": null
+    "custom_slug": "sonic-the-movie-3"
   },
   {
     "id": "56f472f0-4c5b-4c07-9dfe-e7aad6954000",
