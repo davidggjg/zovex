@@ -14487,18 +14487,19 @@
   {
     "id": "0b81bf28-9be2-41e4-9453-a1272a664075",
     "created_date": "2026-06-09T10:27:20.034660",
-    "title": "מאגר מים",
-    "video_url": "https://drive.google.com/file/d/1CEzGqkGAj4bYC5lgRuAri95Pz6CWMW0i/view",
-    "video_id": "1CEzGqkGAj4bYC5lgRuAri95Pz6CWMW0i",
-    "type": "drive",
+    "title": "הטנק",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/67",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/67",
+    "type": "direct",
     "category": "סרטים",
     "series_name": null,
     "season_number": null,
     "episode_number": null,
-    "thumbnail_url": "https://image.tmdb.org/t/p/w500/2VxEtwgzOUukatl2IKGn4borpgE.jpg",
-    "description": "לאחר שירש באופן מסתורי נכס נטוש על החוף, בן ומשפחתו משחררים בטעות יצור עתיק, רדום זמן רב, שהטיל אימה על כל האזור - כולל אבותיו שלו - במשך דורות.",
-    "year": 2023,
-    "custom_slug": "waterreservoir"
+    "thumbnail_url": "https://image.tmdb.org/t/p/w500/z8XQUad7XDJVu5tVJIcXuHfhFlB.jpg",
+    "description": "החזית המזרחית, 1943. צוות של טנק טיגר גרמני נשלח למשימה מסוכנת עמוק מאחורי קו החזית שעליו מתנהל קרב קשה. כשהם עוברים בשטח ההפקר הקטלני, הם צריכים להתמודד עם האויב וגם עם השדים הפנימיים שלהם.",
+    "year": 2025,
+    "custom_slug": "waterreservoir",
+    "episode_title": null
   },
   {
     "id": "31c2a8e9-875d-489a-a3a6-9b3ebf16e970",
