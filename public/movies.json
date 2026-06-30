@@ -14520,9 +14520,9 @@
     "id": "00569dcf-43b5-49a8-9d07-8db2d5458270",
     "created_date": "2026-06-09T10:27:20.034638",
     "title": "סוניק: הסרט 2",
-    "video_url": "https://drive.google.com/file/d/10FCiCaO2l9mN4FcLU5S0Ng6c9Vu3q5vL/view",
-    "video_id": "10FCiCaO2l9mN4FcLU5S0Ng6c9Vu3q5vL",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/61",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/61",
+    "type": "direct",
     "category": "מצוירים",
     "series_name": null,
     "season_number": null,
@@ -14530,7 +14530,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/8LxQs9WwhzMs1ypHEo5O9YNirYS.jpg",
     "description": "לאחר שסוניק התמקם בגרין הילס, הוא צמא להוכיח שיש לו את מה שדרוש בשביל להיות גיבור אמיתי. המבחן שלו מגיע כאשר ד\"ר רובוטניק חוזר, הפעם עם שותף חדש בשם נאקלס, בחיפוש אחר אבן איזמרגד שבכוחה להשמיד עולמות. סוניק חובר אל שותף משלו, טיילז, ויחד הם יוצאים למסע חובק עולם לאיתור האזמרגד לפני שהוא נופל לידיים הלא נכונות.",
     "year": 2022,
-    "custom_slug": "sonic-the-movie-2"
+    "custom_slug": "sonic-the-movie-2",
+    "episode_title": null
   },
   {
     "id": "f0ed3d8f-1a0d-4a61-bb03-c39f60ced574",
