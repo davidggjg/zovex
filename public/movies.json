@@ -17195,12 +17195,6 @@
     "created_date": "2026-06-28T16:25:53.953Z"
   },
   {
-    "id": "live_stream",
-    "video_url": "https://reshet.g-mana.live/media/6f10d1da-0803-48d9-9272-57a811958974/mainManifest.m3u8",
-    "title": "שידור חי",
-    "created_date": "2026-06-28T18:58:01.203Z"
-  },
-  {
     "id": "live_d23243cd-20e0-4cd3-b47b-3af04936f59a",
     "is_live": true,
     "title": "כאן11",
