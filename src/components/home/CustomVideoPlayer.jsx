@@ -1,7 +1,5 @@
 import { X, Play, Pause, Volume2, VolumeX, Maximize, RotateCcw, RotateCw, Share2 } from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
-import Plyr from "plyr";
-import "plyr/dist/plyr.css";
 
 const spinStyle = `
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -436,18 +434,21 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
   );
 }
 
-// ─── Plyr-based direct video player ──────────────────────────
+// ─── Direct video player ────────────────────────────────────────
 // Plays any direct video URL (MP4, WebM, Telegram proxy streams, etc.)
+// Uses the exact same TopBar/ControlsLayer/BottomBar as HlsPlayer —
+// this is what keeps the design 100% identical across every link type.
 // The `src` value is resolved from the movie record in movies.json via buildSrc().
 //
 // URL sources by example:
 //   Direct MP4   → "https://example.com/video.mp4"
 //   Telegram bot → "https://telegram-bot-8528.onrender.com/stream/{channelId}/{msgId}"
 //                  (set VITE_TELEGRAM_PROXY to override the bot base URL)
-function PlyrVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
+function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
   const containerRef = useRef(null);
-  const plyrRef = useRef(null);
   const videoElRef = useRef(null);
+  const [loading, setLoading] = useState(true);
+  const [skipAnim, setSkipAnim] = useState(null);
   // ref כדי שה-interval/cleanup תמיד יקראו את ה-callback העדכני בלי לגרום ל-re-init של הנגן
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
@@ -456,26 +457,27 @@ function PlyrVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
     if (!containerRef.current || !src) return;
     let destroyed = false;
 
-    // Dynamically create the <video> element so Plyr owns its lifecycle.
     const video = document.createElement("video");
     video.setAttribute("playsinline", "");
+    video.setAttribute("autoplay", "");
+    video.style.cssText = "width:100%;height:100%;position:absolute;inset:0;background:#000;object-fit:contain;";
     // src comes from buildSrc(movie) which reads video_url / video_id from movies.json
     video.src = src;
     containerRef.current.appendChild(video);
     videoElRef.current = video;
 
-    plyrRef.current = new Plyr(video, {
-      autoplay: true,
-      controls: ["play-large", "play", "rewind", "fast-forward", "progress", "current-time", "duration", "mute", "volume", "fullscreen"],
-      seekTime: 10,
-      invertTime: false,
-    });
-    plyrRef.current.on("ready", () => {
+    const onLoaded = () => {
       if (destroyed) return;
       // המשך צפייה — קפוץ בדיוק לשנייה שנשמרה בפעם הקודמת
       if (startTime > 1) { try { video.currentTime = startTime; } catch {} }
-      plyrRef.current?.play().catch(() => {});
-    });
+      video.play().catch(() => {});
+      setLoading(false);
+    };
+    const onWaiting = () => setLoading(true);
+    const onPlaying = () => setLoading(false);
+    video.addEventListener("loadedmetadata", onLoaded);
+    video.addEventListener("waiting", onWaiting);
+    video.addEventListener("playing", onPlaying);
 
     // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
     const reportInterval = setInterval(() => {
@@ -489,53 +491,32 @@ function PlyrVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
       clearInterval(reportInterval);
       // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה
       if (video.duration) onProgressRef.current?.(video.currentTime, video.duration);
-      plyrRef.current?.destroy();
-      plyrRef.current = null;
+      video.removeEventListener("loadedmetadata", onLoaded);
+      video.removeEventListener("waiting", onWaiting);
+      video.removeEventListener("playing", onPlaying);
+      video.pause();
+      video.src = "";
       videoElRef.current = null;
       if (containerRef.current) containerRef.current.innerHTML = "";
     };
   }, [src]);
 
+  const handleSkip = useCallback((side) => {
+    const v = videoElRef.current;
+    if (v) v.currentTime = Math.max(0, v.currentTime + (side === "forward" ? 10 : -10));
+    setSkipAnim(side);
+    setTimeout(() => setSkipAnim(null), 700);
+  }, []);
+
   return (
     <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
-      {/* Plyr theme + full-height layout overrides */}
-      <style>{`
-        .plyr--video { --plyr-color-main: #e91e8c; position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; }
-        .plyr__video-wrapper { padding-bottom: 0 !important; height: 100% !important; background: #000; }
-        .plyr video { object-fit: contain; width: 100% !important; height: 100% !important; }
-      `}</style>
-
-      {/* Title bar always on top of Plyr's own controls */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, zIndex: 30,
-        padding: "14px 16px 40px",
-        background: "linear-gradient(to bottom, rgba(0,0,0,0.82) 0%, transparent 100%)",
-        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-        direction: "rtl", pointerEvents: "none",
-      }}>
-        <button
-          onClick={onClose}
-          style={{ pointerEvents: "auto", background: "none", border: "none", color: "#fff", cursor: "pointer", padding: 4, display: "flex", alignItems: "center", WebkitTapHighlightColor: "transparent", outline: "none" }}
-        >
-          <X size={28} strokeWidth={2.5} />
-        </button>
-        <div style={{ flex: 1, textAlign: "center", paddingTop: 2 }}>
-          <div style={{ color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "Arial", textShadow: "0 1px 6px rgba(0,0,0,0.9)" }}>
-            {movie.title}
-          </div>
-          {movie.episode_number && (
-            <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12, fontFamily: "Arial", marginTop: 2 }}>
-              {movie.episode_title
-                ? `פרק ${movie.episode_number} - ${movie.episode_title}`
-                : `פרק ${movie.episode_number}`}
-            </div>
-          )}
+      {loading && (
+        <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center", background: "#000" }}>
+          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #e91e8c", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
         </div>
-        <div style={{ width: 36, flexShrink: 0 }} />
-      </div>
-
-      {/* Plyr mounts here */}
-      <div ref={containerRef} style={{ position: "absolute", inset: 0, background: "#000" }} />
+      )}
+      <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} />
     </div>
   );
 }
@@ -705,7 +686,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
-        <PlyrVideoPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} />
+        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} />
       )}
     </div>
   );
