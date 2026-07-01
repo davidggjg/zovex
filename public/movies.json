@@ -618,17 +618,18 @@
     "id": "073c11e0-23b2-47f9-9379-588acd5eddcb",
     "created_date": "2026-06-09T10:27:20.042542",
     "title": "הנאשם",
-    "video_url": "https://drive.google.com/file/d/13QT_YK2WqR--myLpb_u04o1xR8WIborT/view",
-    "video_id": "13QT_YK2WqR--myLpb_u04o1xR8WIborT",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/151",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/151",
+    "type": "direct",
     "category": "סרטים",
     "series_name": null,
     "season_number": null,
     "episode_number": null,
     "thumbnail_url": "https://base44.app/api/apps/6992542871bb3f3ba9500a34/files/public/6992542871bb3f3ba9500a34/234623262_292803.jpg",
     "description": "בעתיד הקרוב, בלש (כריס פראט) עומד לדין באשמת רצח אשתו.לרשותו עומדות 90 דקות בלבד להוכיח את חפותו בפני שופטת הבינה המלאכותית המתקדמת, שהוא עצמו קידם בעבר, לפני שהיא תקבע את גורלו.",
-    "year": null,
-    "custom_slug": "the-accused"
+    "year": 2026,
+    "custom_slug": "the-accused",
+    "episode_title": null
   },
   {
     "id": "991a1e5a-63cc-4935-a254-db0554ac9924",
@@ -2923,9 +2924,9 @@
     "id": "f1576d45-c95a-4420-aa7b-6994c42259be",
     "created_date": "2026-06-09T10:27:20.040913",
     "title": "באש ובמים סרט",
-    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/149",
-    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/149",
-    "type": "direct",
+    "video_url": "https://drive.google.com/file/d/16NASO4Vnyi1ZNz0lkP_U0oPQD4j61osC/view",
+    "video_id": "16NASO4Vnyi1ZNz0lkP_U0oPQD4j61osC",
+    "type": "drive",
     "category": "סרטים",
     "series_name": null,
     "season_number": null,
@@ -2933,8 +2934,7 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/ssLBO8nB7UAeWWPHqXzXHG6R8z5.jpg",
     "description": "שני חברי ילדות פרועים ושרופים על כדורגל, מקבלים באותו יום שתי בשורות שמשנות את חייהם. השניים מחליטים להשאיר את הכל מאחור ולטוס עם הקבוצה האהובה עליהם למשחק גורלי בפולין.  דווקא שם, התפתחויות לא צפויות מציפות את הסודות שהסתירו האחד מהשני ומאלצות אותם להתמודד איתם ביחד.",
     "year": 2025,
-    "custom_slug": "bashandwatermovie",
-    "episode_title": null
+    "custom_slug": "bashandwatermovie"
   },
   {
     "id": "0b4c0be3-3fd6-4a15-888b-0caf220e2a7f",
