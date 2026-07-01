@@ -2721,9 +2721,9 @@
     "id": "a2efca1a-745c-4712-8611-eac04cf12541",
     "created_date": "2026-06-09T10:27:20.041050",
     "title": "לא לנשום 2",
-    "video_url": "https://drive.google.com/file/d/1xO5thd67pBiMkhtASOc832Ij39RxuF9f/view",
-    "video_id": "1xO5thd67pBiMkhtASOc832Ij39RxuF9f",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/174",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/174",
+    "type": "direct",
     "category": "סרטים",
     "series_name": null,
     "season_number": null,
@@ -2731,7 +2731,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/2xjILGdpXU7IYa50IdLHGHykqD7.jpg",
     "description": "סרט ההמשך מתרחש שנים לאחר הפריצה הראשונית והקטלנית לביתו של נורמן נורדטרום (סטפן לאנג) אשר חי בשקט יחסי, עד שחטאיו מהעבר שבים לפתח דלתו.",
     "year": 2021,
-    "custom_slug": "dont-breathe-2"
+    "custom_slug": "dont-breathe-2",
+    "episode_title": null
   },
   {
     "id": "b67bdc2a-8f1e-468f-9e67-5cc985203ecf",
