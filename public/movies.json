@@ -423,9 +423,9 @@
     "id": "b9cb2fd5-8eae-400b-8560-5c7a25f2299d",
     "created_date": "2026-06-09T10:27:20.033626",
     "title": "שחר אדום",
-    "video_url": "https://drive.google.com/file/d/1vgLJk5rIAeziNUGXHWRyZ-xOoX09FEtY/view",
-    "video_id": "1vgLJk5rIAeziNUGXHWRyZ-xOoX09FEtY",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/101",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/101",
+    "type": "direct",
     "category": "סדרות ישראליות",
     "series_name": "שחר אדום",
     "season_number": 1,
@@ -433,7 +433,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/vcGHCoFdZUj5jww8T7dDakr1osu.jpg",
     "description": "דרמה המביאה אל המסך סיפורי גבורה והישרדות שהתרחשו בזמן מתקפת הטרור של השבעה באוקטובר. כל פרק יעביר חוויה מטלטלת, עוצמתית ומלאת תקווה של אלו ששרדו וחירפו נפשם להציל אנשים מהזוועות. מכיל תכנים קשים לצפייה העוסקים באסון ה-7.10.",
     "year": 2024,
-    "custom_slug": "red-dawn"
+    "custom_slug": "red-dawn",
+    "episode_title": ""
   },
   {
     "id": "bf8049d9-080c-44d2-9aa1-d583628ffb07",
