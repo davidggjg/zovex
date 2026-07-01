@@ -104,6 +104,102 @@ function isIframeUrl(src, type) {
   return ["youtube.com","youtu.be","drive.google.com","vimeo.com","dailymotion.com","streamable.com","rumble.com","archive.org","kan.org.il","ok.ru","t.me","kaltura.com"].some(d => src.includes(d));
 }
 
+// ─── "סיום צפייה" ────────────────────────────────────────────
+// אם נשארה פחות מדקה עד הסוף (או שנצפו 95%+), נחשב כמי שסיים לצפות —
+// גם אם יצא רגע לפני הסוף (כותרות סיום וכו'). במקרה כזה משמרים מיקום 0
+// (בלי "המשך צפייה") כדי שהפריט ייחשב כצפייה שהושלמה, לא כצפייה באמצע.
+const NEAR_END_SECONDS = 60;
+const NEAR_END_RATIO = 0.95;
+function reportProgress(onProgressRef, currentTime, duration) {
+  if (!duration) return;
+  const finished = (duration - currentTime) <= NEAR_END_SECONDS || (currentTime / duration) >= NEAR_END_RATIO;
+  onProgressRef.current?.(finished ? 0 : currentTime, duration);
+}
+
+// ─── מונה צופים חיים ("כמה צופים עכשיו") ──────────────────────
+// שולח "פעימת חיים" (heartbeat) לשרת האחורי כל 15 שניות כל עוד השידור
+// פתוח, ומקבל בחזרה כמה צופים ייחודיים פעילים כרגע על אותו שידור.
+// דורש שני endpoints בשרת (ראה קבצי הדוגמה שצורפו):
+//   POST /api/live/:liveId/heartbeat   { viewer_id }  → { viewers: number }
+//   POST /api/live/:liveId/leave       { viewer_id }  (נשלח עם sendBeacon ביציאה)
+const BACKEND_URL = "https://davidhzhdhd-my-telegram-bot.hf.space";
+
+function getViewerId() {
+  try {
+    let id = localStorage.getItem("zovex_viewer_id");
+    if (!id) {
+      id = "v_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem("zovex_viewer_id", id);
+    }
+    return id;
+  } catch { return "v_" + Math.random().toString(36).slice(2); }
+}
+
+function useLiveViewerCount(liveId, isLive) {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    if (!isLive || !liveId) { setCount(null); return; }
+    let stopped = false;
+    const viewerId = getViewerId();
+    const url = `${BACKEND_URL}/api/live/${encodeURIComponent(liveId)}/heartbeat`;
+
+    const heartbeat = async () => {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ viewer_id: viewerId }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!stopped && typeof data?.viewers === "number") setCount(data.viewers);
+      } catch {}
+    };
+
+    heartbeat();
+    const interval = setInterval(heartbeat, 15000);
+
+    // עזיבה מיידית (סגירת נגן / רענון / החלפת שידור) — כדי שהמונה יתעדכן מהר
+    const leave = () => {
+      try {
+        const body = JSON.stringify({ viewer_id: viewerId });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(`${BACKEND_URL}/api/live/${encodeURIComponent(liveId)}/leave`, body);
+        } else {
+          fetch(`${BACKEND_URL}/api/live/${encodeURIComponent(liveId)}/leave`, { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true }).catch(() => {});
+        }
+      } catch {}
+    };
+    window.addEventListener("beforeunload", leave);
+
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+      leave();
+      window.removeEventListener("beforeunload", leave);
+    };
+  }, [liveId, isLive]);
+
+  return count;
+}
+
+function LiveViewersBadge({ count }) {
+  if (count === null || count === undefined) return null;
+  return (
+    <div style={{
+      position: "absolute", top: 68, left: 14, zIndex: 25,
+      background: "rgba(0,0,0,.62)", backdropFilter: "blur(6px)",
+      borderRadius: 20, padding: "6px 12px",
+      display: "flex", alignItems: "center", gap: 6,
+      color: "#fff", fontFamily: "Arial", fontSize: 12, fontWeight: 700,
+      pointerEvents: "none",
+    }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#e50914", display: "inline-block", animation: "livePulseDot 1.5s ease-in-out infinite" }} />
+      {count.toLocaleString("he-IL")} צופים עכשיו
+    </div>
+  );
+}
+
 function formatTime(secs) {
   if (!secs || isNaN(secs)) return "0:00";
   const m = Math.floor(secs / 60);
@@ -482,15 +578,15 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
     // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
     const reportInterval = setInterval(() => {
       if (!video.paused && !video.ended && video.duration) {
-        onProgressRef.current?.(video.currentTime, video.duration);
+        reportProgress(onProgressRef, video.currentTime, video.duration);
       }
     }, 5000);
 
     return () => {
       destroyed = true;
       clearInterval(reportInterval);
-      // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה
-      if (video.duration) onProgressRef.current?.(video.currentTime, video.duration);
+      // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה (כולל בדיקת "סיום צפייה")
+      if (video.duration) reportProgress(onProgressRef, video.currentTime, video.duration);
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
@@ -571,13 +667,13 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     // שמירת התקדמות תקופתית — רק לתוכן מוקלט, לא לשידור חי
     const reportInterval = !isLive ? setInterval(() => {
       const v = videoElRef.current;
-      if (v && !v.paused && !v.ended && v.duration) onProgressRef.current?.(v.currentTime, v.duration);
+      if (v && !v.paused && !v.ended && v.duration) reportProgress(onProgressRef, v.currentTime, v.duration);
     }, 5000) : null;
     return () => {
       destroyed = true;
       if (reportInterval) clearInterval(reportInterval);
       const v = videoElRef.current;
-      if (!isLive && v && v.duration) onProgressRef.current?.(v.currentTime, v.duration);
+      if (!isLive && v && v.duration) reportProgress(onProgressRef, v.currentTime, v.duration);
       playerRef.current?.shaka?.destroy();
       playerRef.current?.vjs?.dispose();
       playerRef.current = null; videoElRef.current = null;
@@ -669,10 +765,12 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   const isLive = !!movie.is_live;
   const src = buildSrc(movie, isLive ? 0 : startTime);
   const type = movie.type || "direct";
+  const viewerCount = useLiveViewerCount(movie.id, isLive);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column" }}>
       <style>{spinStyle}</style>
+      {isLive && <LiveViewersBadge count={viewerCount} />}
       {!src ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
           <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
