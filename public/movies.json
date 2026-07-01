@@ -368,9 +368,9 @@
     "id": "ab7de648-f3dc-4287-91eb-7e89d5e711a8",
     "created_date": "2026-06-09T10:27:20.042723",
     "title": "משמר הגבול",
-    "video_url": "https://drive.google.com/file/d/1hbSWW5xbWHO--5Od1ZNih982GoTI7QRR/view",
-    "video_id": "1hbSWW5xbWHO--5Od1ZNih982GoTI7QRR",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/119",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/119",
+    "type": "direct",
     "category": "סדרות ישראליות",
     "series_name": "משמר הגבול",
     "season_number": 1,
@@ -378,7 +378,8 @@
     "thumbnail_url": "https://base44.app/api/apps/6992542871bb3f3ba9500a34/files/public/6992542871bb3f3ba9500a34/91a461973_287282.jpg",
     "description": ".",
     "year": 2026,
-    "custom_slug": "mishmar-hagvul"
+    "custom_slug": "mishmar-hagvul",
+    "episode_title": ""
   },
   {
     "id": "f949e9ca-4fbf-4df8-b914-5d7238ff2656",
@@ -6033,18 +6034,17 @@
     "id": "34288e9a-8f22-4bc2-b39a-ec501068e1c5",
     "created_date": "2026-06-09T10:27:20.038629",
     "title": "אווטאר קורה פרק 7",
-    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/115",
-    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/115",
-    "type": "direct",
+    "video_url": "https://drive.google.com/file/d/1s1L1x0HKuT58oLEITXWtpVQPvsKqbpd7/view",
+    "video_id": "1s1L1x0HKuT58oLEITXWtpVQPvsKqbpd7",
+    "type": "drive",
     "category": "סדרות ילדים",
     "series_name": "אווטאר קורה",
     "season_number": 2,
     "episode_number": 7,
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/txLQ0DooT45i8vvvjXjdCArPc83.jpg",
     "description": "",
-    "year": 2026,
-    "custom_slug": "avatar-korra",
-    "episode_title": ""
+    "year": null,
+    "custom_slug": "avatar-korra"
   },
   {
     "id": "29f8bbb7-1300-4872-b13e-458aaf103a2a",
