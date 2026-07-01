@@ -7,6 +7,7 @@ const spinStyle = `
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fadeInOut { 0%{opacity:0;transform:translateY(-50%) scale(0.7)} 25%{opacity:1;transform:translateY(-50%) scale(1.1)} 70%{opacity:1} 100%{opacity:0} }
 @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+@keyframes livePulseDot { 0%,100%{box-shadow:0 0 0 0 rgba(229,9,20,.6)} 50%{box-shadow:0 0 0 6px rgba(229,9,20,0)} }
 `;
 
 // שמות ערוצי טלגרם → מזהה מספרי (חייב להיות זהה ל-Home.jsx)
@@ -14,9 +15,10 @@ const TG_CHANNELS = { "zove8": "7282626428", "ZOVE8": "7282626428" };
 const TG_PROXY = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
 
 // ─── helpers ────────────────────────────────────────────────
-function buildSrc(movie) {
+function buildSrc(movie, startTime = 0) {
   const vid = (movie.video_id || movie.video_url || "").trim();
   const type = movie.type || "direct";
+  const t = Math.max(0, Math.floor(startTime || 0));
   if (!vid) return null;
   if (vid.includes("kaltura.com")) return vid;
   const kalturaMatch = vid.match(/^(\d+)\/(\d+)\/([a-zA-Z0-9_]+)$/);
@@ -28,7 +30,8 @@ function buildSrc(movie) {
   }
   if (type === "youtube" || vid.includes("youtube.com") || vid.includes("youtu.be")) {
     const m = vid.match(/(?:v=|youtu\.be\/)([^&/?]+)/);
-    return `https://www.youtube.com/embed/${m ? m[1] : vid}?autoplay=1`;
+    const base = `https://www.youtube.com/embed/${m ? m[1] : vid}?autoplay=1`;
+    return t > 0 ? `${base}&start=${t}` : base;
   }
   if (type === "drive" || vid.includes("drive.google.com")) {
     const m = vid.match(/\/d\/([^/?]+)/);
@@ -36,7 +39,8 @@ function buildSrc(movie) {
   }
   if (type === "vimeo" || vid.includes("vimeo.com")) {
     const m = vid.match(/vimeo\.com\/(\d+)/);
-    return `https://player.vimeo.com/video/${m ? m[1] : vid}?autoplay=1`;
+    const base = `https://player.vimeo.com/video/${m ? m[1] : vid}?autoplay=1`;
+    return t > 0 ? `${base}#t=${t}s` : base;
   }
   if (type === "dailymotion" || vid.includes("dailymotion.com")) {
     const m = vid.match(/(?:video\/|dai\.ly\/)([a-zA-Z0-9]+)/);
@@ -213,7 +217,7 @@ function TopBar({ title, episode, onClose, visible }) {
 // ─── Bottom controls bar ──────────────────────────────────────
 // FIX: כפתורים מסודרים: [skip-10] [מרווח] [play/pause] [מרווח] [skip+10]
 // עם מרווח גדול בין כפתורים ושורת ההתקדמות למעלה
-function BottomBar({ videoRef, onSkip, visible }) {
+function BottomBar({ videoRef, onSkip, visible, isLive = false }) {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -281,32 +285,41 @@ function BottomBar({ videoRef, onSkip, visible }) {
       pointerEvents: visible ? "auto" : "none",
       direction: "ltr",
     }}>
-      {/* progress bar */}
-      <div style={{ marginBottom: 16, padding: "8px 0", cursor: "pointer" }}
-        ref={progressRef}
-        onClick={seek}
-        onMouseDown={(e) => { setDragging(true); seek(e); }}
-        onMouseMove={(e) => { if (dragging) seek(e); }}
-        onMouseUp={() => setDragging(false)}
-        onTouchStart={(e) => { setDragging(true); seek(e); }}
-        onTouchMove={(e) => { if (dragging) seek(e); }}
-        onTouchEnd={() => setDragging(false)}
-      >
-        <div style={{ width: "100%", height: 3, background: "rgba(255,255,255,0.25)", borderRadius: 3, position: "relative" }}>
-          <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${progress}%`, background: "#e91e8c", borderRadius: 3 }} />
-          <div style={{ position: "absolute", top: "50%", left: `${progress}%`, transform: "translate(-50%,-50%)", width: 13, height: 13, borderRadius: "50%", background: "#e91e8c", boxShadow: "0 0 6px rgba(233,30,140,0.7)" }} />
+      {/* progress bar — לא רלוונטי בשידור חי */}
+      {!isLive && (
+        <div style={{ marginBottom: 16, padding: "8px 0", cursor: "pointer" }}
+          ref={progressRef}
+          onClick={seek}
+          onMouseDown={(e) => { setDragging(true); seek(e); }}
+          onMouseMove={(e) => { if (dragging) seek(e); }}
+          onMouseUp={() => setDragging(false)}
+          onTouchStart={(e) => { setDragging(true); seek(e); }}
+          onTouchMove={(e) => { if (dragging) seek(e); }}
+          onTouchEnd={() => setDragging(false)}
+        >
+          <div style={{ width: "100%", height: 3, background: "rgba(255,255,255,0.25)", borderRadius: 3, position: "relative" }}>
+            <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${progress}%`, background: "#e91e8c", borderRadius: 3 }} />
+            <div style={{ position: "absolute", top: "50%", left: `${progress}%`, transform: "translate(-50%,-50%)", width: 13, height: 13, borderRadius: "50%", background: "#e91e8c", boxShadow: "0 0 6px rgba(233,30,140,0.7)" }} />
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* bottom row: mute + time + fullscreen */}
+      {/* bottom row: mute + time/LIVE + fullscreen */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <button onClick={toggleMute} style={iconBtn}>
             {muted ? <VolumeX size={19} /> : <Volume2 size={19} />}
           </button>
-          <span style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, fontFamily: "Arial", whiteSpace: "nowrap" }}>
-            {formatTime(currentTime)} / {formatTime(duration)}
-          </span>
+          {isLive ? (
+            <span style={{ display: "flex", alignItems: "center", gap: 6, color: "#fff", fontSize: 12, fontWeight: 900, fontFamily: "Arial" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#e50914", display: "inline-block", animation: "livePulseDot 1.5s ease-in-out infinite" }} />
+              LIVE
+            </span>
+          ) : (
+            <span style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, fontFamily: "Arial", whiteSpace: "nowrap" }}>
+              {formatTime(currentTime)} / {formatTime(duration)}
+            </span>
+          )}
         </div>
         <button onClick={goFullscreen} style={iconBtn}>
           <Maximize size={19} />
@@ -335,7 +348,7 @@ const centerBtn = {
 
 // ─── Controls wrapper (auto-hide) ─────────────────────────────
 // FIX: לחיצה על כל מקום במסך (לא רק ה-div) מפעילה/מעצירה + מציגה כפתורים
-function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) {
+function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false }) {
   const [visible, setVisible] = useState(true);
   const timer = useRef(null);
 
@@ -384,7 +397,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
       {/* TopBar — נעלם/מופיע עם הכפתורים */}
       <TopBar title={title} episode={episode} onClose={onClose} visible={visible} />
 
-      {/* כפתורי skip + play צפים באמצע המסך */}
+      {/* כפתורי skip + play צפים באמצע המסך (skip מוסתר בשידור חי) */}
       <div style={{
         position: "absolute", top: "50%", left: "50%",
         transform: "translate(-50%, -50%)",
@@ -395,10 +408,12 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
         zIndex: 20,
       }}>
         {/* skip -10 — אייקון Lucide תקין */}
-        <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-          <RotateCcw size={36} color="white" strokeWidth={1.8} />
-          <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
-        </button>
+        {!isLive && (
+          <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
+            <RotateCcw size={36} color="white" strokeWidth={1.8} />
+            <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
+          </button>
+        )}
         {/* play/pause — ללא שינוי */}
         <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
           {playing
@@ -407,13 +422,15 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
           }
         </button>
         {/* skip +10 — אייקון Lucide תקין */}
-        <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-          <RotateCw size={36} color="white" strokeWidth={1.8} />
-          <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
-        </button>
+        {!isLive && (
+          <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
+            <RotateCw size={36} color="white" strokeWidth={1.8} />
+            <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
+          </button>
+        )}
       </div>
 
-      <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} />
+      <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} />
       <SkipAnim side={skipAnim} />
     </div>
   );
@@ -427,9 +444,13 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim }) 
 //   Direct MP4   → "https://example.com/video.mp4"
 //   Telegram bot → "https://telegram-bot-8528.onrender.com/stream/{channelId}/{msgId}"
 //                  (set VITE_TELEGRAM_PROXY to override the bot base URL)
-function PlyrVideoPlayer({ src, movie, onClose }) {
+function PlyrVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
   const containerRef = useRef(null);
   const plyrRef = useRef(null);
+  const videoElRef = useRef(null);
+  // ref כדי שה-interval/cleanup תמיד יקראו את ה-callback העדכני בלי לגרום ל-re-init של הנגן
+  const onProgressRef = useRef(onProgress);
+  onProgressRef.current = onProgress;
 
   useEffect(() => {
     if (!containerRef.current || !src) return;
@@ -441,6 +462,7 @@ function PlyrVideoPlayer({ src, movie, onClose }) {
     // src comes from buildSrc(movie) which reads video_url / video_id from movies.json
     video.src = src;
     containerRef.current.appendChild(video);
+    videoElRef.current = video;
 
     plyrRef.current = new Plyr(video, {
       autoplay: true,
@@ -449,13 +471,27 @@ function PlyrVideoPlayer({ src, movie, onClose }) {
       invertTime: false,
     });
     plyrRef.current.on("ready", () => {
-      if (!destroyed) plyrRef.current?.play().catch(() => {});
+      if (destroyed) return;
+      // המשך צפייה — קפוץ בדיוק לשנייה שנשמרה בפעם הקודמת
+      if (startTime > 1) { try { video.currentTime = startTime; } catch {} }
+      plyrRef.current?.play().catch(() => {});
     });
+
+    // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
+    const reportInterval = setInterval(() => {
+      if (!video.paused && !video.ended && video.duration) {
+        onProgressRef.current?.(video.currentTime, video.duration);
+      }
+    }, 5000);
 
     return () => {
       destroyed = true;
+      clearInterval(reportInterval);
+      // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה
+      if (video.duration) onProgressRef.current?.(video.currentTime, video.duration);
       plyrRef.current?.destroy();
       plyrRef.current = null;
+      videoElRef.current = null;
       if (containerRef.current) containerRef.current.innerHTML = "";
     };
   }, [src]);
@@ -505,12 +541,14 @@ function PlyrVideoPlayer({ src, movie, onClose }) {
 }
 
 // ─── HLS player ───────────────────────────────────────────────
-function HlsPlayer({ src, movie, onClose }) {
+function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
   const playerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [skipAnim, setSkipAnim] = useState(null);
+  const onProgressRef = useRef(onProgress);
+  onProgressRef.current = onProgress;
 
   useEffect(() => {
     if (!src || !containerRef.current) return;
@@ -535,14 +573,30 @@ function HlsPlayer({ src, movie, onClose }) {
       playerRef.current = { vjs, shaka };
       try {
         await shaka.load(src);
-        if (!destroyed) { videoEl.play().catch(() => {}); setLoading(false); }
+        if (!destroyed) {
+          // המשך צפייה — לא רלוונטי בשידור חי
+          if (!isLive && startTime > 1) { try { videoEl.currentTime = startTime; } catch {} }
+          videoEl.play().catch(() => {}); setLoading(false);
+        }
       } catch {
-        if (!destroyed) { vjs.src({ src, type: "application/x-mpegURL" }); vjs.play().catch(() => {}); setLoading(false); }
+        if (!destroyed) {
+          vjs.src({ src, type: "application/x-mpegURL" });
+          if (!isLive && startTime > 1) { try { vjs.currentTime(startTime); } catch {} }
+          vjs.play().catch(() => {}); setLoading(false);
+        }
       }
     };
     init();
+    // שמירת התקדמות תקופתית — רק לתוכן מוקלט, לא לשידור חי
+    const reportInterval = !isLive ? setInterval(() => {
+      const v = videoElRef.current;
+      if (v && !v.paused && !v.ended && v.duration) onProgressRef.current?.(v.currentTime, v.duration);
+    }, 5000) : null;
     return () => {
       destroyed = true;
+      if (reportInterval) clearInterval(reportInterval);
+      const v = videoElRef.current;
+      if (!isLive && v && v.duration) onProgressRef.current?.(v.currentTime, v.duration);
       playerRef.current?.shaka?.destroy();
       playerRef.current?.vjs?.dispose();
       playerRef.current = null; videoElRef.current = null;
@@ -564,7 +618,7 @@ function HlsPlayer({ src, movie, onClose }) {
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} />
     </div>
   );
 }
@@ -627,8 +681,12 @@ function IframePlayer({ src, movie, onClose }) {
 }
 
 // ─── Main export ──────────────────────────────────────────────
-export default function CustomVideoPlayer({ movie, onClose }) {
-  const src = buildSrc(movie);
+// movie: אובייקט התוכן (סרט/פרק/שידור חי — כולם עוברים דרך אותו נגן אחיד)
+// startTime: שנייה שממנה יש להמשיך צפייה (המשך צפייה / היסטוריה)
+// onProgress(currentTime, duration): callback לשמירת התקדמות תקופתית
+export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onProgress }) {
+  const isLive = !!movie.is_live;
+  const src = buildSrc(movie, isLive ? 0 : startTime);
   const type = movie.type || "direct";
 
   return (
@@ -643,11 +701,11 @@ export default function CustomVideoPlayer({ movie, onClose }) {
           <p style={{ color: "#888", fontSize: 15, fontFamily: "Arial" }}>אין קישור וידאו זמין</p>
         </div>
       ) : isHlsUrl(src) ? (
-        <HlsPlayer src={src} movie={movie} onClose={onClose} />
+        <HlsPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} isLive={isLive} />
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
-        <PlyrVideoPlayer src={src} movie={movie} onClose={onClose} />
+        <PlyrVideoPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} />
       )}
     </div>
   );
