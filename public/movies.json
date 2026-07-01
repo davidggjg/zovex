@@ -385,9 +385,9 @@
     "id": "f949e9ca-4fbf-4df8-b914-5d7238ff2656",
     "created_date": "2026-06-09T10:27:20.042694",
     "title": "משמר הגבול",
-    "video_url": "https://drive.google.com/file/d/12aUkm5W2x85zyOcj6fcSAHfqRZWAIxVK/view",
-    "video_id": "12aUkm5W2x85zyOcj6fcSAHfqRZWAIxVK",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/121",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/121",
+    "type": "direct",
     "category": "סדרות ישראליות",
     "series_name": "משמר הגבול",
     "season_number": 1,
@@ -395,7 +395,8 @@
     "thumbnail_url": "https://base44.app/api/apps/6992542871bb3f3ba9500a34/files/public/6992542871bb3f3ba9500a34/f58ac2bac_287282.jpg",
     "description": "אבי (שלומי לוי), צעיר מבת-ים שמסתבך עם עבריינים מקומיים, מוצא את עצמו בנקודת שבירה. כדי לסגור חשבונות מהעבר ולשנות את מסלול חייו, הוא מחליט להתגייס למשמר הגבול (מג\"ב).\n​מהר מאוד הוא מגלה שהשירות בלוחמה הוא לא רק אקשן ומרדפים, אלא עולם מורכב ומסוכן שבו הגבולות בין טוב לרע, בין חוק לעבריינות ובין חברים לאויבים – מטשטשים לגמרי. אבי וחבריו ליחידה נאלצים להתמודד עם המציאות המורכבת של ישראל, תוך שהם נקרעים בין הנאמנות למשפחה ולרחוב לבין המחויבות למדים ולחוק.",
     "year": 2026,
-    "custom_slug": "mishmar-hagvul"
+    "custom_slug": "mishmar-hagvul",
+    "episode_title": ""
   },
   {
     "id": "a4043ab1-91ce-446b-8ddf-dc31b45a9c02",
