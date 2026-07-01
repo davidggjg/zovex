@@ -407,17 +407,18 @@
     "id": "6eadc8da-f3a3-443f-a887-81cf9925a4ff",
     "created_date": "2026-06-09T10:27:20.033620",
     "title": "פרק 2",
-    "video_url": "https://drive.google.com/file/d/1PXO_NmSvTTogy84xkw4fCQNpIsrZGDvy/view",
-    "video_id": "1PXO_NmSvTTogy84xkw4fCQNpIsrZGDvy",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/103",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/103",
+    "type": "direct",
     "category": "סדרות ישראליות",
     "series_name": "שחר אדום",
     "season_number": 1,
     "episode_number": 2,
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/vcGHCoFdZUj5jww8T7dDakr1osu.jpg",
     "description": "דרמה המביאה אל המסך סיפורי גבורה והישרדות שהתרחשו בזמן מתקפת הטרור של השבעה באוקטובר. כל פרק יעביר חוויה מטלטלת, עוצמתית ומלאת תקווה של אלו ששרדו וחירפו נפשם להציל אנשים מהזוועות. מכיל תכנים קשים לצפייה העוסקים באסון ה-7.10.",
-    "year": null,
-    "custom_slug": "red-dawn"
+    "year": 2026,
+    "custom_slug": "red-dawn",
+    "episode_title": ""
   },
   {
     "id": "b9cb2fd5-8eae-400b-8560-5c7a25f2299d",
