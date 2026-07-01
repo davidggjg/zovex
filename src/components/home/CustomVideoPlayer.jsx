@@ -311,7 +311,7 @@ function TopBar({ title, episode, onClose, visible }) {
 // ─── Bottom controls bar ──────────────────────────────────────
 // FIX: כפתורים מסודרים: [skip-10] [מרווח] [play/pause] [מרווח] [skip+10]
 // עם מרווח גדול בין כפתורים ושורת ההתקדמות למעלה
-function BottomBar({ videoRef, onSkip, visible, isLive = false }) {
+function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -322,21 +322,31 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false }) {
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    // סנכרון מיידי — אם המטא-דאטה כבר נטענה עד שהגענו לכאן (למשל וידאו שנטען
+    // מהר), נקבל את הערכים הנוכחיים במקום לחכות לאירוע שכבר לא יקרה שוב
+    if (v.duration && isFinite(v.duration)) setDuration(v.duration);
+    if (v.currentTime) setCurrentTime(v.currentTime);
+    setPlaying(!v.paused);
     const onTime = () => { if (!dragging) setCurrentTime(v.currentTime); };
     const onMeta = () => setDuration(v.duration);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("loadedmetadata", onMeta);
+    v.addEventListener("durationchange", onMeta);
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
     return () => {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("loadedmetadata", onMeta);
+      v.removeEventListener("durationchange", onMeta);
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
     };
-  }, [videoRef, dragging]);
+    // videoReady משמש כטריגר: הוא הופך ל-true בדיוק כשה-<video> האמיתי נוצר
+    // ונשמר ב-ref — כך שהאפקט הזה רץ שוב ברגע שיש בפועל מה להאזין לו, ולא
+    // "מפספס" את האירועים כי הוא רץ מוקדם מדי (לפני שהאלמנט קיים).
+  }, [videoRef, dragging, videoReady]);
 
   const togglePlay = () => {
     const v = videoRef.current;
@@ -442,7 +452,7 @@ const centerBtn = {
 
 // ─── Controls wrapper (auto-hide) ─────────────────────────────
 // FIX: לחיצה על כל מקום במסך (לא רק ה-div) מפעילה/מעצירה + מציגה כפתורים
-function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false }) {
+function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false, videoReady }) {
   const [visible, setVisible] = useState(true);
   const timer = useRef(null);
 
@@ -459,12 +469,13 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    setPlaying(!v.paused);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
     return () => { v.removeEventListener("play", onPlay); v.removeEventListener("pause", onPause); };
-  }, [videoRef]);
+  }, [videoRef, videoReady]);
 
   const togglePlay = useCallback((e) => {
     e.stopPropagation();
@@ -524,7 +535,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
         )}
       </div>
 
-      <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} />
+      <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} videoReady={videoReady} />
       <SkipAnim side={skipAnim} />
     </div>
   );
@@ -545,6 +556,11 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
   const videoElRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [skipAnim, setSkipAnim] = useState(null);
+  // videoReady: הופך ל-true ברגע שהאלמנט <video> האמיתי נוצר ונשמר ב-ref —
+  // זה מה שמאפשר ל-ControlsLayer/BottomBar (שרוצים להאזין לאירועים שלו:
+  // duration, timeupdate וכו') לדעת מתי בדיוק יש למה להאזין, במקום להחמיץ
+  // את האירועים כי הם ניסו להאזין לפני שהאלמנט בכלל היה קיים.
+  const [videoReady, setVideoReady] = useState(false);
   // ref כדי שה-interval/cleanup תמיד יקראו את ה-callback העדכני בלי לגרום ל-re-init של הנגן
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
@@ -552,6 +568,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
   useEffect(() => {
     if (!containerRef.current || !src) return;
     let destroyed = false;
+    setVideoReady(false);
 
     const video = document.createElement("video");
     video.setAttribute("playsinline", "");
@@ -561,6 +578,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
     video.src = src;
     containerRef.current.appendChild(video);
     videoElRef.current = video;
+    setVideoReady(true);
 
     const onLoaded = () => {
       if (destroyed) return;
@@ -577,7 +595,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
 
     // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
     const reportInterval = setInterval(() => {
-      if (!video.paused && !video.ended && video.duration) {
+      if (!video.paused && !video.ended && Number.isFinite(video.duration) && video.duration > 0) {
         reportProgress(onProgressRef, video.currentTime, video.duration);
       }
     }, 5000);
@@ -586,13 +604,14 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
       destroyed = true;
       clearInterval(reportInterval);
       // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה (כולל בדיקת "סיום צפייה")
-      if (video.duration) reportProgress(onProgressRef, video.currentTime, video.duration);
+      if (Number.isFinite(video.duration) && video.duration > 0) reportProgress(onProgressRef, video.currentTime, video.duration);
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
       video.pause();
       video.src = "";
       videoElRef.current = null;
+      setVideoReady(false);
       if (containerRef.current) containerRef.current.innerHTML = "";
     };
   }, [src]);
@@ -612,7 +631,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} videoReady={videoReady} />
     </div>
   );
 }
@@ -624,12 +643,14 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
   const playerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [skipAnim, setSkipAnim] = useState(null);
+  const [videoReady, setVideoReady] = useState(false);
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
 
   useEffect(() => {
     if (!src || !containerRef.current) return;
     let destroyed = false;
+    setVideoReady(false);
     const init = async () => {
       loadStyles(["https://unpkg.com/video.js@8.21.0/dist/video-js.min.css"]);
       await loadScripts([
@@ -644,6 +665,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       videoEl.style.cssText = "width:100%;height:100%;position:absolute;inset:0;background:#000;";
       containerRef.current.appendChild(videoEl);
       videoElRef.current = videoEl;
+      setVideoReady(true);
       const vjs = window.videojs(videoEl, { controls: false, autoplay: true, fill: true });
       const shaka = new window.shaka.Player();
       await shaka.attach(videoEl);
@@ -667,16 +689,17 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     // שמירת התקדמות תקופתית — רק לתוכן מוקלט, לא לשידור חי
     const reportInterval = !isLive ? setInterval(() => {
       const v = videoElRef.current;
-      if (v && !v.paused && !v.ended && v.duration) reportProgress(onProgressRef, v.currentTime, v.duration);
+      if (v && !v.paused && !v.ended && Number.isFinite(v.duration) && v.duration > 0) reportProgress(onProgressRef, v.currentTime, v.duration);
     }, 5000) : null;
     return () => {
       destroyed = true;
       if (reportInterval) clearInterval(reportInterval);
       const v = videoElRef.current;
-      if (!isLive && v && v.duration) reportProgress(onProgressRef, v.currentTime, v.duration);
+      if (!isLive && v && Number.isFinite(v.duration) && v.duration > 0) reportProgress(onProgressRef, v.currentTime, v.duration);
       playerRef.current?.shaka?.destroy();
       playerRef.current?.vjs?.dispose();
       playerRef.current = null; videoElRef.current = null;
+      setVideoReady(false);
     };
   }, [src]);
 
@@ -695,7 +718,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} videoReady={videoReady} />
     </div>
   );
 }
