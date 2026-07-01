@@ -2826,9 +2826,9 @@
     "id": "90a9bc82-f912-424f-b770-22eb4a8522c3",
     "created_date": "2026-06-09T10:27:20.040978",
     "title": "שומרת הדרקונים",
-    "video_url": "https://drive.google.com/file/d/1prERzSOW8kkYdOoGfPnXSIKYRSrLy7eu/view",
-    "video_id": "1prERzSOW8kkYdOoGfPnXSIKYRSrLy7eu",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/145",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/145",
+    "type": "direct",
     "category": "מצוירים",
     "series_name": null,
     "season_number": null,
@@ -2836,7 +2836,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/nLJ0qMMJd5wuqlArKwF29ozsFDH.jpg",
     "description": "זהו זמן אפל באימפריה הסינית העתיקה. הדרקונים אשר היו בעבר בני ברית חכמים וחברים של בני האדם כעת ניצודים שנים ונזרקים לכלא משוריין מברזל.  במבצר מרוחק באזור ההרים, שפחה צעירה מסייעת לדרקון החי האחרון לברוח מהשבי ומצטרפת אליו במסע להשיב מתנה יקרת ערך: ביצת הדרקון האחרונה, שנגנבה על ידי מכשף מרושע אשר רוצה באמצעותה להיות בן אלמוות.  בעוד צבא הקיסר רודף אחריהם, הזוג הבלתי צפוי הזה יצא למסע ברחבי סין העתיקה, בו שניהם לומדים כיצד להתבגר – אחד מחוכמת חייו בת אלפי השנים והשנייה מחוסר חוויות חייה הצעירים ויצטרכו לסמוך האחד על השנייה כדי להביס את המכשף המפחיד ולהציל את עתידם של כלל הדרקונים.",
     "year": 2024,
-    "custom_slug": "dragon-guardian"
+    "custom_slug": "dragon-guardian",
+    "episode_title": null
   },
   {
     "id": "6b766d7f-2613-4a7e-862a-d93077045ab9",
