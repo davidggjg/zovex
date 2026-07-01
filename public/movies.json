@@ -9690,9 +9690,9 @@
     "id": "e8713b53-b78d-49a8-bd26-9f0d30a543fc",
     "created_date": "2026-06-09T10:27:20.036880",
     "title": "משפחת סופר-על",
-    "video_url": "https://drive.google.com/file/d/0B-GWCo2Qv5ceNjZfeTdfdDltU3M/view",
-    "video_id": "0B-GWCo2Qv5ceNjZfeTdfdDltU3M",
-    "type": "drive",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/135",
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/7282626428/135",
+    "type": "direct",
     "category": "מצוירים",
     "series_name": null,
     "season_number": null,
@@ -9700,7 +9700,8 @@
     "thumbnail_url": "https://image.tmdb.org/t/p/w500/gJVkVsMFYKW0PLo5bHZCxBRo5Ie.jpg",
     "description": "משפחה של גיבורי על נאלצת לעבור לחיות בפרברים כאנשים רגילים לחלוטין, לאחר שהממשלה החליטה לאסור על כל גיבורי העל בעולם להשתמש בכוחות שלהם מסיבות משפטיות, כלכליות ואחרות. ראש המשפחה, מר בוב סופר על, האדם החזק בעולם, משתגע מרוב שעמום מעבודתו הרגילה כסוכן ביטוח. ביאושו, הוא נופל למלכודת שטומן לו סינדרום, הנבל המטורף שיוצא לסגור חשבון עם כל גיבורי העל בעולם. אבל אף אחד לא חוטף את אבא סופר על בלי להסתבך גם עם האישה והילדים. ואם יש דבר אחד שאתם לא רוצים, הוא חשבון פתוח עם משפחה מיוחדת מאוד.",
     "year": 2004,
-    "custom_slug": "mishpachatsuperal"
+    "custom_slug": "mishpachatsuperal",
+    "episode_title": null
   },
   {
     "id": "e5f1d473-2293-41ca-87e7-594b366c9557",
