@@ -7,6 +7,7 @@
     "dev": "vite",
     "prebuild": "node scripts/generate-sitemap.js",
     "build": "vite build",
+    "postbuild": "node scripts/prerender-routes.js",
     "preview": "vite preview",
     "scan": "node scripts/scan.js",
     "scan:fix": "node scripts/scan.js --fix"
