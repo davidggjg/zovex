@@ -1,5 +1,22 @@
 [
   {
+    "title": "לצאת מהמשחק",
+    "description": "חלומו של מאנקו למכור סוף סוף את מועדון הלילה המפוקפק שלו ולצאת לפרישה עם זוגתו הצעירה, עומד בפני סכנה לאחר שנשדד באיומי אקדח. כשבוסים מהקרטל נושפים בצווארו, טיפוס מחשיד מציג עצמו כרוכש פוטנציאלי, וצמד בסגנון \"בוני וקלייד\" שמים לעצמם מטרה לגנוב את כל מה שיש לו – מאנקו צריך לגייס כל טריק שהוא מכיר כדי לצאת עם חברתו, והמעט שנשאר לו, בחתיכה אחת.",
+    "thumbnail_url": "https://image.tmdb.org/t/p/w500/gb9PKeUxvGeQiY5UCUy0w1hVzn4.jpg",
+    "category": "סרטים",
+    "year": 2026,
+    "video_id": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/6837333844/902",
+    "type": "direct",
+    "video_url": "https://davidhzhdhd-my-telegram-bot.hf.space/stream/6837333844/902",
+    "series_name": null,
+    "season_number": null,
+    "episode_number": null,
+    "episode_title": null,
+    "custom_slug": null,
+    "id": "05c5ed64-7cd0-460c-9358-73c1ffe000b3",
+    "created_date": "2026-07-02T12:13:30.864Z"
+  },
+  {
     "id": "live_90b4d964-04fc-4cff-a9b9-f12eb1aaa4fa",
     "is_live": true,
     "title": "i24",
