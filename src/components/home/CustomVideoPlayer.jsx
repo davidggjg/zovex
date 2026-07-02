@@ -111,7 +111,7 @@ function isIframeUrl(src, type) {
 const NEAR_END_SECONDS = 60;
 const NEAR_END_RATIO = 0.95;
 function reportProgress(onProgressRef, currentTime, duration) {
-  if (!duration) return;
+  if (!duration || !Number.isFinite(duration)) return;
   const finished = (duration - currentTime) <= NEAR_END_SECONDS || (currentTime / duration) >= NEAR_END_RATIO;
   onProgressRef.current?.(finished ? 0 : currentTime, duration);
 }
@@ -201,10 +201,26 @@ function LiveViewersBadge({ count }) {
 }
 
 function formatTime(secs) {
-  if (!secs || isNaN(secs)) return "0:00";
+  if (!secs || isNaN(secs) || !isFinite(secs)) return "0:00";
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// כשהשרת המקור (למשל פרוקסי טלגרם) לא שולח Content-Length תקין, הדפדפן
+// מדווח duration=Infinity ולא NaN/0 — ואז שורת ההתקדמות "תקועה" על 0/0
+// ולא נשמרת התקדמות בכלל. הפונקציה הזו מנסה למצוא משך זמן שמיש גם במקרה כזה,
+// דרך טווח ה-seekable שכן מתעדכן תוך כדי הזרמה.
+function getUsableDuration(v) {
+  if (!v) return 0;
+  if (Number.isFinite(v.duration) && v.duration > 0) return v.duration;
+  try {
+    if (v.seekable && v.seekable.length > 0) {
+      const end = v.seekable.end(v.seekable.length - 1);
+      if (Number.isFinite(end) && end > 0) return end;
+    }
+  } catch {}
+  return 0;
 }
 
 function loadScripts(urls) {
@@ -324,29 +340,37 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
     if (!v) return;
     // סנכרון מיידי — אם המטא-דאטה כבר נטענה עד שהגענו לכאן (למשל וידאו שנטען
     // מהר), נקבל את הערכים הנוכחיים במקום לחכות לאירוע שכבר לא יקרה שוב
-    if (v.duration && isFinite(v.duration)) setDuration(v.duration);
+    const syncDuration = () => { const d = getUsableDuration(v); if (d > 0) setDuration(d); };
+    syncDuration();
     if (v.currentTime) setCurrentTime(v.currentTime);
     setPlaying(!v.paused);
-    const onTime = () => { if (!dragging) setCurrentTime(v.currentTime); };
-    const onMeta = () => setDuration(v.duration);
+    const onTime = () => { if (!dragging) setCurrentTime(v.currentTime); syncDuration(); };
+    const onMeta = () => syncDuration();
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("loadedmetadata", onMeta);
     v.addEventListener("durationchange", onMeta);
+    v.addEventListener("progress", onMeta);
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
+    // גיבוי: כמה שרתי הזרמה (למשל פרוקסי טלגרם) לא שולחים Content-Length
+    // ולכן loadedmetadata/durationchange לא תמיד מגיעים בזמן — פולינג קצר
+    // כרשת ביטחון עד שיש משך זמן שמיש.
+    const poll = duration > 0 ? null : setInterval(syncDuration, 500);
     return () => {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("loadedmetadata", onMeta);
       v.removeEventListener("durationchange", onMeta);
+      v.removeEventListener("progress", onMeta);
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
+      if (poll) clearInterval(poll);
     };
     // videoReady משמש כטריגר: הוא הופך ל-true בדיוק כשה-<video> האמיתי נוצר
     // ונשמר ב-ref — כך שהאפקט הזה רץ שוב ברגע שיש בפועל מה להאזין לו, ולא
     // "מפספס" את האירועים כי הוא רץ מוקדם מדי (לפני שהאלמנט קיים).
-  }, [videoRef, dragging, videoReady]);
+  }, [videoRef, dragging, videoReady, duration]);
 
   const togglePlay = () => {
     const v = videoRef.current;
@@ -595,8 +619,9 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
 
     // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
     const reportInterval = setInterval(() => {
-      if (!video.paused && !video.ended && Number.isFinite(video.duration) && video.duration > 0) {
-        reportProgress(onProgressRef, video.currentTime, video.duration);
+      if (!video.paused && !video.ended) {
+        const dur = getUsableDuration(video);
+        if (dur > 0) reportProgress(onProgressRef, video.currentTime, dur);
       }
     }, 5000);
 
@@ -604,7 +629,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
       destroyed = true;
       clearInterval(reportInterval);
       // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה (כולל בדיקת "סיום צפייה")
-      if (Number.isFinite(video.duration) && video.duration > 0) reportProgress(onProgressRef, video.currentTime, video.duration);
+      { const dur = getUsableDuration(video); if (dur > 0) reportProgress(onProgressRef, video.currentTime, dur); }
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
@@ -689,13 +714,16 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     // שמירת התקדמות תקופתית — רק לתוכן מוקלט, לא לשידור חי
     const reportInterval = !isLive ? setInterval(() => {
       const v = videoElRef.current;
-      if (v && !v.paused && !v.ended && Number.isFinite(v.duration) && v.duration > 0) reportProgress(onProgressRef, v.currentTime, v.duration);
+      if (v && !v.paused && !v.ended) {
+        const dur = getUsableDuration(v);
+        if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur);
+      }
     }, 5000) : null;
     return () => {
       destroyed = true;
       if (reportInterval) clearInterval(reportInterval);
       const v = videoElRef.current;
-      if (!isLive && v && Number.isFinite(v.duration) && v.duration > 0) reportProgress(onProgressRef, v.currentTime, v.duration);
+      if (!isLive && v) { const dur = getUsableDuration(v); if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur); }
       playerRef.current?.shaka?.destroy();
       playerRef.current?.vjs?.dispose();
       playerRef.current = null; videoElRef.current = null;
