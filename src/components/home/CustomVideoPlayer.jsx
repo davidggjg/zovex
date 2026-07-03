@@ -1,5 +1,40 @@
-import { X, Play, Pause, Volume2, VolumeX, Maximize, RotateCcw, RotateCw, Share2 } from "lucide-react";
+import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2 } from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
+
+// ──────────────────────────────────────────────────────────────
+// Native bridge helpers (used when running inside the Android app)
+// ──────────────────────────────────────────────────────────────
+function postNative(msg) {
+  try { window.ReactNativeWebView?.postMessage(JSON.stringify(msg)); } catch {}
+}
+
+function setupMediaSession(videoEl, movie) {
+  if (!("mediaSession" in navigator)) return;
+  const artwork = movie.poster_url
+    ? [{ src: movie.poster_url, sizes: "512x512", type: "image/jpeg" }]
+    : [];
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: movie.title || "ZOVEX",
+    artist: movie.year ? String(movie.year) : "",
+    artwork,
+  });
+  const seek = (s) => { try { videoEl.currentTime = Math.max(0, videoEl.currentTime + s); } catch {} };
+  navigator.mediaSession.setActionHandler("play", () => videoEl.play().catch?.(() => {}));
+  navigator.mediaSession.setActionHandler("pause", () => videoEl.pause());
+  navigator.mediaSession.setActionHandler("seekbackward", (d) => seek(-(d?.seekOffset ?? 10)));
+  navigator.mediaSession.setActionHandler("seekforward", (d) => seek(d?.seekOffset ?? 10));
+  navigator.mediaSession.setActionHandler("stop", () => { videoEl.pause(); videoEl.currentTime = 0; });
+  navigator.mediaSession.playbackState = "playing";
+}
+
+function clearMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.metadata = null;
+  ["play","pause","seekbackward","seekforward","stop"].forEach(a => {
+    try { navigator.mediaSession.setActionHandler(a, null); } catch {}
+  });
+  navigator.mediaSession.playbackState = "none";
+}
 
 const spinStyle = `
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -325,15 +360,26 @@ function TopBar({ title, episode, onClose, visible }) {
 }
 
 // ─── Bottom controls bar ──────────────────────────────────────
-// FIX: כפתורים מסודרים: [skip-10] [מרווח] [play/pause] [מרווח] [skip+10]
-// עם מרווח גדול בין כפתורים ושורת ההתקדמות למעלה
 function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [dragging, setDragging] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [pipSupported, setPipSupported] = useState(false);
   const progressRef = useRef(null);
+
+  useEffect(() => {
+    setPipSupported(!!(document.pictureInPictureEnabled || document.webkitSupportsPresentationMode));
+    const onFs = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFs);
+    document.addEventListener("webkitfullscreenchange", onFs);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFs);
+      document.removeEventListener("webkitfullscreenchange", onFs);
+    };
+  }, []);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -397,8 +443,32 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
   }, [videoRef, duration]);
 
   const goFullscreen = () => {
-    const el = document.documentElement;
-    document.fullscreenElement ? document.exitFullscreen?.() : (el.requestFullscreen?.() || el.webkitRequestFullscreen?.());
+    const v = videoRef.current;
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      postNative({ type: "fullscreen", enter: false });
+    } else if (v) {
+      // Try video-element fullscreen first (best on Android/iOS WebView)
+      const req = v.requestFullscreen || v.webkitRequestFullscreen || v.webkitEnterFullscreen;
+      if (req) {
+        req.call(v).catch?.(() => {});
+      } else {
+        // Fallback: ask native to hide status bar for immersive feel
+        postNative({ type: "fullscreen", enter: true });
+      }
+    }
+  };
+
+  const goPip = async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        await v.requestPictureInPicture();
+      }
+    } catch {}
   };
 
   const progress = duration ? (currentTime / duration) * 100 : 0;
@@ -449,9 +519,16 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
             </span>
           )}
         </div>
-        <button onClick={goFullscreen} style={iconBtn}>
-          <Maximize size={19} />
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {pipSupported && (
+            <button onClick={goPip} style={iconBtn} title="Picture in Picture">
+              <PictureInPicture2 size={19} />
+            </button>
+          )}
+          <button onClick={goFullscreen} style={iconBtn}>
+            {isFullscreen ? <Minimize size={19} /> : <Maximize size={19} />}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -606,16 +683,23 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
 
     const onLoaded = () => {
       if (destroyed) return;
-      // המשך צפייה — קפוץ בדיוק לשנייה שנשמרה בפעם הקודמת
       if (startTime > 1) { try { video.currentTime = startTime; } catch {} }
       video.play().catch(() => {});
       setLoading(false);
     };
     const onWaiting = () => setLoading(true);
-    const onPlaying = () => setLoading(false);
+    const onPlaying = () => {
+      setLoading(false);
+      setupMediaSession(video, movie);
+      postNative({ type: "video_playing", value: true });
+    };
+    const onPause = () => postNative({ type: "video_playing", value: false });
+    const onEnded = () => postNative({ type: "video_playing", value: false });
     video.addEventListener("loadedmetadata", onLoaded);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("playing", onPlaying);
+    video.addEventListener("pause", onPause);
+    video.addEventListener("ended", onEnded);
 
     // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
     const reportInterval = setInterval(() => {
@@ -628,11 +712,14 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
     return () => {
       destroyed = true;
       clearInterval(reportInterval);
-      // שמירה אחרונה של המיקום בדיוק ברגע הסגירה/יציאה (כולל בדיקת "סיום צפייה")
       { const dur = getUsableDuration(video); if (dur > 0) reportProgress(onProgressRef, video.currentTime, dur); }
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("ended", onEnded);
+      clearMediaSession();
+      postNative({ type: "video_playing", value: false });
       video.pause();
       video.src = "";
       videoElRef.current = null;
@@ -698,20 +785,24 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       try {
         await shaka.load(src);
         if (!destroyed) {
-          // המשך צפייה — לא רלוונטי בשידור חי
           if (!isLive && startTime > 1) { try { videoEl.currentTime = startTime; } catch {} }
-          videoEl.play().catch(() => {}); setLoading(false);
+          videoEl.play().catch(() => {});
+          setLoading(false);
+          setupMediaSession(videoEl, movie);
+          postNative({ type: "video_playing", value: true });
         }
       } catch {
         if (!destroyed) {
           vjs.src({ src, type: "application/x-mpegURL" });
           if (!isLive && startTime > 1) { try { vjs.currentTime(startTime); } catch {} }
-          vjs.play().catch(() => {}); setLoading(false);
+          vjs.play().catch(() => {});
+          setLoading(false);
+          setupMediaSession(videoEl, movie);
+          postNative({ type: "video_playing", value: true });
         }
       }
     };
     init();
-    // שמירת התקדמות תקופתית — רק לתוכן מוקלט, לא לשידור חי
     const reportInterval = !isLive ? setInterval(() => {
       const v = videoElRef.current;
       if (v && !v.paused && !v.ended) {
@@ -724,6 +815,8 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       if (reportInterval) clearInterval(reportInterval);
       const v = videoElRef.current;
       if (!isLive && v) { const dur = getUsableDuration(v); if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur); }
+      clearMediaSession();
+      postNative({ type: "video_playing", value: false });
       playerRef.current?.shaka?.destroy();
       playerRef.current?.vjs?.dispose();
       playerRef.current = null; videoElRef.current = null;
@@ -809,14 +902,16 @@ function IframePlayer({ src, movie, onClose }) {
 }
 
 // ─── Main export ──────────────────────────────────────────────
-// movie: אובייקט התוכן (סרט/פרק/שידור חי — כולם עוברים דרך אותו נגן אחיד)
-// startTime: שנייה שממנה יש להמשיך צפייה (המשך צפייה / היסטוריה)
-// onProgress(currentTime, duration): callback לשמירת התקדמות תקופתית
 export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onProgress }) {
   const isLive = !!movie.is_live;
   const src = buildSrc(movie, isLive ? 0 : startTime);
   const type = movie.type || "direct";
   const viewerCount = useLiveViewerCount(movie.id, isLive);
+
+  useEffect(() => {
+    postNative({ type: "player_open", value: true });
+    return () => postNative({ type: "player_open", value: false });
+  }, []);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column" }}>
