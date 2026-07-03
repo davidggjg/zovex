@@ -455,11 +455,11 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
     } else {
       postNative({ type: "fullscreen", enter: true });
       if (inApp) {
-        // In native app: visual toggle only (player already covers full screen)
         setIsFullscreen(true);
-      } else if (v) {
-        const req = v.requestFullscreen || v.webkitRequestFullscreen || v.webkitEnterFullscreen;
-        if (req) req.call(v).catch?.(() => {});
+      } else {
+        // Fullscreen the whole page — keeps our custom controls intact
+        const el = document.documentElement;
+        (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
       }
     }
   };
