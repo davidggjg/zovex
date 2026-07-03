@@ -13,15 +13,17 @@ on:
           - 'false'
           - 'true'
 
-  # רץ אוטומטית כל פעם שמישהו מעדכן movies.json או live.json
+  # רץ אוטומטית על כל שינוי בתוכן או בקוד
   push:
     branches: [main]
     paths:
-      - 'public/movies.json'
-      - 'public/live.json'
-      - 'public/apikeys.json'
+      - 'public/**'
       - 'src/**'
       - 'package.json'
+      - 'vite.config.js'
+      - 'tailwind.config.js'
+      - 'postcss.config.js'
+      - 'index.html'
 
 permissions:
   contents: write
