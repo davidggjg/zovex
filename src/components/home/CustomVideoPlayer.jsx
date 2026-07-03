@@ -457,8 +457,10 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
       if (inApp) {
         setIsFullscreen(true);
       } else {
-        // Fullscreen the whole page — keeps our custom controls intact
-        const el = document.documentElement;
+        // Fullscreen our specific container — keeps custom controls visible.
+        // Using documentElement or the video element directly can cause the
+        // browser to show its native player instead of our custom overlay.
+        const el = videoRef.current?.closest("[data-cvp]") || document.documentElement;
         (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
       }
     }
@@ -919,7 +921,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   }, []);
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column" }}>
+    <div data-cvp style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column" }}>
       <style>{spinStyle}</style>
       {isLive && <LiveViewersBadge count={viewerCount} />}
       {!src ? (
