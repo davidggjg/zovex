@@ -444,17 +444,22 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
 
   const goFullscreen = () => {
     const v = videoRef.current;
-    if (document.fullscreenElement || document.webkitFullscreenElement) {
-      (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+    const inApp = !!window.ReactNativeWebView;
+    const nativeFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    const currentlyFs = nativeFs || (inApp && isFullscreen);
+
+    if (currentlyFs) {
+      if (nativeFs) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      setIsFullscreen(false);
       postNative({ type: "fullscreen", enter: false });
-    } else if (v) {
-      // Try video-element fullscreen first (best on Android/iOS WebView)
-      const req = v.requestFullscreen || v.webkitRequestFullscreen || v.webkitEnterFullscreen;
-      if (req) {
-        req.call(v).catch?.(() => {});
-      } else {
-        // Fallback: ask native to hide status bar for immersive feel
-        postNative({ type: "fullscreen", enter: true });
+    } else {
+      postNative({ type: "fullscreen", enter: true });
+      if (inApp) {
+        // In native app: visual toggle only (player already covers full screen)
+        setIsFullscreen(true);
+      } else if (v) {
+        const req = v.requestFullscreen || v.webkitRequestFullscreen || v.webkitEnterFullscreen;
+        if (req) req.call(v).catch?.(() => {});
       }
     }
   };
