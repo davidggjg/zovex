@@ -118,7 +118,7 @@ video{width:100vw;height:100vh;object-fit:contain;display:block}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js"><\/script>
 <script>
 var v=document.getElementById('v');
-var src="${src}";
+var src=${JSON.stringify(src)};
 function tryPlay(){v.play&&v.play().catch(function(){});}
 if(window.Hls&&Hls.isSupported()){
   var hls=new Hls({enableWorker:false,lowLatencyMode:true});
