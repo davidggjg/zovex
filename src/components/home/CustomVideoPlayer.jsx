@@ -43,8 +43,9 @@ const spinStyle = `
 @keyframes livePulseDot { 0%,100%{box-shadow:0 0 0 0 rgba(229,9,20,.6)} 50%{box-shadow:0 0 0 6px rgba(229,9,20,0)} }
 `;
 
-// שמות ערוצי טלגרם → מזהה מספרי (חייב להיות זהה ל-Home.jsx)
-const TG_CHANNELS = { "zove8": "7282626428", "ZOVE8": "7282626428" };
+// שמות ערוצי טלגרם → מזהה מספרי (רק לערוצים פרטיים שדורשים בוט-פרוקסי)
+// ערוצים פומביים (כמו ZOVE8) לא נמפים כאן — הם עוברים ישירות לאיפריים של טלגרם
+const TG_CHANNELS = {};
 const TG_PROXY = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
 
 // ─── helpers ────────────────────────────────────────────────
