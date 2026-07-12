@@ -527,10 +527,12 @@ function HomeMain({ user, onLogout, isGuest }) {
   useEffect(() => { loadMovies(); }, []);
   useEffect(() => {
     loadLiveFromGitHub();
-    // בדוק כל 30 שניות אם יש שידורים חיים חדשים
+    // אם אין שידורים חיים כרגע — בדוק פעם אחת בטעינה ועצור (אין טעם לפולינג מתמשך)
+    if (liveChannels.length === 0) return;
+    // יש שידור חי פעיל — בדוק כל 30 שניות אם יש שינויים
     const interval = setInterval(loadLiveFromGitHub, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [liveChannels.length]);
 
   useEffect(() => {
     const onPop = () => {
