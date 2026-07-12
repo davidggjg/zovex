@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Search, Loader2, ChevronDown, ChevronUp, Upload } from "lucide-react";
 import { Movie } from "@/entities/Movie";
 import { ApiKey } from "@/entities/ApiKey";
@@ -84,7 +84,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [deleting, setDeleting] = useState(null);
   const [saving, setSaving] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [formStatus, setFormStatus] = useState({ type: "", message: "" });
   const [tmdbKey, setTmdbKey] = useState(() => ls("zovex_tmdb_key", ""));
   const [tmdbQuery, setTmdbQuery] = useState("");
@@ -93,7 +92,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [isSeries, setIsSeries] = useState(false);
   const [showExistingSeries, setShowExistingSeries] = useState(false);
   const [videoUrlInput, setVideoUrlInput] = useState("");
-  const [posterPreview, setPosterPreview] = useState("");
   const [form, setForm] = useState({
     title: "", thumbnail_url: "", category: "", description: "",
     year: String(new Date().getFullYear()),
@@ -104,7 +102,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [editingCat, setEditingCat] = useState(null);
   const [editingCatVal, setEditingCatVal] = useState("");
   const [manageQ, setManageQ] = useState("");
-  const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (!tmdbQuery.trim() || !tmdbKey) { setTmdbResults([]); return; }
@@ -134,23 +131,14 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const selectTMDB = (item) => {
     const poster = item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "";
     setForm(p => ({ ...p, title: item.title || item.name || "", description: item.overview || "", thumbnail_url: poster, year: (item.release_date || item.first_air_date || "").slice(0, 4) || p.year, category: item.media_type === "tv" ? "סדרות" : "סרטים" }));
-    setPosterPreview(poster);
     if (item.media_type === "tv") setIsSeries(true);
     setTmdbResults([]); setTmdbQuery("");
-  };
-
-  const handleUploadPoster = (e) => {
-    const file = e.target.files?.[0]; if (!file) return;
-    setUploading(true);
-    const reader = new FileReader();
-    reader.onload = (ev) => { setForm(p => ({ ...p, thumbnail_url: ev.target.result })); setPosterPreview(ev.target.result); setUploading(false); };
-    reader.readAsDataURL(file);
   };
 
   const resetForm = () => {
     setForm({ title: "", thumbnail_url: "", category: categories[0] || "", description: "", year: String(new Date().getFullYear()), series_name: "", season_number: "", episode_number: "", episode_title: "", jellyfinServer: "", jellyfinApiKey: "", custom_slug: "" });
     setVideoUrlInput(""); setIsSeries(false); setEditingMovie(null);
-    setFormStatus({ type: "", message: "" }); setPosterPreview(""); setShowExistingSeries(false);
+    setFormStatus({ type: "", message: "" }); setShowExistingSeries(false);
   };
 
   const generateAI = async () => {
@@ -265,7 +253,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
       jellyfinServer: movie.jellyfin_server || "", jellyfinApiKey: movie.jellyfin_api_key || "",
       custom_slug: movie.custom_slug || "",
     });
-    setPosterPreview(movie.thumbnail_url || "");
     let fullUrl = movie.video_url?.startsWith("http") ? movie.video_url : "";
     if (!fullUrl && movie.video_id) {
       const vid = movie.video_id, type = movie.type || "direct";
@@ -353,7 +340,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   {showExistingSeries && (
                     <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6, maxHeight: 200, overflowY: "auto", background: "#F5F5F7", borderRadius: 12, padding: 10 }}>
                       {existingSeriesNames.map(name => (
-                        <div key={name} onClick={() => { const s = seriesMap[name]; setForm(p => ({ ...p, series_name: name, category: s.category || p.category, thumbnail_url: s.thumbnail_url || p.thumbnail_url })); setPosterPreview(s.thumbnail_url || ""); setShowExistingSeries(false); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: form.series_name === name ? "#e8f4ff" : "#fff", borderRadius: 10, cursor: "pointer", border: `1.5px solid ${form.series_name === name ? "#0071e3" : "#d2d2d7"}` }}>
+                        <div key={name} onClick={() => { const s = seriesMap[name]; setForm(p => ({ ...p, series_name: name, category: s.category || p.category, thumbnail_url: s.thumbnail_url || p.thumbnail_url })); setShowExistingSeries(false); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: form.series_name === name ? "#e8f4ff" : "#fff", borderRadius: 10, cursor: "pointer", border: `1.5px solid ${form.series_name === name ? "#0071e3" : "#d2d2d7"}` }}>
                           {seriesMap[name]?.thumbnail_url ? <img src={seriesMap[name].thumbnail_url} style={{ width: 30, height: 42, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} alt="" /> : <div style={{ width: 30, height: 42, borderRadius: 6, background: "#e0e0e0" }} />}
                           <div style={{ fontSize: 13, fontWeight: 700 }}>{name}</div>
                           {form.series_name === name && <span style={{ marginRight: "auto", fontSize: 16 }}>✓</span>}
@@ -424,16 +411,13 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
               </div>
               {/* poster */}
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 8, fontWeight: 700 }}>תמונת פוסטר</label>
+                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 8, fontWeight: 700 }}>קישור לתמונת פוסטר</label>
                 <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                  <div style={{ width: 56, height: 78, borderRadius: 10, background: "#F0F0F5", border: "1.5px solid #d2d2d7", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }} onClick={() => fileInputRef.current?.click()}>
-                    {posterPreview ? <img src={posterPreview} style={{ width: "100%", height: "100%", objectFit: "cover" }} alt="" onError={() => setPosterPreview("")} /> : <Upload size={20} color="#6e6e73" />}
+                  <div style={{ width: 56, height: 78, borderRadius: 10, background: "#F0F0F5", border: "1.5px solid #d2d2d7", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {form.thumbnail_url ? <img src={form.thumbnail_url} style={{ width: "100%", height: "100%", objectFit: "cover" }} alt="" onError={e => e.target.style.display = "none"} /> : <Upload size={20} color="#6e6e73" />}
                   </div>
-                  <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading} style={{ flex: 1, background: "transparent", color: "#0071e3", border: "1.5px solid #0071e3", borderRadius: 12, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-                    {uploading ? "מעלה..." : "העלה תמונה"}
-                  </button>
+                  <input value={form.thumbnail_url} onChange={e => setForm(p => ({ ...p, thumbnail_url: e.target.value }))} placeholder="https://.../poster.jpg" dir="ltr" style={{ ...inp, flex: 1 }} />
                 </div>
-                <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleUploadPoster} />
                 {isSeries && editingMovie && (
                   <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
                     <button type="button" onClick={() => updateSeriesDescription(form.series_name || editingMovie.series_name, form.description)} disabled={!form.description} style={{ flex: 1, background: form.description ? "#5e5ce6" : "#ccc", color: "#fff", border: "none", borderRadius: 12, padding: "10px 0", fontSize: 12, fontWeight: 700, cursor: form.description ? "pointer" : "default", fontFamily: "inherit" }}>
