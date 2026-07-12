@@ -158,6 +158,7 @@ function reportProgress(onProgressRef, currentTime, duration) {
 //   POST /api/live/:liveId/heartbeat   { viewer_id }  → { viewers: number }
 //   POST /api/live/:liveId/leave       { viewer_id }  (נשלח עם sendBeacon ביציאה)
 const BACKEND_URL = "https://davidhzhdhd-my-telegram-bot.hf.space";
+const STREAM_BACKEND_URL = "https://maco11.onrender.com";
 
 function getViewerId() {
   try {
@@ -766,10 +767,44 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
 
+  // ─── Auto-refresh: שומר את ה-src הנוכחי ומרענן כל 25 דקות ───
+  const currentSrcRef = useRef(src);
+  const refreshTimerRef = useRef(null);
+
+  // פונקציה שמושכת src חדש מהשרת ומטעינה מחדש
+  const refreshStream = useCallback(async () => {
+    try {
+      const res = await fetch(`${STREAM_BACKEND_URL}/api/refresh-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_src: currentSrcRef.current }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const newSrc = data.hls_url || data.url;
+      if (!newSrc || newSrc === currentSrcRef.current) return;
+      currentSrcRef.current = newSrc;
+      // טעינה מחדש בלי רענון דף
+      const shaka = playerRef.current?.shaka;
+      if (shaka) {
+        try { await shaka.load(newSrc); } catch {}
+      }
+    } catch {}
+  }, []);
+
+  // הפעלת טיימר של 25 דקות לרענון אוטומטי
+  const startRefreshTimer = useCallback(() => {
+    if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+    refreshTimerRef.current = setInterval(() => {
+      refreshStream();
+    }, 25 * 60 * 1000); // 25 דקות
+  }, [refreshStream]);
+
   useEffect(() => {
     if (!src || !containerRef.current) return;
     let destroyed = false;
     setVideoReady(false);
+    currentSrcRef.current = src;
     const init = async () => {
       loadStyles(["https://unpkg.com/video.js@8.21.0/dist/video-js.min.css"]);
       await loadScripts([
@@ -797,6 +832,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           setLoading(false);
           setupMediaSession(videoEl, movie);
           postNative({ type: "video_playing", value: true });
+          startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות
         }
       } catch {
         if (!destroyed) {
@@ -806,6 +842,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           setLoading(false);
           setupMediaSession(videoEl, movie);
           postNative({ type: "video_playing", value: true });
+          startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות (fallback)
         }
       }
     };
@@ -820,6 +857,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     return () => {
       destroyed = true;
       if (reportInterval) clearInterval(reportInterval);
+      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); // ← ניקוי טיימר רענון
       const v = videoElRef.current;
       if (!isLive && v) { const dur = getUsableDuration(v); if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur); }
       clearMediaSession();
