@@ -49,7 +49,7 @@ async function saveToGitHub(movies) {
 }
 
 export const Movie = {
-  async list(orderBy = '-created_date', limit = 2000) {
+  async list(orderBy = '-created_date', limit = 100000) {
     _movies = await fetchMovies();
     let sorted = [...(_movies || [])];
     if (orderBy.startsWith('-')) sorted.reverse();

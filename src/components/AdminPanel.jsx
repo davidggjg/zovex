@@ -122,7 +122,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     saveCats(categories.map(c => c === oldName ? newName.trim() : c));
     setSaving(true);
     try {
-      const all = await Movie.list("-created_date", 2000);
+      const all = await Movie.list("-created_date", 100000);
       await Movie.saveAll(all.map(m => m.category === oldName ? { ...m, category: newName.trim() } : m));
     } catch {}
     setSaving(false); loadMovies(); setEditingCat(null); setEditingCatVal("");
@@ -187,7 +187,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     try {
       if (editingMovie) {
         if (payload.series_name && (editingMovie.category !== payload.category || payload.custom_slug !== editingMovie.custom_slug)) {
-          const all = await Movie.list("-created_date", 2000);
+          const all = await Movie.list("-created_date", 100000);
           await Movie.saveAll(all.map(m => m.id === editingMovie.id ? { ...m, ...payload } : m.series_name === payload.series_name ? { ...m, category: payload.category, custom_slug: payload.custom_slug } : m));
           setFormStatus({ type: "success", message: "עודכן! קטגוריה וכתובת URL עודכנו לכל הסדרה" });
         } else {
@@ -214,7 +214,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const handleDeleteSeries = async (serName, episodes) => {
     if (!window.confirm(`למחוק את כל הסדרה "${serName}"? (${episodes.length} פרקים)`)) return;
     try {
-      const all = await Movie.list("-created_date", 2000);
+      const all = await Movie.list("-created_date", 100000);
       await Movie.saveAll(all.filter(m => m.series_name !== serName));
     } catch {}
     loadMovies();
@@ -224,7 +224,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     if (!seriesName || !thumbnailUrl) return;
     setSaving(true);
     try {
-      const all = await Movie.list("-created_date", 2000);
+      const all = await Movie.list("-created_date", 100000);
       await Movie.saveAll(all.map(m => m.series_name === seriesName ? { ...m, thumbnail_url: thumbnailUrl } : m));
     } catch {}
     setFormStatus({ type: "success", message: "תמונה עודכנה לסדרה!" });
@@ -235,7 +235,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     if (!seriesName || !description) return;
     setSaving(true);
     try {
-      const all = await Movie.list("-created_date", 2000);
+      const all = await Movie.list("-created_date", 100000);
       await Movie.saveAll(all.map(m => m.series_name === seriesName ? { ...m, description } : m));
     } catch {}
     setFormStatus({ type: "success", message: "תיאור עודכן לסדרה!" });
@@ -549,7 +549,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   }
                   setLiveSaving(true);
                   try {
-                    const all = await Movie.list("-created_date", 2000);
+                    const all = await Movie.list("-created_date", 100000);
                     let updated;
                     if (editingLiveId) {
                       updated = all.map(m => m.id === editingLiveId
@@ -606,7 +606,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                             if (!window.confirm(`לעצור את "${ch.title}"?`)) return;
                             setLiveSaving(true);
                             try {
-                              const all = await Movie.list("-created_date", 2000);
+                              const all = await Movie.list("-created_date", 100000);
                               await Movie.saveAll(all.filter(m => m.id !== ch.id));
                               await loadMovies();
                               setFormStatus({ type: "success", message: "⏹ שידור הופסק" });

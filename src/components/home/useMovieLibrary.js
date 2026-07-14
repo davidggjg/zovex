@@ -10,7 +10,7 @@ export function useMovieLibrary() {
   const loadMovies = async () => {
     setLoading(true);
     try {
-      const all = (await Movie.list("-created_date", 2000)) || [];
+      const all = (await Movie.list("-created_date", 100000)) || [];
       setLiveChannels(all.filter(m => m.is_live === true));
       setMovies(all.filter(m => !m.is_live));
     } catch {}
