@@ -159,7 +159,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
 
   const handleSave = async () => {
     if (!form.title || !form.category) { setFormStatus({ type: "error", message: "שם וקטגוריה חובה" }); return; }
-    setSaving(true);
     const info = extractVideoInfo(videoUrlInput);
     let autoEpNum = Number(form.episode_number) || null;
     if (isSeries && !editingMovie && !autoEpNum) {
@@ -168,6 +167,29 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
       const existing = movies.filter(m => m.series_name === serName && (m.season_number || 1) === seasonN).map(m => m.episode_number || 0);
       autoEpNum = existing.length ? Math.max(...existing) + 1 : 1;
     }
+    // בדיקת כפילויות — רק בהוספה חדשה, לא בעריכה (שם עורכים פריט קיים בכוונה).
+    // משווים שם מדויק (כך ש"אנקונדה" ו"אנקונדה 2" לא נחשבים כפילות - אלה סרטים
+    // שונים), פרק זהה באותה סדרה/עונה, וגם קישור וידאו זהה בלי קשר לשם -
+    // כי אותו קישור בשני פריטים שונים כמעט תמיד סימן לכפילות אמיתית.
+    if (!editingMovie) {
+      const normTitle = form.title.trim().toLowerCase();
+      const newUrl = videoUrlInput.trim();
+      let dup = null;
+      if (isSeries) {
+        const serName = (form.series_name || form.title).trim().toLowerCase();
+        const seasonN = Number(form.season_number) || 1;
+        dup = movies.find(m => (m.series_name || "").trim().toLowerCase() === serName && (m.season_number || 1) === seasonN && (m.episode_number || 0) === autoEpNum);
+      } else {
+        dup = movies.find(m => !m.series_name && (m.title || "").trim().toLowerCase() === normTitle);
+      }
+      const dupByUrl = !dup && newUrl && movies.find(m => m.video_url === newUrl);
+      const found = dup || dupByUrl;
+      if (found) {
+        const label = found.series_name ? `${found.series_name} (עונה ${found.season_number || 1} פרק ${found.episode_number})` : found.title;
+        if (!window.confirm(`נראה שכבר קיים תוכן דומה: "${label}". לשמור בכל זאת?`)) return;
+      }
+    }
+    setSaving(true);
     let autoThumb = form.thumbnail_url;
     if (!autoThumb && isSeries) {
       const serName = form.series_name || form.title;
