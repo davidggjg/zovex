@@ -1,9 +1,16 @@
 import { ArrowRight, Play } from "lucide-react";
 
+// מזהה "שם בסיס" של סרט כדי לאתר סרטי המשך - מסיר מספר עוקב בסוף השם, כולל
+// כשהוא מגיע אחרי מילת חיבור כמו "חלק"/"פרק"/"Part" (לדוגמה "המדרון 1" ו"המדרון
+// חלק 2" צריכים לזהות אותו שם בסיס "המדרון", לא רק "Title N" ו-"Title N" זהים)
+function baseTitle(title) {
+  return (title || "").replace(/\s*(חלק|פרק|part|chapter)?\s*\d+$/i, "").trim();
+}
+
 // מסך הפרטים של סרט בודד — פוסטר, תיאור, כפתור צפייה וסרטי המשך
 export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMovie }) {
-  const baseName = (movie.title || "").replace(/\s*\d+$/, "").trim();
-  const sequels = movies.filter(m => !m.series_name && m.id !== movie.id && (m.title || "").replace(/\s*\d+$/, "").trim() === baseName).sort((a, b) => (a.year || 0) - (b.year || 0));
+  const baseName = baseTitle(movie.title);
+  const sequels = movies.filter(m => !m.series_name && m.id !== movie.id && baseTitle(m.title) === baseName).sort((a, b) => (a.year || 0) - (b.year || 0));
   return (
     <div style={{ background: "#111", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
       <button onClick={onClose} style={{ position: "fixed", top: 15, right: 15, zIndex: 100, background: "rgba(0,0,0,.7)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
