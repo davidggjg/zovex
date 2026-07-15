@@ -21,9 +21,23 @@ export function usePlayback({ user, loadProgress, saveHistory }) {
   const openWithKalturaRefresh = async (movie, resumeAt = null) => {
     // שמור להיסטוריה (רק למחוברים)
     saveHistory(movie.id, movie.title, movie.thumbnail_url);
-    // המשך צפייה — אם לא הועבר מיקום מפורש, טען את המיקום השמור וקפוץ אליו בדיוק כשהנגן נפתח
-    const startAt = resumeAt !== null ? resumeAt : await loadProgress(movie.id);
-    setResumeSeconds(startAt || 0);
+    // המשך צפייה — לא מחכים כאן ל-loadProgress (קריאת רשת לשרת הבוט): זה מה
+    // שהיה גורם לעיכוב לפני שהנגן בכלל נפתח ומתחיל לטעון את הסרטון. הנגן
+    // נפתח מיד עם 0/resumeAt, ואם יש מיקום שמור הוא מתעדכן ברקע ומדלג
+    // אליו (ראה האפקט על startTime ב-CustomVideoPlayer) ברגע שהתשובה מגיעה.
+    // יוצא דופן: youtube/vimeo מטמיעים את מיקום ההתחלה בתוך ה-src של
+    // ה-iframe עצמו (buildSrc), אז שם עדיין מחכים כדי לא לגרום לאייפריים
+    // להיטען פעמיים (עם קפיצה גלויה) כשה-src משתנה אחרי שהתשובה מגיעה.
+    const vidForType = movie.video_id || movie.video_url || "";
+    const embedsStartInUrl = ["youtube", "vimeo"].includes(movie.type) || vidForType.includes("youtube.com") || vidForType.includes("youtu.be") || vidForType.includes("vimeo.com");
+    if (resumeAt !== null) {
+      setResumeSeconds(resumeAt);
+    } else if (embedsStartInUrl) {
+      setResumeSeconds((await loadProgress(movie.id)) || 0);
+    } else {
+      setResumeSeconds(0);
+      loadProgress(movie.id).then(pos => { if (pos) setResumeSeconds(pos); });
+    }
     // עדכן URL ישירות בלי לגרום ל-re-render של React Router
     // אם יש custom_slug (כתובת אנגלית קצרה) — נשתמש בו במקום השם בעברית
     if (movie.series_name && movie.episode_number) {

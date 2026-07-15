@@ -780,6 +780,16 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     };
   }, [src]);
 
+  // אם המיקום השמור ("המשך צפייה") מגיע רק אחרי שהנגן כבר נפתח והתחיל לטעון
+  // (כי אנחנו כבר לא מחכים לו לפני הפתיחה - ראה usePlayback.js), נדלג אליו
+  // כאן ברגע שהוא מגיע. הבדיקה על currentTime<2 מונעת "קפיצה" מפתיעה אם
+  // המשתמש כבר הספיק לצפות רגע לפני שהתשובה חזרה מהשרת.
+  useEffect(() => {
+    const v = videoElRef.current;
+    if (!v || startTime <= 1) return;
+    if (v.currentTime < 2) { try { v.currentTime = startTime; } catch {} }
+  }, [startTime]);
+
   const handleSkip = useCallback((side) => {
     const v = videoElRef.current;
     if (v) v.currentTime = Math.max(0, v.currentTime + (side === "forward" ? 10 : -10));
@@ -912,6 +922,14 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       setVideoReady(false);
     };
   }, [src]);
+
+  // ראו הערה מקבילה ב-DirectVideoPlayer: מדלגים למיקום השמור גם אם הוא
+  // מגיע רק אחרי שהנגן כבר התחיל לטעון, כל עוד המשתמש עדיין ממש בהתחלה.
+  useEffect(() => {
+    const v = videoElRef.current;
+    if (isLive || !v || startTime <= 1) return;
+    if (v.currentTime < 2) { try { v.currentTime = startTime; } catch {} }
+  }, [startTime, isLive]);
 
   const handleSkip = useCallback((side) => {
     const v = videoElRef.current;
