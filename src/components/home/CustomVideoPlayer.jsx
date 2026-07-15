@@ -1,4 +1,4 @@
-import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2 } from "lucide-react";
+import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2, SkipForward } from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
 
 // ──────────────────────────────────────────────────────────────
@@ -560,9 +560,51 @@ const centerBtn = {
   outline: "none",
 };
 
+// ─── כפתור "הפרק הבא" ──────────────────────────────────────────
+// מופיע כש-5 דקות או פחות נשארו לסוף הפרק, ונעלם אם חוזרים אחורה מעבר לזה.
+// לא עובר אוטומטית - רק מציג כפתור, הצפייה בפרק הבא היא בחירה של הצופה.
+const NEXT_EPISODE_THRESHOLD_SECS = 300;
+function NextEpisodeButton({ videoRef, onNext, label, videoReady }) {
+  const [show, setShow] = useState(false);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !onNext) return;
+    const check = () => {
+      const dur = getUsableDuration(v);
+      const remaining = dur - v.currentTime;
+      setShow(dur > 0 && remaining > 0 && remaining <= NEXT_EPISODE_THRESHOLD_SECS);
+    };
+    check();
+    v.addEventListener("timeupdate", check);
+    return () => v.removeEventListener("timeupdate", check);
+    // videoReady משמש כטריגר: הופך ל-true בדיוק כשה-<video> האמיתי נוצר ונשמר
+    // ב-ref, כך שהאפקט הזה לא "מפספס" לרוץ לפני שיש בכלל למה להאזין (אותה
+    // בעיה שכבר נפתרה ב-BottomBar/ControlsLayer עם אותו pattern בדיוק).
+  }, [videoRef, onNext, videoReady]);
+
+  if (!onNext || !show) return null;
+
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onNext(); }}
+      style={{
+        position: "absolute", bottom: 96, right: 16, zIndex: 30,
+        background: "rgba(20,20,20,0.88)", color: "#fff", border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 700,
+        cursor: "pointer", display: "flex", alignItems: "center", gap: 8,
+        backdropFilter: "blur(6px)", fontFamily: "Arial, sans-serif",
+      }}
+    >
+      <SkipForward size={18} fill="white" />
+      {label ? `הפרק הבא: ${label}` : "הפרק הבא"}
+    </button>
+  );
+}
+
 // ─── Controls wrapper (auto-hide) ─────────────────────────────
 // FIX: לחיצה על כל מקום במסך (לא רק ה-div) מפעילה/מעצירה + מציגה כפתורים
-function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false, videoReady }) {
+function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false, videoReady, onNextEpisode, nextEpisodeLabel }) {
   const [visible, setVisible] = useState(true);
   const timer = useRef(null);
 
@@ -646,6 +688,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
       </div>
 
       <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} videoReady={videoReady} />
+      {!isLive && <NextEpisodeButton videoRef={videoRef} onNext={onNextEpisode} label={nextEpisodeLabel} videoReady={videoReady} />}
       <SkipAnim side={skipAnim} />
     </div>
   );
@@ -661,7 +704,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
 //   Direct MP4   → "https://example.com/video.mp4"
 //   Telegram bot → "https://telegram-bot-8528.onrender.com/stream/{channelId}/{msgId}"
 //                  (set VITE_TELEGRAM_PROXY to override the bot base URL)
-function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
+function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -752,13 +795,13 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress }) {
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} videoReady={videoReady} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} videoReady={videoReady} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
     </div>
   );
 }
 
 // ─── HLS player ───────────────────────────────────────────────
-function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false }) {
+function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false, onNextEpisode, nextEpisodeLabel }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
   const playerRef = useRef(null);
@@ -885,7 +928,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} videoReady={videoReady} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} videoReady={videoReady} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
     </div>
   );
 }
@@ -948,7 +991,7 @@ function IframePlayer({ src, movie, onClose }) {
 }
 
 // ─── Main export ──────────────────────────────────────────────
-export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onProgress }) {
+export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel }) {
   const isLive = !!movie.is_live;
   const src = buildSrc(movie, isLive ? 0 : startTime);
   const type = movie.type || "direct";
@@ -972,11 +1015,11 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
           <p style={{ color: "#888", fontSize: 15, fontFamily: "Arial" }}>אין קישור וידאו זמין</p>
         </div>
       ) : isHlsUrl(src) ? (
-        <HlsPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} isLive={isLive} />
+        <HlsPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
-        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} />
+        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
       )}
     </div>
   );

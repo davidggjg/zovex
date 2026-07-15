@@ -117,6 +117,17 @@ function HomeMain({ user, onLogout, isGuest }) {
     return map;
   }, [movies]);
 
+  // הפרק הבא בסדרה, אחרי הפרק שמנגן כרגע (null אם זה סרט בודד או שאין פרק אחרי)
+  const nextEpisode = useMemo(() => {
+    if (!playerMovie?.series_name) return null;
+    const series = seriesMap[playerMovie.series_name];
+    if (!series) return null;
+    const sorted = [...series.episodes].sort((a, b) => (a.season_number || 1) - (b.season_number || 1) || (a.episode_number || 0) - (b.episode_number || 0));
+    const idx = sorted.findIndex(e => e.id === playerMovie.id);
+    if (idx === -1 || idx === sorted.length - 1) return null;
+    return sorted[idx + 1];
+  }, [playerMovie, seriesMap]);
+
   const allCategories = useMemo(() => {
     const from = movies.map(m => m.category).filter(Boolean);
     // "שידורים חיים" מסוננת מכאן כי היא נוספת בנפרד למטה — כדי למנוע כפילות
@@ -186,6 +197,8 @@ function HomeMain({ user, onLogout, isGuest }) {
       startTime={resumeSeconds}
       onProgress={(pos, dur) => saveProgress(playerMovie.id, pos, dur)}
       onClose={() => setPlayerMovie(null)}
+      onNextEpisode={nextEpisode ? () => openWithKalturaRefresh(nextEpisode) : undefined}
+      nextEpisodeLabel={nextEpisode ? (nextEpisode.episode_title || `פרק ${nextEpisode.episode_number}`) : undefined}
     />
   );
 
