@@ -10,7 +10,15 @@ function baseTitle(title) {
 // מסך הפרטים של סרט בודד — פוסטר, תיאור, כפתור צפייה וסרטי המשך
 export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMovie }) {
   const baseName = baseTitle(movie.title);
-  const sequels = movies.filter(m => !m.series_name && m.id !== movie.id && baseTitle(m.title) === baseName).sort((a, b) => (a.year || 0) - (b.year || 0));
+  // חלק מסרטי ההמשך לא נקראים "שם 2" (למשל "ראלף ההורס" -> "ראלף שובר את
+  // האינטרנט") - אז אי אפשר לזהות אותם לפי מספר בסוף השם. במקרים כאלה
+  // מסמנים ידנית באדמין את אותו franchise על שני הסרטים, וכך הם מתקשרים
+  // גם בלי כותרת דומה.
+  const sequels = movies.filter(m => {
+    if (m.series_name || m.id === movie.id) return false;
+    if (movie.franchise && m.franchise) return m.franchise === movie.franchise;
+    return baseTitle(m.title) === baseName;
+  }).sort((a, b) => (a.year || 0) - (b.year || 0));
   return (
     <div style={{ background: "#111", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
       <button onClick={onClose} style={{ position: "fixed", top: 15, right: 15, zIndex: 100, background: "rgba(0,0,0,.7)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
