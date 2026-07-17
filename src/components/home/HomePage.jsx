@@ -165,8 +165,8 @@ export default function HomePage({
             >
               <X size={12} />
             </button>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "#eee", marginBottom: 1 }}>רוצה להוסיף סרט?</div>
-            <div style={{ fontSize: 10, color: "#888", lineHeight: 1.3 }}>דברו איתנו בטלגרם</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#eee", marginBottom: 1 }}>לחצו כאן לתמיכה 💬</div>
+            <div style={{ fontSize: 10, color: "#888", lineHeight: 1.3 }}>או להוספת סרט חדש</div>
           </div>
         )}
         <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ background: "#229ED9", width: 42, height: 42, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", boxShadow: "0 2px 10px rgba(34,158,217,.35)", textDecoration: "none", flexShrink: 0 }}>
