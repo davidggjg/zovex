@@ -124,17 +124,11 @@ function buildSrc(movie, startTime = 0) {
     const apiKey = movie.jellyfin_api_key || "";
     return server && vid ? `${server}/web/index.html#!/video?id=${vid}&api_key=${apiKey}` : null;
   }
-  // api-hls: כתובת API שמחזירה { stream_url } — מועברת כמות שהיא לנגן
-  if (type === "api-hls") return vid.startsWith("http") ? vid : null;
   return vid.startsWith("http") ? vid : null;
 }
 
 function isHlsUrl(src) {
   return src?.includes(".m3u8") || src?.includes("Manifest.ism");
-}
-
-function isApiHls(type) {
-  return type === "api-hls";
 }
 
 function isIframeUrl(src, type) {
@@ -1014,104 +1008,6 @@ function IframePlayer({ src, movie, onClose }) {
   );
 }
 
-// ─── API-HLS player (מביא URL עדכני מ-API כל 9 דקות) ────────
-// שימוש: type:"api-hls", video_url:"https://your-server.com/live"
-// השרת מחזיר JSON: { stream_url: "https://....m3u8" }
-function ApiHlsPlayer({ src, movie, onClose }) {
-  const videoRef   = useRef(null);
-  const hlsRef     = useRef(null);
-  const timerRef   = useRef(null);
-  const [loading,  setLoading]  = useState(true);
-  const [error,    setError]    = useState(false);
-  const [skipAnim, setSkipAnim] = useState(null);
-
-  const loadStream = useCallback(async () => {
-    try {
-      const res  = await fetch(src);
-      const data = await res.json();
-      const streamUrl = data.stream_url;
-      if (!streamUrl) throw new Error("no stream_url");
-
-      await loadScripts(["https://cdn.jsdelivr.net/npm/hls.js@latest"]);
-      const Hls = window.Hls;
-
-      if (Hls.isSupported()) {
-        if (!hlsRef.current) {
-          hlsRef.current = new Hls();
-          hlsRef.current.attachMedia(videoRef.current);
-        }
-        hlsRef.current.loadSource(streamUrl);
-        hlsRef.current.on(Hls.Events.MANIFEST_PARSED, () => {
-          videoRef.current?.play().catch(() => {});
-          setLoading(false);
-          setError(false);
-        });
-      } else if (videoRef.current?.canPlayType("application/vnd.apple.mpegurl")) {
-        // Apple native HLS (iOS/Safari)
-        videoRef.current.src = streamUrl;
-        videoRef.current.addEventListener("loadedmetadata", () => {
-          videoRef.current?.play().catch(() => {});
-          setLoading(false);
-          setError(false);
-        }, { once: true });
-      }
-    } catch (e) {
-      console.error("ApiHlsPlayer: stream load failed", e);
-      setLoading(false);
-      setError(true);
-    }
-  }, [src]);
-
-  useEffect(() => {
-    if (!videoRef.current) return;
-    loadStream();
-    // רענון שקט כל 9 דקות — מחליף את ה-URL מאחורי הקלעים בלי לעצור את הסרטון
-    timerRef.current = setInterval(loadStream, 540_000);
-    return () => {
-      clearInterval(timerRef.current);
-      hlsRef.current?.destroy();
-      hlsRef.current = null;
-    };
-  }, [loadStream]);
-
-  const handleSkip = useCallback((side) => {
-    const v = videoRef.current;
-    if (v) v.currentTime = Math.max(0, v.currentTime + (side === "forward" ? 10 : -10));
-    setSkipAnim(side);
-    setTimeout(() => setSkipAnim(null), 700);
-  }, []);
-
-  return (
-    <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
-      {loading && !error && (
-        <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, background: "#000" }}>
-          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #e91e8c", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
-          <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, fontFamily: "Arial" }}>טוען שידור חי…</span>
-        </div>
-      )}
-      {error && (
-        <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, background: "#000" }}>
-          <span style={{ fontSize: 38 }}>📡</span>
-          <p style={{ color: "#888", fontFamily: "Arial", fontSize: 14, margin: 0 }}>לא ניתן לטעון את השידור</p>
-          <button
-            onClick={() => { setLoading(true); setError(false); loadStream(); }}
-            style={{ background: "#e91e8c", border: "none", color: "#fff", borderRadius: 8, padding: "8px 22px", cursor: "pointer", fontFamily: "Arial", fontSize: 14 }}
-          >נסה שוב</button>
-        </div>
-      )}
-      <video ref={videoRef} autoPlay playsInline muted style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "#000" }} />
-      <ControlsLayer
-        videoRef={videoRef}
-        title={movie.title}
-        episode={null}
-        onClose={onClose}
-        onSkip={handleSkip}
-        skipAnim={skipAnim}
-      />
-    </div>
-  );
-}
-
 // ─── Main export ──────────────────────────────────────────────
 export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel }) {
   const isLive = !!movie.is_live;
@@ -1136,8 +1032,6 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
           <span style={{ fontSize: 40 }}>🎬</span>
           <p style={{ color: "#888", fontSize: 15, fontFamily: "Arial" }}>אין קישור וידאו זמין</p>
         </div>
-      ) : isApiHls(type) ? (
-        <ApiHlsPlayer src={src} movie={movie} onClose={onClose} />
       ) : isHlsUrl(src) ? (
         <HlsPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
       ) : isIframeUrl(src, type) ? (
