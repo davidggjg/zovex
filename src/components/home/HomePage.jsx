@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Search, Send, Eye, ChevronDown, X } from "lucide-react";
-import { SPIN } from "./helpers";
+import { SPIN, ls, lsSet } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
 
 // מסך הבית — לוגו, חיפוש, תפריט משתמש, קטגוריות, ורשימות התוכן
@@ -11,6 +11,7 @@ export default function HomePage({
 }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showCatModal, setShowCatModal] = useState(false);
+  const [showTelegramTip, setShowTelegramTip] = useState(() => !ls("zovex_hide_telegram_tip"));
   const userMenuRef = useRef(null);
 
   // סגירת התפריט בלחיצה מחוץ לו
@@ -154,13 +155,22 @@ export default function HomePage({
         />
       </main>
       {/* Telegram bubble */}
-      <div style={{ position: "fixed", bottom: 24, left: 16, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 10 }}>
-        <div style={{ background: "#1a1a1a", borderRadius: "16px 16px 16px 4px", padding: "10px 14px", boxShadow: "0 4px 18px rgba(0,0,0,.4)", border: "1px solid #333", maxWidth: 170, direction: "rtl" }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", marginBottom: 2 }}>רוצה להוסיף סרט? 🎬</div>
-          <div style={{ fontSize: 11, color: "#999", lineHeight: 1.4 }}>יש בעיה באתר?<br/>דברו איתנו בטלגרם</div>
-        </div>
-        <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ background: "#24A1DE", width: 50, height: 50, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", boxShadow: "0 4px 15px rgba(36,161,222,.5)", textDecoration: "none", flexShrink: 0 }}>
-          <Send size={22} fill="white" />
+      <div style={{ position: "fixed", bottom: 20, left: 14, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 8 }}>
+        {showTelegramTip && (
+          <div style={{ position: "relative", background: "rgba(26,26,26,0.92)", backdropFilter: "blur(6px)", borderRadius: "14px 14px 14px 4px", padding: "8px 24px 8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,.3)", border: "1px solid #2a2a2a", maxWidth: 150, direction: "rtl" }}>
+            <button
+              onClick={() => { setShowTelegramTip(false); lsSet("zovex_hide_telegram_tip", "1"); }}
+              style={{ position: "absolute", top: 2, left: 2, background: "none", border: "none", color: "#777", cursor: "pointer", padding: 4, display: "flex" }}
+              aria-label="סגור"
+            >
+              <X size={12} />
+            </button>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#eee", marginBottom: 1 }}>רוצה להוסיף סרט?</div>
+            <div style={{ fontSize: 10, color: "#888", lineHeight: 1.3 }}>דברו איתנו בטלגרם</div>
+          </div>
+        )}
+        <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ background: "#229ED9", width: 42, height: 42, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", boxShadow: "0 2px 10px rgba(34,158,217,.35)", textDecoration: "none", flexShrink: 0 }}>
+          <Send size={18} fill="white" />
         </a>
       </div>
     </div>
