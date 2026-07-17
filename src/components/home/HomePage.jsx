@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Search, Send, Eye } from "lucide-react";
+import { Search, Send, Eye, ChevronDown, X } from "lucide-react";
 import { SPIN } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
 
@@ -10,6 +10,7 @@ export default function HomePage({
   movies, seriesMap, liveChannels, isDesktop, handleItemClick, handleContinueWatchingClick, history,
 }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [showCatModal, setShowCatModal] = useState(false);
   const userMenuRef = useRef(null);
 
   // סגירת התפריט בלחיצה מחוץ לו
@@ -94,18 +95,48 @@ export default function HomePage({
             )}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", paddingBottom: 11 }}>
-          {allCategories.map(cat => {
-            const isLiveCat = cat === "שידורים חיים";
-            return (
-              <span key={cat} onClick={() => { setSelectedCategory(cat); if (cat === "היסטוריה") refreshHistory(); }} style={{ cursor: "pointer", fontSize: 13, fontWeight: 700, color: selectedCategory === cat ? "#fff" : (isLiveCat ? "#e50914" : "#ccc"), background: selectedCategory === cat ? "#e50914" : (isLiveCat ? "rgba(229,9,20,0.12)" : "#1a1a1a"), border: selectedCategory === cat ? "none" : (isLiveCat ? "1px solid #e50914" : "1px solid #333"), borderRadius: 50, padding: "6px 16px", flexShrink: 0, boxShadow: selectedCategory === cat ? "0 2px 10px rgba(229,9,20,.35)" : "none", display: "flex", alignItems: "center", gap: 5 }}>
-                {isLiveCat && <Eye size={13} />}
-                {cat}
-              </span>
-            );
-          })}
+        <div style={{ paddingBottom: 11 }}>
+          <button
+            onClick={() => setShowCatModal(true)}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", background: "#1a1a1a", border: "1px solid #333", borderRadius: 14, padding: "13px 16px", cursor: "pointer", fontFamily: "inherit" }}
+          >
+            <span style={{ fontSize: 14, fontWeight: 800, color: "#fff", display: "flex", alignItems: "center", gap: 6 }}>
+              {selectedCategory === "שידורים חיים" && <Eye size={14} color="#e50914" />}
+              קטגוריות: {selectedCategory}
+            </span>
+            <ChevronDown size={20} color="#e50914" />
+          </button>
         </div>
       </header>
+
+      {/* תפריט קטגוריות במסך מלא — נפתח מהכפתור למעלה */}
+      {showCatModal && (
+        <div
+          onClick={() => setShowCatModal(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.92)", display: "flex", flexDirection: "column", alignItems: "center", overflowY: "auto", padding: "60px 20px 130px" }}
+        >
+          {allCategories.map(cat => {
+            const isActive = cat === selectedCategory;
+            const isLiveCat = cat === "שידורים חיים";
+            return (
+              <div
+                key={cat}
+                onClick={(e) => { e.stopPropagation(); setSelectedCategory(cat); if (cat === "היסטוריה") refreshHistory(); setShowCatModal(false); }}
+                style={{ padding: "14px 20px", width: "100%", maxWidth: 480, textAlign: "center", cursor: "pointer", fontSize: isActive ? 26 : 21, fontWeight: isActive ? 900 : 400, color: isActive ? "#fff" : (isLiveCat ? "#e50914" : "rgba(255,255,255,0.45)"), display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+              >
+                {isLiveCat && <Eye size={isActive ? 22 : 18} />}
+                {cat}
+              </div>
+            );
+          })}
+          <button
+            onClick={() => setShowCatModal(false)}
+            style={{ position: "fixed", bottom: 36, left: "50%", transform: "translateX(-50%)", width: 58, height: 58, borderRadius: 29, background: "#fff", border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 18px rgba(0,0,0,.5)" }}
+          >
+            <X size={24} color="#000" />
+          </button>
+        </div>
+      )}
       <main style={{ padding: "8px 0 100px", background: "#0a0a0a" }}>
         <RecentlyAddedBanner movies={movies} seriesMap={seriesMap} handleItemClick={handleItemClick} />
         <NetflixRows
