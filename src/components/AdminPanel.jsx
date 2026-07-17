@@ -625,17 +625,17 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                         <div style={{ display: "flex", gap: 6 }}>
                           <button onClick={() => { setEditingLiveId(ch.id); setLiveNameInput(ch.title); setLiveUrlInput(ch.video_url); }} style={{ background: "none", border: "1.5px solid #d2d2d7", borderRadius: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>✏️ ערוך</button>
                           <button onClick={async () => {
-                            if (!window.confirm(`לעצור את "${ch.title}"?`)) return;
+                            if (!window.confirm(`למחוק את השידור "${ch.title}"? הפעולה לא הפיכה.`)) return;
                             setLiveSaving(true);
                             try {
                               const all = await Movie.list("-created_date", 100000);
                               await Movie.saveAll(all.filter(m => m.id !== ch.id));
                               await loadMovies();
-                              setFormStatus({ type: "success", message: "⏹ שידור הופסק" });
+                              setFormStatus({ type: "success", message: "🗑️ השידור נמחק" });
                             } catch {}
                             setLiveSaving(false);
                             setTimeout(() => setFormStatus({ type: "", message: "" }), 2500);
-                          }} style={{ background: "none", border: "1.5px solid #ffd0d0", borderRadius: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11, color: "#ff3b30", fontFamily: "inherit" }}>⏹ עצור</button>
+                          }} style={{ background: "none", border: "1.5px solid #ffd0d0", borderRadius: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11, color: "#ff3b30", fontFamily: "inherit" }}>🗑️ מחק</button>
                         </div>
                       </div>
                       <div style={{ background: "#000", borderRadius: 10, overflow: "hidden" }}>
