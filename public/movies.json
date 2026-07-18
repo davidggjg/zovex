@@ -57747,5 +57747,39 @@
     "category": "סדרות לילדים",
     "year": 2020,
     "created_date": "2026-07-18T18:01:15.079Z"
+  },
+  {
+    "title": "פאוור קאפל",
+    "description": "ריאליטי קומי ומרגש, המעמיד למבחן את האתגר האנושי הגדול מכולם - זוגיות. 8 זוגות מפורסמים יעמידו את היחסים שלהם למבחן. מי יהיו הפאוור קאפל של ישראל?",
+    "thumbnail_url": "https://chatgpt.com/backend-api/estuary/public_content/enc/eyJpZCI6Im1fNmE1NDllNjNjOTA0ODE5MTkyZTdhOWJjODVjZGE4YzA6ZmlsZV8wMDAwMDAwMDA3ODQ3MjBhYWU5ZTc3ZjEzZmM1ODUxOCIsImdpem1vX2lkIjpudWxsLCJ0cyI6IjIwNjQ3IiwicCI6InB5aSIsImNpZCI6IjEiLCJzaWciOiJhY2ExNjAzZjViYzJkYmZhZmFmZThlY2Q5NWE4YzUzYzkwZGI5NTJhZDNiM2M2OTdjMmJiN2RjNDU0YzBjMmUwIiwidiI6IjAiLCJjcyI6bnVsbCwiY2RuIjpudWxsLCJmbiI6bnVsbCwiY2QiOm51bGwsImNwIjpudWxsLCJtYSI6bnVsbH0=",
+    "category": "סדרות ישראליות",
+    "year": 2026,
+    "video_id": "2748741/50272542/1_ce6uoh8v",
+    "type": "kaltura",
+    "video_url": "https://cdnapisec.kaltura.com//p/2748741/embedPlaykitJs/uiconf_id/50272542?iframeembed=true&entry_id=1_ce6uoh8v",
+    "series_name": "פאוור קאפל",
+    "season_number": 1,
+    "episode_number": 6,
+    "episode_title": "חלק 1",
+    "custom_slug": "power-couple",
+    "id": "e1fd43a4-5216-4ebd-b3fe-18f3e13f1f93",
+    "created_date": "2026-07-18T18:33:44.427Z"
+  },
+  {
+    "title": "פאוור קאפל",
+    "description": "ריאליטי קומי ומרגש, המעמיד למבחן את האתגר האנושי הגדול מכולם - זוגיות. 8 זוגות מפורסמים יעמידו את היחסים שלהם למבחן. מי יהיו הפאוור קאפל של ישראל?",
+    "thumbnail_url": "https://chatgpt.com/backend-api/estuary/public_content/enc/eyJpZCI6Im1fNmE1NDllNjNjOTA0ODE5MTkyZTdhOWJjODVjZGE4YzA6ZmlsZV8wMDAwMDAwMDA3ODQ3MjBhYWU5ZTc3ZjEzZmM1ODUxOCIsImdpem1vX2lkIjpudWxsLCJ0cyI6IjIwNjQ3IiwicCI6InB5aSIsImNpZCI6IjEiLCJzaWciOiJhY2ExNjAzZjViYzJkYmZhZmFmZThlY2Q5NWE4YzUzYzkwZGI5NTJhZDNiM2M2OTdjMmJiN2RjNDU0YzBjMmUwIiwidiI6IjAiLCJjcyI6bnVsbCwiY2RuIjpudWxsLCJmbiI6bnVsbCwiY2QiOm51bGwsImNwIjpudWxsLCJtYSI6bnVsbH0=",
+    "category": "סדרות ישראליות",
+    "year": 2026,
+    "video_id": "2748741/50272542/1_rvzqpe6v",
+    "type": "kaltura",
+    "video_url": "https://cdnapisec.kaltura.com//p/2748741/embedPlaykitJs/uiconf_id/50272542?iframeembed=true&entry_id=1_rvzqpe6v",
+    "series_name": "פאוור קאפל",
+    "season_number": 1,
+    "episode_number": 6,
+    "episode_title": "חלק 2",
+    "custom_slug": "power-couple",
+    "id": "b8da1fca-f46e-4559-a229-85c294221f5f",
+    "created_date": "2026-07-18T18:33:44.427Z"
   }
 ]
