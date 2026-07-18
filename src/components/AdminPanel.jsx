@@ -882,7 +882,7 @@ function MergeSeriesPanel({ movies, loadMovies, cardStyle, inp, dot, MovieEntity
     if (!window.confirm(`למזג "${from}" לתוך "${to}"?`)) return;
     setMerging(true); setStatus("ממזג...");
     try {
-      const all = await MovieEntity.list("-created_date", 2000);
+      const all = await MovieEntity.list("-created_date", 100000);
       await MovieEntity.saveAll(all.map(m => m.series_name === from ? { ...m, series_name: to } : m));
       await loadMovies(); setStatus(`✅ מוזג!`);
     } catch { setStatus("❌ שגיאה"); }
@@ -958,7 +958,7 @@ function SeriesCategoryPanel({ movies, categories, saveCats, loadMovies, cardSty
     if (!bulkSeries || !bulkCat) { setStatus("⚠️ בחר סדרה וקטגוריה"); return; }
     setLoading(true); setStatus("מעדכן...");
     try {
-      const all = await MovieEntity.list("-created_date", 2000);
+      const all = await MovieEntity.list("-created_date", 100000);
       await MovieEntity.saveAll(all.map(m => m.series_name === bulkSeries ? { ...m, category: bulkCat } : m));
       await loadMovies(); setStatus(`✅ קטגוריה "${bulkCat}" הוגדרה לסדרה "${bulkSeries}"`);
     } catch { setStatus("❌ שגיאה"); }
@@ -1189,7 +1189,7 @@ function AutoSlugPanel({ movies, loadMovies, cardStyle, inp, dot, MovieEntity })
     setLog([]);
     setProgress({ done: 0, total: targets.length });
 
-    const all = await MovieEntity.list("-created_date", 2000);
+    const all = await MovieEntity.list("-created_date", 100000);
     let updated = [...all];
     const usedSlugs = new Set(all.map(m => m.custom_slug).filter(Boolean));
 
