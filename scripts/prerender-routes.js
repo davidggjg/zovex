@@ -108,6 +108,21 @@ function buildPageHtml(baseHtml, route, meta) {
   ].filter(Boolean).join("\n    ");
 
   html = html.replace("</head>", `    ${extraTags}\n  </head>`);
+
+  // תוכן סטטי אמיתי בתוך #root — כדי שגם מי שלא מריץ JS (בוטים, תצוגות-
+  // תצוגה-מקדימה ברשתות חברתיות) יראה טקסט/תמונה אמיתיים בתגובה הראשונה,
+  // לא רק תגיות <head>. React (createRoot().render) מחליף את זה לגמרי
+  // ברגע שהוא עולה - אין כאן hydrate, אז אין סיכון לשגיאת mismatch.
+  const staticBody = `
+      <h1>${escapeHtml(meta.title)}</h1>
+      ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(meta.title)}" style="max-width:280px;border-radius:8px" />` : ""}
+      <p>${escapeHtml(description)}</p>
+      <p><a href="${escapeHtml(SITE_URL)}/">צפייה ישירה בחינם - ZOVEX</a></p>
+    `;
+  html = html.replace(
+    '<div id="root"></div>',
+    `<div id="root" style="background:#0a0a0a;color:#fff;font-family:Arial,sans-serif;padding:20px;direction:rtl">${staticBody}</div>`
+  );
   return html;
 }
 
