@@ -1,10 +1,31 @@
 import React from "react";
 import { Eye } from "lucide-react";
 
+// בונה את כתובת ה-URL האמיתית של הכרטיס — בדיוק אותו נוסחה כמו ב-handleItemClick
+// ב-Home.jsx, כדי שיהיה קישור <a href> אמיתי וניתן-לסריקה, לא רק onClick.
+// בלי href אמיתי, גוגל לא רואה שום קישור מדף הבית לדפי הסרטים/סדרות בכלל.
+function buildCardHref(item, isSer, isLive) {
+  if (isLive) {
+    const slug = item.custom_slug || encodeURIComponent((item.title || item.name || "").replace(/ /g, "-"));
+    return `/live/${slug}`;
+  }
+  if (isSer) {
+    const slug = item.custom_slug || encodeURIComponent((item.name || "").replace(/ /g, "-"));
+    return `/${slug}`;
+  }
+  const slug = item.custom_slug || (encodeURIComponent((item.title || "").replace(/ /g, "-")) + "-" + (item.id || "").slice(0, 6));
+  return `/${slug}`;
+}
+
 function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
   const title = isSer ? item.name : item.title;
+  const href = buildCardHref(item, isSer, isLive);
   return (
-    <div onClick={() => onClick(item, isSer)} style={{ flexShrink: 0, width: cardW, cursor: "pointer", direction: "rtl" }}>
+    <a
+      href={href}
+      onClick={e => { e.preventDefault(); onClick(item, isSer); }}
+      style={{ flexShrink: 0, width: cardW, cursor: "pointer", direction: "rtl", textDecoration: "none", color: "inherit", display: "block" }}
+    >
       <div style={{ width: cardW, height: cardH, borderRadius: 12, overflow: "hidden", background: isLive ? "#1a1a1a" : "#1c1c1e", position: "relative", border: isLive ? "2px solid #e50914" : "none", transition: "transform .18s", boxShadow: "0 2px 8px rgba(0,0,0,.4)" }}
         onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,.18)"; }}
         onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,.10)"; }}>
@@ -29,7 +50,7 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
         )}
       </div>
       <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: "#f2f2f2", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right", padding: "0 2px" }}>{title}</div>
-    </div>
+    </a>
   );
 }
 
@@ -83,4 +104,4 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
 }
 
 
-export { NetflixCard, NetflixRow };
+export { NetflixCard, NetflixRow, buildCardHref };

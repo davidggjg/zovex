@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { NetflixRow } from "./NetflixCard";
+import { NetflixRow, buildCardHref } from "./NetflixCard";
 import LiveBanner from "../LiveBanner";
 
 function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user }) {
@@ -151,12 +151,14 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
   const title = movie.series_name || movie.title;
 
   return (
-    <div
-      onClick={() => handleItemClick(displayItem, isSer)}
+    <a
+      href={buildCardHref(displayItem, isSer, false)}
+      onClick={e => { e.preventDefault(); handleItemClick(displayItem, isSer); }}
       style={{
         position: "relative", margin: "6px 14px 16px", borderRadius: 16, overflow: "hidden",
         cursor: "pointer", height: 170, background: "#111",
         opacity: visible ? 1 : 0, transition: "opacity .35s ease",
+        display: "block", textDecoration: "none", color: "inherit",
       }}
     >
       {movie.thumbnail_url && (
@@ -177,7 +179,7 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
           </div>
         )}
       </div>
-    </div>
+    </a>
   );
 }
 
