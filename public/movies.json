@@ -9526,7 +9526,8 @@
     "video_url": "https://n-121-7.il.cdn-redge.media/livehls/oil/kancdn-live/live/kan11/live.livx/playlist.m3u8",
     "category": "שידורים חיים",
     "created_date": "2026-06-28T20:29:05.788Z",
-    "custom_slug": "kan11"
+    "custom_slug": "kan11",
+    "thumbnail_url": "/zovex/live-logos/kan11.png"
   },
   {
     "title": "צ'רלי וחצי",
@@ -42294,7 +42295,8 @@
     "video_url": "https://i24newshebrew-cdn.encoders.immergo.tv/master.m3u8",
     "category": "שידורים חיים",
     "created_date": "2026-07-02T06:47:23.995Z",
-    "custom_slug": "i24"
+    "custom_slug": "i24",
+    "thumbnail_url": "/zovex/live-logos/i24.jpg"
   },
   {
     "title": "האח הקטן",
@@ -42371,7 +42373,8 @@
     "video_url": "https://r.il.cdn-redge.media/livehls/oil/ch14/live/ch14/live.livx/playlist.m3u8?dvr=7200000",
     "category": "שידורים חיים",
     "created_date": "2026-07-01T06:41:47.208Z",
-    "custom_slug": "c14"
+    "custom_slug": "c14",
+    "thumbnail_url": "/zovex/live-logos/c14.jpg"
   },
   {
     "id": "live_e0feb41e-e47b-45ac-9368-c70753f2e1e9",
@@ -42380,7 +42383,8 @@
     "video_url": "https://reshet.g-mana.live/media/6f10d1da-0803-48d9-9272-57a811958974/mainManifest.m3u8",
     "category": "שידורים חיים",
     "created_date": "2026-06-28T20:33:09.949Z",
-    "custom_slug": "reshet13"
+    "custom_slug": "reshet13",
+    "thumbnail_url": "/zovex/live-logos/reshet13.jpg"
   },
   {
     "id": "live_4692f62b-3b80-40f4-b345-9fe79b8c61e4",
@@ -42389,7 +42393,8 @@
     "video_url": "https://n-121-5.il.cdn-redge.media/livehls/oil/kancdn-live/live/kan_edu/live.livx/playlist.m3u8?renditions&fmp4",
     "category": "שידורים חיים",
     "created_date": "2026-06-28T20:25:29.949Z",
-    "custom_slug": "kaneducation"
+    "custom_slug": "kaneducation",
+    "thumbnail_url": "/zovex/live-logos/kaneducation.jpg"
   },
   {
     "id": "88234946-8950-48da-b696-4f987b4a4e30",
