@@ -153,6 +153,8 @@ function HomeMain({ user, onLogout, isGuest }) {
   const handleItemClick = (item, isSer) => {
     const action = () => {
       if (item.is_live) {
+        const slug = item.custom_slug || encodeURIComponent((item.title || item.name || "").replace(/ /g, "-"));
+        navigate(`/live/${slug}`);
         setShowLivePlayer(item);
         return;
       }
@@ -181,6 +183,15 @@ function HomeMain({ user, onLogout, isGuest }) {
 
   // מזהה איזה סרט/סדרה לפתוח לפי ה-slug שבכתובת
   useSlugRouting(movies, slug, episode, setSelectedSeries, setSelectedMovie, openWithKalturaRefresh);
+
+  // כתובת מהצורה /live/שם-הערוץ — פותחת ישירות את הנגן של השידור החי המתאים
+  useEffect(() => {
+    if (slug !== "live" || !episode || !liveChannels.length) return;
+    const found = liveChannels.find(ch =>
+      ch.custom_slug === episode || encodeURIComponent((ch.title || "").replace(/ /g, "-")) === episode
+    );
+    if (found) setShowLivePlayer(found);
+  }, [slug, episode, liveChannels]);
 
   // ── early returns ──
   if (kalturaRefreshing) return (
@@ -267,7 +278,7 @@ function HomeMain({ user, onLogout, isGuest }) {
       {showLivePlayer && (
         <CustomVideoPlayer
           movie={{ ...showLivePlayer, is_live: true }}
-          onClose={() => setShowLivePlayer(null)}
+          onClose={() => { setShowLivePlayer(null); window.history.replaceState(null, "", "/zovex/"); }}
         />
       )}
 

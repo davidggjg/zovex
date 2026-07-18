@@ -76,6 +76,8 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
 
   const [liveNameInput, setLiveNameInput] = useState("");
   const [liveUrlInput, setLiveUrlInput] = useState("");
+  const [liveThumbInput, setLiveThumbInput] = useState("");
+  const [liveSlugInput, setLiveSlugInput] = useState("");
   const [liveSaving, setLiveSaving] = useState(false);
   const [editingLiveId, setEditingLiveId] = useState(null);
   const [adminTab, setAdminTab] = useState("browse");
@@ -562,6 +564,24 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                 style={{ ...inp, marginBottom: 10 }}
               />
 
+              <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>קישור לפוסטר (לא חובה)</label>
+              <input
+                value={liveThumbInput}
+                onChange={e => setLiveThumbInput(e.target.value)}
+                placeholder="https://example.com/poster.jpg"
+                dir="ltr"
+                style={{ ...inp, marginBottom: 10 }}
+              />
+
+              <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>כתובת אנגלית ל-URL (לא חובה, למשל: news12)</label>
+              <input
+                value={liveSlugInput}
+                onChange={e => setLiveSlugInput(e.target.value)}
+                placeholder="channel-name"
+                dir="ltr"
+                style={{ ...inp, marginBottom: 10 }}
+              />
+
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
                 <button onClick={async () => {
                   if (!liveUrlInput.trim() || !liveNameInput.trim()) {
@@ -572,10 +592,11 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   setLiveSaving(true);
                   try {
                     const all = await Movie.list("-created_date", 100000);
+                    const slug = liveSlugInput.trim().toLowerCase().replace(/\s+/g, "-") || null;
                     let updated;
                     if (editingLiveId) {
                       updated = all.map(m => m.id === editingLiveId
-                        ? { ...m, title: liveNameInput.trim(), video_url: liveUrlInput.trim() }
+                        ? { ...m, title: liveNameInput.trim(), video_url: liveUrlInput.trim(), thumbnail_url: liveThumbInput.trim(), custom_slug: slug }
                         : m);
                     } else {
                       const liveEntry = {
@@ -583,13 +604,15 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                         is_live: true,
                         title: liveNameInput.trim(),
                         video_url: liveUrlInput.trim(),
+                        thumbnail_url: liveThumbInput.trim(),
+                        custom_slug: slug,
                         category: "שידורים חיים",
                         created_date: new Date().toISOString(),
                       };
                       updated = [liveEntry, ...all];
                     }
                     await Movie.saveAll(updated);
-                    setLiveNameInput(""); setLiveUrlInput(""); setEditingLiveId(null);
+                    setLiveNameInput(""); setLiveUrlInput(""); setLiveThumbInput(""); setLiveSlugInput(""); setEditingLiveId(null);
                     setFormStatus({ type: "success", message: editingLiveId ? "✅ עודכן!" : "✅ שידור חדש נוסף! פעיל עכשיו לכולם" });
                     await loadMovies();
                   } catch { setFormStatus({ type: "error", message: "שגיאה בשמירה — בדוק טוקן" }); }
@@ -599,7 +622,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   {liveSaving ? "⏳ שומר..." : editingLiveId ? "💾 עדכן שידור" : "🔴 הוסף שידור חי"}
                 </button>
                 {editingLiveId && (
-                  <button onClick={() => { setEditingLiveId(null); setLiveNameInput(""); setLiveUrlInput(""); }} style={{ flex: 1, background: "#f5f5f7", color: "#333", border: "1.5px solid #d2d2d7", borderRadius: 12, padding: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                  <button onClick={() => { setEditingLiveId(null); setLiveNameInput(""); setLiveUrlInput(""); setLiveThumbInput(""); setLiveSlugInput(""); }} style={{ flex: 1, background: "#f5f5f7", color: "#333", border: "1.5px solid #d2d2d7", borderRadius: 12, padding: 12, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                     ביטול
                   </button>
                 )}
@@ -623,7 +646,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                           </span>
                         </div>
                         <div style={{ display: "flex", gap: 6 }}>
-                          <button onClick={() => { setEditingLiveId(ch.id); setLiveNameInput(ch.title); setLiveUrlInput(ch.video_url); }} style={{ background: "none", border: "1.5px solid #d2d2d7", borderRadius: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>✏️ ערוך</button>
+                          <button onClick={() => { setEditingLiveId(ch.id); setLiveNameInput(ch.title); setLiveUrlInput(ch.video_url); setLiveThumbInput(ch.thumbnail_url || ""); setLiveSlugInput(ch.custom_slug || ""); }} style={{ background: "none", border: "1.5px solid #d2d2d7", borderRadius: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>✏️ ערוך</button>
                           <button onClick={async () => {
                             if (!window.confirm(`למחוק את השידור "${ch.title}"? הפעולה לא הפיכה.`)) return;
                             setLiveSaving(true);
