@@ -42380,7 +42380,7 @@
     "id": "live_e0feb41e-e47b-45ac-9368-c70753f2e1e9",
     "is_live": true,
     "title": "ראשת 13",
-    "video_url": "https://reshet.g-mana.live/media/6f10d1da-0803-48d9-9272-57a811958974/mainManifest.m3u8",
+    "video_url": "https://d198ztbnlup2iq.cloudfront.net/out/v1/2d9050c90fb94df8b78d1d98306a1a65/index.m3u8",
     "category": "שידורים חיים",
     "created_date": "2026-06-28T20:33:09.949Z",
     "custom_slug": "reshet13",
@@ -57822,16 +57822,6 @@
     "custom_slug": "power-couple",
     "id": "b8da1fca-f46e-4559-a229-85c294221f5f",
     "created_date": "2026-07-18T18:33:44.427Z"
-  },
-  {
-    "id": "live_c994fbad-abe7-4240-8276-5c704c93493f",
-    "title": "דה וויס",
-    "is_live": true,
-    "category": "שידורים חיים",
-    "custom_slug": "the-voice-il",
-    "thumbnail_url": "/zovex/live-logos/thevoice.png",
-    "video_url": "https://d198ztbnlup2iq.cloudfront.net/out/v1/2d9050c90fb94df8b78d1d98306a1a65/index.m3u8",
-    "created_date": "2026-07-18T18:47:29.611Z"
   },
   {
     "id": "d0f2feea-e254-4cb1-b129-195a4a441e4e",
