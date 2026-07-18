@@ -76,7 +76,9 @@ function buildPageHtml(baseHtml, route, meta) {
   const title = `${meta.title} - צפייה ישירה | ZOVEX`;
   const rawDesc = (meta.description || `צפייה ישירה ב${meta.title} - בחינם, באתר ZOVEX.`).trim();
   const description = rawDesc.length > 200 ? rawDesc.slice(0, 197) + "..." : rawDesc;
-  const url = `${SITE_URL}/${route}`;
+  // עם לוכסן בסוף - זו הכתובת שבאמת מחזירה 200 ישירות (GitHub Pages מפנה
+  // 301 מהגרסה בלי הלוכסן, כי route כאן הוא תיקייה עם index.html בפנים)
+  const url = `${SITE_URL}/${route}/`;
   const image = meta.thumbnail_url || "";
   const ogType = meta.type === "series" ? "video.tv_show" : "video.movie";
   const schemaType = meta.type === "series" ? "TVSeries" : "Movie";

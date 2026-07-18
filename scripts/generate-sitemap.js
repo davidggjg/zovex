@@ -72,7 +72,11 @@ function generateSitemap() {
 
   const urlEntries = paths
     .map((p) => {
-      const loc = p ? `${SITE_URL}/${p}` : `${SITE_URL}/`;
+      // תיקון: GitHub Pages מפנה (301) כל כתובת-תיקייה בלי לוכסן בסוף אל
+      // הגרסה עם הלוכסן (כי כל route כאן הוא בפועל תיקייה עם index.html
+      // בפנים) - אז רושמים כאן ישר את הכתובת עם הלוכסן, כדי שגוגל יגיע
+      // ישר ל-200 בלי הפניה מיותרת באמצע.
+      const loc = p ? `${SITE_URL}/${p}/` : `${SITE_URL}/`;
       const priority = p ? "0.7" : "1.0";
       return `  <url>\n    <loc>${loc}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>${priority}</priority>\n  </url>`;
     })
