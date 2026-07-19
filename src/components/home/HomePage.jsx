@@ -169,8 +169,9 @@ export default function HomePage({
             <div style={{ fontSize: 10, color: "#888", lineHeight: 1.3 }}>או להוספת סרט חדש</div>
           </div>
         )}
-        <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ background: "#229ED9", width: 42, height: 42, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", boxShadow: "0 2px 10px rgba(34,158,217,.35)", textDecoration: "none", flexShrink: 0 }}>
-          <Send size={18} fill="white" />
+        <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ background: "#229ED9", height: 42, padding: "0 14px", borderRadius: 21, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, color: "#fff", boxShadow: "0 2px 10px rgba(34,158,217,.35)", textDecoration: "none", flexShrink: 0, whiteSpace: "nowrap" }}>
+          <Send size={16} fill="white" />
+          <span style={{ fontSize: 12, fontWeight: 700 }}>תמיכה</span>
         </a>
       </div>
     </div>
