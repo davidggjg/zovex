@@ -152,90 +152,7 @@ function reportProgress(onProgressRef, currentTime, duration) {
   onProgressRef.current?.(finished ? 0 : currentTime, duration);
 }
 
-// ─── מונה צופים חיים ("כמה צופים עכשיו") ──────────────────────
-// שולח "פעימת חיים" (heartbeat) לשרת האחורי כל 15 שניות כל עוד השידור
-// פתוח, ומקבל בחזרה כמה צופים ייחודיים פעילים כרגע על אותו שידור.
-// דורש שני endpoints בשרת (ראה קבצי הדוגמה שצורפו):
-//   POST /api/live/:liveId/heartbeat   { viewer_id }  → { viewers: number }
-//   POST /api/live/:liveId/leave       { viewer_id }  (נשלח עם sendBeacon ביציאה)
-const BACKEND_URL = "https://davidhzhdhd-my-telegram-bot.hf.space";
 const STREAM_BACKEND_URL = "https://maco11.onrender.com";
-
-function getViewerId() {
-  try {
-    let id = localStorage.getItem("zovex_viewer_id");
-    if (!id) {
-      id = "v_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-      localStorage.setItem("zovex_viewer_id", id);
-    }
-    return id;
-  } catch { return "v_" + Math.random().toString(36).slice(2); }
-}
-
-function useLiveViewerCount(liveId, isLive) {
-  const [count, setCount] = useState(null);
-  useEffect(() => {
-    if (!isLive || !liveId) { setCount(null); return; }
-    let stopped = false;
-    const viewerId = getViewerId();
-    const url = `${BACKEND_URL}/api/live/${encodeURIComponent(liveId)}/heartbeat`;
-
-    const heartbeat = async () => {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ viewer_id: viewerId }),
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!stopped && typeof data?.viewers === "number") setCount(data.viewers);
-      } catch {}
-    };
-
-    heartbeat();
-    const interval = setInterval(heartbeat, 15000);
-
-    // עזיבה מיידית (סגירת נגן / רענון / החלפת שידור) — כדי שהמונה יתעדכן מהר
-    const leave = () => {
-      try {
-        const body = JSON.stringify({ viewer_id: viewerId });
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(`${BACKEND_URL}/api/live/${encodeURIComponent(liveId)}/leave`, body);
-        } else {
-          fetch(`${BACKEND_URL}/api/live/${encodeURIComponent(liveId)}/leave`, { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true }).catch(() => {});
-        }
-      } catch {}
-    };
-    window.addEventListener("beforeunload", leave);
-
-    return () => {
-      stopped = true;
-      clearInterval(interval);
-      leave();
-      window.removeEventListener("beforeunload", leave);
-    };
-  }, [liveId, isLive]);
-
-  return count;
-}
-
-function LiveViewersBadge({ count }) {
-  if (count === null || count === undefined) return null;
-  return (
-    <div style={{
-      position: "absolute", top: 68, left: 14, zIndex: 25,
-      background: "rgba(0,0,0,.62)", backdropFilter: "blur(6px)",
-      borderRadius: 20, padding: "6px 12px",
-      display: "flex", alignItems: "center", gap: 6,
-      color: "#fff", fontFamily: "Arial", fontSize: 12, fontWeight: 700,
-      pointerEvents: "none",
-    }}>
-      <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#e50914", display: "inline-block", animation: "livePulseDot 1.5s ease-in-out infinite" }} />
-      {count.toLocaleString("he-IL")} צופים עכשיו
-    </div>
-  );
-}
 
 function formatTime(secs) {
   if (!secs || isNaN(secs) || !isFinite(secs)) return "0:00";
@@ -1013,7 +930,6 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   const isLive = !!movie.is_live;
   const src = buildSrc(movie, isLive ? 0 : startTime);
   const type = movie.type || "direct";
-  const viewerCount = useLiveViewerCount(movie.id, isLive);
 
   useEffect(() => {
     postNative({ type: "player_open", value: true });
@@ -1023,7 +939,6 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   return (
     <div data-cvp style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column" }}>
       <style>{spinStyle}</style>
-      {isLive && <LiveViewersBadge count={viewerCount} />}
       {!src ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
           <button onClick={onClose} style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", borderRadius: "50%", width: 42, height: 42, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>

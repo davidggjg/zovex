@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { Search, Loader2, ChevronDown, ChevronUp, Upload } from "lucide-react";
 import { Movie } from "@/entities/Movie";
 import { ApiKey } from "@/entities/ApiKey";
-import { apiCall, SPIN, ls, lsSet, extractVideoInfo } from "./home/helpers";
+import { SPIN, ls, lsSet, extractVideoInfo } from "./home/helpers";
 
 // ─── HLS player (iframe-based, works on all Android browsers) ─
 const HlsPlayer = ({ src }) => {
@@ -45,30 +45,6 @@ if(window.Hls&&Hls.isSupported()){
   );
 };
 
-// ─── מונה צופים חיים בפאנל ניהול ─────────────────────────────
-// שולף כל 10 שניות, לכל שידור פעיל, כמה צופים יש עליו כרגע (בלי "להצטרף"
-// כצופה — endpoint נפרד GET שלא רושם heartbeat). דורש שה-endpoint
-// /api/live/:liveId/viewers קיים בשרת (ראה live_viewers_flask.py / live_viewers_express.js).
-function useAdminLiveViewerCounts(liveChannels, active) {
-  const [counts, setCounts] = useState({});
-  const idsKey = liveChannels.map(c => c.id).join(",");
-  useEffect(() => {
-    if (!active || liveChannels.length === 0) return;
-    let stopped = false;
-    const poll = async () => {
-      const results = await Promise.all(liveChannels.map(async ch => {
-        const res = await apiCall(`/api/live/${ch.id}/viewers`, "GET");
-        return [ch.id, typeof res?.viewers === "number" ? res.viewers : null];
-      }));
-      if (!stopped) setCounts(Object.fromEntries(results));
-    };
-    poll();
-    const interval = setInterval(poll, 10000);
-    return () => { stopped = true; clearInterval(interval); };
-  }, [active, idsKey]);
-  return counts;
-}
-
 // פאנל הניהול המלא — טפסי הוספה/עריכה, רשימת ניהול, קטגוריות, שידור חי, הגדרות
 export default function AdminPanel({ movies, seriesMap, liveChannels, categories, saveCats, loadMovies, onClose }) {
   const existingSeriesNames = useMemo(() => Object.keys(seriesMap), [seriesMap]);
@@ -81,7 +57,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [liveSaving, setLiveSaving] = useState(false);
   const [editingLiveId, setEditingLiveId] = useState(null);
   const [adminTab, setAdminTab] = useState("browse");
-  const adminLiveViewerCounts = useAdminLiveViewerCounts(liveChannels, adminTab === "live");
   const [editingMovie, setEditingMovie] = useState(null);
   const [deleting, setDeleting] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -641,9 +616,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#e50914", display: "inline-block", animation: "livePulseDot 1.5s ease-in-out infinite" }} />
                           <span style={{ fontSize: 13, fontWeight: 700 }}>{ch.title}</span>
-                          <span style={{ fontSize: 11, fontWeight: 700, color: "#0071e3", background: "#e8f2ff", borderRadius: 8, padding: "2px 8px" }}>
-                            👁️ {adminLiveViewerCounts[ch.id] ?? "…"} צופים
-                          </span>
                         </div>
                         <div style={{ display: "flex", gap: 6 }}>
                           <button onClick={() => { setEditingLiveId(ch.id); setLiveNameInput(ch.title); setLiveUrlInput(ch.video_url); setLiveThumbInput(ch.thumbnail_url || ""); setLiveSlugInput(ch.custom_slug || ""); }} style={{ background: "none", border: "1.5px solid #d2d2d7", borderRadius: 8, padding: "4px 10px", cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>✏️ ערוך</button>
