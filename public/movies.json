@@ -60163,5 +60163,35 @@
     "custom_slug": "harold-and-the-purple-crayon",
     "year": 2024,
     "created_date": "2026-07-19T18:47:36.356Z"
+  },
+  {
+    "id": "live_c3f42937-c148-4b37-896d-ce7228ce1e8e",
+    "is_live": true,
+    "title": "ספורט 5",
+    "video_url": "http://stream.mcquack.net/41/index.m3u8",
+    "category": "שידורים חיים",
+    "created_date": "2026-07-19T23:57:47.156Z",
+    "custom_slug": "sport5",
+    "thumbnail_url": "/zovex/live-logos/sport5.png"
+  },
+  {
+    "id": "live_809398f1-c4bf-456e-8572-c9001bcad17c",
+    "is_live": true,
+    "title": "הוט דרמה",
+    "video_url": "http://stream.mcquack.net/381/index.m3u8",
+    "category": "שידורים חיים",
+    "created_date": "2026-07-19T23:57:47.156Z",
+    "custom_slug": "hot-drama",
+    "thumbnail_url": "/zovex/live-logos/hotdrama.png"
+  },
+  {
+    "id": "live_72c6f579-58ce-415f-ba79-9d13c484a75e",
+    "is_live": true,
+    "title": "הוט זון",
+    "video_url": "http://stream.mcquack.net/379/index.m3u8",
+    "category": "שידורים חיים",
+    "created_date": "2026-07-19T23:57:47.156Z",
+    "custom_slug": "hot-zone",
+    "thumbnail_url": "/zovex/live-logos/hotzone.png"
   }
 ]
