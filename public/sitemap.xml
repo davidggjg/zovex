@@ -1824,4 +1824,10 @@
     <changefreq>daily</changefreq>
     <priority>0.7</priority>
   </url>
+  <url>
+    <loc>https://davidggjg.github.io/zovex/avatar-live-action/</loc>
+    <lastmod>2026-07-19</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.7</priority>
+  </url>
 </urlset>
