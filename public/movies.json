@@ -60163,5 +60163,15 @@
     "custom_slug": "harold-and-the-purple-crayon",
     "year": 2024,
     "created_date": "2026-07-19T18:47:36.356Z"
+  },
+  {
+    "id": "live_fd5fe4c4-9009-4ab0-b65b-24c3fb381baf",
+    "is_live": true,
+    "title": "גמר המונדיאל 2026",
+    "video_url": "https://n-121-7.il.cdn-redge.media/livehls/oil/kancdn-live/live/kan11/live.livx/playlist.m3u8",
+    "category": "שידורים חיים",
+    "created_date": "2026-07-19T18:52:08.739Z",
+    "custom_slug": "world-cup-final-2026",
+    "thumbnail_url": "/zovex/live-logos/kan11.png"
   }
 ]
