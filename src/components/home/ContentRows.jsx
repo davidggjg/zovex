@@ -56,15 +56,8 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
   // rowsToShow תמיד ריק בשבילה ובלי הסדר הזה היינו נתקעים תמיד ב"לא נמצאו
   // תוצאות" בלי להגיע לקוד שמטפל בהיסטוריה בפועל (זה בדיוק מה שקרה).
   if (selectedCategory === "היסטוריה") {
-    // דיאגנוסטיקה זמנית על המסך (בלי צורך ב-DevTools) — מראה בדיוק איפה זה נשבר:
-    // אם "מהשרת" הוא 0 → הבעיה בטעינה/שמירה מהשרת. אם "מהשרת" > 0 אבל "הותאם" הוא 0 →
-    // הבעיה בהתאמה בין media_id שנשמר לבין movie.id הנוכחי (למשל תוכן שנמחק/שונה).
-    const debugLine = `דיאגנוסטיקה: מהשרת ${history?.length || 0} | הותאם לסרט קיים ${continueWatchingItems.length}`;
     return (
       <div style={{ paddingTop: 8 }}>
-        <div style={{ fontSize: 11, color: "#e50914", textAlign: "center", padding: "6px 12px", fontFamily: "monospace", direction: "ltr" }}>
-          {debugLine}
-        </div>
         {continueWatchingItems.length > 0 ? (
           <>
             <NetflixRow title="▶️ המשך צפייה" items={continueWatchingItems} isDesktop={isDesktop} handleItemClick={onContinueWatchingClick} isLiveRow={false} />
