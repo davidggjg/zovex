@@ -793,6 +793,22 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       setVideoReady(true);
       const vjs = window.videojs(videoEl, { controls: false, autoplay: true, fill: true });
       const shaka = new window.shaka.Player();
+      // תיקון: שידורים חיים מ-CDN חיצוני (כמו כאן 11) נראו "נתקעים וקופצים
+      // אחורה" אצלנו כל כמה שניות, בזמן שאותו שידור בדיוק חלק לגמרי באתר
+      // המקור - כלומר זו לא בעיה בשידור עצמו, זו הגדרת ה-buffering ברירת
+      // המחדל של Shaka (מכוונת ל-VOD, לא לשידור חי מ-CDN שיכול להיות קצת
+      // פחות יציב). מגדילים את חלון ה-buffer רק לשידורים חיים - זה עולה
+      // בכמה שניות עיכוב מול "הקצה החי", אבל נותן הרבה יותר כרית נגד
+      // קפיצות ברשת לפני שהנגן צריך לעצור ולהמתין.
+      if (isLive) {
+        shaka.configure({
+          streaming: {
+            bufferingGoal: 30,
+            rebufferingGoal: 4,
+            retryParameters: { maxAttempts: 5, baseDelay: 500, backoffFactor: 2, timeout: 15000 },
+          },
+        });
+      }
       await shaka.attach(videoEl);
       playerRef.current = { vjs, shaka };
       try {
