@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Search, Send, Eye, ChevronDown, X } from "lucide-react";
+import { Search, Send, Eye, ChevronDown, X, Download } from "lucide-react";
 import { SPIN, ls, lsSet } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
 
@@ -96,6 +96,19 @@ export default function HomePage({
             )}
           </div>
         </div>
+        <a
+          href="https://github.com/davidggjg/zovex-android/releases/latest/download/zovex.apk"
+          download
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            padding: "8px 10px", marginBottom: 10, borderRadius: 10,
+            background: "rgba(229,9,20,0.08)", border: "1px solid rgba(229,9,20,0.25)",
+            color: "#e5e5e5", fontSize: 12, fontWeight: 700, textDecoration: "none",
+          }}
+        >
+          <Download size={14} color="#e50914" />
+          הורידו את אפליקציית ZOVEX לאנדרואיד
+        </a>
         <div style={{ paddingBottom: 11 }}>
           <button
             onClick={() => setShowCatModal(true)}
