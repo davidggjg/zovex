@@ -60193,5 +60193,15 @@
     "created_date": "2026-07-19T23:57:47.156Z",
     "custom_slug": "hot-zone",
     "thumbnail_url": "/zovex/live-logos/hotzone.png?v=2"
+  },
+  {
+    "id": "live_bd2608e7-451f-4e55-91d6-d9ea7cb3d213",
+    "is_live": true,
+    "title": "זום",
+    "video_url": "https://stream.mcquack.net/377/index.m3u8",
+    "category": "שידורים חיים",
+    "created_date": "2026-07-20T11:58:51.003Z",
+    "custom_slug": "zoom-tv",
+    "thumbnail_url": "/zovex/live-logos/zoomtv.png"
   }
 ]
