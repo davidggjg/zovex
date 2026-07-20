@@ -30,14 +30,14 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
         onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,.18)"; }}
         onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,.10)"; }}>
         {isLive && item.thumbnail_url ? (
-          <img src={item.thumbnail_url} alt={title} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
+          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
         ) : isLive ? (
           <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "linear-gradient(135deg,#1a1a1a,#2a0a0c)" }}>
             <Eye size={30} color="#e50914" strokeWidth={2} />
             <span style={{ fontSize: 10, color: "#fff", fontWeight: 700, textAlign: "center", padding: "0 8px" }}>שידור חי</span>
           </div>
         ) : item.thumbnail_url ? (
-          <img src={item.thumbnail_url} alt={title} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
+          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
         ) : (
           <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, background: "#1c1c1e", color: "#666" }}>🎬</div>
         )}
@@ -54,10 +54,20 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
   );
 }
 
+// כמה כרטיסים נטענים ל-DOM בהתחלה בכל שורה, ומספר שמתווסף בכל "טעינה נוספת".
+// בלי זה, שורה עם מאות פריטים (למשל קטגוריה שלמה) יוצרת מיד מאות תגי <img>
+// בפעם אחת - כבד בטעינה ראשונית גם עם loading="lazy", כי הדפדפן עדיין בונה
+// את כל האלמנטים מראש. במקום זה טוענים דף ראשון קטן ומרחיבים כשמתקרבים לסוף.
+const ROW_PAGE_SIZE = 20;
+
 function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
   const rowRef = React.useRef(null);
   const cardW = isDesktop ? 170 : 130;
   const cardH = isDesktop ? 240 : 185;
+  const [visibleCount, setVisibleCount] = React.useState(ROW_PAGE_SIZE);
+
+  // הרשימה עצמה משתנה (חיפוש/קטגוריה) - איפוס לדף הראשון בכל פעם שהתוכן משתנה
+  React.useEffect(() => { setVisibleCount(ROW_PAGE_SIZE); }, [items]);
 
   const scroll = (dir) => {
     if (!rowRef.current) return;
@@ -65,7 +75,19 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
     rowRef.current.scrollBy({ left: dir === "right" ? -amount : amount, behavior: "smooth" });
   };
 
+  // השורה מוצגת ב-direction: ltr (למטה) בלי קשר לכיווניות שאר האתר, אז
+  // "הקצה הרחוק" יכול להיות תחילת הגלילה או סופה בהתאם לדפדפן - בודקים את
+  // שני הקצוות במקום להניח כיוון ספציפי.
+  const handleScroll = () => {
+    const el = rowRef.current;
+    if (!el || visibleCount >= items.length) return;
+    const nearEnd = el.scrollWidth - el.clientWidth - el.scrollLeft < cardW * 6;
+    const nearStart = el.scrollLeft < cardW * 6;
+    if (nearEnd || nearStart) setVisibleCount(v => Math.min(v + ROW_PAGE_SIZE, items.length));
+  };
+
   if (!items || items.length === 0) return null;
+  const visibleItems = items.slice(0, visibleCount);
 
   return (
     <div style={{ marginBottom: isDesktop ? 36 : 28, direction: "rtl" }}>
@@ -82,8 +104,8 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
         </div>
       </div>
       {/* הcarousel */}
-      <div ref={rowRef} style={{ display: "flex", gap: 10, overflowX: "auto", scrollbarWidth: "none", msOverflowStyle: "none", padding: "4px 16px 8px", direction: "ltr" }}>
-        {items.map((item) => {
+      <div ref={rowRef} onScroll={handleScroll} style={{ display: "flex", gap: 10, overflowX: "auto", scrollbarWidth: "none", msOverflowStyle: "none", padding: "4px 16px 8px", direction: "ltr" }}>
+        {visibleItems.map((item) => {
           const isSer = !!item.episodes;
           const isLive = !!item.is_live;
           return (
