@@ -177,11 +177,24 @@ function getUsableDuration(v) {
   return 0;
 }
 
+// video.js ו-shaka-player מוגשים כקבצים סטטיים מהאתר שלנו עצמו (public/vendor)
+// ולא מ-CDN חיצוני (unpkg/cdnjs) - כי אם ה-CDN החיצוני איטי/חסום ברשת של
+// המשתמש, הנגן היה נתקע על "טוען..." לנצח בלי שום הודעת שגיאה, גם כשקישור
+// השידור עצמו עולה מיידית בכל מקום אחר. VENDOR_BASE מצביע לתיקייה הזו.
+const VENDOR_BASE = (import.meta.env.BASE_URL || "/") + "vendor/";
+
 function loadScripts(urls) {
-  return Promise.all(urls.map(url => new Promise(resolve => {
+  return Promise.all(urls.map(url => new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${url}"]`)) { resolve(); return; }
     const s = document.createElement("script");
-    s.src = url; s.onload = resolve;
+    let done = false;
+    const finish = ok => { if (done) return; done = true; ok ? resolve() : reject(new Error("script load failed: " + url)); };
+    // בלי timeout, כישלון רשת שקט (לא onerror, סתם תקוע) היה תוקע את הנגן
+    // לצמיתות בלי שום משוב למשתמש - 8 שניות מספיק נדיב לקובץ סטטי מהשרת שלנו.
+    const timer = setTimeout(() => finish(false), 8000);
+    s.src = url;
+    s.onload = () => { clearTimeout(timer); finish(true); };
+    s.onerror = () => { clearTimeout(timer); finish(false); };
     document.head.appendChild(s);
   })));
 }
@@ -777,10 +790,10 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     setVideoReady(false);
     currentSrcRef.current = src;
     const init = async () => {
-      loadStyles(["https://unpkg.com/video.js@8.21.0/dist/video-js.min.css"]);
+      loadStyles([VENDOR_BASE + "video-js.min.css"]);
       await loadScripts([
-        "https://unpkg.com/video.js@8.21.0/dist/video.min.js",
-        "https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.compiled.js",
+        VENDOR_BASE + "video.min.js",
+        VENDOR_BASE + "shaka-player.compiled.js",
       ]);
       if (destroyed) return;
       window.shaka.polyfill.installAll();
@@ -833,7 +846,9 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
         }
       }
     };
-    init();
+    // loadScripts יכולה להיכשל (רשת/timeout) - בלי catch כאן זה היה משאיר
+    // את הנגן תקוע לנצח על ה-loading spinner בלי שום משוב.
+    init().catch(() => { if (!destroyed) setLoading(false); });
     const reportInterval = !isLive ? setInterval(() => {
       const v = videoElRef.current;
       if (v && !v.paused && !v.ended) {
