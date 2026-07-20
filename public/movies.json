@@ -60172,7 +60172,7 @@
     "category": "שידורים חיים",
     "created_date": "2026-07-19T23:57:47.156Z",
     "custom_slug": "sport5",
-    "thumbnail_url": "/zovex/live-logos/sport5.png"
+    "thumbnail_url": "/zovex/live-logos/sport5.png?v=2"
   },
   {
     "id": "live_809398f1-c4bf-456e-8572-c9001bcad17c",
@@ -60182,7 +60182,7 @@
     "category": "שידורים חיים",
     "created_date": "2026-07-19T23:57:47.156Z",
     "custom_slug": "hot-drama",
-    "thumbnail_url": "/zovex/live-logos/hotdrama.png"
+    "thumbnail_url": "/zovex/live-logos/hotdrama.png?v=2"
   },
   {
     "id": "live_72c6f579-58ce-415f-ba79-9d13c484a75e",
@@ -60192,6 +60192,6 @@
     "category": "שידורים חיים",
     "created_date": "2026-07-19T23:57:47.156Z",
     "custom_slug": "hot-zone",
-    "thumbnail_url": "/zovex/live-logos/hotzone.png"
+    "thumbnail_url": "/zovex/live-logos/hotzone.png?v=2"
   }
 ]
