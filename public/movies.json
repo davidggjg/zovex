@@ -65095,5 +65095,18 @@
     "custom_slug": "avatar-aang-last-airbender-2026",
     "year": 2026,
     "created_date": "2026-07-25T23:52:02.251Z"
+  },
+  {
+    "id": "c4e879ef-acb0-47b9-8c05-8821a236a549",
+    "title": "תוכן AI אנימה - בדיקה",
+    "description": "תוכן אנימה מקורי שנוצר על ידי AI",
+    "thumbnail_url": "",
+    "video_id": "https://pixeldrain.com/api/file/pPj9MZ9n",
+    "video_url": "https://pixeldrain.com/api/file/pPj9MZ9n",
+    "type": "direct",
+    "category": "סדרות",
+    "custom_slug": "ai-anime-test",
+    "year": 2026,
+    "created_date": "2026-07-26T07:42:31.976Z"
   }
 ]
