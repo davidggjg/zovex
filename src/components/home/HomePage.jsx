@@ -145,7 +145,7 @@ export default function HomePage({
           })}
           <button
             onClick={() => setShowCatModal(false)}
-            style={{ position: "fixed", bottom: 36, left: "50%", transform: "translateX(-50%)", width: 58, height: 58, borderRadius: 29, background: "#fff", border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 18px rgba(0,0,0,.5)" }}
+            style={{ position: "fixed", bottom: 90, left: "50%", transform: "translateX(-50%)", width: 58, height: 58, borderRadius: 29, background: "#fff", border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 18px rgba(0,0,0,.5)" }}
           >
             <X size={24} color="#000" />
           </button>
@@ -167,8 +167,8 @@ export default function HomePage({
           user={user}
         />
       </main>
-      {/* Telegram bubble */}
-      <div style={{ position: "fixed", bottom: 20, left: 14, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 8 }}>
+      {/* Telegram bubble — bottom מוגבה כדי לא להיחסם ע"י באנר הפרסומת הקבוע בתחתית */}
+      <div style={{ position: "fixed", bottom: 78, left: 14, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 8 }}>
         {showTelegramTip && (
           <div style={{ position: "relative", background: "rgba(26,26,26,0.92)", backdropFilter: "blur(6px)", borderRadius: "14px 14px 14px 4px", padding: "8px 24px 8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,.3)", border: "1px solid #2a2a2a", maxWidth: 150, direction: "rtl" }}>
             <button
