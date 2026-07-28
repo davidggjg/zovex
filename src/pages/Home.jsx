@@ -6,6 +6,7 @@ import MovieDetail from "@/components/MovieDetail.jsx";
 import SeriesView from "@/components/SeriesView.jsx";
 import { useGoogleAuth, LandingScreen } from "@/components/home/Auth.jsx";
 import HomePage from "@/components/home/HomePage.jsx";
+import AdBanner from "@/components/home/AdBanner.jsx";
 import AdminLoginScreen from "@/components/home/AdminLoginScreen.jsx";
 import DonationModalView from "@/components/home/DonationModalView.jsx";
 import { useWatchHistory } from "@/components/home/useWatchHistory";
@@ -273,6 +274,7 @@ function HomeMain({ user, onLogout, isGuest }) {
   return (
     <>
       {donationModal}
+      <AdBanner />
 
       {/* ── Live Player — נפתח מתוך קטגוריית "שידורים חיים", דרך אותו נגן מאוחד כמו כל שאר התוכן ── */}
       {showLivePlayer && (
