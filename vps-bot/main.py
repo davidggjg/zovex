@@ -957,6 +957,84 @@ async def telegram_watchdog():
                 os._exit(1)
         await asyncio.sleep(WATCHDOG_CHECK_INTERVAL_SECS)
 
+# ── Parallel download workers ────────────────────────────────────────────────
+# צוואר הבקבוק שמדדנו: חיבור MTProto יחיד מושך מטלגרם ב-~0.17 MB/s בלבד,
+# בעוד הרשת של השרת מסוגלת ל-12 MB/s. הפתרון: pool של כמה Client-ים של אותו
+# בוט (Pyrogram מאשר מספר חיבורים במקביל לאותו בוט), שכל אחד מושך "רצועה"
+# אחרת של הקובץ בו-זמנית — וכך רוחב-הפס האפקטיבי מוכפל במספר ה-workers.
+# ה-workers האלה הם להורדה בלבד (no_updates=True) — רק ה-bot_client הראשי
+# מטפל בהודעות נכנסות, כדי שלא תהיה כפילות בעיבוד.
+NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "6"))
+download_workers: list[Client] = []
+
+async def start_download_workers():
+    for i in range(NUM_DOWNLOAD_WORKERS):
+        try:
+            w = Client(
+                name=f"stream_worker_{i}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                bot_token=BOT_TOKEN,
+                in_memory=True,       # workers לא צריכים session קבוע
+                no_updates=True,      # לא מקבלים עדכונים — הורדה בלבד
+                workdir=str(DATA_DIR),
+            )
+            await w.start()
+            download_workers.append(w)
+        except Exception as e:
+            log.warning("worker %d לא עלה: %s", i, e)
+    log.info("🚀 %d download workers פעילים", len(download_workers))
+
+async def stop_download_workers():
+    for w in download_workers:
+        try:
+            await w.stop()
+        except Exception:
+            pass
+    download_workers.clear()
+
+async def _worker_fetch_band(worker: Client, chat_id: int, message_id: int,
+                             offset_chunks: int, limit_chunks: int) -> int:
+    """מושך רצועה של הקובץ (limit_chunks חתיכות של 1MB החל מ-offset_chunks)
+    דרך worker נתון, ומחזיר כמה בייטים נמשכו בפועל. משמש למדידה."""
+    msg = await worker.get_messages(chat_id, message_id)
+    total = 0
+    async for chunk in worker.stream_media(msg, offset=offset_chunks, limit=limit_chunks):
+        total += len(chunk)
+    return total
+
+@api.get("/speedtest/{chat_id}/{message_id}")
+async def speedtest(chat_id: int, message_id: int, mb: int = 24, workers: int = 0):
+    """מודד מהירות משיכה מקבילה מטלגרם. mb=כמה מגה למשוך, workers=כמה חיבורים
+    (0 = כל ה-pool). דוגמה: /speedtest/8658294616/7669?mb=24&workers=6
+    להשוואה מול חיבור יחיד: ?workers=1"""
+    pool = download_workers if download_workers else [bot_client]
+    n = len(pool) if workers <= 0 else min(workers, len(pool))
+    n = max(1, n)
+    total_chunks = max(1, mb)                       # ~1MB לחתיכה
+    per = (total_chunks + n - 1) // n               # חתיכות לכל worker
+    t0 = time.time()
+    tasks = []
+    for i in range(n):
+        off = i * per
+        if off >= total_chunks:
+            break
+        lim = min(per, total_chunks - off)
+        tasks.append(_worker_fetch_band(pool[i], chat_id, message_id, off, lim))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    elapsed = time.time() - t0
+    downloaded = sum(r for r in results if isinstance(r, int))
+    errors = [repr(r) for r in results if not isinstance(r, int)]
+    speed = (downloaded / elapsed) if elapsed > 0 else 0
+    return JSONResponse({
+        "workers_used": len(tasks),
+        "workers_available": len(download_workers),
+        "downloaded_mb": round(downloaded / 1048576, 1),
+        "seconds": round(elapsed, 2),
+        "speed_mb_per_sec": round(speed / 1048576, 2),
+        "errors": errors,
+    })
+
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 @api.on_event("startup")
@@ -965,6 +1043,8 @@ async def startup():
     restore_from_dataset()
     await bot_client.start()
     _hls_relay_client = httpx.AsyncClient(timeout=15)
+    # ה-workers עולים ברקע כדי לא לעכב את עליית השרת (כל אחד עושה auth נפרד)
+    asyncio.create_task(start_download_workers())
     asyncio.create_task(keep_alive())
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
@@ -973,6 +1053,7 @@ async def startup():
 
 @api.on_event("shutdown")
 async def shutdown():
+    await stop_download_workers()
     await bot_client.stop()
     if _hls_relay_client:
         await _hls_relay_client.aclose()
