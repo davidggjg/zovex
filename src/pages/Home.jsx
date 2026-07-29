@@ -255,7 +255,7 @@ function HomeMain({ user, onLogout, isGuest }) {
       seriesName={selectedSeries}
       seriesMap={seriesMap}
       onEpisodePlay={openWithKalturaRefresh}
-      onClose={() => { setSelectedSeries(null); window.history.replaceState(null, "", "/zovex/"); }}
+      onClose={() => { setSelectedSeries(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
     />
   );
 
@@ -265,7 +265,7 @@ function HomeMain({ user, onLogout, isGuest }) {
       movie={selectedMovie}
       movies={movies}
       onPlay={() => openWithKalturaRefresh(selectedMovie)}
-      onClose={() => { setSelectedMovie(null); window.history.replaceState(null, "", "/zovex/"); }}
+      onClose={() => { setSelectedMovie(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
       onSelectMovie={setSelectedMovie}
     />
   );
@@ -280,7 +280,7 @@ function HomeMain({ user, onLogout, isGuest }) {
       {showLivePlayer && (
         <CustomVideoPlayer
           movie={{ ...showLivePlayer, is_live: true }}
-          onClose={() => { setShowLivePlayer(null); window.history.replaceState(null, "", "/zovex/"); }}
+          onClose={() => { setShowLivePlayer(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
         />
       )}
 

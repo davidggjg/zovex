@@ -1041,7 +1041,7 @@ function ApiKeysPanel({ cardStyle, inp, dot }) {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const apiUrl = `${window.location.origin}/zovex/api`;
+  const apiUrl = `${window.location.origin}${import.meta.env.BASE_URL}api`;
 
   return (
     <div style={{ ...cardStyle, border: "2px solid #0071e3" }}>
