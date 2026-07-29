@@ -457,21 +457,14 @@ async def stream_session_range(sess: "StreamSession", start: int, end: int) -> A
     (מהירה פי כמה); אחרת נופל חזרה למנגנון ה-buffer החד-חיבורי המקורי."""
     pos = start
     if download_workers:
-        # ── מסלול מקבילי: מושכים בחלונות, כל חלון מפוצל בין ה-workers ──
-        while pos <= end:
-            win_end = min(end + 1, pos + PARALLEL_WINDOW_BYTES)
-            got = 0
-            try:
-                async for data in pool_stream_window(sess.msg, pos, win_end):
-                    got += len(data)
-                    sess.last_used = time.time()
-                    yield data
-            except Exception as e:
-                log.error("משיכה מקבילה נכשלה ב-offset %d: %s", pos, e)
-                break
-            if got == 0:
-                break  # סוף קובץ או כשל
-            pos += got
+        # ── מסלול מקבילי: pool_stream_window מטפל בעצמו בחלונות + pipeline ──
+        try:
+            async for data in pool_stream_window(sess.msg, start, end + 1):
+                pos += len(data)
+                sess.last_used = time.time()
+                yield data
+        except Exception as e:
+            log.error("משיכה מקבילה נכשלה ב-offset %d: %s", pos, e)
     else:
         # ── מסלול fallback: buffer + generator יחיד (המנגנון המקורי) ──
         while pos <= end:
@@ -988,8 +981,10 @@ async def telegram_watchdog():
 NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "2"))
 BAND_TIMEOUT_SECS = 45
 # גודל "חלון" משיכה מקבילה בהזרמה: כל חלון מפוצל בין ה-workers ונמשך במקביל.
-# קטן מדי = תקורה (הרבה פתיחות stream); גדול מדי = השהיה ארוכה לבייט הראשון.
-PARALLEL_WINDOW_BYTES = int(os.environ.get("PARALLEL_WINDOW_BYTES", str(8 * 1024 * 1024)))
+# חלון גדול = פחות פתיחות-stream (שהן יקרות!) = תפוקה גבוהה יותר. חלון ראשון
+# קטן = התחלה מהירה. pipeline מושך את החלון הבא בזמן ששולחים את הנוכחי.
+PARALLEL_WINDOW_BYTES = int(os.environ.get("PARALLEL_WINDOW_BYTES", str(32 * 1024 * 1024)))
+FIRST_WINDOW_BYTES = int(os.environ.get("FIRST_WINDOW_BYTES", str(4 * 1024 * 1024)))
 download_workers: list[Client] = []
 
 async def start_download_workers():
@@ -1082,18 +1077,18 @@ async def speedtest(chat_id: int, message_id: int, mb: int = 24, workers: int = 
         "errors": errors,
     })
 
-async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> AsyncGenerator[bytes, None]:
-    """מושך את [start_byte, end_byte) במקביל דרך כל ה-workers, ומניב את הבתים
-    *לפי הסדר*. מפצל את הטווח לרצועות של chunks, מריץ את כל הרצועות בו-זמנית
-    (כל worker על חיבור נפרד), ומניב רצועה-רצועה לפי הסדר ברגע שהיא מוכנה —
-    כך שהמשיכה מקבילית (מהירה) אבל הפלט ללקוח נשאר רציף ותקין."""
+async def _fetch_window(msg: Message, w_start: int, w_end: int) -> bytes:
+    """מושך חלון [w_start, w_end) במלואו: מפצל אותו בין ה-workers, כל worker
+    פותח stream *אחד* (בלי פתיחות חוזרות) ומושך את הרצועה שלו במלואה, ואז
+    מחברים לפי הסדר. זו בדיוק השיטה שנתנה 4.65 MB/s בבדיקה — חיבור אחד לכל
+    worker לכל חלון, ולא פתיחה מחדש כל כמה MB."""
     pool = download_workers if download_workers else [bot_client]
     n = len(pool)
-    start_chunk = start_byte // PYROGRAM_CHUNK_SIZE
-    end_chunk = (end_byte + PYROGRAM_CHUNK_SIZE - 1) // PYROGRAM_CHUNK_SIZE
+    start_chunk = w_start // PYROGRAM_CHUNK_SIZE
+    end_chunk = (w_end + PYROGRAM_CHUNK_SIZE - 1) // PYROGRAM_CHUNK_SIZE
     total_chunks = end_chunk - start_chunk
     if total_chunks <= 0:
-        return
+        return b""
     per = (total_chunks + n - 1) // n
 
     async def _band(worker: Client, off_chunks: int, lim_chunks: int) -> bytes:
@@ -1113,14 +1108,43 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
             asyncio.wait_for(_band(pool[i], off, lim), timeout=BAND_TIMEOUT_SECS)))
         band_starts.append(off * PYROGRAM_CHUNK_SIZE)
 
-    for idx, task in enumerate(tasks):
-        part = await task                       # ממתין לפי הסדר (band0 קודם)
+    parts = await asyncio.gather(*tasks)
+    out = bytearray()
+    for idx, part in enumerate(parts):
         band_start = band_starts[idx]
-        # חיתוך החפיפה המדויקת עם הטווח הגלובלי המבוקש
-        lo = max(start_byte, band_start) - band_start
-        hi = min(end_byte, band_start + len(part)) - band_start
+        lo = max(w_start, band_start) - band_start
+        hi = min(w_end, band_start + len(part)) - band_start
         if lo < hi:
-            yield part[lo:hi]
+            out.extend(part[lo:hi])
+    return bytes(out)
+
+async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> AsyncGenerator[bytes, None]:
+    """מזרים [start_byte, end_byte) בחלונות גדולים מקביליים, עם pipeline: בזמן
+    ששולחים חלון ללקוח, החלון הבא כבר נמשך ברקע — כך שאין המתנה בין חלונות.
+    החלון הראשון קטן (התחלה מהירה), השאר גדולים (תפוקה גבוהה, מעט פתיחות)."""
+    if end_byte <= start_byte:
+        return
+    pos = start_byte
+    win = FIRST_WINDOW_BYTES
+    w_end = min(end_byte, pos + win)
+    next_task = asyncio.ensure_future(_fetch_window(msg, pos, w_end))
+    cur_end = w_end
+    while next_task is not None:
+        try:
+            data = await next_task
+        except Exception as e:
+            log.error("חלון משיכה נכשל ב-%d: %s", pos, e)
+            return
+        # מתחילים את החלון הבא *לפני* שמניבים את הנוכחי (pipeline)
+        if cur_end < end_byte:
+            win = PARALLEL_WINDOW_BYTES
+            nxt_end = min(end_byte, cur_end + win)
+            next_task = asyncio.ensure_future(_fetch_window(msg, cur_end, nxt_end))
+            prev_end, cur_end = cur_end, nxt_end
+        else:
+            next_task = None
+        if data:
+            yield data
 
 # ── משיכה מקבילה ללא-auth (שימוש חוזר ב-auth_key הקיים של הבוט) ───────────────
 # הטכניקה של FastTelethon: פותחים כמה חיבורי media לאותו DC שמשתמשים ב-auth_key
