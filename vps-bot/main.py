@@ -980,7 +980,11 @@ async def telegram_watchdog():
 # אחרת של הקובץ בו-זמנית — וכך רוחב-הפס האפקטיבי מוכפל במספר ה-workers.
 # ה-workers האלה הם להורדה בלבד (no_updates=True) — רק ה-bot_client הראשי
 # מטפל בהודעות נכנסות, כדי שלא תהיה כפילות בעיבוד.
-NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "4"))
+# ברירת מחדל 0: הגישה של workers שכל אחד עושה auth.ImportBotAuthorization
+# נחסמת ע"י טלגרם (FLOOD_WAIT של דקות ארוכות). המקביליות האמיתית נעשית ע"י
+# חיבורים שמשתמשים בהתחברות הקיימת של הבוט הראשי (ראה pool_stream_window /
+# הגישה ללא-auth), בלי התחברויות חדשות. משאירים את הדגל לניסויים בלבד.
+NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "0"))
 BAND_TIMEOUT_SECS = 45
 # גודל "חלון" משיכה מקבילה בהזרמה: כל חלון מפוצל בין ה-workers ונמשך במקביל.
 # קטן מדי = תקורה (הרבה פתיחות stream); גדול מדי = השהיה ארוכה לבייט הראשון.
