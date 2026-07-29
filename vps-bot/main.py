@@ -25,6 +25,9 @@ from pydantic import BaseModel
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
+from pyrogram.session import Session, Auth
+from pyrogram.file_id import FileId
+from pyrogram.raw import functions, types as raw_types
 from huggingface_hub import HfApi, hf_hub_download
 import uvicorn
 
@@ -1124,6 +1127,118 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
         hi = min(end_byte, band_start + len(part)) - band_start
         if lo < hi:
             yield part[lo:hi]
+
+# ── משיכה מקבילה ללא-auth (שימוש חוזר ב-auth_key הקיים של הבוט) ───────────────
+# הטכניקה של FastTelethon: פותחים כמה חיבורי media לאותו DC שמשתמשים ב-auth_key
+# שכבר קיים לבוט הראשי — בלי auth.ImportBotAuthorization (מה שנחסם ב-FLOOD_WAIT).
+# כל חיבור מושך חלק אחר של הקובץ ב-upload.GetFile במקביל. פותרים את החיבורים
+# פעם אחת ושומרים ב-pool לפי DC.
+MEDIA_CHUNK = 1024 * 1024
+_media_sessions: dict = {}          # dc_id -> list[Session]
+_media_sessions_lock = asyncio.Lock()
+
+async def _make_media_session(dc_id: int) -> Session:
+    test_mode = await bot_client.storage.test_mode()
+    home_dc = await bot_client.storage.dc_id()
+    if dc_id == home_dc:
+        auth_key = await bot_client.storage.auth_key()
+    else:
+        auth_key = await Auth(bot_client, dc_id, test_mode).create()
+    session = Session(bot_client, dc_id, auth_key, test_mode, is_media=True)
+    await session.start()
+    if dc_id != home_dc:
+        for _ in range(3):
+            exported = await bot_client.invoke(functions.auth.ExportAuthorization(dc_id=dc_id))
+            try:
+                await session.invoke(functions.auth.ImportAuthorization(
+                    id=exported.id, bytes=exported.bytes))
+                break
+            except Exception as e:
+                log.warning("ImportAuthorization ל-DC %d נכשל, מנסה שוב: %s", dc_id, e)
+    log.info("✅ נוצר media session ל-DC %d", dc_id)
+    return session
+
+async def get_media_session_pool(dc_id: int, n: int) -> list:
+    async with _media_sessions_lock:
+        pool = _media_sessions.get(dc_id, [])
+        while len(pool) < n:
+            try:
+                pool.append(await _make_media_session(dc_id))
+            except Exception as e:
+                log.error("יצירת media session נכשלה: %s", e)
+                break
+        _media_sessions[dc_id] = pool
+    return pool[:n]
+
+def _file_location(media):
+    f = FileId.decode(media.file_id)
+    return f.dc_id, raw_types.InputDocumentFileLocation(
+        id=f.media_id,
+        access_hash=f.access_hash,
+        file_reference=f.file_reference,
+        thumb_size="",
+    )
+
+async def _band_getfile(session: Session, location, start_byte: int, end_byte: int) -> int:
+    """מושך [start_byte, end_byte) דרך session נתון ב-GetFile, מחזיר כמה בייטים נמשכו."""
+    total = 0
+    offset = (start_byte // MEDIA_CHUNK) * MEDIA_CHUNK
+    while offset < end_byte:
+        try:
+            r = await session.invoke(functions.upload.GetFile(
+                location=location, offset=offset, limit=MEDIA_CHUNK, precise=False))
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
+        chunk = getattr(r, "bytes", b"")
+        if not chunk:
+            break
+        total += len(chunk)
+        offset += len(chunk)
+        if len(chunk) < MEDIA_CHUNK:
+            break
+    return total
+
+@api.get("/speedtest2/{chat_id}/{message_id}")
+async def speedtest2(chat_id: int, message_id: int, mb: int = 24, conn: int = 4):
+    """בדיקת מהירות למשיכה מקבילה ללא-auth (חיבורים שמשתמשים ב-auth הקיים).
+    דוגמה: /speedtest2/8658294616/7669?mb=24&conn=4"""
+    try:
+        msg = await fetch_message(chat_id, message_id)
+        media = msg.video or msg.audio or msg.document or msg.video_note
+        if not media:
+            raise HTTPException(404, "no media")
+        dc_id, location = _file_location(media)
+        sessions = await get_media_session_pool(dc_id, conn)
+        if not sessions:
+            return JSONResponse({"error": "no media sessions could be created", "dc_id": dc_id})
+        n = len(sessions)
+        total_bytes = mb * 1024 * 1024
+        per = (total_bytes + n - 1) // n
+        t0 = time.time()
+        tasks = []
+        for i in range(n):
+            s = i * per
+            if s >= total_bytes:
+                break
+            e = min(total_bytes, s + per)
+            tasks.append(_band_getfile(sessions[i], location, s, e))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        elapsed = time.time() - t0
+        downloaded = sum(r for r in results if isinstance(r, int))
+        errors = [repr(r) for r in results if not isinstance(r, int)]
+        speed = downloaded / elapsed if elapsed > 0 else 0
+        return JSONResponse({
+            "dc_id": dc_id,
+            "connections": n,
+            "downloaded_mb": round(downloaded / 1048576, 1),
+            "seconds": round(elapsed, 2),
+            "speed_mb_per_sec": round(speed / 1048576, 2),
+            "errors": errors,
+        })
+    except Exception as e:
+        log.exception("speedtest2 failed")
+        return JSONResponse({"error": repr(e)}, status_code=500)
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
