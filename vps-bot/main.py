@@ -983,11 +983,9 @@ async def telegram_watchdog():
 # אחרת של הקובץ בו-זמנית — וכך רוחב-הפס האפקטיבי מוכפל במספר ה-workers.
 # ה-workers האלה הם להורדה בלבד (no_updates=True) — רק ה-bot_client הראשי
 # מטפל בהודעות נכנסות, כדי שלא תהיה כפילות בעיבוד.
-# ברירת מחדל 0: הגישה של workers שכל אחד עושה auth.ImportBotAuthorization
-# נחסמת ע"י טלגרם (FLOOD_WAIT של דקות ארוכות). המקביליות האמיתית נעשית ע"י
-# חיבורים שמשתמשים בהתחברות הקיימת של הבוט הראשי (ראה pool_stream_window /
-# הגישה ללא-auth), בלי התחברויות חדשות. משאירים את הדגל לניסויים בלבד.
-NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "0"))
+# 2 workers עם session קבוע: כל אחד מתחבר פעם אחת בלבד (FLOOD_WAIT הוא חד-פעמי),
+# ואז נשאר קבוע ונותן מקביליות מוכחת (~פי 2-3 מהיר יותר). ניתן לשנות דרך env.
+NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "2"))
 BAND_TIMEOUT_SECS = 45
 # גודל "חלון" משיכה מקבילה בהזרמה: כל חלון מפוצל בין ה-workers ונמשך במקביל.
 # קטן מדי = תקורה (הרבה פתיחות stream); גדול מדי = השהיה ארוכה לבייט הראשון.
@@ -999,34 +997,30 @@ async def start_download_workers():
     # בו-זמנית עם אותו טוקן בוט. session קבוע (in_memory=False) → כל worker
     # מתחבר פעם אחת בלבד וברסטארט הבא רק מתחבר-מחדש מהר. ניסיונות חוזרים
     # לכל worker כדי לעמוד בכשלים זמניים.
+    # ניסיון אחד בלבד לכל worker: אם ההתחברות נכשלת ב-FLOOD_WAIT, אין טעם
+    # לנסות שוב מיד (רק מחמיר את החסימה). session קבוע → אחרי התחברות מוצלחת
+    # אחת, הפעלות הבאות רק מתחברות-מחדש בלי auth חדש.
     for i in range(NUM_DOWNLOAD_WORKERS):
-        started = False
-        for attempt in range(3):
-            w = Client(
-                name=f"stream_worker_{i}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                bot_token=BOT_TOKEN,
-                in_memory=False,      # session קבוע — לא מתחבר מאפס כל restart
-                no_updates=True,      # הורדה בלבד, בלי עדכונים
-                workdir=str(DATA_DIR),
-            )
+        w = Client(
+            name=f"stream_worker_{i}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            bot_token=BOT_TOKEN,
+            in_memory=False,      # session קבוע
+            no_updates=True,      # הורדה בלבד
+            workdir=str(DATA_DIR),
+        )
+        try:
+            await asyncio.wait_for(w.start(), timeout=40)
+            download_workers.append(w)
+            log.info("✅ worker %d עלה (%d/%d פעילים)", i, len(download_workers), NUM_DOWNLOAD_WORKERS)
+        except Exception as e:
+            log.warning("⚠️ worker %d לא עלה (יתכן FLOOD_WAIT — ננסה בהפעלה הבאה): %s", i, e)
             try:
-                await asyncio.wait_for(w.start(), timeout=40)
-                download_workers.append(w)
-                log.info("✅ worker %d עלה (%d/%d פעילים)", i, len(download_workers), NUM_DOWNLOAD_WORKERS)
-                started = True
-                break
-            except Exception as e:
-                log.warning("⚠️ worker %d ניסיון %d/3 נכשל: %s", i, attempt + 1, e)
-                try:
-                    await w.stop()
-                except Exception:
-                    pass
-                await asyncio.sleep(4)
-        if not started:
-            log.error("❌ worker %d לא עלה אחרי 3 ניסיונות", i)
-        await asyncio.sleep(2)   # השהיה בין workers כדי לא להציף את הauth
+                await w.stop()
+            except Exception:
+                pass
+        await asyncio.sleep(3)   # השהיה בין workers כדי לא להציף את ה-auth
     log.info("🚀 סה\"כ %d/%d download workers פעילים", len(download_workers), NUM_DOWNLOAD_WORKERS)
 
 async def stop_download_workers():
