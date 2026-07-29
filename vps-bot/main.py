@@ -450,31 +450,47 @@ async def reap_idle_sessions():
                 del STREAM_SESSIONS[k]
 
 async def stream_session_range(sess: "StreamSession", start: int, end: int) -> AsyncGenerator[bytes, None]:
-    """מזרים את הטווח המבוקש מתוך ה-session (buffer + generator משותפים),
-    בלי לפתוח session חדש מול טלגרם על כל בקשה — רק כשקופצים רחוק (seek גדול)."""
+    """מזרים את הטווח המבוקש. אם יש download workers — משתמש במשיכה מקבילה
+    (מהירה פי כמה); אחרת נופל חזרה למנגנון ה-buffer החד-חיבורי המקורי."""
     pos = start
-    while pos <= end:
-        chunk_target = min(end + 1, pos + PYROGRAM_CHUNK_SIZE)
-        await sess.ensure(pos, chunk_target)
-        async with sess.lock:
-            rel_start = pos - sess.buf_start
-            available_end = min(len(sess.buf), end + 1 - sess.buf_start)
-            if rel_start < 0 or rel_start >= available_end:
-                break  # הגענו לסוף מה שיש (למשל סוף הקובץ)
-            data = bytes(sess.buf[rel_start:available_end])
-            sess.last_used = time.time()
-        yield data
-        pos += len(data)
-    # אם לא הגענו עד הסוף שהובטח (כישלון חוזר בטלגרם) - ה-Content-Length
-    # כבר נשלח ללקוח מראש, אז חייבים עדיין לשלוח את מספר הבייטים המובטח,
-    # אחרת uvicorn קורס עם RuntimeError: Response content shorter than
-    # Content-Length. ממלאים באפסים במקום לקצר את התגובה.
+    if download_workers:
+        # ── מסלול מקבילי: מושכים בחלונות, כל חלון מפוצל בין ה-workers ──
+        while pos <= end:
+            win_end = min(end + 1, pos + PARALLEL_WINDOW_BYTES)
+            got = 0
+            try:
+                async for data in pool_stream_window(sess.msg, pos, win_end):
+                    got += len(data)
+                    sess.last_used = time.time()
+                    yield data
+            except Exception as e:
+                log.error("משיכה מקבילה נכשלה ב-offset %d: %s", pos, e)
+                break
+            if got == 0:
+                break  # סוף קובץ או כשל
+            pos += got
+    else:
+        # ── מסלול fallback: buffer + generator יחיד (המנגנון המקורי) ──
+        while pos <= end:
+            chunk_target = min(end + 1, pos + PYROGRAM_CHUNK_SIZE)
+            await sess.ensure(pos, chunk_target)
+            async with sess.lock:
+                rel_start = pos - sess.buf_start
+                available_end = min(len(sess.buf), end + 1 - sess.buf_start)
+                if rel_start < 0 or rel_start >= available_end:
+                    break
+                data = bytes(sess.buf[rel_start:available_end])
+                sess.last_used = time.time()
+            yield data
+            pos += len(data)
+        asyncio.create_task(sess.prefetch_ahead())
+    # אם לא הגענו עד הסוף שהובטח - ה-Content-Length כבר נשלח ללקוח מראש, אז
+    # חייבים לשלוח את מספר הבייטים המובטח, אחרת uvicorn קורס עם
+    # RuntimeError: Response content shorter than Content-Length.
     if pos <= end:
         remaining = end - pos + 1
         log.error("stream_session_range: ממלא %d בייטים ריקים (טלגרם לא הצליח לספק)", remaining)
         yield b"\x00" * remaining
-    # אחרי שסיפקנו את המבוקש, ממשיכים למשוך עוד קדימה ברקע (לא חוסם את התגובה)
-    asyncio.create_task(sess.prefetch_ahead())
 
 # ── Stream Route ──────────────────────────────────────────────────────────────
 
@@ -966,6 +982,9 @@ async def telegram_watchdog():
 # מטפל בהודעות נכנסות, כדי שלא תהיה כפילות בעיבוד.
 NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "4"))
 BAND_TIMEOUT_SECS = 45
+# גודל "חלון" משיכה מקבילה בהזרמה: כל חלון מפוצל בין ה-workers ונמשך במקביל.
+# קטן מדי = תקורה (הרבה פתיחות stream); גדול מדי = השהיה ארוכה לבייט הראשון.
+PARALLEL_WINDOW_BYTES = int(os.environ.get("PARALLEL_WINDOW_BYTES", str(8 * 1024 * 1024)))
 download_workers: list[Client] = []
 
 async def start_download_workers():
@@ -1044,6 +1063,46 @@ async def speedtest(chat_id: int, message_id: int, mb: int = 24, workers: int = 
         "speed_mb_per_sec": round(speed / 1048576, 2),
         "errors": errors,
     })
+
+async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> AsyncGenerator[bytes, None]:
+    """מושך את [start_byte, end_byte) במקביל דרך כל ה-workers, ומניב את הבתים
+    *לפי הסדר*. מפצל את הטווח לרצועות של chunks, מריץ את כל הרצועות בו-זמנית
+    (כל worker על חיבור נפרד), ומניב רצועה-רצועה לפי הסדר ברגע שהיא מוכנה —
+    כך שהמשיכה מקבילית (מהירה) אבל הפלט ללקוח נשאר רציף ותקין."""
+    pool = download_workers if download_workers else [bot_client]
+    n = len(pool)
+    start_chunk = start_byte // PYROGRAM_CHUNK_SIZE
+    end_chunk = (end_byte + PYROGRAM_CHUNK_SIZE - 1) // PYROGRAM_CHUNK_SIZE
+    total_chunks = end_chunk - start_chunk
+    if total_chunks <= 0:
+        return
+    per = (total_chunks + n - 1) // n
+
+    async def _band(worker: Client, off_chunks: int, lim_chunks: int) -> bytes:
+        buf = bytearray()
+        async for chunk in worker.stream_media(msg, offset=off_chunks, limit=lim_chunks):
+            buf.extend(chunk)
+        return bytes(buf)
+
+    tasks = []
+    band_starts = []
+    for i in range(n):
+        off = start_chunk + i * per
+        if off >= end_chunk:
+            break
+        lim = min(per, end_chunk - off)
+        tasks.append(asyncio.ensure_future(
+            asyncio.wait_for(_band(pool[i], off, lim), timeout=BAND_TIMEOUT_SECS)))
+        band_starts.append(off * PYROGRAM_CHUNK_SIZE)
+
+    for idx, task in enumerate(tasks):
+        part = await task                       # ממתין לפי הסדר (band0 קודם)
+        band_start = band_starts[idx]
+        # חיתוך החפיפה המדויקת עם הטווח הגלובלי המבוקש
+        lo = max(start_byte, band_start) - band_start
+        hi = min(end_byte, band_start + len(part)) - band_start
+        if lo < hi:
+            yield part[lo:hi]
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
