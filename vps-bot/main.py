@@ -802,6 +802,109 @@ async def ping():
     stats["last_ping"] = datetime.utcnow().isoformat()
     return JSONResponse({"status": "ok"})
 
+# ── מיגרציה לערוץ (דרך הבוט הראשי — יש לו את כל ה-peers בזיכרון) ─────────────
+# מריצים דרך הבוט הרץ (bot_client) כי ה-session הקבוע שלו כבר מכיר גם את
+# הצ'אטים המקוריים (הקבצים הישנים) וגם את הערוץ. copy_message מעביר את הקובץ
+# עצמו בלי הורדה מחדש. checkpoint לחידוש, טיפול ב-FloodWait.
+MIGRATION_PROGRESS_FILE = DATA_DIR / "migration_progress.json"
+MIGRATION_OUT_FILE = DATA_DIR / "movies_migrated.json"
+MOVIES_SRC_URL = "https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json"
+_OLD_URL_RE = re.compile(r"https?://[^/]*hf\.space/stream/(-?\d+)/(\d+)")
+_migration = {"running": False, "migrated": 0, "failed": 0, "skipped": 0,
+              "total": 0, "done": False, "error": None, "last": ""}
+
+def _load_mig_progress():
+    if MIGRATION_PROGRESS_FILE.exists():
+        try:
+            return json.loads(MIGRATION_PROGRESS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+async def _run_migration(limit: int, new_base: str):
+    import urllib.request
+    try:
+        _migration.update(running=True, done=False, error=None,
+                          migrated=0, failed=0, skipped=0, total=0, last="")
+        channel = STREAM_CHANNEL_ID
+        if not channel:
+            _migration.update(error="STREAM_CHANNEL_ID לא מוגדר", running=False, done=True)
+            return
+        # ודא שהבוט הראשי מזהה את הערוץ
+        try:
+            await bot_client.get_chat(channel)
+        except Exception as e:
+            _migration.update(error=f"הבוט הראשי לא מזהה את הערוץ ({e}). הוסף את Davidvvggbot כאדמין ושלח הודעה בערוץ.",
+                              running=False, done=True)
+            return
+        data = json.loads(urllib.request.urlopen(MOVIES_SRC_URL, timeout=60).read().decode())
+        progress = _load_mig_progress()
+        _migration["total"] = len(data)
+        for entry in data:
+            url = entry.get("video_url") or entry.get("video_id") or ""
+            m = _OLD_URL_RE.search(url)
+            if not m:
+                continue
+            old_chat, old_msg = int(m.group(1)), int(m.group(2))
+            key = f"{old_chat}:{old_msg}"
+            if key in progress:
+                new_id = progress[key]
+                _migration["skipped"] += 1
+            else:
+                if limit and _migration["migrated"] >= limit:
+                    continue
+                try:
+                    res = await bot_client.copy_message(
+                        chat_id=channel, from_chat_id=old_chat, message_id=old_msg)
+                    new_id = res.id
+                    progress[key] = new_id
+                    _migration["migrated"] += 1
+                    _migration["last"] = f"{key} -> {new_id}"
+                    if _migration["migrated"] % 20 == 0:
+                        MIGRATION_PROGRESS_FILE.write_text(json.dumps(progress, ensure_ascii=False))
+                    await asyncio.sleep(0.7)
+                except FloodWait as e:
+                    MIGRATION_PROGRESS_FILE.write_text(json.dumps(progress, ensure_ascii=False))
+                    await asyncio.sleep(e.value + 1)
+                    try:
+                        res = await bot_client.copy_message(
+                            chat_id=channel, from_chat_id=old_chat, message_id=old_msg)
+                        new_id = res.id
+                        progress[key] = new_id
+                        _migration["migrated"] += 1
+                    except Exception:
+                        _migration["failed"] += 1
+                        continue
+                except Exception:
+                    _migration["failed"] += 1
+                    continue
+            new_url = f"{new_base}/stream/{channel}/{new_id}"
+            entry["video_url"] = new_url
+            entry["video_id"] = new_url
+        MIGRATION_PROGRESS_FILE.write_text(json.dumps(progress, ensure_ascii=False))
+        MIGRATION_OUT_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _migration.update(running=False, done=True)
+        log.info("✅ מיגרציה הושלמה: %d הועברו, %d נכשלו", _migration["migrated"], _migration["failed"])
+    except Exception as e:
+        log.exception("migration failed")
+        _migration.update(error=repr(e), running=False, done=True)
+
+@api.get("/admin/migrate")
+async def admin_migrate(request: Request, limit: int = 0, base: str = "http://213.139.78.39"):
+    # מותר רק מ-localhost (הרצה מהשרת עצמו)
+    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="localhost only")
+    if _migration["running"]:
+        return JSONResponse({"status": "כבר רץ", **_migration})
+    asyncio.create_task(_run_migration(limit, base))
+    return JSONResponse({"status": "התחיל", "limit": limit, "base": base})
+
+@api.get("/admin/migrate/status")
+async def admin_migrate_status(request: Request):
+    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="localhost only")
+    return JSONResponse(dict(_migration))
+
 # ── ריענון שרת דרך קישור פשוט ──────────────────────────────────────────────
 # מיועד לשליחה למישהו שצריך לרענן את השרת בעצמו כשהוא נתקע, בלי גישה
 # לחשבון Hugging Face. שולחים לו קישור מהצורה:
