@@ -964,7 +964,8 @@ async def telegram_watchdog():
 # אחרת של הקובץ בו-זמנית — וכך רוחב-הפס האפקטיבי מוכפל במספר ה-workers.
 # ה-workers האלה הם להורדה בלבד (no_updates=True) — רק ה-bot_client הראשי
 # מטפל בהודעות נכנסות, כדי שלא תהיה כפילות בעיבוד.
-NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "6"))
+NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "4"))
+BAND_TIMEOUT_SECS = 45
 download_workers: list[Client] = []
 
 async def start_download_workers():
@@ -993,11 +994,14 @@ async def stop_download_workers():
             pass
     download_workers.clear()
 
-async def _worker_fetch_band(worker: Client, chat_id: int, message_id: int,
+async def _worker_fetch_band(worker: Client, msg: Message,
                              offset_chunks: int, limit_chunks: int) -> int:
     """מושך רצועה של הקובץ (limit_chunks חתיכות של 1MB החל מ-offset_chunks)
-    דרך worker נתון, ומחזיר כמה בייטים נמשכו בפועל. משמש למדידה."""
-    msg = await worker.get_messages(chat_id, message_id)
+    דרך worker נתון, ומחזיר כמה בייטים נמשכו בפועל.
+
+    חשוב: מקבל את ה-Message כבר פתור מהבוט הראשי (שיש לו peer cache), במקום
+    שכל worker יפתור בעצמו — worker עם session טרי לא מכיר את הצ'אט ונתקע.
+    ה-file_id שבתוך ה-msg תקף לכל חיבור של אותו בוט, אז stream_media עובד."""
     total = 0
     async for chunk in worker.stream_media(msg, offset=offset_chunks, limit=limit_chunks):
         total += len(chunk)
@@ -1006,8 +1010,13 @@ async def _worker_fetch_band(worker: Client, chat_id: int, message_id: int,
 @api.get("/speedtest/{chat_id}/{message_id}")
 async def speedtest(chat_id: int, message_id: int, mb: int = 24, workers: int = 0):
     """מודד מהירות משיכה מקבילה מטלגרם. mb=כמה מגה למשוך, workers=כמה חיבורים
-    (0 = כל ה-pool). דוגמה: /speedtest/8658294616/7669?mb=24&workers=6
+    (0 = כל ה-pool). דוגמה: /speedtest/8658294616/7669?mb=24&workers=4
     להשוואה מול חיבור יחיד: ?workers=1"""
+    # פותרים את ההודעה פעם אחת דרך הבוט הראשי (הוא בעל ה-peer cache)
+    msg = await fetch_message(chat_id, message_id)
+    if not msg or not (msg.video or msg.audio or msg.document or msg.video_note):
+        raise HTTPException(status_code=404, detail="No media found")
+
     pool = download_workers if download_workers else [bot_client]
     n = len(pool) if workers <= 0 else min(workers, len(pool))
     n = max(1, n)
@@ -1020,7 +1029,8 @@ async def speedtest(chat_id: int, message_id: int, mb: int = 24, workers: int = 
         if off >= total_chunks:
             break
         lim = min(per, total_chunks - off)
-        tasks.append(_worker_fetch_band(pool[i], chat_id, message_id, off, lim))
+        tasks.append(asyncio.wait_for(
+            _worker_fetch_band(pool[i], msg, off, lim), timeout=BAND_TIMEOUT_SECS))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.time() - t0
     downloaded = sum(r for r in results if isinstance(r, int))
