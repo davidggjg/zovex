@@ -28,6 +28,7 @@ from pyrogram.errors import FloodWait
 from pyrogram.session import Session, Auth
 from pyrogram.file_id import FileId
 from pyrogram.raw import functions, types as raw_types
+from pyrogram.handlers import MessageHandler
 from huggingface_hub import HfApi, hf_hub_download
 import uvicorn
 
@@ -488,10 +489,159 @@ async def stream_session_range(sess: "StreamSession", start: int, end: int) -> A
         log.error("stream_session_range: ממלא %d בייטים ריקים (טלגרם לא הצליח לספק)", remaining)
         yield b"\x00" * remaining
 
+# ── Stream bot pool: ריבוי בוטים לתוכן בערוץ (רוטציה + זיהוי חניקה) ──────────
+# תובנה מהבדיקות: בוט *טרי* מושך מהערוץ ב-~4.2 MB/s, אבל בוט שנחנק (FLOOD_WAIT
+# מרוב שימוש) יורד ל-0.65. הפתרון: pool של בוטים (כולם אדמינים בערוץ), השרת
+# מסובב ביניהם, וכשבוט נחנק (FloodWait/timeout) מסמן אותו ב-cooldown ומדלג לבא.
+STREAM_CHANNEL_ID = int(os.environ.get("STREAM_CHANNEL_ID", "0"))
+STREAM_BOTS_FILE = DATA_DIR.parent / "stream_bots.txt"   # /opt/zovex-bot/stream_bots.txt
+_stream_bots: list = []
+_stream_rr = 0
+_stream_rr_lock = asyncio.Lock()
+
+async def _pool_noop(client, message):
+    pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
+
+async def start_stream_pool():
+    if not STREAM_BOTS_FILE.exists():
+        log.info("אין stream_bots.txt — pool בוטים לא פעיל")
+        return
+    tokens = [t.strip() for t in STREAM_BOTS_FILE.read_text().splitlines() if t.strip()]
+    for i, tok in enumerate(tokens):
+        try:
+            c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
+                       in_memory=False, no_updates=False, workdir=str(DATA_DIR))
+            c.add_handler(MessageHandler(_pool_noop, filters.channel))
+            await asyncio.wait_for(c.start(), timeout=40)
+            if STREAM_CHANNEL_ID:
+                try:
+                    await c.get_chat(STREAM_CHANNEL_ID)
+                except Exception:
+                    pass  # יזוהה כשיגיע פוסט חדש לערוץ
+            _stream_bots.append({"client": c, "name": f"pool_{i}", "cooldown_until": 0.0})
+            log.info("✅ pool bot %d עלה (%d פעילים)", i, len(_stream_bots))
+        except Exception as e:
+            log.warning("⚠️ pool bot %d לא עלה: %s", i, e)
+        await asyncio.sleep(2)
+    log.info("🚀 stream pool: %d בוטים פעילים", len(_stream_bots))
+
+async def stop_stream_pool():
+    for b in _stream_bots:
+        try:
+            await b["client"].stop()
+        except Exception:
+            pass
+    _stream_bots.clear()
+
+async def pick_stream_bot():
+    now = time.time()
+    async with _stream_rr_lock:
+        global _stream_rr
+        healthy = [b for b in _stream_bots if b["cooldown_until"] < now]
+        pool = healthy or _stream_bots
+        if not pool:
+            return None
+        b = pool[_stream_rr % len(pool)]
+        _stream_rr += 1
+        return b
+
+def _mark_choked(bot, seconds):
+    bot["cooldown_until"] = time.time() + seconds
+    log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
+
+async def channel_get_media(chat_id, message_id):
+    """מנסה כמה בוטים עד שאחד פותר את ההודעה. מחזיר (media) או None."""
+    for _ in range(min(max(1, len(_stream_bots)), 5)):
+        bot = await pick_stream_bot()
+        if bot is None:
+            return None
+        try:
+            msg = await asyncio.wait_for(
+                bot["client"].get_messages(chat_id, message_id), timeout=20)
+            media = msg.video or msg.audio or msg.document or msg.video_note
+            if media:
+                return media
+        except FloodWait as e:
+            _mark_choked(bot, e.value)
+        except Exception as e:
+            log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
+            _mark_choked(bot, 30)
+    return None
+
+async def channel_stream_range(chat_id, message_id, start, end):
+    """מזרים [start, end] מהערוץ דרך בוט מה-pool. בוט שנחנק בהתחלה → עוברים לבא."""
+    CHUNK = PYROGRAM_CHUNK_SIZE
+    pos = start
+    for _ in range(min(max(1, len(_stream_bots)), 4)):
+        bot = await pick_stream_bot()
+        if bot is None:
+            break
+        try:
+            msg = await asyncio.wait_for(
+                bot["client"].get_messages(chat_id, message_id), timeout=20)
+            off_chunks = pos // CHUNK
+            produced = off_chunks * CHUNK
+            async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
+                c_start = produced
+                c_end = produced + len(chunk)
+                lo = max(pos, c_start) - c_start
+                hi = min(end + 1, c_end) - c_start
+                if lo < hi:
+                    yield chunk[lo:hi]
+                    pos = c_start + hi
+                produced = c_end
+                if produced > end:
+                    break
+            break  # הצלחה
+        except FloodWait as e:
+            _mark_choked(bot, e.value)
+            if pos > start:
+                break   # כבר שלחנו בייטים — אי אפשר להחליף בוט באמצע
+        except Exception as e:
+            log.warning("channel stream שגיאה: %s", e)
+            _mark_choked(bot, 30)
+            if pos > start:
+                break
+    if pos <= end:
+        yield b"\x00" * (end - pos + 1)
+
+async def stream_from_channel(chat_id: int, message_id: int, request: Request):
+    media = await channel_get_media(chat_id, message_id)
+    if not media:
+        raise HTTPException(status_code=503, detail="No media / no healthy bot")
+    file_size = media.file_size
+    mime_type = getattr(media, "mime_type", "application/octet-stream")
+    file_name = getattr(media, "file_name", None) or f"file_{message_id}"
+    safe_name = file_name.encode("ascii", "ignore").decode("ascii") or f"file_{message_id}"
+    disposition = f'inline; filename="{safe_name}"; filename*=UTF-8\'\'{quote(file_name)}'
+    range_header = request.headers.get("Range")
+    if range_header:
+        start, end = parse_range(range_header, file_size)
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+            "Content-Disposition": disposition,
+        }
+        return StreamingResponse(
+            channel_stream_range(chat_id, message_id, start, end),
+            status_code=206, media_type=mime_type, headers=headers)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Content-Disposition": disposition,
+    }
+    return StreamingResponse(
+        channel_stream_range(chat_id, message_id, 0, file_size - 1),
+        status_code=200, media_type=mime_type, headers=headers)
+
 # ── Stream Route ──────────────────────────────────────────────────────────────
 
 @api.get("/stream/{chat_id}/{message_id}")
 async def stream(chat_id: int, message_id: int, request: Request):
+    # תוכן בערוץ (chat_id שלילי) → דרך pool הבוטים; תוכן ישן (chat פרטי) → בוט ראשי
+    if chat_id < 0 and _stream_bots:
+        return await stream_from_channel(chat_id, message_id, request)
     client_key = request.client.host if request.client else "unknown"
     sess = await get_session(chat_id, message_id, client_key)
     file_size = sess.file_size
@@ -1266,8 +1416,9 @@ async def startup():
     restore_from_dataset()
     await bot_client.start()
     _hls_relay_client = httpx.AsyncClient(timeout=15)
-    # ה-workers עולים ברקע כדי לא לעכב את עליית השרת (כל אחד עושה auth נפרד)
+    # ה-workers/pool עולים ברקע כדי לא לעכב את עליית השרת
     asyncio.create_task(start_download_workers())
+    asyncio.create_task(start_stream_pool())
     asyncio.create_task(keep_alive())
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
@@ -1277,6 +1428,7 @@ async def startup():
 @api.on_event("shutdown")
 async def shutdown():
     await stop_download_workers()
+    await stop_stream_pool()
     await bot_client.stop()
     if _hls_relay_client:
         await _hls_relay_client.aclose()
