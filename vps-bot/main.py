@@ -978,7 +978,7 @@ async def telegram_watchdog():
 # מטפל בהודעות נכנסות, כדי שלא תהיה כפילות בעיבוד.
 # 2 workers עם session קבוע: כל אחד מתחבר פעם אחת בלבד (FLOOD_WAIT הוא חד-פעמי),
 # ואז נשאר קבוע ונותן מקביליות מוכחת (~פי 2-3 מהיר יותר). ניתן לשנות דרך env.
-NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "2"))
+NUM_DOWNLOAD_WORKERS = int(os.environ.get("NUM_DOWNLOAD_WORKERS", "0"))
 BAND_TIMEOUT_SECS = 45
 # גודל "חלון" משיכה מקבילה בהזרמה: כל חלון מפוצל בין ה-workers ונמשך במקביל.
 # חלון גדול = פחות פתיחות-stream (שהן יקרות!) = תפוקה גבוהה יותר. חלון ראשון
