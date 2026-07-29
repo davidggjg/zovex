@@ -988,22 +988,39 @@ PARALLEL_WINDOW_BYTES = int(os.environ.get("PARALLEL_WINDOW_BYTES", str(8 * 1024
 download_workers: list[Client] = []
 
 async def start_download_workers():
+    # מדליקים את ה-workers אחד-אחד (לא בבת אחת): טלגרם דוחה כמה התחברויות
+    # בו-זמנית עם אותו טוקן בוט. session קבוע (in_memory=False) → כל worker
+    # מתחבר פעם אחת בלבד וברסטארט הבא רק מתחבר-מחדש מהר. ניסיונות חוזרים
+    # לכל worker כדי לעמוד בכשלים זמניים.
     for i in range(NUM_DOWNLOAD_WORKERS):
-        try:
+        started = False
+        for attempt in range(3):
             w = Client(
                 name=f"stream_worker_{i}",
                 api_id=API_ID,
                 api_hash=API_HASH,
                 bot_token=BOT_TOKEN,
-                in_memory=True,       # workers לא צריכים session קבוע
-                no_updates=True,      # לא מקבלים עדכונים — הורדה בלבד
+                in_memory=False,      # session קבוע — לא מתחבר מאפס כל restart
+                no_updates=True,      # הורדה בלבד, בלי עדכונים
                 workdir=str(DATA_DIR),
             )
-            await w.start()
-            download_workers.append(w)
-        except Exception as e:
-            log.warning("worker %d לא עלה: %s", i, e)
-    log.info("🚀 %d download workers פעילים", len(download_workers))
+            try:
+                await asyncio.wait_for(w.start(), timeout=40)
+                download_workers.append(w)
+                log.info("✅ worker %d עלה (%d/%d פעילים)", i, len(download_workers), NUM_DOWNLOAD_WORKERS)
+                started = True
+                break
+            except Exception as e:
+                log.warning("⚠️ worker %d ניסיון %d/3 נכשל: %s", i, attempt + 1, e)
+                try:
+                    await w.stop()
+                except Exception:
+                    pass
+                await asyncio.sleep(4)
+        if not started:
+            log.error("❌ worker %d לא עלה אחרי 3 ניסיונות", i)
+        await asyncio.sleep(2)   # השהיה בין workers כדי לא להציף את הauth
+    log.info("🚀 סה\"כ %d/%d download workers פעילים", len(download_workers), NUM_DOWNLOAD_WORKERS)
 
 async def stop_download_workers():
     for w in download_workers:
