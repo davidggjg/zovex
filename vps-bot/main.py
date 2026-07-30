@@ -693,8 +693,15 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
 # ── Stream Route ──────────────────────────────────────────────────────────────
 
 @api.get("/stream/{chat_id}/{message_id}")
-async def stream(chat_id: int, message_id: int, request: Request):
+async def stream(chat_id: int, message_id: int, request: Request,
+                 exp: int = 0, sig: str = ""):
     check_hotlink(request)
+    # אימות קישור חתום: אם מוגדר סוד חתימה — הקישור חייב exp תקף וחתימה נכונה.
+    if SIGN_SECRET:
+        if not exp or exp < int(time.time()):
+            raise HTTPException(status_code=403, detail="הקישור פג תוקף")
+        if not hmac.compare_digest(sig, _stream_sig(str(chat_id), str(message_id), exp)):
+            raise HTTPException(status_code=403, detail="חתימה שגויה")
     # תוכן בערוץ (chat_id שלילי) → דרך pool הבוטים; תוכן ישן (chat פרטי) → בוט ראשי
     if chat_id < 0 and _stream_bots:
         return await stream_from_channel(chat_id, message_id, request)
@@ -1175,12 +1182,51 @@ def stored_stream_url(msg_id) -> str:
 def expand_base(s):
     return s.replace(BASE_TOKEN, STREAM_PUBLIC_BASE) if isinstance(s, str) else s
 
+# ── קישורים חתומים שפגים (הגנת תוכן) ─────────────────────────────────────────
+# כל קישור /stream שמוגש ללקוח מקבל חתימה (HMAC) ותוקף. השרת מאמת אותם ב-/stream
+# ודוחה קישור שפג או עם חתימה שגויה. כך קישור שנחלץ (למשל ממכשיר עם רוט) מת
+# תוך שעות, אי-אפשר לשתף אותו או לבנות עליו הורדה המונית. שקוף ללקוח — האתר
+# והאפליקציה פשוט מקבלים קישור חתום מ-/content ומנגנים.
+import hashlib
+SIGN_SECRET_FILE = DATA_DIR / "sign_secret.txt"
+def _load_or_create_sign_secret() -> str:
+    env = os.environ.get("STREAM_SIGN_SECRET", "").strip()
+    if env:
+        return env
+    if SIGN_SECRET_FILE.exists():
+        return SIGN_SECRET_FILE.read_text().strip()
+    secret = os.urandom(24).hex()
+    try:
+        SIGN_SECRET_FILE.write_text(secret)
+    except Exception:
+        pass
+    return secret
+SIGN_SECRET = _load_or_create_sign_secret()
+SIGN_TTL = int(os.environ.get("STREAM_SIGN_TTL", "21600"))  # 6 שעות — מספיק לסרט ארוך
+_STREAM_PATH_RE = re.compile(r"/stream/(-?\d+)/(\d+)")
+
+def _stream_sig(chat: str, msg: str, exp: int) -> str:
+    data = f"{chat}/{msg}/{exp}".encode()
+    return hmac.new(SIGN_SECRET.encode(), data, hashlib.sha256).hexdigest()[:32]
+
+def sign_stream_url(url):
+    """מוסיף ?exp=&sig= לקישור /stream. משאיר קישורים אחרים כמו שהם."""
+    if not isinstance(url, str) or not SIGN_SECRET:
+        return url
+    m = _STREAM_PATH_RE.search(url)
+    if not m or "sig=" in url:
+        return url
+    exp = int(time.time()) + SIGN_TTL
+    sig = _stream_sig(m.group(1), m.group(2), exp)
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}exp={exp}&sig={sig}"
+
 def _expand_urls(items: list) -> list:
     for e in items:
         for k in ("video_url", "video_id"):
             v = e.get(k)
             if isinstance(v, str) and BASE_TOKEN in v:
-                e[k] = v.replace(BASE_TOKEN, STREAM_PUBLIC_BASE)
+                e[k] = sign_stream_url(v.replace(BASE_TOKEN, STREAM_PUBLIC_BASE))
     return items
 
 def _collapse_urls(items: list) -> list:
@@ -1188,7 +1234,11 @@ def _collapse_urls(items: list) -> list:
         for k in ("video_url", "video_id"):
             v = e.get(k)
             if isinstance(v, str) and STREAM_PUBLIC_BASE and STREAM_PUBLIC_BASE in v:
-                e[k] = v.replace(STREAM_PUBLIC_BASE, BASE_TOKEN)
+                v = v.replace(STREAM_PUBLIC_BASE, BASE_TOKEN)
+                # מסירים חתימה/תוקף אם דבקו בקישור (הם מתווספים מחדש בכל הגשה)
+                if "/stream/" in v:
+                    v = re.sub(r"[?&](exp|sig)=[^&]*", "", v)
+                e[k] = v
     return items
 
 upload_bot: Optional[Client] = None
@@ -1335,7 +1385,7 @@ async def _handle_custom_name(client: Client, message: Message, uid: int):
             pending.get("file_unique_id", ""))
         _pending_uploads.pop(cmid, None)
         await message.reply_text(
-            f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{expand_base(entry['video_url'])}")
+            f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(entry['video_url']))}")
         return
     pending["options"] = options
     await message.reply_text(
@@ -1364,7 +1414,7 @@ async def on_upload(client: Client, message: Message):
     if dup:
         await message.reply_text(
             f"♻️ הקובץ הזה כבר קיים במערכת:\n<b>{dup.get('title','—')}</b>"
-            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{expand_base(dup['video_url'])}")
+            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(dup['video_url']))}")
         return
     status = await message.reply_text("⏳ מעלה לערוץ...")
     try:
@@ -1432,7 +1482,7 @@ async def on_select(client: Client, cq: CallbackQuery):
             pending.get("file_unique_id", ""))
         _pending_uploads.pop(cmid, None)
         await cq.message.edit_text(
-            f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{expand_base(entry['video_url'])}")
+            f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(entry['video_url']))}")
         await cq.answer("נשמר!")
         return
     try:
@@ -1445,7 +1495,7 @@ async def on_select(client: Client, cq: CallbackQuery):
     poster_line = f"\n🖼 {entry['thumbnail_url']}" if entry["thumbnail_url"] else ""
     await cq.message.edit_text(
         f"✅ נוסף: <b>{entry['title']}</b> ({entry['year'] or '?'})"
-        f"{poster_line}\n\n🔗 קישור סטרימינג:\n{expand_base(entry['video_url'])}")
+        f"{poster_line}\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(entry['video_url']))}")
     await cq.answer("נוסף!")
 
 async def start_upload_bot():
