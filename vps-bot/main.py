@@ -1526,6 +1526,59 @@ async def content_save(req: ContentSaveReq, request: Request):
     save_content(req.movies)
     return {"ok": True, "count": len(req.movies)}
 
+@api.get("/content/relink")
+async def content_relink(request: Request, dry: int = 1):
+    """מחליף את הקישורים הישנים (hf.space שמת) בקישורי השרת/הערוץ החדשים:
+    - טלגרם: לפי מפת המיגרציה (migration_progress.json) → /stream/<ערוץ>/<msg חדש>
+    - שידורים חיים: hf.space/hls-relay/… → אותו נתיב אבל דרך השרת החדש
+    כל שאר הסוגים (kaltura/drive/youtube וכו') נשארים כמו שהם.
+    מותר רק מ-localhost. dry=1 (ברירת מחדל) = תצוגה מקדימה בלי לשמור; dry=0 = מבצע."""
+    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="localhost only")
+    # מפת המיגרציה: "old_chat:old_msg" -> new_msg_id
+    prog = {}
+    if MIGRATION_PROGRESS_FILE.exists():
+        try:
+            prog = json.loads(MIGRATION_PROGRESS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            prog = {}
+    content = load_content()
+    stats = {"telegram_relinked": 0, "telegram_unmapped": 0, "live_relinked": 0,
+             "total": len(content), "have_map": len(prog), "channel": STREAM_CHANNEL_ID,
+             "base": STREAM_PUBLIC_BASE}
+    for e in content:
+        url = e.get("video_url") or e.get("video_id") or ""
+        if not url:
+            continue
+        # שידורים חיים / hls-relay דרך hf.space → השרת החדש
+        idx = url.find("/hls-relay/")
+        if "hf.space" in url and idx != -1:
+            new = STREAM_PUBLIC_BASE + url[idx:]
+            e["video_url"] = new
+            if e.get("video_id"):
+                e["video_id"] = new
+            stats["live_relinked"] += 1
+            continue
+        # טלגרם ישן hf.space/stream/<chat>/<msg>
+        m = _OLD_URL_RE.search(url)
+        if not m:
+            continue
+        key = f"{int(m.group(1))}:{int(m.group(2))}"
+        new_msg = prog.get(key)
+        if new_msg is None:
+            stats["telegram_unmapped"] += 1
+            continue
+        new = f"{STREAM_PUBLIC_BASE}/stream/{STREAM_CHANNEL_ID}/{new_msg}"
+        e["video_url"] = new
+        e["video_id"] = new
+        stats["telegram_relinked"] += 1
+    if dry == 0:
+        save_content(content)
+        stats["saved"] = True
+    else:
+        stats["saved"] = False
+    return stats
+
 # ── ריענון שרת דרך קישור פשוט ──────────────────────────────────────────────
 # מיועד לשליחה למישהו שצריך לרענן את השרת בעצמו כשהוא נתקע, בלי גישה
 # לחשבון Hugging Face. שולחים לו קישור מהצורה:
