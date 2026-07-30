@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZOVEX · ניהול</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:'Segoe UI',Arial,sans-serif; background:#0a0a0a; color:#eee; }
+  a { color:#ff4d5a; }
+  .wrap { max-width:920px; margin:0 auto; padding:16px; }
+  h1 { color:#e50914; letter-spacing:3px; font-size:22px; margin:8px 0 16px; }
+  h2 { font-size:16px; color:#ccc; margin:18px 0 8px; }
+  .card { background:#161616; border:1px solid #262626; border-radius:14px; padding:16px; margin-bottom:14px; }
+  input, select, textarea { width:100%; padding:11px 13px; border-radius:10px; border:1px solid #333; background:#0f0f0f; color:#fff; font-size:15px; margin-bottom:10px; }
+  textarea { min-height:70px; resize:vertical; }
+  label { display:block; font-size:13px; color:#9a9a9a; margin:2px 0 4px; }
+  button { background:#e50914; color:#fff; border:none; border-radius:10px; padding:11px 15px; font-size:15px; font-weight:700; cursor:pointer; }
+  button.sec { background:#2a2a2a; }
+  button.gray { background:#333; }
+  button.mini { padding:7px 11px; font-size:13px; border-radius:8px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { margin-bottom:0; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .tabs button { background:#1c1c1c; color:#bbb; }
+  .tabs button.active { background:#e50914; color:#fff; }
+  .muted { color:#888; font-size:13px; }
+  .err { color:#ff6b6b; font-size:13px; min-height:16px; }
+  .ok { color:#4caf50; font-size:13px; min-height:16px; }
+  .item { display:flex; gap:10px; align-items:center; padding:8px; border-bottom:1px solid #222; }
+  .item img { width:44px; height:64px; object-fit:cover; border-radius:6px; background:#222; flex:none; }
+  .item .meta { flex:1; min-width:0; }
+  .item .meta .t { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .item .meta .s { color:#888; font-size:12px; }
+  .hidden { display:none; }
+  .pill { display:inline-block; background:#222; border-radius:20px; padding:2px 9px; font-size:11px; color:#aaa; }
+  .toprow { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .settings-link { font-size:12px; color:#888; cursor:pointer; text-decoration:underline; }
+</style></head>
+<body><div class="wrap">
+
+<!-- ── מסך כניסה ── -->
+<div id="login" class="card">
+  <h1>ZOVEX · ניהול</h1>
+  <label>סיסמת ניהול</label>
+  <input id="pass" type="password" placeholder="סיסמה" onkeydown="if(event.key==='Enter')doLogin()">
+  <button onclick="doLogin()" style="width:100%">כניסה</button>
+  <div id="loginErr" class="err"></div>
+</div>
+
+<!-- ── האפליקציה ── -->
+<div id="app" class="hidden">
+  <div class="toprow">
+    <h1>ZOVEX · ניהול</h1>
+    <span class="settings-link" onclick="showTab('settings')">⚙ מפתחות</span>
+  </div>
+  <div class="tabs">
+    <button id="tab-content" class="active" onclick="showTab('content')">תוכן</button>
+    <button id="tab-uploads" onclick="showTab('uploads')">העלאות מהבוט</button>
+    <button id="tab-admins" onclick="showTab('admins')">מנהלים</button>
+    <button id="tab-settings" onclick="showTab('settings')">מפתחות</button>
+  </div>
+
+  <!-- תוכן -->
+  <div id="pane-content">
+    <div class="card">
+      <div class="row">
+        <input id="search" placeholder="חיפוש לפי שם / סדרה…" oninput="renderList()" style="flex:1">
+        <button class="mini" onclick="openAdd()">+ הוסף</button>
+        <button class="mini gray" onclick="loadMovies(true)">↻</button>
+      </div>
+      <div id="counts" class="muted"></div>
+      <div id="list"></div>
+    </div>
+  </div>
+
+  <!-- טופס הוספה/עריכה -->
+  <div id="pane-edit" class="hidden">
+    <div class="card">
+      <div class="toprow"><h2 id="editTitle">הוספת פריט</h2>
+        <button class="mini gray" onclick="showTab('content')">← חזרה</button></div>
+
+      <label>סוג פריט</label>
+      <select id="f_kind" onchange="toggleSeries()">
+        <option value="movie">סרט</option>
+        <option value="series">פרק בסדרה</option>
+      </select>
+
+      <div class="card" style="background:#101010">
+        <label>חיפוש TMDB (שם באנגלית/עברית) — ממלא פוסטר/שנה/תקציר</label>
+        <div class="row"><input id="tmdbq" placeholder="שם לחיפוש…" style="flex:1"
+             onkeydown="if(event.key==='Enter')doTmdb()">
+          <button class="mini sec" onclick="doTmdb()">חפש</button></div>
+        <div id="tmdbRes"></div>
+      </div>
+
+      <div id="seriesFields" class="hidden">
+        <label>שם הסדרה</label><input id="f_series">
+        <div class="grid2">
+          <div><label>עונה</label><input id="f_season" type="number" min="1"></div>
+          <div><label>פרק</label><input id="f_episode" type="number" min="1"></div>
+        </div>
+        <label>שם הפרק (לא חובה)</label><input id="f_eptitle">
+      </div>
+
+      <label id="lbl_title">שם</label><input id="f_title">
+      <div class="grid2">
+        <div><label>שנה</label><input id="f_year" type="number"></div>
+        <div><label>קטגוריה</label>
+          <select id="f_category">
+            <option>סרטים</option><option>סדרות</option><option>אנימה</option>
+            <option>סדרות ישראליות</option><option>סדרות לילדים</option>
+            <option>סרטים לילדים (מתאים גם למשפחה)</option><option>אימה</option>
+            <option>שידורים חיים</option>
+          </select></div>
+      </div>
+      <label>סוג נגן</label>
+      <select id="f_type">
+        <option value="direct">direct (קישור סטרימינג / mp4)</option>
+        <option value="kaltura">kaltura</option>
+        <option value="drive">drive</option>
+        <option value="dailymotion">dailymotion</option>
+        <option value="youtube">youtube</option>
+      </select>
+      <label>קישור וידאו (video_url)</label><input id="f_video" placeholder="http://213.139.78.39:8000/stream/…">
+      <label>פוסטר (thumbnail_url)</label><input id="f_thumb">
+      <label>תקציר</label><textarea id="f_desc"></textarea>
+
+      <div class="row" style="margin-top:6px">
+        <button onclick="saveMovie()" style="flex:1">שמור ופרסם לאתר</button>
+        <button id="delBtn" class="gray hidden" onclick="deleteMovie()">מחק</button>
+      </div>
+      <div id="editMsg" class="ok"></div>
+    </div>
+  </div>
+
+  <!-- העלאות מהבוט -->
+  <div id="pane-uploads" class="hidden">
+    <div class="card">
+      <div class="toprow"><h2>העלאות שממתינות מהבוט</h2>
+        <button class="mini gray" onclick="loadUploads()">↻</button></div>
+      <div class="muted">קבצים שהמנהלים העלו לערוץ. לחיצה על "הוסף לאתר" ממלאת את הטופס עם הקישור.</div>
+      <div id="uploadsList"></div>
+    </div>
+  </div>
+
+  <!-- מנהלים -->
+  <div id="pane-admins" class="hidden">
+    <div class="card">
+      <h2>מנהלים מורשים (Telegram ID)</h2>
+      <div class="muted">רק מזהים ברשימה יקבלו מענה מבוט ההעלאה.</div>
+      <div class="grid2" style="margin-top:8px">
+        <input id="a_id" type="number" placeholder="Telegram ID">
+        <input id="a_name" placeholder="שם (לא חובה)">
+      </div>
+      <button class="mini" onclick="addAdmin()">הוסף מנהל</button>
+      <div id="adminErr" class="err"></div>
+      <div id="adminsList" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- מפתחות -->
+  <div id="pane-settings" class="hidden">
+    <div class="card">
+      <h2>מפתחות (נשמרים במכשיר הזה בלבד)</h2>
+      <label>GitHub Token (עם הרשאת repo — נדרש לפרסום לאתר)</label>
+      <input id="s_gh" type="password" placeholder="ghp_…">
+      <label>TMDB API Key</label>
+      <input id="s_tmdb" type="password" placeholder="TMDB key">
+      <label>מאגר (owner/repo)</label>
+      <input id="s_repo" placeholder="davidggjg/zovex">
+      <button class="mini" onclick="saveSettings()">שמור מפתחות</button>
+      <div id="setMsg" class="ok"></div>
+      <div class="muted" style="margin-top:10px">המפתחות נשמרים ב-localStorage של הדפדפן במכשיר הזה, ולא נשלחים לשרת שלנו. ה-GitHub Token נשלח רק ל-GitHub (HTTPS).</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let PASS = "";
+let movies = [];
+let editingId = null;
+const GH_FILE = "public/movies.json";
+const WORKFLOW = "deploy.yml";
+
+// ── הגדרות/מפתחות ──
+function repo(){ return localStorage.getItem("zx_repo") || "davidggjg/zovex"; }
+function ghToken(){ return localStorage.getItem("github_token") || ""; }
+function tmdbKey(){ return localStorage.getItem("zovex_tmdb_key") || ""; }
+function saveSettings(){
+  localStorage.setItem("github_token", $("s_gh").value.trim());
+  localStorage.setItem("zovex_tmdb_key", $("s_tmdb").value.trim());
+  localStorage.setItem("zx_repo", ($("s_repo").value.trim()||"davidggjg/zovex"));
+  $("setMsg").textContent = "נשמר ✓";
+  setTimeout(()=>$("setMsg").textContent="",2000);
+}
+function loadSettingsUI(){
+  $("s_gh").value = ghToken(); $("s_tmdb").value = tmdbKey(); $("s_repo").value = repo();
+}
+
+// ── כניסה ── (הסיסמה נבדקת מול השרת דרך /panel/api list)
+async function doLogin(){
+  const p = $("pass").value;
+  try{
+    const r = await fetch("/panel/api", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({password:p, action:"list"})});
+    if(r.status===401){ $("loginErr").textContent="סיסמה שגויה"; return; }
+    if(!r.ok){ $("loginErr").textContent="שגיאת שרת"; return; }
+    PASS = p;
+    $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+    loadSettingsUI(); loadMovies();
+  }catch(e){ $("loginErr").textContent="אין חיבור לשרת"; }
+}
+
+// ── טאבים ──
+function showTab(name){
+  ["content","uploads","admins","settings","edit"].forEach(n=>{
+    const p=$("pane-"+n); if(p) p.classList.add("hidden");
+    const t=$("tab-"+n); if(t) t.classList.remove("active");
+  });
+  $("pane-"+name).classList.remove("hidden");
+  const t=$("tab-"+name); if(t) t.classList.add("active");
+  if(name==="uploads") loadUploads();
+  if(name==="admins") loadAdmins();
+  if(name==="settings") loadSettingsUI();
+}
+
+// ── טעינת movies.json ──
+async function loadMovies(force){
+  $("counts").textContent = "טוען…";
+  try{
+    const url = `https://raw.githubusercontent.com/${repo()}/main/${GH_FILE}?t=`+Date.now();
+    const r = await fetch(url); movies = await r.json();
+    renderList();
+  }catch(e){ $("counts").textContent = "טעינה נכשלה: "+e.message; }
+}
+function renderList(){
+  const q = ($("search").value||"").trim().toLowerCase();
+  $("counts").textContent = `סה"כ ${movies.length} פריטים`;
+  const list = $("list");
+  if(!q){ list.innerHTML = '<div class="muted" style="padding:10px">הקלד חיפוש כדי להציג פריטים.</div>'; return; }
+  const res = movies.filter(m =>
+    (m.title||"").toLowerCase().includes(q) || (m.series_name||"").toLowerCase().includes(q)
+  ).slice(0,100);
+  if(!res.length){ list.innerHTML='<div class="muted" style="padding:10px">לא נמצא.</div>'; return; }
+  list.innerHTML = res.map(m=>{
+    const sub = m.series_name ? `סדרה · ע${m.season_number||"?"} פ${m.episode_number||"?"}` : `סרט · ${m.year||""}`;
+    return `<div class="item">
+      <img src="${m.thumbnail_url||""}" onerror="this.style.visibility='hidden'">
+      <div class="meta"><div class="t">${esc(m.title||"—")}</div>
+        <div class="s">${sub} · <span class="pill">${esc(m.category||"")}</span></div></div>
+      <button class="mini sec" onclick="openEdit('${m.id}')">ערוך</button>
+    </div>`;
+  }).join("");
+}
+function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ── טופס ──
+function toggleSeries(){
+  const isSer = $("f_kind").value==="series";
+  $("seriesFields").classList.toggle("hidden", !isSer);
+  $("lbl_title").textContent = isSer ? "כותרת מוצגת (בד\"כ שם הסדרה)" : "שם";
+  if(isSer && !$("f_category").value.includes("סדר")) {}
+}
+function clearForm(){
+  ["f_title","f_year","f_video","f_thumb","f_desc","f_series","f_season","f_episode","f_eptitle","tmdbq"].forEach(i=>$(i).value="");
+  $("tmdbRes").innerHTML=""; $("editMsg").textContent="";
+  $("f_kind").value="movie"; $("f_type").value="direct"; $("f_category").value="סרטים"; toggleSeries();
+}
+function openAdd(){
+  editingId=null; clearForm();
+  $("editTitle").textContent="הוספת פריט"; $("delBtn").classList.add("hidden");
+  showTab("edit");
+}
+function openEdit(id){
+  const m = movies.find(x=>x.id===id); if(!m) return;
+  editingId=id; clearForm();
+  $("editTitle").textContent="עריכת פריט"; $("delBtn").classList.remove("hidden");
+  $("f_kind").value = m.series_name ? "series":"movie"; toggleSeries();
+  $("f_title").value=m.title||""; $("f_year").value=m.year||"";
+  $("f_category").value=m.category||"סרטים"; $("f_type").value=m.type||"direct";
+  $("f_video").value=m.video_url||m.video_id||""; $("f_thumb").value=m.thumbnail_url||"";
+  $("f_desc").value=m.description||"";
+  $("f_series").value=m.series_name||""; $("f_season").value=m.season_number||"";
+  $("f_episode").value=m.episode_number||""; $("f_eptitle").value=m.episode_title||"";
+  showTab("edit");
+}
+
+// ── TMDB ──
+async function doTmdb(){
+  const key=tmdbKey(); if(!key){ $("tmdbRes").innerHTML='<span class="err">חסר TMDB key (בטאב מפתחות)</span>'; return; }
+  const q=$("tmdbq").value.trim(); if(!q) return;
+  $("tmdbRes").innerHTML="מחפש…";
+  try{
+    const r=await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${key}&language=he&include_adult=false&query=`+encodeURIComponent(q));
+    const d=await r.json();
+    const res=(d.results||[]).filter(x=>x.media_type!=="person").slice(0,6);
+    if(!res.length){ $("tmdbRes").innerHTML='<span class="muted">אין תוצאות</span>'; return; }
+    $("tmdbRes").innerHTML=res.map((x,i)=>{
+      const t=x.title||x.name||""; const y=(x.release_date||x.first_air_date||"").slice(0,4);
+      const kind=x.media_type==="tv"?"סדרה":"סרט";
+      window["_tmdb"+i]=x;
+      return `<div class="item"><img src="${x.poster_path?'https://image.tmdb.org/t/p/w200'+x.poster_path:''}" onerror="this.style.visibility='hidden'">
+        <div class="meta"><div class="t">${esc(t)} (${y||"?"})</div><div class="s">${kind}</div></div>
+        <button class="mini sec" onclick="pickTmdb(${i})">בחר</button></div>`;
+    }).join("");
+  }catch(e){ $("tmdbRes").innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+function pickTmdb(i){
+  const x=window["_tmdb"+i]; if(!x) return;
+  const t=x.title||x.name||""; const y=(x.release_date||x.first_air_date||"").slice(0,4);
+  if(x.media_type==="tv" && $("f_kind").value!=="series"){ $("f_kind").value="series"; toggleSeries(); }
+  if($("f_kind").value==="series"){ if(!$("f_series").value) $("f_series").value=t; if(!$("f_title").value) $("f_title").value=t; }
+  else { $("f_title").value=t; }
+  if(y) $("f_year").value=y;
+  if(x.poster_path) $("f_thumb").value='https://image.tmdb.org/t/p/w500'+x.poster_path;
+  if(x.overview) $("f_desc").value=x.overview;
+  $("tmdbRes").innerHTML='<span class="ok">מולא ✓</span>';
+}
+
+// ── שמירה/מחיקה → commit לגיטהאב ──
+function buildEntry(){
+  const isSer=$("f_kind").value==="series";
+  const vid=$("f_video").value.trim();
+  return {
+    title:$("f_title").value.trim(),
+    year: $("f_year").value? parseInt($("f_year").value): null,
+    category:$("f_category").value,
+    description:$("f_desc").value.trim(),
+    type:$("f_type").value,
+    video_id:vid, video_url:vid,
+    thumbnail_url:$("f_thumb").value.trim(),
+    series_name: isSer? ($("f_series").value.trim()||null): null,
+    season_number: isSer&&$("f_season").value? parseInt($("f_season").value): null,
+    episode_number: isSer&&$("f_episode").value? parseInt($("f_episode").value): null,
+    episode_title: isSer? ($("f_eptitle").value.trim()||""): null,
+    custom_slug: null,
+  };
+}
+async function ghGetSha(){
+  const r=await fetch(`https://api.github.com/repos/${repo()}/contents/${GH_FILE}`,
+    {headers:{Authorization:`token ${ghToken()}`,Accept:"application/vnd.github.v3+json"}});
+  const d=await r.json(); return d.sha;
+}
+async function ghPut(arr,msg){
+  const sha=await ghGetSha();
+  const content=btoa(unescape(encodeURIComponent(JSON.stringify(arr,null,2))));
+  const r=await fetch(`https://api.github.com/repos/${repo()}/contents/${GH_FILE}`,{
+    method:"PUT",headers:{Authorization:`token ${ghToken()}`,"Content-Type":"application/json",Accept:"application/vnd.github.v3+json"},
+    body:JSON.stringify({message:msg,content,sha})});
+  if(!r.ok){ throw new Error("GitHub: "+r.status+" "+(await r.text()).slice(0,120)); }
+  // הפעלת ה-deploy workflow
+  await fetch(`https://api.github.com/repos/${repo()}/actions/workflows/${WORKFLOW}/dispatches`,{
+    method:"POST",headers:{Authorization:`token ${ghToken()}`,"Content-Type":"application/json",Accept:"application/vnd.github.v3+json"},
+    body:JSON.stringify({ref:"main"})}).catch(()=>{});
+}
+async function saveMovie(){
+  if(!ghToken()){ $("editMsg").innerHTML='<span class="err">חסר GitHub Token (בטאב מפתחות)</span>'; return; }
+  const e=buildEntry();
+  if(!e.title){ $("editMsg").innerHTML='<span class="err">חסר שם</span>'; return; }
+  if(!e.video_url){ $("editMsg").innerHTML='<span class="err">חסר קישור וידאו</span>'; return; }
+  $("editMsg").textContent="שומר…";
+  try{
+    let arr;
+    if(editingId){ arr = movies.map(m=> m.id===editingId? {...m,...e}: m); }
+    else {
+      const nm={...e, id:crypto.randomUUID(), created_date:new Date().toISOString()};
+      arr=[nm, ...movies];
+    }
+    await ghPut(arr, editingId? "Edit movie":"Add movie");
+    movies=arr;
+    $("editMsg").innerHTML='<span class="ok">נשמר ופורסם ✓ (חי באתר תוך ~1 דקה)</span>';
+    setTimeout(()=>showTab("content"),1200);
+  }catch(err){ $("editMsg").innerHTML='<span class="err">'+err.message+'</span>'; }
+}
+async function deleteMovie(){
+  if(!editingId) return;
+  if(!confirm("למחוק את הפריט מהאתר?")) return;
+  $("editMsg").textContent="מוחק…";
+  try{
+    const arr=movies.filter(m=>m.id!==editingId);
+    await ghPut(arr,"Delete movie"); movies=arr;
+    $("editMsg").innerHTML='<span class="ok">נמחק ✓</span>';
+    setTimeout(()=>showTab("content"),1000);
+  }catch(err){ $("editMsg").innerHTML='<span class="err">'+err.message+'</span>'; }
+}
+
+// ── העלאות מהבוט ──
+async function loadUploads(){
+  const el=$("uploadsList"); el.innerHTML="טוען…";
+  try{
+    const r=await fetch("/uploads/new"); const d=await r.json();
+    if(!d.items || !d.items.length){ el.innerHTML='<div class="muted" style="padding:10px">אין העלאות ממתינות.</div>'; return; }
+    el.innerHTML=d.items.slice().reverse().map((u,i)=>{
+      window["_up"+i]=u;
+      return `<div class="item"><img src="${u.thumbnail_url||""}" onerror="this.style.visibility='hidden'">
+        <div class="meta"><div class="t">${esc(u.title||"—")} (${u.year||"?"})</div>
+          <div class="s">${esc((u.video_url||"").slice(0,48))}…</div></div>
+        <button class="mini" onclick="useUpload(${i})">הוסף לאתר</button></div>`;
+    }).join("");
+  }catch(e){ el.innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+function useUpload(i){
+  const u=window["_up"+i]; if(!u) return;
+  openAdd();
+  $("f_kind").value = (u.media_kind==="tv")?"series":"movie"; toggleSeries();
+  $("f_title").value=u.title||""; if($("f_kind").value==="series") $("f_series").value=u.title||"";
+  $("f_year").value=u.year||""; $("f_video").value=u.video_url||"";
+  $("f_thumb").value=u.thumbnail_url||""; $("f_desc").value=u.description||"";
+  $("f_category").value = ($("f_kind").value==="series")?"סדרות":"סרטים";
+}
+
+// ── מנהלים ──
+async function panelApi(action, extra){
+  const r=await fetch("/panel/api",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({password:PASS, action, ...(extra||{})})});
+  if(!r.ok) throw new Error((await r.json()).detail || r.status);
+  return r.json();
+}
+async function loadAdmins(){
+  try{ const d=await panelApi("list"); renderAdmins(d.admins);}catch(e){ $("adminErr").textContent=e.message; }
+}
+function renderAdmins(admins){
+  const el=$("adminsList");
+  if(!admins.length){ el.innerHTML='<div class="muted" style="padding:8px">אין מנהלים.</div>'; return; }
+  el.innerHTML=admins.map(a=>`<div class="item"><div class="meta"><div class="t">${esc(a.name||"—")}</div><div class="s">${a.id}</div></div>
+    <button class="mini gray" onclick="rmAdmin(${a.id})">הסר</button></div>`).join("");
+}
+async function addAdmin(){
+  const id=$("a_id").value, name=$("a_name").value;
+  if(!id){ $("adminErr").textContent="חסר ID"; return; }
+  try{ const d=await panelApi("add",{id:parseInt(id),name}); $("a_id").value="";$("a_name").value="";$("adminErr").textContent=""; renderAdmins(d.admins);}
+  catch(e){ $("adminErr").textContent=e.message; }
+}
+async function rmAdmin(id){
+  try{ const d=await panelApi("remove",{id}); renderAdmins(d.admins);}catch(e){ alert(e.message); }
+}
+</script>
+</div></body></html>

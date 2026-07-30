@@ -988,6 +988,19 @@ async def panel_api(req: PanelReq):
 async def panel_page():
     return HTMLResponse(PANEL_HTML)
 
+# אתר הניהול המלא (תוכן + מנהלים + העלאות) — מוגש מקובץ admin.html שליד main.py.
+# הגשה מהשרת עצמו פותרת את בעיית ה-HTTPS↔HTTP: הדף מדבר עם /panel/api ו-/uploads
+# ב-same-origin, ועם GitHub/TMDB ב-HTTPS.
+ADMIN_HTML_FILE = Path(__file__).parent / "admin.html"
+
+@api.get("/admin", response_class=HTMLResponse)
+async def admin_page():
+    if ADMIN_HTML_FILE.exists():
+        return HTMLResponse(ADMIN_HTML_FILE.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>admin.html לא נמצא בשרת</h1>"
+                        "<p>העלה את הקובץ ל-" + str(ADMIN_HTML_FILE) + "</p>",
+                        status_code=404)
+
 PANEL_HTML = """<!DOCTYPE html>
 <html lang="he" dir="rtl"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
