@@ -71,6 +71,8 @@ server {
     location /admin        { include snippets/zovex-proxy.conf; }
     location /panel        { include snippets/zovex-proxy.conf; }
     location /uploads/     { include snippets/zovex-proxy.conf; }
+    location /feedback/    { include snippets/zovex-proxy.conf; }
+    location /app/         { include snippets/zovex-proxy.conf; }
     location = /ping       { include snippets/zovex-proxy.conf; }
     location = /restart    { include snippets/zovex-proxy.conf; }
     location = /dashboard  { include snippets/zovex-proxy.conf; }

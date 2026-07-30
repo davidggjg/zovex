@@ -34,6 +34,7 @@
   .item .meta .s { color:#86868b; font-size:12px; }
   .hidden { display:none; }
   .pill { display:inline-block; background:#f0f0f5; border-radius:20px; padding:2px 9px; font-size:11px; color:#6e6e73; }
+  .badge { display:inline-block; background:#ff3b30; color:#fff; border-radius:20px; padding:1px 7px; font-size:11px; font-weight:600; }
   .toprow { display:flex; justify-content:space-between; align-items:center; gap:10px; }
   .ser { border:1px solid #e3e3e8; border-radius:12px; margin-bottom:8px; overflow:hidden; }
   .ser .head { display:flex; align-items:center; gap:8px; padding:9px 11px; cursor:pointer; background:#fafafa; }
@@ -60,6 +61,7 @@
     <button id="tab-cats" onclick="showTab('cats')">קטגוריות</button>
     <button id="tab-live" onclick="showTab('live')">שידורים חיים</button>
     <button id="tab-uploads" onclick="showTab('uploads')">העלאות מהבוט</button>
+    <button id="tab-support" onclick="showTab('support')">תמיכה <span id="supBadge" class="badge hidden">0</span></button>
     <button id="tab-admins" onclick="showTab('admins')">מנהלים</button>
   </div>
 
@@ -159,6 +161,19 @@
       <div id="uploadsList"></div></div>
   </div>
 
+  <!-- תמיכה / משוב -->
+  <div id="pane-support" class="hidden">
+    <div class="card"><div class="toprow"><h2>הודעות מהמשתמשים</h2>
+      <div class="row">
+        <button class="mini gray" onclick="loadSupport()">↻ רענן</button></div></div>
+      <div class="muted">משתמשים כותבים מתוך האפליקציה (תמיכה / חוות דעת / טיפים). בחר שיחה כדי לענות — התשובה תופיע להם באפליקציה (ותישלח התראה אם מוגדר).</div>
+      <div class="grid2" style="margin-top:10px;align-items:start">
+        <div id="supThreads" style="max-height:70vh;overflow:auto"></div>
+        <div id="supChat" class="card" style="margin:0;background:#f5f6f8"><div class="muted">בחר שיחה מימין.</div></div>
+      </div>
+    </div>
+  </div>
+
   <!-- מנהלים -->
   <div id="pane-admins" class="hidden">
     <div class="card"><h2>מנהלים מורשים (Telegram ID)</h2>
@@ -168,6 +183,17 @@
       </div>
       <button class="mini" onclick="addAdmin()">הוסף</button>
       <div id="adminErr" class="err"></div><div id="adminsList" style="margin-top:8px"></div></div>
+
+    <div class="card"><h2>גרסת אפליקציה (עדכון מאולץ)</h2>
+      <div class="muted">האפליקציה בודקת בהפעלה. גרסה נמוכה מ"מינימלית" → דיאלוג חוסם שמחייב עדכון. נמוכה מ"אחרונה" → הצעה לעדכן.</div>
+      <div class="grid2" style="margin-top:8px">
+        <input id="v_latest" placeholder="גרסה אחרונה (למשל 1.1.0)">
+        <input id="v_min" placeholder="גרסה מינימלית (חוסם, למשל 1.0.0)">
+      </div>
+      <input id="v_url" placeholder="קישור לעדכון (APK / דף שחרור)" style="margin-top:8px">
+      <input id="v_notes" placeholder="הודעת עדכון (לא חובה)" style="margin-top:8px">
+      <button class="mini" style="margin-top:8px" onclick="saveVersion()">שמור גרסה</button>
+      <div id="verMsg" class="muted" style="margin-top:6px"></div></div>
   </div>
 </div>
 
@@ -210,19 +236,21 @@ async function doLogin(){
     if(!r.ok){ $("loginErr").textContent="שגיאת שרת"; return; }
     PASS=p; $("login").classList.add("hidden"); $("app").classList.remove("hidden");
     await loadContent();
+    loadSupport();   // מעדכן את מונה ההודעות שלא נקראו על הטאב
   }catch(e){ $("loginErr").textContent="אין חיבור לשרת"; }
 }
 
 // ── טאבים ──
 function showTab(n){
-  ["add","manage","cats","live","uploads","admins"].forEach(x=>{
+  ["add","manage","cats","live","uploads","support","admins"].forEach(x=>{
     $("pane-"+x).classList.add("hidden"); const t=$("tab-"+x); if(t)t.classList.remove("active");});
   $("pane-"+n).classList.remove("hidden"); $("tab-"+n).classList.add("active");
   if(n==="manage") renderManage();
   if(n==="cats") renderCats();
   if(n==="live"){ liveReset(); renderLive(); }
   if(n==="uploads") loadUploads();
-  if(n==="admins") loadAdmins();
+  if(n==="support") loadSupport();
+  if(n==="admins"){ loadAdmins(); loadVersion(); }
 }
 
 // ── תוכן: טעינה ושמירה מהשרת ──
@@ -500,5 +528,78 @@ async function addAdmin(){ const id=$("a_id").value,name=$("a_name").value;
   try{ renderAdmins((await panelApi("add",{id:parseInt(id),name})).admins); $("a_id").value="";$("a_name").value="";$("adminErr").textContent="";}
   catch(e){ $("adminErr").textContent=e.message; } }
 async function rmAdmin(id){ try{ renderAdmins((await panelApi("remove",{id})).admins);}catch(e){ alert(e.message); } }
+
+// ── תמיכה / משוב ──
+let _threads=[], _curThread=null;
+const KIND_HE={support:"תמיכה",review:"חוות דעת",tip:"טיפ"};
+async function loadSupport(){
+  try{
+    const r=await fetch("/feedback/all",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS})});
+    if(!r.ok) throw new Error("שגיאה");
+    const d=await r.json(); _threads=d.threads||[]; renderThreads(); updateSupBadge(d.unread||0);
+  }catch(e){ $("supThreads").innerHTML='<div class="err">טעינה נכשלה</div>'; }
+}
+function updateSupBadge(n){ const b=$("supBadge"); if(!b) return;
+  b.textContent=n; b.classList.toggle("hidden", !n); }
+function renderThreads(){
+  if(!_threads.length){ $("supThreads").innerHTML='<div class="muted">אין הודעות עדיין.</div>'; return; }
+  $("supThreads").innerHTML=_threads.map((t,i)=>{
+    const last=t.messages&&t.messages.length?t.messages[t.messages.length-1]:null;
+    const preview=last?esc((last.text||"").slice(0,60)):"";
+    const who=last&&last.from==="admin"?"↩ אני: ":"";
+    return `<div class="item" style="cursor:pointer" onclick="openThread(${i})">
+      <div class="meta"><div class="t">${esc(t.name||"משתמש")} ${t.unread_admin?'<span class="badge">חדש</span>':''}</div>
+      <div class="s">${who}${preview}</div></div></div>`; }).join("");
+}
+function openThread(i){
+  _curThread=_threads[i]; const t=_curThread;
+  const msgs=(t.messages||[]).map(m=>{
+    const mine=m.from==="admin";
+    const kind=m.kind?`<span class="badge">${KIND_HE[m.kind]||m.kind}</span> `:"";
+    return `<div style="text-align:${mine?'left':'right'};margin:6px 0">
+      <div style="display:inline-block;max-width:85%;padding:8px 10px;border-radius:12px;
+        background:${mine?'#0071e3':'#e6e8eb'};color:${mine?'#fff':'#1d1d1f'};text-align:right;white-space:pre-wrap">
+        ${mine?'':kind}${esc(m.text||"")}</div></div>`; }).join("");
+  $("supChat").innerHTML=`
+    <div class="toprow"><h2 style="margin:0">${esc(t.name||"משתמש")}</h2>
+      <div class="s muted">${esc(t.email||"")}</div></div>
+    <div style="max-height:50vh;overflow:auto;margin:8px 0;padding:4px">${msgs||'<div class="muted">—</div>'}</div>
+    <textarea id="supReply" rows="2" placeholder="כתוב תשובה..."></textarea>
+    <button class="mini" style="margin-top:6px" onclick="sendReply()">שלח תשובה</button>
+    <div id="supReplyMsg" class="muted" style="margin-top:6px"></div>`;
+}
+async function sendReply(){
+  if(!_curThread) return; const text=$("supReply").value.trim();
+  if(!text){ return; }
+  $("supReplyMsg").textContent="שולח...";
+  try{
+    const r=await fetch("/feedback/reply",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,user_id:_curThread.user_id,text})});
+    if(!r.ok) throw new Error("שגיאה");
+    $("supReplyMsg").innerHTML='<span class="ok">נשלח ✓</span>';
+    await loadSupport();
+    // פתח מחדש את אותה שיחה כדי לראות את התשובה
+    const idx=_threads.findIndex(x=>x.user_id===_curThread.user_id);
+    if(idx>=0) openThread(idx);
+  }catch(e){ $("supReplyMsg").innerHTML='<span class="err">שליחה נכשלה</span>'; }
+}
+
+// ── גרסת אפליקציה ──
+async function loadVersion(){
+  try{ const v=await (await fetch("/app/version")).json();
+    $("v_latest").value=v.latest||""; $("v_min").value=v.min||"";
+    $("v_url").value=v.url||""; $("v_notes").value=v.notes||""; }catch{}
+}
+async function saveVersion(){
+  $("verMsg").textContent="שומר...";
+  try{
+    const r=await fetch("/app/version/set",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,latest:$("v_latest").value,min:$("v_min").value,
+        url:$("v_url").value,notes:$("v_notes").value})});
+    if(!r.ok) throw new Error("שגיאה");
+    $("verMsg").innerHTML='<span class="ok">נשמר ✓</span>';
+  }catch(e){ $("verMsg").innerHTML='<span class="err">שמירה נכשלה</span>'; }
+}
 </script>
 </div></body></html>

@@ -1667,6 +1667,147 @@ async def uploads_clear(req: UploadsClearReq, request: Request):
     save_new_uploads(lst)
     return {"ok": True, "remaining": len(lst)}
 
+# ── מערכת תמיכה/משוב: משתמשים כותבים, המנהל רואה בפאנל ומגיב ──────────────────
+# feedback.json: { user_id: {user_id,name,email,fcm_token,messages:[{from,text,ts,kind}],
+#                            updated, unread_admin, unread_user} }
+FEEDBACK_FILE = DATA_DIR / "feedback.json"
+
+def load_feedback() -> dict:
+    if FEEDBACK_FILE.exists():
+        try:
+            return json.loads(FEEDBACK_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def save_feedback(d: dict):
+    FEEDBACK_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+
+class FeedbackSendReq(BaseModel):
+    user_id: str
+    name: Optional[str] = ""
+    email: Optional[str] = ""
+    text: str
+    kind: Optional[str] = "support"   # support / review / tip
+    fcm_token: Optional[str] = ""
+
+@api.post("/feedback/send")
+async def feedback_send(req: FeedbackSendReq):
+    text = (req.text or "").strip()
+    if not req.user_id or not text:
+        raise HTTPException(status_code=400, detail="חסר משתמש או טקסט")
+    d = load_feedback()
+    th = d.get(req.user_id) or {"user_id": req.user_id, "messages": []}
+    if req.name:  th["name"] = req.name
+    if req.email: th["email"] = req.email
+    if req.fcm_token: th["fcm_token"] = req.fcm_token
+    th["messages"].append({"from": "user", "text": text[:4000],
+                           "ts": datetime.utcnow().isoformat(), "kind": req.kind or "support"})
+    th["updated"] = datetime.utcnow().isoformat()
+    th["unread_admin"] = True
+    d[req.user_id] = th
+    save_feedback(d)
+    return {"ok": True}
+
+@api.get("/feedback/mine")
+async def feedback_mine(user_id: str):
+    d = load_feedback()
+    th = d.get(user_id)
+    if not th:
+        return {"user_id": user_id, "messages": [], "unread_user": False}
+    if th.get("unread_user"):
+        th["unread_user"] = False
+        save_feedback(d)   # סימון כנקרא כשהמשתמש פותח את הצ'אט
+    return th
+
+class FeedbackReplyReq(BaseModel):
+    password: str
+    user_id: str
+    text: str
+
+@api.post("/feedback/reply")
+async def feedback_reply(req: FeedbackReplyReq, request: Request):
+    check_panel_password(request, req.password)
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="חסר טקסט")
+    d = load_feedback()
+    th = d.get(req.user_id)
+    if not th:
+        raise HTTPException(status_code=404, detail="לא נמצא")
+    th["messages"].append({"from": "admin", "text": text[:4000],
+                           "ts": datetime.utcnow().isoformat()})
+    th["updated"] = datetime.utcnow().isoformat()
+    th["unread_user"] = True
+    th["unread_admin"] = False
+    save_feedback(d)
+    asyncio.create_task(send_reply_push(th, text))   # התראה (אם יש טוקן+FCM)
+    return {"ok": True}
+
+class FeedbackListReq(BaseModel):
+    password: str
+
+@api.post("/feedback/all")
+async def feedback_all(req: FeedbackListReq, request: Request):
+    check_panel_password(request, req.password)
+    d = load_feedback()
+    threads = sorted(d.values(), key=lambda t: t.get("updated", ""), reverse=True)
+    unread = sum(1 for t in threads if t.get("unread_admin"))
+    return {"threads": threads, "unread": unread}
+
+async def send_reply_push(thread: dict, text: str):
+    """שולח התראת push למשתמש כשהמנהל מגיב. פעיל רק אם הוגדר FCM (מפתח שירות
+    Firebase בשרת) ולמשתמש יש fcm_token. אחרת — המשתמש יראה את התשובה בפתיחה."""
+    token = thread.get("fcm_token")
+    if not token or not _fcm_send:
+        return
+    try:
+        await _fcm_send(token, "תשובה מ-ZOVEX", text[:120])
+    except Exception as e:
+        log.warning("שליחת push נכשלה: %s", e)
+
+# מוגדר בהמשך אם קיים מפתח Firebase; אחרת נשאר None (התראות כבויות, השאר עובד)
+_fcm_send = None
+
+# ── גרסת אפליקציה: דיאלוג עדכון מאולץ / מומלץ ────────────────────────────────
+# app_version.json: {"latest","min","url","notes"}. האפליקציה מושכת /app/version
+# בהפעלה ומשווה ל-versionName שלה: קטן מ-min → חובה לעדכן (חוסם); קטן מ-latest →
+# מוצע לעדכן. המנהל מעדכן דרך /app/version/set (סיסמת פאנל).
+APP_VERSION_FILE = DATA_DIR / "app_version.json"
+APP_UPDATE_URL_DEFAULT = os.environ.get(
+    "APP_UPDATE_URL",
+    "https://github.com/davidggjg/zovex-android/releases/latest")
+
+def load_app_version() -> dict:
+    if APP_VERSION_FILE.exists():
+        try:
+            return json.loads(APP_VERSION_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"latest": "1.0.0", "min": "1.0.0", "url": APP_UPDATE_URL_DEFAULT, "notes": ""}
+
+@api.get("/app/version")
+async def app_version_get():
+    return load_app_version()
+
+class AppVersionSetReq(BaseModel):
+    password: str
+    latest: Optional[str] = None
+    min: Optional[str] = None
+    url: Optional[str] = None
+    notes: Optional[str] = None
+
+@api.post("/app/version/set")
+async def app_version_set(req: AppVersionSetReq, request: Request):
+    check_panel_password(request, req.password)
+    v = load_app_version()
+    if req.latest is not None: v["latest"] = req.latest.strip()
+    if req.min is not None:    v["min"] = req.min.strip()
+    if req.url is not None:     v["url"] = req.url.strip() or APP_UPDATE_URL_DEFAULT
+    if req.notes is not None:   v["notes"] = req.notes.strip()
+    APP_VERSION_FILE.write_text(json.dumps(v, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "version": v}
+
 # ── מאגר התוכן בשרת (content.json) — מקור האמת החדש, מנותק מגיטהאב ──────────────
 # פאנל הניהול טוען את כל הספרייה, עורך בזיכרון, ושומר את המערך המלא חזרה (save).
 # האתר יוכל בעתיד למשוך מ-/content או /movies.json במקום מגיטהאב.
