@@ -1396,6 +1396,65 @@ async def stop_upload_bot():
 async def uploads_new():
     return {"count": len(load_new_uploads()), "items": load_new_uploads()}
 
+# ── מאגר התוכן בשרת (content.json) — מקור האמת החדש, מנותק מגיטהאב ──────────────
+# פאנל הניהול טוען את כל הספרייה, עורך בזיכרון, ושומר את המערך המלא חזרה (save).
+# האתר יוכל בעתיד למשוך מ-/content או /movies.json במקום מגיטהאב.
+CONTENT_FILE = DATA_DIR / "content.json"
+CONTENT_SEED_URL = os.environ.get(
+    "CONTENT_SEED_URL",
+    "https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json")
+
+def load_content() -> list:
+    if CONTENT_FILE.exists():
+        try:
+            return json.loads(CONTENT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+def save_content(arr: list):
+    CONTENT_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
+
+async def seed_content_if_empty():
+    """בהפעלה ראשונה — זורע את content.json מתוך movies.json הקיים בגיטהאב, כדי
+    שהפאנל יראה מיד את כל התוכן הקיים. אחרי זה המקור הוא השרת בלבד."""
+    if CONTENT_FILE.exists():
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30) as cx:
+            r = await cx.get(CONTENT_SEED_URL + "?t=" + str(int(time.time())))
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list):
+                    save_content(data)
+                    log.info("✅ content.json נזרע מ-%d פריטים", len(data))
+    except Exception as e:
+        log.warning("זריעת content.json נכשלה: %s", e)
+
+@api.get("/content")
+async def content_get():
+    """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן."""
+    return load_content()
+
+@api.get("/movies.json")
+async def content_movies_alias():
+    """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
+    return load_content()
+
+class ContentSaveReq(BaseModel):
+    password: str
+    movies: list
+
+@api.post("/content/save")
+async def content_save(req: ContentSaveReq):
+    """שמירת המערך המלא (list/create/update/delete/saveAll כולם עוברים דרך זה)."""
+    if not PANEL_PASSWORD or req.password != PANEL_PASSWORD:
+        raise HTTPException(status_code=401, detail="סיסמה שגויה")
+    if not isinstance(req.movies, list):
+        raise HTTPException(status_code=400, detail="movies חייב להיות מערך")
+    save_content(req.movies)
+    return {"ok": True, "count": len(req.movies)}
+
 # ── ריענון שרת דרך קישור פשוט ──────────────────────────────────────────────
 # מיועד לשליחה למישהו שצריך לרענן את השרת בעצמו כשהוא נתקע, בלי גישה
 # לחשבון Hugging Face. שולחים לו קישור מהצורה:
@@ -2014,6 +2073,7 @@ async def startup():
     asyncio.create_task(start_download_workers())
     asyncio.create_task(start_stream_pool())
     asyncio.create_task(start_upload_bot())
+    asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
