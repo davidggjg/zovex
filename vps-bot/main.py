@@ -1153,6 +1153,35 @@ STREAM_PUBLIC_BASE = os.environ.get("STREAM_PUBLIC_BASE", BASE_URL).rstrip("/")
 NEW_UPLOADS_FILE = DATA_DIR / "new_uploads.json"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 
+# ── קישורים ניידים (portable) — לא שומרים את הכתובת בתוך הקישור ────────────────
+# הקישורים שלנו נשמרים עם מציין-מקום %BASE% במקום הכתובת (IP/דומיין). השרת
+# מזריק את הכתובת האמיתית (STREAM_PUBLIC_BASE) רק בזמן ההגשה (/content), ומכווץ
+# בחזרה ל-%BASE% בזמן השמירה. כך, כשמגיע דומיין — משנים משתנה אחד ב-.env
+# (STREAM_PUBLIC_BASE) והכל מתעדכן, בלי לשכתב אף קישור.
+BASE_TOKEN = "%BASE%"
+
+def stored_stream_url(msg_id) -> str:
+    return f"{BASE_TOKEN}/stream/{STREAM_CHANNEL_ID}/{msg_id}"
+
+def expand_base(s):
+    return s.replace(BASE_TOKEN, STREAM_PUBLIC_BASE) if isinstance(s, str) else s
+
+def _expand_urls(items: list) -> list:
+    for e in items:
+        for k in ("video_url", "video_id"):
+            v = e.get(k)
+            if isinstance(v, str) and BASE_TOKEN in v:
+                e[k] = v.replace(BASE_TOKEN, STREAM_PUBLIC_BASE)
+    return items
+
+def _collapse_urls(items: list) -> list:
+    for e in items:
+        for k in ("video_url", "video_id"):
+            v = e.get(k)
+            if isinstance(v, str) and STREAM_PUBLIC_BASE and STREAM_PUBLIC_BASE in v:
+                e[k] = v.replace(STREAM_PUBLIC_BASE, BASE_TOKEN)
+    return items
+
 upload_bot: Optional[Client] = None
 # _pending_uploads: message_id-בערוץ (str) → {"channel_msg_id","chat_id","user_id","fname","options":[...]}
 _pending_uploads: dict = {}
@@ -1230,8 +1259,9 @@ def find_upload_by_fuid(fuid: str):
     return None
 
 def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
-    """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json."""
-    stream_url = f"{STREAM_PUBLIC_BASE}/stream/{STREAM_CHANNEL_ID}/{channel_msg_id}"
+    """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json.
+    שומר קישור נייד (%BASE%) — הכתובת האמיתית מוזרקת בזמן ההגשה/התצוגה."""
+    stream_url = stored_stream_url(channel_msg_id)
     entry = {
         "id": _slugify(chosen["title"], chosen["tmdb_id"]) + "-" + str(channel_msg_id),
         "title": chosen["title"],
@@ -1296,7 +1326,7 @@ async def _handle_custom_name(client: Client, message: Message, uid: int):
             pending.get("file_unique_id", ""))
         _pending_uploads.pop(cmid, None)
         await message.reply_text(
-            f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+            f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{expand_base(entry['video_url'])}")
         return
     pending["options"] = options
     await message.reply_text(
@@ -1325,7 +1355,7 @@ async def on_upload(client: Client, message: Message):
     if dup:
         await message.reply_text(
             f"♻️ הקובץ הזה כבר קיים במערכת:\n<b>{dup.get('title','—')}</b>"
-            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{dup['video_url']}")
+            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{expand_base(dup['video_url'])}")
         return
     status = await message.reply_text("⏳ מעלה לערוץ...")
     try:
@@ -1393,7 +1423,7 @@ async def on_select(client: Client, cq: CallbackQuery):
             pending.get("file_unique_id", ""))
         _pending_uploads.pop(cmid, None)
         await cq.message.edit_text(
-            f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+            f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{expand_base(entry['video_url'])}")
         await cq.answer("נשמר!")
         return
     try:
@@ -1406,7 +1436,7 @@ async def on_select(client: Client, cq: CallbackQuery):
     poster_line = f"\n🖼 {entry['thumbnail_url']}" if entry["thumbnail_url"] else ""
     await cq.message.edit_text(
         f"✅ נוסף: <b>{entry['title']}</b> ({entry['year'] or '?'})"
-        f"{poster_line}\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+        f"{poster_line}\n\n🔗 קישור סטרימינג:\n{expand_base(entry['video_url'])}")
     await cq.answer("נוסף!")
 
 async def start_upload_bot():
@@ -1447,7 +1477,8 @@ async def stop_upload_bot():
 # ל-movies.json כשמעדכנים. (רק קריאה; אין כאן חשיפת טוקנים.)
 @api.get("/uploads/new")
 async def uploads_new():
-    return {"count": len(load_new_uploads()), "items": load_new_uploads()}
+    items = _expand_urls(load_new_uploads())
+    return {"count": len(items), "items": items}
 
 # ── מאגר התוכן בשרת (content.json) — מקור האמת החדש, מנותק מגיטהאב ──────────────
 # פאנל הניהול טוען את כל הספרייה, עורך בזיכרון, ושומר את המערך המלא חזרה (save).
@@ -1505,13 +1536,13 @@ async def admin_tmdb(q: str = ""):
 
 @api.get("/content")
 async def content_get():
-    """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן."""
-    return load_content()
+    """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית)."""
+    return _expand_urls(load_content())
 
 @api.get("/movies.json")
 async def content_movies_alias():
     """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
-    return load_content()
+    return _expand_urls(load_content())
 
 class ContentSaveReq(BaseModel):
     password: str
@@ -1523,7 +1554,8 @@ async def content_save(req: ContentSaveReq, request: Request):
     check_panel_password(request, req.password)
     if not isinstance(req.movies, list):
         raise HTTPException(status_code=400, detail="movies חייב להיות מערך")
-    save_content(req.movies)
+    # מכווצים את הכתובת שלנו חזרה ל-%BASE% כדי שהקישורים יישארו ניידים
+    save_content(_collapse_urls(req.movies))
     return {"ok": True, "count": len(req.movies)}
 
 @api.get("/content/relink")
@@ -1553,7 +1585,7 @@ async def content_relink(request: Request, dry: int = 1):
         # שידורים חיים / hls-relay דרך hf.space → השרת החדש
         idx = url.find("/hls-relay/")
         if "hf.space" in url and idx != -1:
-            new = STREAM_PUBLIC_BASE + url[idx:]
+            new = BASE_TOKEN + url[idx:]
             e["video_url"] = new
             if e.get("video_id"):
                 e["video_id"] = new
@@ -1568,7 +1600,7 @@ async def content_relink(request: Request, dry: int = 1):
         if new_msg is None:
             stats["telegram_unmapped"] += 1
             continue
-        new = f"{STREAM_PUBLIC_BASE}/stream/{STREAM_CHANNEL_ID}/{new_msg}"
+        new = stored_stream_url(new_msg)
         e["video_url"] = new
         e["video_id"] = new
         stats["telegram_relinked"] += 1
