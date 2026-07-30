@@ -35,10 +35,12 @@ export function useMovieLibrary() {
     setLoading(false);
   };
 
-  // קריאה מ-raw.githubusercontent.com — מתעדכן מיד אחרי שמירה בלי לחכות ל-build
+  // רענון שידורים חיים. בשרת — מ-/content (אותו origin); אחרת מ-GitHub.
+  const LIVE_SRC = import.meta.env.VITE_CONTENT_URL
+    || "https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json";
   const loadLiveFromGitHub = async () => {
     try {
-      const res = await fetch(`https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json?t=` + Date.now());
+      const res = await fetch(`${LIVE_SRC}?t=` + Date.now());
       if (!res.ok) return;
       const all = await res.json();
       setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));

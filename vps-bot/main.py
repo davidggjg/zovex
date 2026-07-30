@@ -1668,6 +1668,7 @@ async def restart_server(key: str = ""):
     )
 
 @api.get("/", response_class=HTMLResponse)
+@api.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     html = f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">

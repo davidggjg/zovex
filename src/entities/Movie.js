@@ -1,6 +1,8 @@
 const GITHUB_REPO = import.meta.env.VITE_GITHUB_REPO || 'davidggjg/zovex';
 const GITHUB_FILE = 'public/movies.json';
 const BASE_PATH = import.meta.env.BASE_URL || '/';
+// כשהאתר רץ על השרת — מושכים את התוכן מ-/content (אותו origin) במקום מגיטהאב.
+const CONTENT_URL = import.meta.env.VITE_CONTENT_URL || '';
 
 function getToken() {
   try { return localStorage.getItem('github_token') || ''; } catch { return ''; }
@@ -9,6 +11,13 @@ function getToken() {
 let _movies = null;
 
 async function fetchMovies() {
+  // מקור התוכן החדש: השרת (/content). אם מוגדר — מנסים אותו קודם.
+  if (CONTENT_URL) {
+    try {
+      const r = await fetch(`${CONTENT_URL}?t=` + Date.now());
+      if (r.ok) { _movies = await r.json(); return _movies; }
+    } catch {}
+  }
   try {
     const res = await fetch(`${BASE_PATH}movies.json?t=` + Date.now());
     if (!res.ok) throw new Error('failed');

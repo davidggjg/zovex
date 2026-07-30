@@ -1,5 +1,8 @@
 // ─── constants ────────────────────────────────────────────────
-export const BACKEND_URL = "https://davidhzhdhd-my-telegram-bot.hf.space";
+// כתובת הבקאש להיסטוריה/המשך-צפייה. בבנייה לשרת מגדירים VITE_BACKEND_URL=""
+// (מחרוזת ריקה) כדי לפנות לאותו origin — /api/... . ברירת מחדל: הבוט הישן.
+export const BACKEND_URL =
+  import.meta.env.VITE_BACKEND_URL ?? "https://davidhzhdhd-my-telegram-bot.hf.space";
 
 // ─── Backend API helper ──────────────────────────────
 export async function apiCall(path, method = "GET", body = null, userId = null) {

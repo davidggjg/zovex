@@ -46,11 +46,11 @@ export function usePlayback({ user, loadProgress, saveHistory }) {
       const epSlug = movie.custom_slug
         ? `season-${seasonNum}-episode-${movie.episode_number}`
         : encodeURIComponent(`עונה-${seasonNum}-פרק-${movie.episode_number}`);
-      window.history.replaceState(null, "", `/zovex/${serSlug}/${epSlug}`);
+      window.history.replaceState(null, "", `${import.meta.env.BASE_URL}${serSlug}/${epSlug}`);
     } else if (movie.title && !movie.series_name) {
       const movieSlug = movie.custom_slug ? movie.custom_slug : (encodeURIComponent((movie.title || "").replace(/ /g, "-")) + "-" + movie.id.slice(0, 6));
       const watchPart = movie.custom_slug ? "watch" : "watch";
-      window.history.replaceState(null, "", `/zovex/${movieSlug}/${watchPart}`);
+      window.history.replaceState(null, "", `${import.meta.env.BASE_URL}${movieSlug}/${watchPart}`);
     }
     const vid = movie.video_id || "";
     const isKaltura = movie.type === "kaltura" || vid.includes("kaltura");
