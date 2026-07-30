@@ -549,8 +549,19 @@ def _mark_choked(bot, seconds):
     bot["cooldown_until"] = time.time() + seconds
     log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
 
-async def channel_get_media(chat_id, message_id):
-    """מנסה כמה בוטים עד שאחד פותר את ההודעה. מחזיר (media) או None."""
+# cache של אובייקט ההודעה מהערוץ. בלעדיו כל בקשת Range (וכל דילוג/מילוי-buffer
+# של הנגן) הייתה עושה get_messages נוסף ל-Telegram — round-trip שמאט את הטעינה.
+# ה-FileId בתוך ההודעה תקף לכל בוט בערוץ, אז אפשר לשתף אותו בין הבוטים ב-pool.
+_channel_msg_cache: dict = {}   # (chat_id, message_id) -> (msg, expires_at)
+_CHANNEL_MSG_TTL = 600          # 10 דקות
+
+async def _get_channel_msg(chat_id, message_id):
+    """מחזיר אובייקט Message מהערוץ (עם cache). מנסה כמה בוטים עד שאחד פותר."""
+    key = (chat_id, message_id)
+    now = time.time()
+    cached = _channel_msg_cache.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
     for _ in range(min(max(1, len(_stream_bots)), 5)):
         bot = await pick_stream_bot()
         if bot is None:
@@ -558,27 +569,36 @@ async def channel_get_media(chat_id, message_id):
         try:
             msg = await asyncio.wait_for(
                 bot["client"].get_messages(chat_id, message_id), timeout=20)
-            media = msg.video or msg.audio or msg.document or msg.video_note
-            if media:
-                return media
+            if msg and (msg.video or msg.audio or msg.document or msg.video_note):
+                _channel_msg_cache[key] = (msg, now + _CHANNEL_MSG_TTL)
+                return msg
         except FloodWait as e:
             _mark_choked(bot, e.value)
         except Exception as e:
-            log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
+            log.warning("_get_channel_msg שגיאה (%s): %s", chat_id, e)
             _mark_choked(bot, 30)
     return None
+
+async def channel_get_media(chat_id, message_id):
+    """מחזיר את ה-media של ההודעה מהערוץ (או None)."""
+    msg = await _get_channel_msg(chat_id, message_id)
+    if not msg:
+        return None
+    return msg.video or msg.audio or msg.document or msg.video_note
 
 async def channel_stream_range(chat_id, message_id, start, end):
     """מזרים [start, end] מהערוץ דרך בוט מה-pool. בוט שנחנק בהתחלה → עוברים לבא."""
     CHUNK = PYROGRAM_CHUNK_SIZE
     pos = start
+    msg = await _get_channel_msg(chat_id, message_id)   # מה-cache — בלי round-trip נוסף
+    if msg is None:
+        yield b"\x00" * (end - start + 1)
+        return
     for _ in range(min(max(1, len(_stream_bots)), 4)):
         bot = await pick_stream_bot()
         if bot is None:
             break
         try:
-            msg = await asyncio.wait_for(
-                bot["client"].get_messages(chat_id, message_id), timeout=20)
             off_chunks = pos // CHUNK
             produced = off_chunks * CHUNK
             async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
@@ -1126,7 +1146,16 @@ def _slugify(title: str, tmdb_id) -> str:
     base = re.sub(r"[^a-zA-Z0-9]+", "-", (title or "")).strip("-").lower()
     return (base or "movie") + "-" + str(tmdb_id)
 
-def add_movie_entry(chosen: dict, channel_msg_id: int) -> dict:
+def find_upload_by_fuid(fuid: str):
+    """מחזיר כניסה קיימת עם אותו file_unique_id (מניעת כפילויות), או None."""
+    if not fuid:
+        return None
+    for e in load_new_uploads():
+        if e.get("file_unique_id") and e["file_unique_id"] == fuid:
+            return e
+    return None
+
+def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
     """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json."""
     stream_url = f"{STREAM_PUBLIC_BASE}/stream/{STREAM_CHANNEL_ID}/{channel_msg_id}"
     entry = {
@@ -1140,10 +1169,13 @@ def add_movie_entry(chosen: dict, channel_msg_id: int) -> dict:
         "thumbnail_url": chosen.get("poster", ""),
         "description": chosen.get("overview", ""),
         "channel_msg_id": channel_msg_id,
+        "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
     }
     lst = load_new_uploads()
-    lst = [e for e in lst if e.get("channel_msg_id") != channel_msg_id]  # מניעת כפילות
+    # מניעת כפילות — לפי מזהה ההודעה בערוץ וגם לפי הקובץ עצמו (file_unique_id)
+    lst = [e for e in lst if e.get("channel_msg_id") != channel_msg_id
+           and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
     lst.append(entry)
     save_new_uploads(lst)
     return entry
@@ -1186,7 +1218,8 @@ async def _handle_custom_name(client: Client, message: Message, uid: int):
         # אין זיהוי — שומרים בשם המדויק שהוקלד
         entry = add_movie_entry(
             {"title": name, "year": "", "tmdb_id": 0, "type": "movie",
-             "poster": "", "overview": ""}, pending["channel_msg_id"])
+             "poster": "", "overview": ""}, pending["channel_msg_id"],
+            pending.get("file_unique_id", ""))
         _pending_uploads.pop(cmid, None)
         await message.reply_text(
             f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
@@ -1211,6 +1244,15 @@ async def on_upload(client: Client, message: Message):
             return
         await message.reply_text("שלח לי קובץ סרט/פרק (וידאו או מסמך) ואני אזהה אותו.")
         return
+    # מניעת כפילויות — אותו קובץ בדיוק שכבר הועלה? מחזירים את הקישור הקיים בלי
+    # להעלות שוב לערוץ.
+    fuid = getattr(media, "file_unique_id", "") or ""
+    dup = find_upload_by_fuid(fuid)
+    if dup:
+        await message.reply_text(
+            f"♻️ הקובץ הזה כבר קיים במערכת:\n<b>{dup.get('title','—')}</b>"
+            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{dup['video_url']}")
+        return
     status = await message.reply_text("⏳ מעלה לערוץ...")
     try:
         copied = await client.copy_message(
@@ -1231,7 +1273,7 @@ async def on_upload(client: Client, message: Message):
     _pending_uploads[str(channel_msg_id)] = {
         "channel_msg_id": channel_msg_id, "chat_id": message.chat.id,
         "user_id": uid, "fname": fname, "options": options,
-        "raw_name": query or fname,
+        "raw_name": query or fname, "file_unique_id": fuid,
     }
     if not options:
         # אין זיהוי אוטומטי — נותנים לבחור: שמור בשם הגולמי או הקלד שם ידני
@@ -1273,7 +1315,8 @@ async def on_select(client: Client, cq: CallbackQuery):
         raw = pending.get("raw_name") or f"קובץ {pending['channel_msg_id']}"
         entry = add_movie_entry(
             {"title": raw, "year": "", "tmdb_id": 0, "type": "movie",
-             "poster": "", "overview": ""}, pending["channel_msg_id"])
+             "poster": "", "overview": ""}, pending["channel_msg_id"],
+            pending.get("file_unique_id", ""))
         _pending_uploads.pop(cmid, None)
         await cq.message.edit_text(
             f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
@@ -1283,7 +1326,8 @@ async def on_select(client: Client, cq: CallbackQuery):
         chosen = pending["options"][int(idx)]
     except Exception:
         await cq.answer("בחירה לא תקינה", show_alert=True); return
-    entry = add_movie_entry(chosen, pending["channel_msg_id"])
+    entry = add_movie_entry(chosen, pending["channel_msg_id"],
+                            pending.get("file_unique_id", ""))
     _pending_uploads.pop(cmid, None)
     poster_line = f"\n🖼 {entry['thumbnail_url']}" if entry["thumbnail_url"] else ""
     await cq.message.edit_text(
