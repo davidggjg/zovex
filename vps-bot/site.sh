@@ -54,6 +54,13 @@ server {
     root $SITE_DIR;
     index index.html;
 
+    # דחיסה — רק לטקסט/JSON (לא לוידאו!). מקטין את /content פי ~10 → טעינה מהירה.
+    gzip on;
+    gzip_proxied any;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_types application/json application/javascript text/css text/plain image/svg+xml application/xml;
+
     # ── API → הבוט (uvicorn 127.0.0.1:8000) ──
     location /stream/      { include snippets/zovex-stream.conf; }
     location /hls-relay/   { include snippets/zovex-stream.conf; }
