@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, FileReferenceExpired
 from pyrogram.session import Session, Auth
 from pyrogram.file_id import FileId
 from pyrogram.raw import functions, types as raw_types
@@ -549,56 +549,59 @@ def _mark_choked(bot, seconds):
     bot["cooldown_until"] = time.time() + seconds
     log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
 
-# cache של אובייקט ההודעה מהערוץ. בלעדיו כל בקשת Range (וכל דילוג/מילוי-buffer
-# של הנגן) הייתה עושה get_messages נוסף ל-Telegram — round-trip שמאט את הטעינה.
-# ה-FileId בתוך ההודעה תקף לכל בוט בערוץ, אז אפשר לשתף אותו בין הבוטים ב-pool.
-_channel_msg_cache: dict = {}   # (chat_id, message_id) -> (msg, expires_at)
-_CHANNEL_MSG_TTL = 600          # 10 דקות
+# cache של אובייקט ההודעה — *per-bot*. קריטי: ה-file_reference בתוך ההודעה
+# תקף רק בהקשר של הסשן שששלף אותו. שיתוף בין בוטים גרם ל-FILE_REFERENCE_EXPIRED
+# (הקישור נשבר אחרי כמה שניות). לכן כל בוט מחזיק cache משלו, וכשה-reference
+# פג — שולפים מחדש עם אותו בוט. ל-metadata (גודל/mime) אין בעיית reference.
+_bot_msg_cache: dict = {}   # (bot_name, chat_id, message_id) -> (msg, expires_at)
+_BOT_MSG_TTL = 120          # 2 דקות — מספיק לרצף בקשות Range של אותה צפייה
 
-async def _get_channel_msg(chat_id, message_id):
-    """מחזיר אובייקט Message מהערוץ (עם cache). מנסה כמה בוטים עד שאחד פותר."""
-    key = (chat_id, message_id)
+async def _get_bot_msg(bot, chat_id, message_id, force=False):
+    """שולף את ההודעה עבור בוט מסוים (cache פר-בוט). force=True מכריח שליפה טרייה."""
+    key = (bot["name"], chat_id, message_id)
     now = time.time()
-    cached = _channel_msg_cache.get(key)
-    if cached and cached[1] > now:
-        return cached[0]
+    if not force:
+        c = _bot_msg_cache.get(key)
+        if c and c[1] > now:
+            return c[0]
+    msg = await asyncio.wait_for(
+        bot["client"].get_messages(chat_id, message_id), timeout=20)
+    if msg and (msg.video or msg.audio or msg.document or msg.video_note):
+        _bot_msg_cache[key] = (msg, now + _BOT_MSG_TTL)
+        return msg
+    return None
+
+async def channel_get_media(chat_id, message_id):
+    """מחזיר את ה-media של ההודעה מהערוץ (metadata בלבד — אין בעיית reference)."""
     for _ in range(min(max(1, len(_stream_bots)), 5)):
         bot = await pick_stream_bot()
         if bot is None:
             return None
         try:
-            msg = await asyncio.wait_for(
-                bot["client"].get_messages(chat_id, message_id), timeout=20)
-            if msg and (msg.video or msg.audio or msg.document or msg.video_note):
-                _channel_msg_cache[key] = (msg, now + _CHANNEL_MSG_TTL)
-                return msg
+            msg = await _get_bot_msg(bot, chat_id, message_id)
+            if msg:
+                return msg.video or msg.audio or msg.document or msg.video_note
         except FloodWait as e:
             _mark_choked(bot, e.value)
         except Exception as e:
-            log.warning("_get_channel_msg שגיאה (%s): %s", chat_id, e)
+            log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
             _mark_choked(bot, 30)
     return None
 
-async def channel_get_media(chat_id, message_id):
-    """מחזיר את ה-media של ההודעה מהערוץ (או None)."""
-    msg = await _get_channel_msg(chat_id, message_id)
-    if not msg:
-        return None
-    return msg.video or msg.audio or msg.document or msg.video_note
-
 async def channel_stream_range(chat_id, message_id, start, end):
-    """מזרים [start, end] מהערוץ דרך בוט מה-pool. בוט שנחנק בהתחלה → עוברים לבא."""
+    """מזרים [start, end] מהערוץ דרך בוט מה-pool. כל בוט שולף את ההודעה של עצמו
+    (file_reference תקף רק בהקשר שלו). בוט שנחנק בהתחלה → עוברים לבא."""
     CHUNK = PYROGRAM_CHUNK_SIZE
     pos = start
-    msg = await _get_channel_msg(chat_id, message_id)   # מה-cache — בלי round-trip נוסף
-    if msg is None:
-        yield b"\x00" * (end - start + 1)
-        return
     for _ in range(min(max(1, len(_stream_bots)), 4)):
         bot = await pick_stream_bot()
         if bot is None:
             break
         try:
+            msg = await _get_bot_msg(bot, chat_id, message_id)
+            if msg is None:
+                _mark_choked(bot, 15)
+                continue
             off_chunks = pos // CHUNK
             produced = off_chunks * CHUNK
             async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
@@ -613,6 +616,11 @@ async def channel_stream_range(chat_id, message_id, start, end):
                 if produced > end:
                     break
             break  # הצלחה
+        except FileReferenceExpired:
+            # ה-reference פג — נזרוק את ה-cache של הבוט ונתן לו סיבוב נוסף
+            _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+            if pos > start:
+                break   # כבר שלחנו בייטים — אי אפשר להתחיל מחדש
         except FloodWait as e:
             _mark_choked(bot, e.value)
             if pos > start:
