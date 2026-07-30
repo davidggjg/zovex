@@ -129,6 +129,15 @@ def check_hotlink(request: Request):
     if any(allowed in ref for allowed in HOTLINK_REFERERS):
         return
     raise HTTPException(status_code=403, detail="hotlink not allowed")
+
+def is_local_request(request: Request) -> bool:
+    """True רק אם הבקשה באמת מקומית (curl מהשרת ל-127.0.0.1). בקשה שהגיעה דרך
+    nginx נושאת X-Forwarded-For — ואז היא *לא* מקומית, גם אם ה-socket הוא
+    127.0.0.1. קריטי כדי ש-/content/relink ו-/admin/migrate לא ייחשפו לציבור
+    ברגע שיש reverse proxy."""
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
+        return False
+    return bool(request.client) and request.client.host in ("127.0.0.1", "::1")
 _hf_api = HfApi(token=HF_TOKEN) if (HF_TOKEN and DATA_REPO_ID) else None
 
 if not _hf_api:
@@ -940,7 +949,7 @@ async def _run_migration(limit: int, new_base: str):
 @api.get("/admin/migrate")
 async def admin_migrate(request: Request, limit: int = 0, base: str = "http://213.139.78.39"):
     # מותר רק מ-localhost (הרצה מהשרת עצמו)
-    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+    if not is_local_request(request):
         raise HTTPException(status_code=403, detail="localhost only")
     if _migration["running"]:
         return JSONResponse({"status": "כבר רץ", **_migration})
@@ -949,7 +958,7 @@ async def admin_migrate(request: Request, limit: int = 0, base: str = "http://21
 
 @api.get("/admin/migrate/status")
 async def admin_migrate_status(request: Request):
-    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+    if not is_local_request(request):
         raise HTTPException(status_code=403, detail="localhost only")
     return JSONResponse(dict(_migration))
 
@@ -1565,7 +1574,7 @@ async def content_relink(request: Request, dry: int = 1):
     - שידורים חיים: hf.space/hls-relay/… → אותו נתיב אבל דרך השרת החדש
     כל שאר הסוגים (kaltura/drive/youtube וכו') נשארים כמו שהם.
     מותר רק מ-localhost. dry=1 (ברירת מחדל) = תצוגה מקדימה בלי לשמור; dry=0 = מבצע."""
-    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+    if not is_local_request(request):
         raise HTTPException(status_code=403, detail="localhost only")
     # מפת המיגרציה: "old_chat:old_msg" -> new_msg_id
     prog = {}
