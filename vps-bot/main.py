@@ -10,6 +10,7 @@ import re
 import sys
 import json
 import time
+import hmac
 import asyncio
 import logging
 import httpx
@@ -111,6 +112,23 @@ DATA_REPO_ID = os.environ.get("DATA_REPO_ID", "").strip()
 # עצמו. חובה להגדיר RESTART_KEY ב-Settings → Secrets של ה-Space (כל מחרוזת
 # שרירותית שתבחרי) - בלי זה ה-endpoint חסום לגמרי.
 RESTART_KEY = os.environ.get("RESTART_KEY", "").strip()
+
+# ── הגנת hotlink (אופציונלי) על קישורי הסטרימינג ─────────────────────────────
+# אם מגדירים HOTLINK_REFERERS (רשימה מופרדת בפסיקים, למשל
+# "davidggjg.github.io,zovex1.netlify.app,213.139.78.39") — רק בקשות עם Referer
+# שמכיל אחד מהם (או בלי Referer בכלל, בשביל האפליקציה/וידאו ישיר) יורשו. זה
+# חוסם אתרים אחרים שמנסים להטמיע את הזרם אצלם. כברירת מחדל ריק ⇒ לא חוסם כלום.
+HOTLINK_REFERERS = [r.strip() for r in os.environ.get("HOTLINK_REFERERS", "").split(",") if r.strip()]
+
+def check_hotlink(request: Request):
+    if not HOTLINK_REFERERS:
+        return  # הגנה כבויה — התנהגות רגילה
+    ref = request.headers.get("referer") or request.headers.get("origin") or ""
+    if not ref:
+        return  # אפליקציה / תג <video> ישיר — אין referer, מרשים
+    if any(allowed in ref for allowed in HOTLINK_REFERERS):
+        return
+    raise HTTPException(status_code=403, detail="hotlink not allowed")
 _hf_api = HfApi(token=HF_TOKEN) if (HF_TOKEN and DATA_REPO_ID) else None
 
 if not _hf_api:
@@ -667,6 +685,7 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
 
 @api.get("/stream/{chat_id}/{message_id}")
 async def stream(chat_id: int, message_id: int, request: Request):
+    check_hotlink(request)
     # תוכן בערוץ (chat_id שלילי) → דרך pool הבוטים; תוכן ישן (chat פרטי) → בוט ראשי
     if chat_id < 0 and _stream_bots:
         return await stream_from_channel(chat_id, message_id, request)
@@ -759,6 +778,7 @@ def _rewrite_hls_manifest(text: str, base_url: str) -> str:
 
 @api.get("/hls-relay/{host}/{path:path}")
 async def hls_relay(host: str, path: str, request: Request):
+    check_hotlink(request)
     if host not in HLS_RELAY_ALLOWED_HOSTS:
         raise HTTPException(403, "host not allowed")
     upstream_url = f"http://{host}/{path}"
@@ -940,6 +960,40 @@ async def admin_migrate_status(request: Request):
 ADMINS_FILE = DATA_DIR / "admins.json"
 PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "").strip()
 
+# ── הגנת brute-force על סיסמת הפאנל ─────────────────────────────────────────
+# בלי זה אפשר לנחש את הסיסמה באלפי ניסיונות. אחרי כמה כישלונות מ-IP מסוים —
+# חוסמים אותו לזמן קצוב. ההשוואה עצמה ב-hmac.compare_digest (זמן קבוע) כדי
+# למנוע דליפת מידע דרך תזמון.
+_auth_fails: dict = {}          # ip -> [timestamps של כישלונות]
+AUTH_MAX_FAILS = 6              # כישלונות מותרים
+AUTH_WINDOW = 300              # בחלון של 5 דקות
+AUTH_LOCK = 900               # ואז חסימה של 15 דקות
+
+def _client_ip(request: Request) -> str:
+    # מאחורי nginx/פרוקסי — קח את ה-IP האמיתי אם יש
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def check_panel_password(request: Request, password: str):
+    """מאמת את סיסמת הפאנל עם הגנת brute-force. זורק HTTPException אם נכשל/חסום."""
+    ip = _client_ip(request)
+    now = time.time()
+    fails = [t for t in _auth_fails.get(ip, []) if now - t < AUTH_LOCK]
+    # אם יש יותר מדי כישלונות בחלון האחרון — חסום
+    recent = [t for t in fails if now - t < AUTH_WINDOW]
+    if len(recent) >= AUTH_MAX_FAILS:
+        _auth_fails[ip] = fails
+        raise HTTPException(status_code=429, detail="יותר מדי ניסיונות — נסה שוב בעוד כמה דקות")
+    ok = bool(PANEL_PASSWORD) and hmac.compare_digest(password or "", PANEL_PASSWORD)
+    if not ok:
+        fails.append(now)
+        _auth_fails[ip] = fails
+        raise HTTPException(status_code=401, detail="סיסמה שגויה")
+    # הצלחה — נקה כישלונות קודמים מאותו IP
+    _auth_fails.pop(ip, None)
+
 def load_admins() -> list:
     if ADMINS_FILE.exists():
         try:
@@ -965,9 +1019,8 @@ class PanelReq(BaseModel):
     name: Optional[str] = ""
 
 @api.post("/panel/api")
-async def panel_api(req: PanelReq):
-    if not PANEL_PASSWORD or req.password != PANEL_PASSWORD:
-        raise HTTPException(status_code=401, detail="סיסמה שגויה")
+async def panel_api(req: PanelReq, request: Request):
+    check_panel_password(request, req.password)
     admins = load_admins()
     if req.action == "list":
         return {"admins": admins}
@@ -1412,7 +1465,21 @@ def load_content() -> list:
             return []
     return []
 
+CONTENT_BAK_DIR = DATA_DIR / "content_backups"
+
 def save_content(arr: list):
+    # גיבוי בטיחות לפני דריסה — content.json הוא מקור האמת, ורוצים אפשרות לשחזר
+    # אם מישהו מחק/דרס בטעות. שומרים עד 10 גיבויים אחרונים.
+    try:
+        if CONTENT_FILE.exists():
+            CONTENT_BAK_DIR.mkdir(parents=True, exist_ok=True)
+            bak = CONTENT_BAK_DIR / f"content_{int(time.time())}.json"
+            bak.write_text(CONTENT_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+            baks = sorted(CONTENT_BAK_DIR.glob("content_*.json"))
+            for old in baks[:-10]:
+                old.unlink(missing_ok=True)
+    except Exception as e:
+        log.warning("גיבוי content נכשל (ממשיכים בשמירה): %s", e)
     CONTENT_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
 
 async def seed_content_if_empty():
@@ -1451,10 +1518,9 @@ class ContentSaveReq(BaseModel):
     movies: list
 
 @api.post("/content/save")
-async def content_save(req: ContentSaveReq):
+async def content_save(req: ContentSaveReq, request: Request):
     """שמירת המערך המלא (list/create/update/delete/saveAll כולם עוברים דרך זה)."""
-    if not PANEL_PASSWORD or req.password != PANEL_PASSWORD:
-        raise HTTPException(status_code=401, detail="סיסמה שגויה")
+    check_panel_password(request, req.password)
     if not isinstance(req.movies, list):
         raise HTTPException(status_code=400, detail="movies חייב להיות מערך")
     save_content(req.movies)
