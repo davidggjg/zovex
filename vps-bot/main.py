@@ -23,12 +23,12 @@ from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from pyrogram.session import Session, Auth
 from pyrogram.file_id import FileId
 from pyrogram.raw import functions, types as raw_types
-from pyrogram.handlers import MessageHandler
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 from huggingface_hub import HfApi, hf_hub_download
 import uvicorn
 
@@ -1047,6 +1047,232 @@ async function removeAdmin(id) {
 }
 </script></div></body></html>"""
 
+# ── בוט העלאה (טוקן נפרד) + זיהוי TMDB ───────────────────────────────────────
+# בוט נפרד לגמרי (טוקן משלו) שמקבל קבצים מצוות המנהלים (רק Telegram-ID מורשים
+# מ-admins.json). הזרימה: מנהל שולח סרט לבוט → הבוט מעתיק אותו לערוץ התוכן
+# (copy_message, בלי הורדה מחדש) → מחפש ב-TMDB לפי שם הקובץ → מציג כפתורים עם
+# הצעות (שם+שנה, כי כמה סרטים חולקים שם) → המנהל בוחר → הבוט בונה כניסת סרט,
+# מוסיף ל-new_uploads.json ומחזיר קישור סטרימינג. מנהלים לא מקבלים גישה לשרת.
+UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "").strip()
+TMDB_API_KEY     = os.environ.get("TMDB_API_KEY", "").strip()
+STREAM_PUBLIC_BASE = os.environ.get("STREAM_PUBLIC_BASE", BASE_URL).rstrip("/")
+NEW_UPLOADS_FILE = DATA_DIR / "new_uploads.json"
+TMDB_IMG = "https://image.tmdb.org/t/p/w500"
+
+upload_bot: Optional[Client] = None
+# _pending_uploads: message_id-בערוץ (str) → {"channel_msg_id","chat_id","user_id","fname","options":[...]}
+_pending_uploads: dict = {}
+
+def load_new_uploads() -> list:
+    if NEW_UPLOADS_FILE.exists():
+        try:
+            return json.loads(NEW_UPLOADS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+def save_new_uploads(lst: list):
+    NEW_UPLOADS_FILE.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def clean_name(fname: str) -> str:
+    """מנקה שם קובץ לשם חיפוש: מוריד סיומת, נקודות/קווים, איכות/קודק וכו'."""
+    n = fname or ""
+    n = re.sub(r"\.(mkv|mp4|avi|mov|webm|m4v|ts|wmv|flv)$", "", n, flags=re.I)
+    n = n.replace(".", " ").replace("_", " ").replace("-", " ")
+    # הסרת תגיות איכות/מקור נפוצות
+    n = re.sub(r"\b(1080p|720p|2160p|480p|4k|x264|x265|h264|h265|hevc|bluray|brrip|"
+               r"webrip|web[- ]?dl|hdrip|dvdrip|hdtv|aac|ac3|dts|hebdub|hebsub|heb|"
+               r"proper|repack|remux|10bit|amzn|nf|dsnp)\b", "", n, flags=re.I)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+async def tmdb_search(query: str) -> list:
+    """מחזיר עד 6 תוצאות TMDB (movie/tv), עם שם, שנה, פוסטר, סוג."""
+    if not TMDB_API_KEY or not query:
+        return []
+    out = []
+    try:
+        async with httpx.AsyncClient(timeout=12) as cx:
+            for lang in ("he", "en-US"):
+                r = await cx.get("https://api.themoviedb.org/3/search/multi",
+                                 params={"api_key": TMDB_API_KEY, "query": query,
+                                         "language": lang, "include_adult": "false"})
+                if r.status_code != 200:
+                    continue
+                for it in r.json().get("results", []):
+                    mt = it.get("media_type")
+                    if mt not in ("movie", "tv"):
+                        continue
+                    title = it.get("title") or it.get("name") or ""
+                    date = it.get("release_date") or it.get("first_air_date") or ""
+                    year = (date or "")[:4]
+                    tid = it.get("id")
+                    if not title or not tid:
+                        continue
+                    if any(o["tmdb_id"] == tid and o["type"] == mt for o in out):
+                        continue
+                    out.append({
+                        "tmdb_id": tid, "type": mt, "title": title, "year": year,
+                        "poster": (TMDB_IMG + it["poster_path"]) if it.get("poster_path") else "",
+                        "overview": (it.get("overview") or "")[:300],
+                    })
+                if out:
+                    break  # אם עברית החזירה תוצאות — לא צריך את אנגלית
+    except Exception as e:
+        log.warning("tmdb_search נכשל: %s", e)
+    return out[:6]
+
+def _slugify(title: str, tmdb_id) -> str:
+    base = re.sub(r"[^a-zA-Z0-9]+", "-", (title or "")).strip("-").lower()
+    return (base or "movie") + "-" + str(tmdb_id)
+
+def add_movie_entry(chosen: dict, channel_msg_id: int) -> dict:
+    """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json."""
+    stream_url = f"{STREAM_PUBLIC_BASE}/stream/{STREAM_CHANNEL_ID}/{channel_msg_id}"
+    entry = {
+        "id": _slugify(chosen["title"], chosen["tmdb_id"]) + "-" + str(channel_msg_id),
+        "title": chosen["title"],
+        "year": chosen["year"],
+        "type": "telegram",
+        "media_kind": chosen["type"],           # movie / tv
+        "tmdb_id": chosen["tmdb_id"],
+        "video_url": stream_url,
+        "thumbnail_url": chosen.get("poster", ""),
+        "description": chosen.get("overview", ""),
+        "channel_msg_id": channel_msg_id,
+        "added_at": datetime.utcnow().isoformat(),
+    }
+    lst = load_new_uploads()
+    lst = [e for e in lst if e.get("channel_msg_id") != channel_msg_id]  # מניעת כפילות
+    lst.append(entry)
+    save_new_uploads(lst)
+    return entry
+
+async def _upload_noop(client, message):
+    pass  # שומר את ה-peer של הערוץ ב-cache (כמו ב-pool)
+
+async def on_upload(client: Client, message: Message):
+    """מנהל שלח קובץ/וידאו לבוט ההעלאה."""
+    uid = message.from_user.id if message.from_user else 0
+    if not is_admin_id(uid):
+        # לא מורשה — לא עונים כלל (הבעלים ביקש: מי שלא ברשימה, הבוט לא יענה לו)
+        log.info("upload_bot: התעלמות מ-uid לא-מורשה %s", uid)
+        return
+    media = message.video or message.document or message.audio
+    if not media:
+        await message.reply_text("שלח לי קובץ סרט/פרק (וידאו או מסמך) ואני אזהה אותו.")
+        return
+    status = await message.reply_text("⏳ מעלה לערוץ...")
+    try:
+        copied = await client.copy_message(
+            chat_id=STREAM_CHANNEL_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.id,
+        )
+        channel_msg_id = copied.id
+    except Exception as e:
+        log.warning("upload_bot: copy_message נכשל: %s", e)
+        await status.edit_text(f"❌ ההעלאה לערוץ נכשלה: {e}\n"
+                               f"ודא שבוט ההעלאה הוא אדמין בערוץ.")
+        return
+    fname = getattr(media, "file_name", None) or (message.caption or "") or ""
+    query = clean_name(fname)
+    await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{query or '—'}</b>...")
+    options = await tmdb_search(query)
+    if not options:
+        # אין זיהוי — שומרים כניסה בסיסית עם השם הגולמי, אפשר לערוך אח״כ
+        entry = add_movie_entry(
+            {"title": query or fname or f"קובץ {channel_msg_id}", "year": "",
+             "tmdb_id": 0, "type": "movie", "poster": "", "overview": ""},
+            channel_msg_id)
+        await status.edit_text(
+            f"⚠️ לא נמצא זיהוי ב-TMDB עבור «{query}».\n"
+            f"הוספתי כניסה בסיסית בשם הזה.\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+        return
+    _pending_uploads[str(channel_msg_id)] = {
+        "channel_msg_id": channel_msg_id, "chat_id": message.chat.id,
+        "user_id": uid, "fname": fname, "options": options,
+    }
+    buttons = []
+    for i, o in enumerate(options):
+        label = f"{o['title']} ({o['year'] or '?'}) · {'סדרה' if o['type']=='tv' else 'סרט'}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"sel:{channel_msg_id}:{i}")])
+    buttons.append([InlineKeyboardButton("❌ ביטול", callback_data=f"sel:{channel_msg_id}:x")])
+    await status.edit_text(
+        "🎬 מצאתי כמה התאמות — איזו זו?",
+        reply_markup=InlineKeyboardMarkup(buttons))
+
+async def on_select(client: Client, cq: CallbackQuery):
+    """מנהל בחר איזו התאמה מ-TMDB."""
+    uid = cq.from_user.id if cq.from_user else 0
+    if not is_admin_id(uid):
+        await cq.answer("לא מורשה", show_alert=True)
+        return
+    try:
+        _, cmid, idx = cq.data.split(":", 2)
+    except Exception:
+        await cq.answer(); return
+    pending = _pending_uploads.get(cmid)
+    if not pending:
+        await cq.answer("פג תוקף — שלח שוב את הקובץ", show_alert=True)
+        return
+    if idx == "x":
+        _pending_uploads.pop(cmid, None)
+        await cq.message.edit_text("בוטל. הקובץ נשאר בערוץ אבל לא נוסף לאתר.")
+        await cq.answer()
+        return
+    try:
+        chosen = pending["options"][int(idx)]
+    except Exception:
+        await cq.answer("בחירה לא תקינה", show_alert=True); return
+    entry = add_movie_entry(chosen, pending["channel_msg_id"])
+    _pending_uploads.pop(cmid, None)
+    poster_line = f"\n🖼 {entry['thumbnail_url']}" if entry["thumbnail_url"] else ""
+    await cq.message.edit_text(
+        f"✅ נוסף: <b>{entry['title']}</b> ({entry['year'] or '?'})"
+        f"{poster_line}\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+    await cq.answer("נוסף!")
+
+async def start_upload_bot():
+    global upload_bot
+    if not UPLOAD_BOT_TOKEN:
+        log.info("אין UPLOAD_BOT_TOKEN — בוט העלאה לא פעיל")
+        return
+    try:
+        upload_bot = Client("upload_bot", api_id=API_ID, api_hash=API_HASH,
+                            bot_token=UPLOAD_BOT_TOKEN, in_memory=False,
+                            no_updates=False, workdir=str(DATA_DIR))
+        upload_bot.add_handler(MessageHandler(
+            on_upload, filters.private & (filters.video | filters.document | filters.audio)))
+        upload_bot.add_handler(MessageHandler(on_upload, filters.private & filters.text))
+        upload_bot.add_handler(CallbackQueryHandler(on_select, filters.regex(r"^sel:")))
+        upload_bot.add_handler(MessageHandler(_upload_noop, filters.channel))
+        await asyncio.wait_for(upload_bot.start(), timeout=40)
+        if STREAM_CHANNEL_ID:
+            try:
+                await upload_bot.get_chat(STREAM_CHANNEL_ID)
+            except Exception:
+                pass  # יזוהה כשיגיע פוסט חדש לערוץ
+        log.info("✅ בוט העלאה עלה")
+    except Exception as e:
+        log.warning("⚠️ בוט העלאה לא עלה: %s", e)
+        upload_bot = None
+
+async def stop_upload_bot():
+    global upload_bot
+    if upload_bot:
+        try:
+            await upload_bot.stop()
+        except Exception:
+            pass
+        upload_bot = None
+
+# מגישים את הכניסות שנוספו דרך בוט ההעלאה — האתר/מנהל יכולים למשוך אותן ולמזג
+# ל-movies.json כשמעדכנים. (רק קריאה; אין כאן חשיפת טוקנים.)
+@api.get("/uploads/new")
+async def uploads_new():
+    return {"count": len(load_new_uploads()), "items": load_new_uploads()}
+
 # ── ריענון שרת דרך קישור פשוט ──────────────────────────────────────────────
 # מיועד לשליחה למישהו שצריך לרענן את השרת בעצמו כשהוא נתקע, בלי גישה
 # לחשבון Hugging Face. שולחים לו קישור מהצורה:
@@ -1664,6 +1890,7 @@ async def startup():
     # ה-workers/pool עולים ברקע כדי לא לעכב את עליית השרת
     asyncio.create_task(start_download_workers())
     asyncio.create_task(start_stream_pool())
+    asyncio.create_task(start_upload_bot())
     asyncio.create_task(keep_alive())
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
@@ -1674,6 +1901,7 @@ async def startup():
 async def shutdown():
     await stop_download_workers()
     await stop_stream_pool()
+    await stop_upload_bot()
     await bot_client.stop()
     if _hls_relay_client:
         await _hls_relay_client.aclose()
