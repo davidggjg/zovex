@@ -1,13 +1,11 @@
 import { useState, useEffect, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import CustomVideoPlayer from "@/components/home/CustomVideoPlayer.jsx";
-import AdminPanel from "@/components/AdminPanel.jsx";
 import MovieDetail from "@/components/MovieDetail.jsx";
 import SeriesView from "@/components/SeriesView.jsx";
 import { useGoogleAuth, LandingScreen } from "@/components/home/Auth.jsx";
 import HomePage from "@/components/home/HomePage.jsx";
 import AdBanner from "@/components/home/AdBanner.jsx";
-import AdminLoginScreen from "@/components/home/AdminLoginScreen.jsx";
 import DonationModalView from "@/components/home/DonationModalView.jsx";
 import { useWatchHistory } from "@/components/home/useWatchHistory";
 import { useApiKeyEndpoint } from "@/components/home/useApiKeyEndpoint";
@@ -18,7 +16,6 @@ import { useCategories } from "@/components/home/useCategories";
 import { useIsDesktop } from "@/components/home/useIsDesktop";
 import { ls, lsSet, lsDel, lsJson, SPIN } from "@/components/home/helpers";
 
-const SECRET_TRIGGER = "ZovexAdmin2026";
 
 export default function Home() {
   const { user, skipped, loginWithGoogle, logout, skip } = useGoogleAuth();
@@ -58,9 +55,6 @@ function HomeMain({ user, onLogout, isGuest }) {
   const [showDonation, setShowDonation] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
 
-  // admin
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
-  const [showAdmin, setShowAdmin] = useState(false);
 
   // live streams — מערך של כמה שידורים חיים במקביל, כל אחד עם שם וקישור
   // נשמרים ב-movies.json כתכנים עם category: "שידורים חיים" ו-is_live: true
@@ -102,10 +96,6 @@ function HomeMain({ user, onLogout, isGuest }) {
 
   useEffect(() => { selectedMovie ? lsSet("zovex_movie", JSON.stringify(selectedMovie)) : lsDel("zovex_movie"); }, [selectedMovie]);
   useEffect(() => { selectedSeries ? lsSet("zovex_series", selectedSeries) : lsDel("zovex_series"); }, [selectedSeries]);
-
-  useEffect(() => {
-    if (searchTerm === SECRET_TRIGGER) { setSearchTerm(""); setShowAdminLogin(true); }
-  }, [searchTerm]);
 
   // ── derived ──
   const seriesMap = useMemo(() => {
@@ -224,30 +214,10 @@ function HomeMain({ user, onLogout, isGuest }) {
     </div>
   );
 
-  if (showAdminLogin) return (
-    <AdminLoginScreen
-      onSuccess={() => { setShowAdminLogin(false); setShowAdmin(true); setShowDonation(false); }}
-      onCancel={() => setShowAdminLogin(false)}
-    />
-  );
-
   // ── donation modal ──
-  const donationModal = showDonation && !showAdmin
+  const donationModal = showDonation
     ? <DonationModalView onContinue={() => { setShowDonation(false); pendingAction && pendingAction(); }} />
     : null;
-
-  // ── admin panel ──
-  if (showAdmin) return (
-    <AdminPanel
-      movies={movies}
-      seriesMap={seriesMap}
-      liveChannels={liveChannels}
-      categories={categories}
-      saveCats={saveCats}
-      loadMovies={loadMovies}
-      onClose={() => setShowAdmin(false)}
-    />
-  );
 
   // ── Series page ──
   if (selectedSeries) return (
