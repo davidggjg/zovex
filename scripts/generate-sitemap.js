@@ -9,9 +9,13 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const MOVIES_PATH = path.join(ROOT, "public", "movies.json");
-const SITEMAP_PATH = path.join(ROOT, "public", "sitemap.xml");
+// ניתן לעקוף את יעד הפלט ואת כתובת האתר דרך משתני סביבה (לבנייה לשרת).
+// ברירת מחדל: GitHub Pages — כדי שהבנייה הרגילה לא תשתנה.
+const SITEMAP_PATH = process.env.SITEMAP_OUT
+  ? path.resolve(ROOT, process.env.SITEMAP_OUT)
+  : path.join(ROOT, "public", "sitemap.xml");
 
-const SITE_URL = "https://davidggjg.github.io/zovex";
+const SITE_URL = process.env.SITE_URL || "https://davidggjg.github.io/zovex";
 
 function slugifyMovie(movie) {
   if (movie.custom_slug) return movie.custom_slug;
