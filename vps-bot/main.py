@@ -905,6 +905,148 @@ async def admin_migrate_status(request: Request):
         raise HTTPException(status_code=403, detail="localhost only")
     return JSONResponse(dict(_migration))
 
+# ── Whitelist מנהלים + פאנל ניהול מאובטח ─────────────────────────────────────
+# הבעלים מנהל רשימת Telegram-ID של המנהלים המורשים. רק הם יקבלו מענה מבוט
+# ההעלאה. הרשימה נשמרת בשרת (admins.json), ונערכת דרך פאנל אינטרנטי מוגן
+# בסיסמה (PANEL_PASSWORD ב-.env).
+ADMINS_FILE = DATA_DIR / "admins.json"
+PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "").strip()
+
+def load_admins() -> list:
+    if ADMINS_FILE.exists():
+        try:
+            return json.loads(ADMINS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+def save_admins(lst: list):
+    ADMINS_FILE.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def is_admin_id(uid) -> bool:
+    try:
+        uid = int(uid)
+    except Exception:
+        return False
+    return any(int(a.get("id", 0)) == uid for a in load_admins())
+
+class PanelReq(BaseModel):
+    password: str
+    action: str
+    id: Optional[int] = None
+    name: Optional[str] = ""
+
+@api.post("/panel/api")
+async def panel_api(req: PanelReq):
+    if not PANEL_PASSWORD or req.password != PANEL_PASSWORD:
+        raise HTTPException(status_code=401, detail="סיסמה שגויה")
+    admins = load_admins()
+    if req.action == "list":
+        return {"admins": admins}
+    if req.action == "add":
+        if req.id is None:
+            raise HTTPException(400, "חסר id")
+        if not any(int(a["id"]) == int(req.id) for a in admins):
+            admins.append({"id": int(req.id), "name": req.name or ""})
+            save_admins(admins)
+        return {"admins": admins}
+    if req.action == "remove":
+        admins = [a for a in admins if int(a["id"]) != int(req.id)]
+        save_admins(admins)
+        return {"admins": admins}
+    raise HTTPException(400, "פעולה לא מוכרת")
+
+@api.get("/panel", response_class=HTMLResponse)
+async def panel_page():
+    return HTMLResponse(PANEL_HTML)
+
+PANEL_HTML = """<!DOCTYPE html>
+<html lang="he" dir="rtl"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZOVEX · ניהול מנהלים</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:'Segoe UI',Arial,sans-serif; background:#0a0a0a; color:#eee; }
+  .wrap { max-width:520px; margin:0 auto; padding:24px 16px; }
+  h1 { color:#e50914; letter-spacing:3px; font-size:24px; }
+  .card { background:#161616; border:1px solid #262626; border-radius:14px; padding:18px; margin-bottom:16px; }
+  input { width:100%; padding:12px 14px; border-radius:10px; border:1px solid #333; background:#0f0f0f; color:#fff; font-size:15px; margin-bottom:10px; }
+  button { background:#e50914; color:#fff; border:none; border-radius:10px; padding:12px 16px; font-size:15px; font-weight:700; cursor:pointer; width:100%; }
+  button.sec { background:#2a2a2a; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px; border-bottom:1px solid #222; }
+  .row:last-child { border-bottom:none; }
+  .row .info { text-align:right; }
+  .row .id { color:#888; font-size:12px; font-family:monospace; direction:ltr; }
+  .rm { background:#3a1414; color:#ff6b6b; width:auto; padding:8px 12px; font-size:13px; }
+  .hide { display:none; }
+  .err { color:#ff6b6b; font-size:13px; margin-top:6px; }
+  .muted { color:#888; font-size:13px; line-height:1.6; }
+</style></head><body><div class="wrap">
+  <h1>ZOVEX · ניהול מנהלים</h1>
+
+  <div id="login" class="card">
+    <div class="muted">הזן את סיסמת הפאנל כדי לנהל את רשימת המנהלים המורשים.</div>
+    <br><input id="pw" type="password" placeholder="סיסמת פאנל" onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()">כניסה</button>
+    <div id="loginErr" class="err"></div>
+  </div>
+
+  <div id="app" class="hide">
+    <div class="card">
+      <div class="muted">הוסף מנהל לפי <b>Telegram ID</b> (מספרי). רק מנהלים ברשימה יקבלו מענה מבוט ההעלאה.<br>
+      טיפ: כדי לדעת את ה-ID של מישהו, שלח לבוט <b>@userinfobot</b> בטלגרם.</div>
+      <br>
+      <input id="tid" type="number" placeholder="Telegram ID (למשל 123456789)">
+      <input id="tname" type="text" placeholder="שם (לזיהוי, לא חובה)">
+      <button onclick="addAdmin()">➕ הוסף מנהל</button>
+      <div id="addErr" class="err"></div>
+    </div>
+    <div class="card">
+      <div class="muted">מנהלים מורשים:</div>
+      <div id="list"></div>
+    </div>
+  </div>
+
+<script>
+let PW = "";
+async function api(action, extra={}) {
+  const r = await fetch("/panel/api", { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ password: PW, action, ...extra }) });
+  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || "שגיאה");
+  return r.json();
+}
+async function doLogin() {
+  PW = document.getElementById("pw").value;
+  try { const d = await api("list"); showApp(d.admins); }
+  catch(e){ document.getElementById("loginErr").textContent = e.message; }
+}
+function showApp(admins) {
+  document.getElementById("login").classList.add("hide");
+  document.getElementById("app").classList.remove("hide");
+  render(admins);
+}
+function render(admins) {
+  const el = document.getElementById("list");
+  if (!admins.length) { el.innerHTML = '<div class="muted" style="padding:12px">אין מנהלים עדיין.</div>'; return; }
+  el.innerHTML = admins.map(a => `<div class="row">
+    <button class="rm" onclick="removeAdmin(${a.id})">הסר</button>
+    <div class="info"><div>${a.name||"—"}</div><div class="id">${a.id}</div></div>
+  </div>`).join("");
+}
+async function addAdmin() {
+  const id = document.getElementById("tid").value;
+  const name = document.getElementById("tname").value;
+  if (!id) { document.getElementById("addErr").textContent = "חסר Telegram ID"; return; }
+  try { const d = await api("add", { id: parseInt(id), name });
+    document.getElementById("tid").value=""; document.getElementById("tname").value="";
+    document.getElementById("addErr").textContent=""; render(d.admins); }
+  catch(e){ document.getElementById("addErr").textContent = e.message; }
+}
+async function removeAdmin(id) {
+  try { const d = await api("remove", { id }); render(d.admins); } catch(e){ alert(e.message); }
+}
+</script></div></body></html>"""
+
 # ── ריענון שרת דרך קישור פשוט ──────────────────────────────────────────────
 # מיועד לשליחה למישהו שצריך לרענן את השרת בעצמו כשהוא נתקע, בלי גישה
 # לחשבון Hugging Face. שולחים לו קישור מהצורה:
