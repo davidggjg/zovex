@@ -173,7 +173,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let PASS="", movies=[], editingId=null, liveEditId=null;
+let PASS="", movies=[], editingId=null, liveEditId=null, _fromUploadCmid=null;
 function toast(on){ $("saveToast").classList.toggle("hidden", !on); }
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -272,7 +272,7 @@ function pickExisting(){
 function clearForm(){
   ["f_title","f_slug","f_year","f_video","f_thumb","f_desc","f_series","f_season","f_episode","tmdbq"].forEach(i=>$(i).value="");
   $("tmdbRes").innerHTML=""; $("addMsg").textContent=""; $("typeHint").textContent=""; $("f_existing").value="";
-  $("f_kind").value="movie"; $("f_category").value=""; toggleSeries();
+  $("f_kind").value="movie"; $("f_category").value=""; _fromUploadCmid=null; toggleSeries();
 }
 function openAdd(){
   editingId=null; clearForm();
@@ -308,8 +308,16 @@ async function saveItem(){
   if(!e.video_url){ $("addMsg").innerHTML='<span class="err">חסר קישור וידאו</span>'; return; }
   if(editingId){ movies=movies.map(m=>m.id===editingId?{...m,...e}:m); }
   else { movies=[{...e,id:crypto.randomUUID(),created_date:new Date().toISOString()}, ...movies]; }
-  if(await persist()){ refreshDerived(); $("addMsg").innerHTML='<span class="ok">נשמר ✓</span>';
-    if(!editingId) clearForm(); }
+  if(await persist()){
+    refreshDerived();
+    if(_fromUploadCmid!=null){
+      try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({password:PASS, channel_msg_ids:[_fromUploadCmid]})}); }catch{}
+      _fromUploadCmid=null;
+    }
+    $("addMsg").innerHTML='<span class="ok">נשמר ✓ (הוסר מרשימת ההעלאות)</span>';
+    if(!editingId) clearForm();
+  }
 }
 async function delItem(){
   if(!editingId||!confirm("למחוק?")) return;
@@ -432,7 +440,8 @@ async function loadUploads(){
         : `${esc((u.video_url||"").slice(0,40))}…`;
       return `<div class="item"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
         <div class="meta"><div class="t">${esc(u.title||"—")}</div><div class="s">${sub}</div></div>
-        <button class="mini" onclick="useUpload(${i})">ערוך+הוסף</button></div>`; }).join("");
+        <button class="mini" onclick="useUpload(${i})">ערוך+הוסף</button>
+        <button class="mini gray" onclick="removeUpload(${u.channel_msg_id})">הסר</button></div>`; }).join("");
   }catch(e){ el.innerHTML='<span class="err">'+e.message+'</span>'; }
 }
 async function addAllUploads(){
@@ -461,12 +470,19 @@ async function addAllUploads(){
     alert("נוסף! עכשיו ערוך פרק אחד מהסדרה, שים פוסטר, ולחץ 'עדכן פוסטר לכל הסדרה'.");
   }
 }
+async function removeUpload(cmid){
+  if(cmid==null||!confirm("להסיר מרשימת ההעלאות? (הקובץ נשאר בערוץ, רק יורד מהרשימה)")) return;
+  try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({password:PASS, channel_msg_ids:[cmid]})}); }catch{}
+  loadUploads();
+}
 function useUpload(i){ const u=window["_u"+i]; if(!u) return; openAdd();
   $("f_kind").value=(u.media_kind==="tv")?"series":"movie"; toggleSeries();
   $("f_title").value=u.title||""; if($("f_kind").value==="series")$("f_series").value=u.title||"";
   $("f_year").value=u.year||""; $("f_video").value=u.video_url||""; $("f_thumb").value=u.thumbnail_url||""; $("f_desc").value=u.description||"";
   $("f_category").value=($("f_kind").value==="series")?"סדרות":"סרטים"; detectType();
-  $("addMsg").innerHTML='<span class="ok">מולא מההעלאה — בדוק ושמור</span>';
+  _fromUploadCmid = (u.channel_msg_id!=null)?u.channel_msg_id:null;
+  $("addMsg").innerHTML='<span class="ok">מולא מההעלאה — בדוק ושמור (יוסר מהרשימה אחרי שמירה)</span>';
 }
 
 // ── מנהלים ──
