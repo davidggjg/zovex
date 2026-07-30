@@ -551,6 +551,36 @@ async def start_stream_pool():
             log.warning("⚠️ pool bot %d לא עלה: %s", i, e)
         await asyncio.sleep(2)
     log.info("🚀 stream pool: %d בוטים פעילים", len(_stream_bots))
+    asyncio.create_task(warm_stream_pool())
+
+async def warm_stream_pool():
+    """מחמם מראש את חיבור-המדיה (DC) של כל בוט ב-pool. בלי זה, הפליי הראשון של
+    כל בוט אחרי restart פותח חיבור טרי לטלגרם (Connecting→Session→Ping) שלוקח
+    כמה שניות — וזה מה שגרם ל'פליי לוקח מיליון שנה'. חתיכה אחת מכל בוט מספיקה
+    כדי לפתוח ולשמור את החיבור."""
+    if not _stream_bots or not STREAM_CHANNEL_ID:
+        return
+    msg_id = None
+    for e in load_content():
+        u = e.get("video_url") or e.get("video_id") or ""
+        m = re.search(r"/stream/-?\d+/(\d+)", u)
+        if m:
+            msg_id = int(m.group(1))
+            break
+    if msg_id is None:
+        return
+    for b in _stream_bots:
+        try:
+            msg = await asyncio.wait_for(_get_bot_msg(b, STREAM_CHANNEL_ID, msg_id), timeout=25)
+            if not msg:
+                continue
+            async for _chunk in b["client"].stream_media(msg, offset=0):
+                break  # חתיכה אחת — רק כדי לפתוח את חיבור ה-DC
+            log.info("🔥 חוממה מדיה: %s", b["name"])
+        except Exception as e:
+            log.warning("⚠️ חימום %s נכשל: %s", b.get("name"), e)
+        await asyncio.sleep(0.4)
+    log.info("🔥 pool מחומם — פליי ראשון יהיה מהיר")
 
 async def stop_stream_pool():
     for b in _stream_bots:
