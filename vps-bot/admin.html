@@ -4,46 +4,48 @@
 <title>ZOVEX · ניהול</title>
 <style>
   * { box-sizing: border-box; }
-  body { margin:0; font-family:'Segoe UI',Arial,sans-serif; background:#0a0a0a; color:#eee; }
-  a { color:#ff4d5a; }
+  body { margin:0; font-family:'Segoe UI',-apple-system,Arial,sans-serif; background:#f5f5f7; color:#1d1d1f; }
+  a { color:#0071e3; }
   .wrap { max-width:960px; margin:0 auto; padding:14px; }
-  h1 { color:#e50914; letter-spacing:3px; font-size:22px; margin:6px 0 14px; }
-  h2 { font-size:15px; color:#ccc; margin:14px 0 8px; }
-  .card { background:#161616; border:1px solid #262626; border-radius:14px; padding:14px; margin-bottom:12px; }
-  input, select, textarea { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #333; background:#0f0f0f; color:#fff; font-size:15px; margin-bottom:9px; }
+  h1 { color:#1d1d1f; letter-spacing:2px; font-size:22px; margin:6px 0 14px; }
+  h1 b { color:#0071e3; }
+  h2 { font-size:15px; color:#1d1d1f; margin:12px 0 8px; font-weight:700; }
+  .card { background:#fff; border:1px solid #e3e3e8; border-radius:16px; padding:14px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+  input, select, textarea { width:100%; padding:10px 12px; border-radius:10px; border:1px solid #d2d2d7; background:#fff; color:#1d1d1f; font-size:15px; margin-bottom:9px; font-family:inherit; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:#0071e3; }
   textarea { min-height:64px; resize:vertical; }
-  label { display:block; font-size:12px; color:#9a9a9a; margin:2px 0 4px; }
-  button { background:#e50914; color:#fff; border:none; border-radius:10px; padding:10px 14px; font-size:14px; font-weight:700; cursor:pointer; }
-  button.sec { background:#2a2a2a; } button.gray { background:#333; }
+  label { display:block; font-size:12px; color:#6e6e73; margin:2px 0 4px; font-weight:600; }
+  button { background:#0071e3; color:#fff; border:none; border-radius:10px; padding:10px 14px; font-size:14px; font-weight:700; cursor:pointer; font-family:inherit; }
+  button.sec { background:#eef0f3; color:#0071e3; } button.gray { background:#f0f0f5; color:#6e6e73; }
   button.mini { padding:6px 10px; font-size:12px; border-radius:8px; }
-  button.green { background:#2e7d32; } button.orange { background:#e07b00; } button.blue { background:#1565c0; }
+  button.green { background:#34c759; } button.orange { background:#ff9500; } button.danger { background:#ff3b30; }
   .row { display:flex; gap:8px; align-items:center; } .row>*{ margin-bottom:0; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .tabs { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
-  .tabs button { background:#1c1c1c; color:#bbb; }
-  .tabs button.active { background:#e50914; color:#fff; }
-  .muted { color:#888; font-size:12px; }
-  .err { color:#ff6b6b; font-size:12px; min-height:15px; }
-  .ok { color:#4caf50; font-size:12px; min-height:15px; }
-  .item { display:flex; gap:10px; align-items:center; padding:7px 4px; border-bottom:1px solid #222; }
-  .item img { width:40px; height:58px; object-fit:cover; border-radius:6px; background:#222; flex:none; }
+  .tabs button { background:#eceef1; color:#6e6e73; }
+  .tabs button.active { background:#0071e3; color:#fff; }
+  .muted { color:#86868b; font-size:12px; }
+  .err { color:#ff3b30; font-size:12px; min-height:15px; }
+  .ok { color:#34c759; font-size:12px; min-height:15px; }
+  .item { display:flex; gap:10px; align-items:center; padding:7px 4px; border-bottom:1px solid #eee; }
+  .item img { width:40px; height:58px; object-fit:cover; border-radius:6px; background:#e8e8ea; flex:none; }
   .item .meta { flex:1; min-width:0; }
   .item .meta .t { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .item .meta .s { color:#888; font-size:12px; }
+  .item .meta .s { color:#86868b; font-size:12px; }
   .hidden { display:none; }
-  .pill { display:inline-block; background:#222; border-radius:20px; padding:2px 9px; font-size:11px; color:#aaa; }
+  .pill { display:inline-block; background:#f0f0f5; border-radius:20px; padding:2px 9px; font-size:11px; color:#6e6e73; }
   .toprow { display:flex; justify-content:space-between; align-items:center; gap:10px; }
-  .ser { border:1px solid #262626; border-radius:10px; margin-bottom:8px; overflow:hidden; }
-  .ser .head { display:flex; align-items:center; gap:8px; padding:9px 11px; cursor:pointer; background:#1a1a1a; }
+  .ser { border:1px solid #e3e3e8; border-radius:12px; margin-bottom:8px; overflow:hidden; }
+  .ser .head { display:flex; align-items:center; gap:8px; padding:9px 11px; cursor:pointer; background:#fafafa; }
   .ser .head .t { flex:1; font-weight:700; font-size:13px; }
-  .saving { position:fixed; top:10px; left:50%; transform:translateX(-50%); background:#e50914; color:#fff; padding:8px 18px; border-radius:20px; font-size:13px; z-index:99; }
+  .saving { position:fixed; top:10px; left:50%; transform:translateX(-50%); background:#0071e3; color:#fff; padding:8px 18px; border-radius:20px; font-size:13px; z-index:99; box-shadow:0 2px 8px rgba(0,0,0,.15); }
 </style></head>
 <body><div class="wrap">
 <div id="saveToast" class="saving hidden">שומר…</div>
 
 <!-- כניסה -->
 <div id="login" class="card">
-  <h1>ZOVEX · ניהול</h1>
+  <h1>ZOVEX <b>·</b> ניהול</h1>
   <label>סיסמת ניהול</label>
   <input id="pass" type="password" placeholder="סיסמה" onkeydown="if(event.key==='Enter')doLogin()">
   <button onclick="doLogin()" style="width:100%">כניסה</button>
@@ -51,7 +53,7 @@
 </div>
 
 <div id="app" class="hidden">
-  <div class="toprow"><h1>ZOVEX · ניהול</h1><span id="totalCount" class="muted"></span></div>
+  <div class="toprow"><h1>ZOVEX <b>·</b> ניהול</h1><span id="totalCount" class="muted"></span></div>
   <div class="tabs">
     <button id="tab-add" class="active" onclick="showTab('add')">הוספה</button>
     <button id="tab-manage" onclick="showTab('manage')">ניהול תוכן</button>
@@ -59,7 +61,6 @@
     <button id="tab-live" onclick="showTab('live')">שידורים חיים</button>
     <button id="tab-uploads" onclick="showTab('uploads')">העלאות מהבוט</button>
     <button id="tab-admins" onclick="showTab('admins')">מנהלים</button>
-    <button id="tab-keys" onclick="showTab('keys')">מפתחות</button>
   </div>
 
   <!-- הוספה/עריכה -->
@@ -68,7 +69,7 @@
       <div class="toprow"><h2 id="editTitle">הוספת פריט</h2>
         <button id="cancelEdit" class="mini gray hidden" onclick="openAdd()">בטל עריכה</button></div>
 
-      <div class="card" style="background:#101010">
+      <div class="card" style="background:#f7f7fa">
         <label>חיפוש TMDB — ממלא פוסטר/שנה/תקציר</label>
         <div class="row"><input id="tmdbq" placeholder="שם סרט/סדרה…" style="flex:1"
              onkeydown="if(event.key==='Enter')doTmdb()">
@@ -100,24 +101,19 @@
         <div><label>קטגוריה</label><input id="f_category" list="catlist" placeholder="בחר/הקלד">
           <datalist id="catlist"></datalist></div>
       </div>
-      <label>סוג נגן</label>
-      <select id="f_type">
-        <option value="direct">direct (קישור סטרימינג / mp4)</option>
-        <option value="kaltura">kaltura</option><option value="drive">drive</option>
-        <option value="dailymotion">dailymotion</option><option value="youtube">youtube</option>
-      </select>
-      <label>קישור וידאו</label>
-      <input id="f_video" dir="ltr" placeholder="http://213.139.78.39:8000/stream/-100…">
+      <label>קישור וידאו <span class="muted">(הסוג יזוהה אוטומטית)</span></label>
+      <input id="f_video" dir="ltr" placeholder="קישור סטרימינג / YouTube / Drive / mp4 / Kaltura…" oninput="detectType()">
+      <div id="typeHint" class="muted" style="margin:-4px 0 8px"></div>
       <label>פוסטר (thumbnail_url)</label><input id="f_thumb" dir="ltr">
       <label>תקציר</label><textarea id="f_desc"></textarea>
 
       <div id="applyAll" class="row hidden" style="margin-bottom:8px">
-        <button class="mini blue" onclick="applyToSeries('thumbnail_url')">עדכן פוסטר לכל הסדרה</button>
+        <button class="mini" style="background:#5e5ce6" onclick="applyToSeries('thumbnail_url')">עדכן פוסטר לכל הסדרה</button>
         <button class="mini orange" onclick="applyToSeries('description')">עדכן תקציר לכל הסדרה</button>
       </div>
       <div class="row">
         <button onclick="saveItem()" style="flex:1">שמור</button>
-        <button id="delBtn" class="gray hidden" onclick="delItem()">מחק</button>
+        <button id="delBtn" class="danger hidden" onclick="delItem()">מחק</button>
       </div>
       <div id="addMsg" class="ok"></div>
     </div>
@@ -172,22 +168,36 @@
       <button class="mini" onclick="addAdmin()">הוסף</button>
       <div id="adminErr" class="err"></div><div id="adminsList" style="margin-top:8px"></div></div>
   </div>
-
-  <!-- מפתחות -->
-  <div id="pane-keys" class="hidden">
-    <div class="card"><h2>TMDB API Key</h2>
-      <div class="muted">נשמר בדפדפן הזה בלבד. משמש לחיפוש פוסטרים/מטא-דאטה.</div>
-      <input id="s_tmdb" type="password" placeholder="TMDB key" style="margin-top:8px">
-      <button class="mini" onclick="saveKeys()">שמור</button><div id="keysMsg" class="ok"></div></div>
-  </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 let PASS="", movies=[], editingId=null, liveEditId=null;
-function tmdbKey(){ return localStorage.getItem("zovex_tmdb_key")||""; }
 function toast(on){ $("saveToast").classList.toggle("hidden", !on); }
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ── זיהוי אוטומטי של סוג הנגן מהקישור (זהה ללוגיקה של האתר) ──
+function extractVideoInfo(url){
+  if(!url) return {type:"direct",video_id:""};
+  if(url.includes("<iframe")){ const m=url.match(/src=["']([^"']+)['"]/); if(m) url=m[1]; }
+  if(!url.startsWith("http")) return {type:"direct",video_id:url};
+  if(url.includes("youtube.com")||url.includes("youtu.be")){ const m=url.match(/(?:v=|youtu\.be\/)([^&/?]+)/); return {type:"youtube",video_id:m?.[1]||url}; }
+  if(url.includes("drive.google.com")){ const m=url.match(/\/d\/([^/]+)/); return {type:"drive",video_id:m?.[1]||url}; }
+  if(url.includes("vimeo.com")){ const m=url.match(/vimeo\.com\/(\d+)/); return {type:"vimeo",video_id:m?.[1]||url}; }
+  if(url.includes("dailymotion.com")){ const m=url.match(/video\/([^_]+)/); return {type:"dailymotion",video_id:m?.[1]||url}; }
+  if(url.includes("streamable.com")){ const m=url.match(/streamable\.com\/([^?]+)/); return {type:"streamable",video_id:m?.[1]||url}; }
+  if(url.includes("rumble.com")){ const m=url.match(/embed\/([^?/]+)/); return {type:"rumble",video_id:m?.[1]||url}; }
+  if(url.includes("archive.org")){ const m=url.match(/details\/([^?/]+)/); return {type:"archive",video_id:m?.[1]||url}; }
+  if(url.includes("kan.org.il")){ const m=url.match(/id=(\d+)/); return {type:"kan",video_id:m?.[1]||url}; }
+  if(url.includes("ok.ru")){ const m=url.match(/video\/(\d+)/); return {type:"okru",video_id:m?.[1]||url}; }
+  if(url.includes("t.me")) return {type:"telegram",video_id:url.replace("https://t.me/","")};
+  if(url.includes("kaltura.com")||url.match(/^\d+\/\d+\/[a-zA-Z0-9_]+$/)) return {type:"kaltura",video_id:url};
+  return {type:"direct",video_id:url};
+}
+function detectType(){
+  const u=$("f_video").value.trim();
+  $("typeHint").textContent = u ? ("סוג שזוהה: "+extractVideoInfo(u).type) : "";
+}
 
 // ── כניסה ──
 async function doLogin(){
@@ -198,13 +208,13 @@ async function doLogin(){
     if(r.status===401){ $("loginErr").textContent="סיסמה שגויה"; return; }
     if(!r.ok){ $("loginErr").textContent="שגיאת שרת"; return; }
     PASS=p; $("login").classList.add("hidden"); $("app").classList.remove("hidden");
-    $("s_tmdb").value=tmdbKey(); await loadContent();
+    await loadContent();
   }catch(e){ $("loginErr").textContent="אין חיבור לשרת"; }
 }
 
 // ── טאבים ──
 function showTab(n){
-  ["add","manage","cats","live","uploads","admins","keys"].forEach(x=>{
+  ["add","manage","cats","live","uploads","admins"].forEach(x=>{
     $("pane-"+x).classList.add("hidden"); const t=$("tab-"+x); if(t)t.classList.remove("active");});
   $("pane-"+n).classList.remove("hidden"); $("tab-"+n).classList.add("active");
   if(n==="manage") renderManage();
@@ -255,14 +265,13 @@ function pickExisting(){
   const eps=seriesMap()[n]||[]; const s=eps[0]||{};
   $("f_series").value=n; if(s.category)$("f_category").value=s.category;
   if(s.thumbnail_url)$("f_thumb").value=s.thumbnail_url; if(s.custom_slug)$("f_slug").value=s.custom_slug;
-  // הצע פרק הבא
   const maxEp=Math.max(0,...eps.filter(e=>(e.season_number||1)==(parseInt($("f_season").value)||1)).map(e=>e.episode_number||0));
   if(!$("f_episode").value) $("f_episode").value=maxEp+1;
 }
 function clearForm(){
   ["f_title","f_slug","f_year","f_video","f_thumb","f_desc","f_series","f_season","f_episode","tmdbq"].forEach(i=>$(i).value="");
-  $("tmdbRes").innerHTML=""; $("addMsg").textContent=""; $("f_existing").value="";
-  $("f_kind").value="movie"; $("f_type").value="direct"; $("f_category").value=""; toggleSeries();
+  $("tmdbRes").innerHTML=""; $("addMsg").textContent=""; $("typeHint").textContent=""; $("f_existing").value="";
+  $("f_kind").value="movie"; $("f_category").value=""; toggleSeries();
 }
 function openAdd(){
   editingId=null; clearForm();
@@ -275,16 +284,17 @@ function startEdit(id){
   $("editTitle").textContent="עריכת פריט"; $("delBtn").classList.remove("hidden"); $("cancelEdit").classList.remove("hidden");
   $("f_kind").value=m.series_name?"series":"movie";
   $("f_title").value=m.title||""; $("f_slug").value=m.custom_slug||""; $("f_year").value=m.year||"";
-  $("f_category").value=m.category||""; $("f_type").value=m.type||"direct";
-  $("f_video").value=m.video_url||m.video_id||""; $("f_thumb").value=m.thumbnail_url||""; $("f_desc").value=m.description||"";
+  $("f_category").value=m.category||""; $("f_video").value=m.video_url||m.video_id||"";
+  $("f_thumb").value=m.thumbnail_url||""; $("f_desc").value=m.description||"";
   $("f_series").value=m.series_name||""; $("f_season").value=m.season_number||""; $("f_episode").value=m.episode_number||"";
-  toggleSeries(); showTab("add");
+  toggleSeries(); detectType(); showTab("add");
 }
 function buildEntry(){
   const s=$("f_kind").value==="series"; const vid=$("f_video").value.trim();
+  const info=extractVideoInfo(vid);
   return { title:$("f_title").value.trim(), year:$("f_year").value?parseInt($("f_year").value):null,
-    category:$("f_category").value.trim(), description:$("f_desc").value.trim(), type:$("f_type").value,
-    video_id:vid, video_url:vid, thumbnail_url:$("f_thumb").value.trim(),
+    category:$("f_category").value.trim(), description:$("f_desc").value.trim(),
+    type:info.type, video_id:info.video_id, video_url:vid, thumbnail_url:$("f_thumb").value.trim(),
     custom_slug:$("f_slug").value.trim()||null,
     series_name:s?($("f_series").value.trim()||null):null,
     season_number:s&&$("f_season").value?parseInt($("f_season").value):null,
@@ -313,28 +323,26 @@ async function applyToSeries(field){
   if(await persist()){ $("addMsg").innerHTML='<span class="ok">עודכן לכל הסדרה ✓</span>'; }
 }
 
-// ── TMDB ──
+// ── TMDB דרך השרת (המפתח בשרת) ──
 async function doTmdb(){
-  const key=tmdbKey(); if(!key){ $("tmdbRes").innerHTML='<span class="err">חסר TMDB key (טאב מפתחות)</span>'; return; }
   const q=$("tmdbq").value.trim(); if(!q) return; $("tmdbRes").innerHTML="מחפש…";
   try{
-    const r=await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${key}&language=he&include_adult=false&query=`+encodeURIComponent(q));
-    const res=((await r.json()).results||[]).filter(x=>x.media_type!=="person").slice(0,6);
+    const d=await (await fetch("/admin/tmdb?q="+encodeURIComponent(q))).json();
+    const res=(d.results||[]).slice(0,6);
     if(!res.length){ $("tmdbRes").innerHTML='<span class="muted">אין תוצאות</span>'; return; }
     $("tmdbRes").innerHTML=res.map((x,i)=>{ window["_t"+i]=x;
-      const t=x.title||x.name||"", y=(x.release_date||x.first_air_date||"").slice(0,4), k=x.media_type==="tv"?"סדרה":"סרט";
-      return `<div class="item"><img src="${x.poster_path?'https://image.tmdb.org/t/p/w200'+x.poster_path:''}" onerror="this.style.visibility='hidden'">
-        <div class="meta"><div class="t">${esc(t)} (${y||"?"})</div><div class="s">${k}</div></div>
+      const k=x.type==="tv"?"סדרה":"סרט";
+      return `<div class="item"><img src="${x.poster||''}" onerror="this.style.visibility='hidden'">
+        <div class="meta"><div class="t">${esc(x.title)} (${x.year||"?"})</div><div class="s">${k}</div></div>
         <button class="mini sec" onclick="pickTmdb(${i})">בחר</button></div>`; }).join("");
   }catch(e){ $("tmdbRes").innerHTML='<span class="err">'+e.message+'</span>'; }
 }
 function pickTmdb(i){
   const x=window["_t"+i]; if(!x) return;
-  const t=x.title||x.name||"", y=(x.release_date||x.first_air_date||"").slice(0,4);
-  if(x.media_type==="tv" && $("f_kind").value!=="series"){ $("f_kind").value="series"; toggleSeries(); }
-  if($("f_kind").value==="series"){ if(!$("f_series").value)$("f_series").value=t; if(!$("f_title").value)$("f_title").value=t; }
-  else $("f_title").value=t;
-  if(y)$("f_year").value=y; if(x.poster_path)$("f_thumb").value='https://image.tmdb.org/t/p/w500'+x.poster_path;
+  if(x.type==="tv" && $("f_kind").value!=="series"){ $("f_kind").value="series"; toggleSeries(); }
+  if($("f_kind").value==="series"){ if(!$("f_series").value)$("f_series").value=x.title; if(!$("f_title").value)$("f_title").value=x.title; }
+  else $("f_title").value=x.title;
+  if(x.year)$("f_year").value=x.year; if(x.poster)$("f_thumb").value=x.poster;
   if(x.overview)$("f_desc").value=x.overview;
   $("tmdbRes").innerHTML='<span class="ok">מולא ✓</span>';
 }
@@ -344,7 +352,7 @@ function renderManage(){
   const q=($("mq").value||"").trim().toLowerCase(); const el=$("manageList");
   const sm=seriesMap();
   let sers=Object.keys(sm).filter(n=>!q||n.toLowerCase().includes(q)).sort();
-  let movs=movies.filter(m=>!m.series_name && (!q||(m.title||"").toLowerCase().includes(q)));
+  let movs=movies.filter(m=>!m.series_name && m.category!=="שידורים חיים" && (!q||(m.title||"").toLowerCase().includes(q)));
   let html="";
   if(sers.length){ html+='<div class="muted" style="margin:4px 0">סדרות ('+sers.length+')</div>';
     html+=sers.slice(0,60).map(n=>{ const eps=sm[n].slice().sort((a,b)=>((a.season_number||1)-(b.season_number||1))||((a.episode_number||0)-(b.episode_number||0)));
@@ -424,7 +432,7 @@ function useUpload(i){ const u=window["_u"+i]; if(!u) return; openAdd();
   $("f_kind").value=(u.media_kind==="tv")?"series":"movie"; toggleSeries();
   $("f_title").value=u.title||""; if($("f_kind").value==="series")$("f_series").value=u.title||"";
   $("f_year").value=u.year||""; $("f_video").value=u.video_url||""; $("f_thumb").value=u.thumbnail_url||""; $("f_desc").value=u.description||"";
-  $("f_category").value=($("f_kind").value==="series")?"סדרות":"סרטים";
+  $("f_category").value=($("f_kind").value==="series")?"סדרות":"סרטים"; detectType();
   $("addMsg").innerHTML='<span class="ok">מולא מההעלאה — בדוק ושמור</span>';
 }
 
@@ -443,9 +451,5 @@ async function addAdmin(){ const id=$("a_id").value,name=$("a_name").value;
   try{ renderAdmins((await panelApi("add",{id:parseInt(id),name})).admins); $("a_id").value="";$("a_name").value="";$("adminErr").textContent="";}
   catch(e){ $("adminErr").textContent=e.message; } }
 async function rmAdmin(id){ try{ renderAdmins((await panelApi("remove",{id})).admins);}catch(e){ alert(e.message); } }
-
-// ── מפתחות ──
-function saveKeys(){ localStorage.setItem("zovex_tmdb_key",$("s_tmdb").value.trim());
-  $("keysMsg").textContent="נשמר ✓"; setTimeout(()=>$("keysMsg").textContent="",2000); }
 </script>
 </div></body></html>

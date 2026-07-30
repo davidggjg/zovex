@@ -1431,6 +1431,11 @@ async def seed_content_if_empty():
     except Exception as e:
         log.warning("זריעת content.json נכשלה: %s", e)
 
+@api.get("/admin/tmdb")
+async def admin_tmdb(q: str = ""):
+    """חיפוש TMDB דרך השרת — המפתח (TMDB_API_KEY) נשאר בשרת, לא בדפדפן."""
+    return {"results": await tmdb_search(q)}
+
 @api.get("/content")
 async def content_get():
     """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן."""
