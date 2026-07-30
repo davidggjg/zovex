@@ -1343,6 +1343,67 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "")
     save_new_uploads(lst)
     return entry
 
+# ── זיהוי פרק סדרה משם הקובץ (להעלאה מרובה) ─────────────────────────────────
+# תומך: S01E05 / 1x05 / "עונה 1 פרק 5" / "פרק 5". שם הסדרה = מה שלפני הסימון.
+_EP_PATTERNS = [
+    re.compile(r'\bS\s*0*(\d{1,2})\s*E\s*0*(\d{1,3})\b', re.I),   # S01E05
+    re.compile(r'\b(\d{1,2})\s*[xX]\s*0*(\d{1,3})\b'),            # 1x05
+]
+
+def parse_episode_info(fname: str):
+    if not fname:
+        return None
+    n = re.sub(r'\.(mkv|mp4|avi|mov|webm|m4v|ts|wmv|flv)$', '', fname, flags=re.I)
+    n = n.replace('.', ' ').replace('_', ' ').replace('-', ' ')
+    season = episode = None
+    cut = None
+    for pat in _EP_PATTERNS:
+        m = pat.search(n)
+        if m:
+            season, episode, cut = int(m.group(1)), int(m.group(2)), m.start()
+            break
+    if episode is None:
+        me = re.search(r'פרק\s*0*(\d+)', n)
+        ms = re.search(r'עונה\s*0*(\d+)', n)
+        if me:
+            episode = int(me.group(1))
+            season = int(ms.group(1)) if ms else 1
+            cut = min(x.start() for x in (ms, me) if x)
+    if episode is None:
+        return None
+    series = clean_name(n[:cut]).strip() if cut else ""
+    if not series:
+        series = clean_name(n)
+    return {"series": series or "סדרה", "season": season or 1, "episode": episode}
+
+def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
+    """מוסיף פרק סדרה אוטומטית ל-new_uploads (בלי TMDB) — לאישור בפאנל + פוסטר."""
+    entry = {
+        "id": _slugify(ep["series"], "ep") + f"-s{ep['season']}e{ep['episode']}-{channel_msg_id}",
+        "title": ep["series"],
+        "series_name": ep["series"],
+        "season_number": ep["season"],
+        "episode_number": ep["episode"],
+        "episode_title": "",
+        "year": "",
+        "category": "סדרות",
+        "type": "telegram",
+        "media_kind": "tv",
+        "tmdb_id": 0,
+        "video_url": stored_stream_url(channel_msg_id),
+        "thumbnail_url": "",
+        "description": "",
+        "channel_msg_id": channel_msg_id,
+        "file_unique_id": file_unique_id,
+        "added_at": datetime.utcnow().isoformat(),
+    }
+    lst = load_new_uploads()
+    lst = [e for e in lst if e.get("channel_msg_id") != channel_msg_id
+           and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
+    lst.append(entry)
+    save_new_uploads(lst)
+    return entry
+
 async def _upload_noop(client, message):
     pass  # שומר את ה-peer של הערוץ ב-cache (כמו ב-pool)
 
@@ -1430,6 +1491,15 @@ async def on_upload(client: Client, message: Message):
                                f"ודא שבוט ההעלאה הוא אדמין בערוץ.")
         return
     fname = getattr(media, "file_name", None) or (message.caption or "") or ""
+    # אם שם הקובץ מכיל סימון פרק (S01E05 / עונה X פרק Y / 1x05) — הוספה אוטומטית
+    # כפרק סדרה, בלי TMDB אינטראקטיבי. מתאים להעלאה מרובה (עד 20 קבצים ברצף).
+    ep = parse_episode_info(fname)
+    if ep:
+        add_episode_entry(ep, channel_msg_id, fuid)
+        await status.edit_text(
+            f"✅ פרק נוסף: <b>{ep['series']}</b> — עונה {ep['season']} פרק {ep['episode']}\n"
+            f"אשר בפאנל («הוסף הכל») והוסף פוסטר לסדרה.")
+        return
     query = clean_name(fname)
     await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{query or '—'}</b>...")
     options = await tmdb_search(query)
@@ -1538,6 +1608,22 @@ async def stop_upload_bot():
 async def uploads_new():
     items = _expand_urls(load_new_uploads())
     return {"count": len(items), "items": items}
+
+class UploadsClearReq(BaseModel):
+    password: str
+    channel_msg_ids: list = []
+
+@api.post("/uploads/clear")
+async def uploads_clear(req: UploadsClearReq, request: Request):
+    """מסיר העלאות שכבר אושרו ונכנסו לאתר (לפי channel_msg_id). ריק = מנקה הכל."""
+    check_panel_password(request, req.password)
+    if req.channel_msg_ids:
+        ids = set(req.channel_msg_ids)
+        lst = [e for e in load_new_uploads() if e.get("channel_msg_id") not in ids]
+    else:
+        lst = []
+    save_new_uploads(lst)
+    return {"ok": True, "remaining": len(lst)}
 
 # ── מאגר התוכן בשרת (content.json) — מקור האמת החדש, מנותק מגיטהאב ──────────────
 # פאנל הניהול טוען את כל הספרייה, עורך בזיכרון, ושומר את המערך המלא חזרה (save).

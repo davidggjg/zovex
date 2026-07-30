@@ -153,8 +153,9 @@
   <!-- העלאות -->
   <div id="pane-uploads" class="hidden">
     <div class="card"><div class="toprow"><h2>העלאות שממתינות מהבוט</h2>
-      <button class="mini gray" onclick="loadUploads()">↻</button></div>
-      <div class="muted">לחיצה על "הוסף" ממלאת את טופס ההוספה עם הקישור.</div>
+      <div class="row"><button class="mini green" onclick="addAllUploads()">✓ הוסף הכל לאתר</button>
+        <button class="mini gray" onclick="loadUploads()">↻</button></div></div>
+      <div class="muted">"הוסף הכל" מכניס את כל הפרקים לאתר בבת אחת. אח"כ ערוך פרק אחד, שים פוסטר, ולחץ "עדכן פוסטר לכל הסדרה".</div>
       <div id="uploadsList"></div></div>
   </div>
 
@@ -418,15 +419,47 @@ async function saveLive(){
 }
 
 // ── העלאות מהבוט ──
+let _uploads=[];
 async function loadUploads(){
   const el=$("uploadsList"); el.innerHTML="טוען…";
   try{ const d=await (await fetch("/uploads/new")).json();
-    if(!d.items||!d.items.length){ el.innerHTML='<div class="muted" style="padding:8px">אין העלאות ממתינות.</div>'; return; }
-    el.innerHTML=d.items.slice().reverse().map((u,i)=>{ window["_u"+i]=u;
+    _uploads=d.items||[];
+    if(!_uploads.length){ el.innerHTML='<div class="muted" style="padding:8px">אין העלאות ממתינות.</div>'; return; }
+    el.innerHTML='<div class="muted" style="margin-bottom:6px">'+_uploads.length+' ממתינים</div>'+
+      _uploads.slice().reverse().map((u,i)=>{ window["_u"+i]=u;
+      const sub = u.series_name
+        ? `סדרה · ${esc(u.series_name)} · ע${u.season_number||1}פ${u.episode_number||"?"}`
+        : `${esc((u.video_url||"").slice(0,40))}…`;
       return `<div class="item"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
-        <div class="meta"><div class="t">${esc(u.title||"—")} (${u.year||"?"})</div><div class="s">${esc((u.video_url||"").slice(0,44))}…</div></div>
-        <button class="mini" onclick="useUpload(${i})">הוסף</button></div>`; }).join("");
+        <div class="meta"><div class="t">${esc(u.title||"—")}</div><div class="s">${sub}</div></div>
+        <button class="mini" onclick="useUpload(${i})">ערוך+הוסף</button></div>`; }).join("");
   }catch(e){ el.innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+async function addAllUploads(){
+  if(!_uploads.length){ await loadUploads(); if(!_uploads.length) return; }
+  if(!confirm(`להוסיף ${_uploads.length} פריטים לאתר עכשיו?`)) return;
+  const ids=[];
+  const newItems=_uploads.map(u=>{
+    const isSer = u.media_kind==="tv" || !!u.series_name;
+    const vid=(u.video_url||"").trim(); const info=extractVideoInfo(vid);
+    if(u.channel_msg_id!=null) ids.push(u.channel_msg_id);
+    return { id:crypto.randomUUID(), created_date:new Date().toISOString(),
+      title:u.title||"", year:u.year?parseInt(u.year):null,
+      category:u.category||(isSer?"סדרות":"סרטים"), description:u.description||"",
+      type:info.type, video_id:info.video_id, video_url:vid, thumbnail_url:u.thumbnail_url||"",
+      custom_slug:null,
+      series_name:isSer?(u.series_name||u.title||null):null,
+      season_number:isSer?(u.season_number||1):null,
+      episode_number:isSer?(u.episode_number||null):null,
+      episode_title:isSer?"":null };
+  });
+  movies=[...newItems, ...movies];
+  if(await persist()){
+    try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS, channel_msg_ids:ids})}); }catch{}
+    refreshDerived(); await loadUploads();
+    alert("נוסף! עכשיו ערוך פרק אחד מהסדרה, שים פוסטר, ולחץ 'עדכן פוסטר לכל הסדרה'.");
+  }
 }
 function useUpload(i){ const u=window["_u"+i]; if(!u) return; openAdd();
   $("f_kind").value=(u.media_kind==="tv")?"series":"movie"; toggleSeries();
