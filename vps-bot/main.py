@@ -1606,8 +1606,20 @@ async def stop_upload_bot():
 # ל-movies.json כשמעדכנים. (רק קריאה; אין כאן חשיפת טוקנים.)
 @api.get("/uploads/new")
 async def uploads_new():
-    items = _expand_urls(load_new_uploads())
-    return {"count": len(items), "items": items}
+    # מציגים רק העלאות שעדיין לא נמצאות באתר. אם פריט כבר נוסף ל-content
+    # (לפי מזהה ההודעה בערוץ שבקישור) — מסירים אותו אוטומטית מהרשימה (self-heal),
+    # כך שהרשימה תמיד משקפת רק את מה שבאמת ממתין.
+    items = load_new_uploads()
+    present = set()
+    for e in load_content():
+        u = e.get("video_url") or e.get("video_id") or ""
+        m = re.search(r"/stream/-?\d+/(\d+)", u)
+        if m:
+            present.add(int(m.group(1)))
+    pending = [it for it in items if it.get("channel_msg_id") not in present]
+    if len(pending) != len(items):
+        save_new_uploads(pending)
+    return {"count": len(pending), "items": _expand_urls(pending)}
 
 class UploadsClearReq(BaseModel):
     password: str
