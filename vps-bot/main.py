@@ -1151,8 +1151,53 @@ def add_movie_entry(chosen: dict, channel_msg_id: int) -> dict:
 async def _upload_noop(client, message):
     pass  # שומר את ה-peer של הערוץ ב-cache (כמו ב-pool)
 
+# _awaiting_name: user_id (int) → cmid (str) — מנהל שלחץ "שם אחר" וממתינים
+# שיקליד שם ידני בהודעת טקסט הבאה.
+_awaiting_name: dict = {}
+
+def _options_keyboard(cmid, options, raw_name=""):
+    """בונה מקלדת: הצעות TMDB + שמירה בשם הגולמי + שם ידני + ביטול."""
+    rows = []
+    for i, o in enumerate(options):
+        label = f"{o['title']} ({o['year'] or '?'}) · {'סדרה' if o['type']=='tv' else 'סרט'}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"sel:{cmid}:{i}")])
+    if raw_name:
+        rows.append([InlineKeyboardButton(f"💾 שמור בשם «{raw_name[:28]}»",
+                                          callback_data=f"sel:{cmid}:save")])
+    rows.append([InlineKeyboardButton("✏️ שם אחר (הקלד ידני)", callback_data=f"sel:{cmid}:name")])
+    rows.append([InlineKeyboardButton("❌ ביטול", callback_data=f"sel:{cmid}:x")])
+    return InlineKeyboardMarkup(rows)
+
+async def _handle_custom_name(client: Client, message: Message, uid: int):
+    """מנהל הקליד שם ידני אחרי שלחץ 'שם אחר'. מחפשים שוב ב-TMDB לפי השם הזה."""
+    cmid = _awaiting_name.pop(uid, None)
+    pending = _pending_uploads.get(cmid) if cmid else None
+    if not pending:
+        await message.reply_text("פג תוקף. שלח שוב את הקובץ.")
+        return
+    name = (message.text or "").strip()
+    if not name:
+        _awaiting_name[uid] = cmid  # עדיין מחכים
+        await message.reply_text("לא קלטתי שם. הקלד את השם ושלח שוב.")
+        return
+    pending["raw_name"] = name
+    options = await tmdb_search(name)
+    if not options:
+        # אין זיהוי — שומרים בשם המדויק שהוקלד
+        entry = add_movie_entry(
+            {"title": name, "year": "", "tmdb_id": 0, "type": "movie",
+             "poster": "", "overview": ""}, pending["channel_msg_id"])
+        _pending_uploads.pop(cmid, None)
+        await message.reply_text(
+            f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+        return
+    pending["options"] = options
+    await message.reply_text(
+        f"🎬 לפי «{name}» מצאתי — איזו זו?",
+        reply_markup=_options_keyboard(cmid, options, name))
+
 async def on_upload(client: Client, message: Message):
-    """מנהל שלח קובץ/וידאו לבוט ההעלאה."""
+    """מנהל שלח קובץ/וידאו לבוט ההעלאה (או טקסט — לזרימת שם ידני)."""
     uid = message.from_user.id if message.from_user else 0
     if not is_admin_id(uid):
         # לא מורשה — לא עונים כלל (הבעלים ביקש: מי שלא ברשימה, הבוט לא יענה לו)
@@ -1160,6 +1205,10 @@ async def on_upload(client: Client, message: Message):
         return
     media = message.video or message.document or message.audio
     if not media:
+        # אולי זה שם ידני שממתינים לו
+        if uid in _awaiting_name:
+            await _handle_custom_name(client, message, uid)
+            return
         await message.reply_text("שלח לי קובץ סרט/פרק (וידאו או מסמך) ואני אזהה אותו.")
         return
     status = await message.reply_text("⏳ מעלה לערוץ...")
@@ -1179,31 +1228,24 @@ async def on_upload(client: Client, message: Message):
     query = clean_name(fname)
     await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{query or '—'}</b>...")
     options = await tmdb_search(query)
-    if not options:
-        # אין זיהוי — שומרים כניסה בסיסית עם השם הגולמי, אפשר לערוך אח״כ
-        entry = add_movie_entry(
-            {"title": query or fname or f"קובץ {channel_msg_id}", "year": "",
-             "tmdb_id": 0, "type": "movie", "poster": "", "overview": ""},
-            channel_msg_id)
-        await status.edit_text(
-            f"⚠️ לא נמצא זיהוי ב-TMDB עבור «{query}».\n"
-            f"הוספתי כניסה בסיסית בשם הזה.\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
-        return
     _pending_uploads[str(channel_msg_id)] = {
         "channel_msg_id": channel_msg_id, "chat_id": message.chat.id,
         "user_id": uid, "fname": fname, "options": options,
+        "raw_name": query or fname,
     }
-    buttons = []
-    for i, o in enumerate(options):
-        label = f"{o['title']} ({o['year'] or '?'}) · {'סדרה' if o['type']=='tv' else 'סרט'}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"sel:{channel_msg_id}:{i}")])
-    buttons.append([InlineKeyboardButton("❌ ביטול", callback_data=f"sel:{channel_msg_id}:x")])
+    if not options:
+        # אין זיהוי אוטומטי — נותנים לבחור: שמור בשם הגולמי או הקלד שם ידני
+        await status.edit_text(
+            f"⚠️ לא זיהיתי אוטומטית «{query or fname}».\n"
+            f"אפשר לשמור בשם הזה, או להקליד שם אחר לחיפוש:",
+            reply_markup=_options_keyboard(channel_msg_id, [], query or fname))
+        return
     await status.edit_text(
-        "🎬 מצאתי כמה התאמות — איזו זו?",
-        reply_markup=InlineKeyboardMarkup(buttons))
+        "🎬 מצאתי כמה התאמות — איזו זו? (או 'שם אחר' אם אף אחת לא נכונה)",
+        reply_markup=_options_keyboard(channel_msg_id, options, query))
 
 async def on_select(client: Client, cq: CallbackQuery):
-    """מנהל בחר איזו התאמה מ-TMDB."""
+    """מנהל בחר התאמה מ-TMDB / ביקש לשמור בשם גולמי / ביקש להקליד שם ידני."""
     uid = cq.from_user.id if cq.from_user else 0
     if not is_admin_id(uid):
         await cq.answer("לא מורשה", show_alert=True)
@@ -1218,8 +1260,24 @@ async def on_select(client: Client, cq: CallbackQuery):
         return
     if idx == "x":
         _pending_uploads.pop(cmid, None)
+        _awaiting_name.pop(uid, None)
         await cq.message.edit_text("בוטל. הקובץ נשאר בערוץ אבל לא נוסף לאתר.")
         await cq.answer()
+        return
+    if idx == "name":
+        _awaiting_name[uid] = cmid
+        await cq.message.edit_text("✏️ הקלד את השם המדויק ושלח — אחפש שוב ב-TMDB לפיו.")
+        await cq.answer()
+        return
+    if idx == "save":
+        raw = pending.get("raw_name") or f"קובץ {pending['channel_msg_id']}"
+        entry = add_movie_entry(
+            {"title": raw, "year": "", "tmdb_id": 0, "type": "movie",
+             "poster": "", "overview": ""}, pending["channel_msg_id"])
+        _pending_uploads.pop(cmid, None)
+        await cq.message.edit_text(
+            f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{entry['video_url']}")
+        await cq.answer("נשמר!")
         return
     try:
         chosen = pending["options"][int(idx)]
