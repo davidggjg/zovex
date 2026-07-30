@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Search, Send, Eye, ChevronDown, X, Download } from "lucide-react";
 import { SPIN, ls, lsSet } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
+import SupportChat from "./SupportChat";
 
 // מסך הבית — לוגו, חיפוש, תפריט משתמש, קטגוריות, ורשימות התוכן
 export default function HomePage({
@@ -12,6 +13,7 @@ export default function HomePage({
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showCatModal, setShowCatModal] = useState(false);
   const [showTelegramTip, setShowTelegramTip] = useState(() => !ls("zovex_hide_telegram_tip"));
+  const [supportOpen, setSupportOpen] = useState(false);
   const userMenuRef = useRef(null);
 
   // סגירת התפריט בלחיצה מחוץ לו
@@ -182,11 +184,14 @@ export default function HomePage({
             <div style={{ fontSize: 10, color: "#888", lineHeight: 1.3 }}>או להוספת סרט חדש</div>
           </div>
         )}
-        <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ background: "#229ED9", height: 42, padding: "0 14px", borderRadius: 21, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, color: "#fff", boxShadow: "0 2px 10px rgba(34,158,217,.35)", textDecoration: "none", flexShrink: 0, whiteSpace: "nowrap" }}>
+        <button
+          onClick={() => { setShowTelegramTip(false); lsSet("zovex_hide_telegram_tip", "1"); setSupportOpen(true); }}
+          style={{ background: "#229ED9", height: 42, padding: "0 14px", borderRadius: 21, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, color: "#fff", boxShadow: "0 2px 10px rgba(34,158,217,.35)", border: "none", cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>
           <Send size={16} fill="white" />
           <span style={{ fontSize: 12, fontWeight: 700 }}>תמיכה</span>
-        </a>
+        </button>
       </div>
+      <SupportChat open={supportOpen} onClose={() => setSupportOpen(false)} user={user} />
     </div>
   );
 }
