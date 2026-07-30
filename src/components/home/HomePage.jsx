@@ -169,8 +169,9 @@ export default function HomePage({
           user={user}
         />
       </main>
-      {/* Telegram bubble */}
-      <div style={{ position: "fixed", bottom: 20, left: 14, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 8 }}>
+      {/* כפתור תמיכה — bottom:62 כדי לרחף מעל באנר הפרסומת (bottom:0, גובה 50)
+          ו-zIndex גבוה ממנו, אחרת הבאנר בולע את הלחיצה והכפתור "לא מגיב". */}
+      <div style={{ position: "fixed", bottom: 62, left: 14, zIndex: 10000, display: "flex", alignItems: "flex-end", gap: 8 }}>
         {showTelegramTip && (
           <div style={{ position: "relative", background: "rgba(26,26,26,0.92)", backdropFilter: "blur(6px)", borderRadius: "14px 14px 14px 4px", padding: "8px 24px 8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,.3)", border: "1px solid #2a2a2a", maxWidth: 150, direction: "rtl" }}>
             <button

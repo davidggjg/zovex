@@ -76,7 +76,7 @@ export default function SupportChat({ open, onClose, user }) {
   return (
     <div
       onClick={onClose}
-      style={{ position: "fixed", inset: 0, zIndex: 3000, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center", direction: "rtl" }}
+      style={{ position: "fixed", inset: 0, zIndex: 10001, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center", direction: "rtl" }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
