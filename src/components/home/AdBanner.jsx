@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-const AD_KEY = "833479e14706e97fe2b8acbc143a4963";
+const AD_KEY = "8050516fd44627d57aee36c0f8306419";
 
 // הבאנר נטען בתוך iframe מבודד (ולא ישירות בדף) כי סקריפט הפרסומת משתמש
 // ב-document.write, שיכול למחוק את כל האתר אם ירוץ ישירות בתוך ה-DOM של React.
