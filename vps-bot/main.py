@@ -529,27 +529,34 @@ _stream_rr_lock = asyncio.Lock()
 async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
+async def _start_one_pool_bot(i: int, tok: str):
+    """מעלה בוט pool בודד ומוסיף אותו לרשימה. בטוח להרצה במקביל."""
+    try:
+        c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
+                   in_memory=False, no_updates=False, workdir=str(DATA_DIR))
+        c.add_handler(MessageHandler(_pool_noop, filters.channel))
+        await asyncio.wait_for(c.start(), timeout=40)
+        if STREAM_CHANNEL_ID:
+            try:
+                await c.get_chat(STREAM_CHANNEL_ID)
+            except Exception:
+                pass  # יזוהה כשיגיע פוסט חדש לערוץ
+        _stream_bots.append({"client": c, "name": f"pool_{i}", "cooldown_until": 0.0})
+        log.info("✅ pool bot %d עלה (%d פעילים)", i, len(_stream_bots))
+    except Exception as e:
+        log.warning("⚠️ pool bot %d לא עלה: %s", i, e)
+
 async def start_stream_pool():
     if not STREAM_BOTS_FILE.exists():
         log.info("אין stream_bots.txt — pool בוטים לא פעיל")
         return
     tokens = [t.strip() for t in STREAM_BOTS_FILE.read_text().splitlines() if t.strip()]
-    for i, tok in enumerate(tokens):
-        try:
-            c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
-                       in_memory=False, no_updates=False, workdir=str(DATA_DIR))
-            c.add_handler(MessageHandler(_pool_noop, filters.channel))
-            await asyncio.wait_for(c.start(), timeout=40)
-            if STREAM_CHANNEL_ID:
-                try:
-                    await c.get_chat(STREAM_CHANNEL_ID)
-                except Exception:
-                    pass  # יזוהה כשיגיע פוסט חדש לערוץ
-            _stream_bots.append({"client": c, "name": f"pool_{i}", "cooldown_until": 0.0})
-            log.info("✅ pool bot %d עלה (%d פעילים)", i, len(_stream_bots))
-        except Exception as e:
-            log.warning("⚠️ pool bot %d לא עלה: %s", i, e)
-        await asyncio.sleep(2)
+    # העלאה במקביל בקבוצות של 8 — מהיר גם עם עשרות בוטים (במקום אחד-אחד)
+    BATCH = 8
+    for start in range(0, len(tokens), BATCH):
+        batch = tokens[start:start + BATCH]
+        await asyncio.gather(*[_start_one_pool_bot(start + j, t) for j, t in enumerate(batch)])
+        await asyncio.sleep(1)   # הפוגה קצרה בין קבוצות
     log.info("🚀 stream pool: %d בוטים פעילים", len(_stream_bots))
     asyncio.create_task(warm_stream_pool())
 
