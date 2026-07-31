@@ -319,6 +319,7 @@ function startEdit(id){
   $("f_thumb").value=m.thumbnail_url||""; $("f_desc").value=m.description||"";
   $("f_series").value=m.series_name||""; $("f_season").value=m.season_number||""; $("f_episode").value=m.episode_number||"";
   $("f_episode_end").value=m.episode_number_end||"";
+  if(m.series_name) $("f_existing").value=m.series_name;   // מסמן שהפרק שייך לסדרה הזו
   toggleSeries(); detectType(); showTab("add");
 }
 function buildEntry(){
@@ -338,6 +339,7 @@ async function saveItem(){
   const e=buildEntry();
   if(!e.title){ $("addMsg").innerHTML='<span class="err">חסר שם</span>'; return; }
   if(!e.video_url){ $("addMsg").innerHTML='<span class="err">חסר קישור וידאו</span>'; return; }
+  const wasEditing=!!editingId;
   if(editingId){ movies=movies.map(m=>m.id===editingId?{...m,...e}:m); }
   else { movies=[{...e,id:crypto.randomUUID(),created_date:new Date().toISOString()}, ...movies]; }
   if(await persist()){
@@ -347,8 +349,13 @@ async function saveItem(){
         body:JSON.stringify({password:PASS, channel_msg_ids:[_fromUploadCmid]})}); }catch{}
       _fromUploadCmid=null;
     }
-    $("addMsg").innerHTML='<span class="ok">נשמר ✓ (הוסר מרשימת ההעלאות)</span>';
-    if(!editingId) clearForm();
+    if(wasEditing){
+      editingId=null;
+      showTab("manage");          // חזרה לרשימה מרועננת — רואים מיד את השינוי
+    } else {
+      clearForm();
+      $("addMsg").innerHTML='<span class="ok">נשמר ✓</span>';
+    }
   }
 }
 async function delItem(){
@@ -571,18 +578,29 @@ async function removeUpload(cmid){
 function useUpload(i){ const u=window["_u"+i]; if(!u) return; openAdd();
   const isSer=(u.media_kind==="tv")||!!u.series_name;
   $("f_kind").value=isSer?"series":"movie"; toggleSeries();
+  let inh=null;                                    // פרק קיים מהסדרה, אם היא כבר באתר
   if(isSer){
-    $("f_series").value=u.series_name||u.title||"";
-    $("f_season").value=u.season_number||"";        // ממלא אוטומטית את העונה שזוהתה
-    $("f_episode").value=u.episode_number||"";       // ואת מספר הפרק
-    $("f_title").value=u.episode_title||u.title||u.series_name||"";
+    const sn=u.series_name||u.title||"";
+    $("f_series").value=sn;
+    $("f_season").value=u.season_number||"";        // עונה שזוהתה
+    $("f_episode").value=u.episode_number||"";       // פרק שזוהה
+    $("f_title").value=u.episode_title||u.title||sn;
+    const eps=seriesMap()[sn];                       // הסדרה כבר קיימת באתר?
+    if(eps&&eps.length){ inh=eps[0]; $("f_existing").value=sn; }  // כן → מקשר אליה
   } else {
     $("f_title").value=u.title||"";
   }
-  $("f_year").value=u.year||""; $("f_video").value=u.video_url||""; $("f_thumb").value=u.thumbnail_url||""; $("f_desc").value=u.description||"";
-  $("f_category").value=isSer?"סדרות":"סרטים"; detectType();
+  $("f_year").value=u.year||(inh&&inh.year?inh.year:"");
+  $("f_video").value=u.video_url||"";
+  $("f_thumb").value=u.thumbnail_url||(inh?inh.thumbnail_url||"":"");   // יורש פוסטר מהסדרה
+  $("f_desc").value=u.description||(inh?inh.description||"":"");
+  $("f_slug").value=inh?inh.custom_slug||"":"";
+  $("f_category").value=isSer?(inh&&inh.category?inh.category:"סדרות"):"סרטים";
+  detectType();
   _fromUploadCmid = (u.channel_msg_id!=null)?u.channel_msg_id:null;
-  $("addMsg").innerHTML='<span class="ok">מולא מההעלאה (כולל עונה/פרק) — בדוק ושמור</span>';
+  $("addMsg").innerHTML=inh
+    ? '<span class="ok">מולא — ייכנס לסדרה הקיימת «'+esc(inh.series_name)+'» עם פוסטר. בדוק ושמור</span>'
+    : '<span class="ok">מולא מההעלאה (כולל עונה/פרק) — בדוק ושמור</span>';
 }
 
 // ── מנהלים ──
