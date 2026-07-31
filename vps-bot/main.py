@@ -1299,10 +1299,12 @@ def clean_name(fname: str) -> str:
     return n
 
 async def tmdb_search(query: str) -> list:
-    """מחזיר עד 6 תוצאות TMDB (movie/tv), עם שם, שנה, פוסטר, סוג."""
+    """מחזיר עד 6 תוצאות TMDB (movie/tv). לכל תוצאה: שם עברי לתצוגה (title),
+    שם אנגלי (en_title) לקישור נקי, שנה, פוסטר, סוג. תמיד מושך גם עברית וגם
+    אנגלית כדי שגם לתוכן עברי יהיה שם אנגלי לכתובת (slug)."""
     if not TMDB_API_KEY or not query:
         return []
-    out = []
+    he_out, en_out, en_map = [], [], {}
     try:
         async with httpx.AsyncClient(timeout=12) as cx:
             for lang in ("he", "en-US"):
@@ -1316,27 +1318,55 @@ async def tmdb_search(query: str) -> list:
                     if mt not in ("movie", "tv"):
                         continue
                     title = it.get("title") or it.get("name") or ""
-                    date = it.get("release_date") or it.get("first_air_date") or ""
-                    year = (date or "")[:4]
+                    orig = it.get("original_title") or it.get("original_name") or ""
                     tid = it.get("id")
-                    if not title or not tid:
+                    if not tid:
                         continue
-                    if any(o["tmdb_id"] == tid and o["type"] == mt for o in out):
+                    if lang == "en-US":
+                        # מפת שם אנגלי לכל פריט (לפי מזהה+סוג) — משמש ל-slug
+                        en_map[(tid, mt)] = title or orig
+                    bucket = en_out if lang == "en-US" else he_out
+                    if not title or any(o["tmdb_id"] == tid and o["type"] == mt for o in bucket):
                         continue
-                    out.append({
-                        "tmdb_id": tid, "type": mt, "title": title, "year": year,
+                    date = it.get("release_date") or it.get("first_air_date") or ""
+                    bucket.append({
+                        "tmdb_id": tid, "type": mt, "title": title, "year": (date or "")[:4],
                         "poster": (TMDB_IMG + it["poster_path"]) if it.get("poster_path") else "",
                         "overview": (it.get("overview") or "")[:300],
+                        "original": orig,
                     })
-                if out:
-                    break  # אם עברית החזירה תוצאות — לא צריך את אנגלית
     except Exception as e:
         log.warning("tmdb_search נכשל: %s", e)
+    out = he_out or en_out          # עברית עדיפה לתצוגה; אם אין — אנגלית
+    for o in out:                    # מצמידים שם אנגלי לכל תוצאה (לקישור)
+        o["en_title"] = en_map.get((o["tmdb_id"], o["type"])) or o.get("original") or o["title"]
     return out[:6]
 
+# ── תעתיק עברית→לטינית (גיבוי ל-slug כשאין שם אנגלי ב-TMDB, למשל תוכן ישראלי) ──
+_HE_TRANSLIT = {
+    "א": "", "ב": "b", "ג": "g", "ד": "d", "ה": "h", "ו": "v", "ז": "z", "ח": "ch",
+    "ט": "t", "י": "y", "כ": "k", "ך": "k", "ל": "l", "מ": "m", "ם": "m", "נ": "n",
+    "ן": "n", "ס": "s", "ע": "", "פ": "p", "ף": "p", "צ": "tz", "ץ": "tz", "ק": "k",
+    "ר": "r", "ש": "sh", "ת": "t",
+}
+def _translit_he(s: str) -> str:
+    return "".join(_HE_TRANSLIT.get(c, c) for c in (s or ""))
+
+def _slug_base(title: str) -> str:
+    """בסיס slug לטיני נקי משם. אם השם עברי — מתעתק אותו קודם."""
+    latin = re.sub(r"[a-zA-Z0-9]", "", title or "")  # יש בו תווים לא-לטיניים?
+    src = _translit_he(title) if latin.strip() and re.search(r"[א-ת]", title or "") else (title or "")
+    return re.sub(r"[^a-zA-Z0-9]+", "-", src).strip("-").lower()
+
 def _slugify(title: str, tmdb_id) -> str:
-    base = re.sub(r"[^a-zA-Z0-9]+", "-", (title or "")).strip("-").lower()
-    return (base or "movie") + "-" + str(tmdb_id)
+    return (_slug_base(title) or "movie") + "-" + str(tmdb_id)
+
+def _custom_slug(en_title: str, he_title: str, tmdb_id) -> str:
+    """slug לכתובת: מעדיף שם אנגלי; נופל לתעתיק עברי; ואז ל-tmdb id."""
+    base = _slug_base(en_title) or _slug_base(he_title)
+    if base:
+        return f"{base}-{tmdb_id}" if tmdb_id else base
+    return f"movie-{tmdb_id}" if tmdb_id else ""
 
 def find_upload_by_fuid(fuid: str):
     """מחזיר כניסה קיימת עם אותו file_unique_id (מניעת כפילויות), או None."""
@@ -1351,9 +1381,13 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "")
     """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json.
     שומר קישור נייד (%BASE%) — הכתובת האמיתית מוזרקת בזמן ההגשה/התצוגה."""
     stream_url = stored_stream_url(channel_msg_id)
+    en_title = chosen.get("en_title") or chosen.get("original") or chosen["title"]
     entry = {
-        "id": _slugify(chosen["title"], chosen["tmdb_id"]) + "-" + str(channel_msg_id),
+        "id": _slugify(en_title, chosen["tmdb_id"]) + "-" + str(channel_msg_id),
         "title": chosen["title"],
+        # custom_slug — כתובת נקייה באנגלית (מ-TMDB) במקום עברית מקודדת בכתובת
+        "custom_slug": _custom_slug(en_title, chosen["title"], chosen["tmdb_id"]),
+        "en_title": en_title,
         "year": chosen["year"],
         "type": "telegram",
         "media_kind": chosen["type"],           # movie / tv
@@ -1411,6 +1445,8 @@ def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "") -
     entry = {
         "id": _slugify(ep["series"], "ep") + f"-s{ep['season']}e{ep['episode']}-{channel_msg_id}",
         "title": ep["series"],
+        # slug נקי לכתובת הסדרה (תעתיק אם השם עברי) — כל הפרקים חולקים אותו
+        "custom_slug": _slug_base(ep["series"]) or None,
         "series_name": ep["series"],
         "season_number": ep["season"],
         "episode_number": ep["episode"],
