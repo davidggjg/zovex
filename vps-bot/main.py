@@ -1428,7 +1428,8 @@ SERIES_ALIASES_FILE = DATA_DIR / "series_aliases.json"
 def _norm_alias(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip()).lower()
 def _load_series_aliases() -> dict:
-    default = {"תאג''ד": "תאגד", 'תאג"ד': "תאגד", "תאג״ד": "תאגד", "תאג׳׳ד": "תאגד"}
+    default = {"תאג''ד": "תאגד", 'תאג"ד': "תאגד", "תאג״ד": "תאגד", "תאג׳׳ד": "תאגד",
+               "taagad": "תאגד"}
     if SERIES_ALIASES_FILE.exists():
         try:
             default.update(json.loads(SERIES_ALIASES_FILE.read_text(encoding="utf-8")))
