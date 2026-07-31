@@ -1489,6 +1489,9 @@ async def _upload_noop(client, message):
 # שיקליד שם ידני בהודעת טקסט הבאה.
 _awaiting_name: dict = {}
 
+# נעילה שמעבירה קבצים לערוץ אחד-אחרי-השני (העלאה מרובה בלי FloodWait)
+_upload_lock = asyncio.Lock()
+
 def _options_keyboard(cmid, options, raw_name=""):
     """בונה מקלדת: הצעות TMDB + שמירה בשם הגולמי + שם ידני + ביטול."""
     rows = []
@@ -1556,18 +1559,39 @@ async def on_upload(client: Client, message: Message):
             f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(dup['video_url']))}")
         return
     status = await message.reply_text("⏳ מעלה לערוץ...")
-    try:
-        copied = await client.copy_message(
-            chat_id=STREAM_CHANNEL_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.id,
-        )
-        channel_msg_id = copied.id
-    except Exception as e:
-        log.warning("upload_bot: copy_message נכשל: %s", e)
-        await status.edit_text(f"❌ ההעלאה לערוץ נכשלה: {e}\n"
-                               f"ודא שבוט ההעלאה הוא אדמין בערוץ.")
-        return
+    # תור: מעבירים קובץ-קובץ (לא כולם בבת אחת) + retry עם המתנה על FloodWait,
+    # כדי שהעלאה מרובה לא תיחסם ע"י טלגרם (420 FLOOD_WAIT).
+    channel_msg_id = None
+    async with _upload_lock:
+        for attempt in range(6):
+            try:
+                copied = await client.copy_message(
+                    chat_id=STREAM_CHANNEL_ID,
+                    from_chat_id=message.chat.id,
+                    message_id=message.id,
+                )
+                channel_msg_id = copied.id
+                break
+            except FloodWait as e:
+                wait = int(getattr(e, "value", 30)) + 2
+                log.warning("upload_bot: FloodWait %ss (ניסיון %d)", wait, attempt + 1)
+                try:
+                    await status.edit_text(
+                        f"⏳ טלגרם ביקש להמתין {wait} שניות (העלאה מהירה מדי) — "
+                        f"ממתין ומנסה שוב אוטומטית, אל תשלח שוב.")
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
+            except Exception as e:
+                log.warning("upload_bot: copy_message נכשל: %s", e)
+                await status.edit_text(f"❌ ההעלאה לערוץ נכשלה: {e}\n"
+                                       f"ודא שבוט ההעלאה הוא אדמין בערוץ.")
+                return
+        else:
+            await status.edit_text("❌ נכשל אחרי כמה ניסיונות (FloodWait). נסה שוב בעוד דקה.")
+            return
+        # הפוגה קצרה בזמן שהתור נעול — מרווח בין העלאות רצופות שמקטין FloodWait
+        await asyncio.sleep(1.5)
     fname = getattr(media, "file_name", None) or (message.caption or "") or ""
     # אם שם הקובץ מכיל סימון פרק (S01E05 / עונה X פרק Y / 1x05) — הוספה אוטומטית
     # כפרק סדרה, בלי TMDB אינטראקטיבי. מתאים להעלאה מרובה (עד 20 קבצים ברצף).
