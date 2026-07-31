@@ -92,6 +92,8 @@
           <div><label>עונה</label><input id="f_season" type="number" min="1" placeholder="1"></div>
           <div><label>פרק</label><input id="f_episode" type="number" min="1" placeholder="1"></div>
         </div>
+        <label>פרק שני (רק אם שני פרקים באותו וידאו — יוצג "פרק 1+2")</label>
+        <input id="f_episode_end" type="number" min="1" placeholder="ריק = פרק אחד רגיל">
       </div>
 
       <label id="lbl_title">שם</label>
@@ -298,7 +300,7 @@ function pickExisting(){
   if(!$("f_episode").value) $("f_episode").value=maxEp+1;
 }
 function clearForm(){
-  ["f_title","f_slug","f_year","f_video","f_thumb","f_desc","f_series","f_season","f_episode","tmdbq"].forEach(i=>$(i).value="");
+  ["f_title","f_slug","f_year","f_video","f_thumb","f_desc","f_series","f_season","f_episode","f_episode_end","tmdbq"].forEach(i=>$(i).value="");
   $("tmdbRes").innerHTML=""; $("addMsg").textContent=""; $("typeHint").textContent=""; $("f_existing").value="";
   $("f_kind").value="movie"; $("f_category").value=""; _fromUploadCmid=null; toggleSeries();
 }
@@ -316,6 +318,7 @@ function startEdit(id){
   $("f_category").value=m.category||""; $("f_video").value=m.video_url||m.video_id||"";
   $("f_thumb").value=m.thumbnail_url||""; $("f_desc").value=m.description||"";
   $("f_series").value=m.series_name||""; $("f_season").value=m.season_number||""; $("f_episode").value=m.episode_number||"";
+  $("f_episode_end").value=m.episode_number_end||"";
   toggleSeries(); detectType(); showTab("add");
 }
 function buildEntry(){
@@ -328,6 +331,7 @@ function buildEntry(){
     series_name:s?($("f_series").value.trim()||null):null,
     season_number:s&&$("f_season").value?parseInt($("f_season").value):null,
     episode_number:s&&$("f_episode").value?parseInt($("f_episode").value):null,
+    episode_number_end:s&&$("f_episode_end").value?parseInt($("f_episode_end").value):null,
     episode_title:s?"":null };
 }
 async function saveItem(){
@@ -398,7 +402,7 @@ function renderManage(){
         <div class="t">${esc(n)}</div><span class="pill">${eps.length} פרקים</span>
         <button class="mini gray" onclick="event.stopPropagation();delSeries('${esc(n).replace(/'/g,"")}')">🗑</button></div>
         <div class="hidden" style="padding:4px 8px">${eps.map(e=>`<div class="item">
-          <div class="meta"><div class="t">ע${e.season_number||1}פ${e.episode_number||"?"} — ${esc(e.title||"")}</div></div>
+          <div class="meta"><div class="t">ע${e.season_number||1}פ${e.episode_number||"?"}${e.episode_number_end?"+"+e.episode_number_end:""} — ${esc(e.title||"")}</div></div>
           <button class="mini sec" onclick="startEdit('${e.id}')">✏️</button>
           <button class="mini gray" onclick="quickDel('${e.id}')">🗑</button></div>`).join("")}</div></div>`;
     }).join(""); }

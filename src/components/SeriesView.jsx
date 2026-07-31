@@ -57,7 +57,7 @@ export default function SeriesView({ seriesName, seriesMap, onEpisodePlay, onClo
                 <Play size={18} fill="white" color="white" />
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>פרק {ep.episode_number || i + 1}{ep.episode_title ? " - " + ep.episode_title : ""}</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>פרק {ep.episode_number || i + 1}{ep.episode_number_end ? "+" + ep.episode_number_end : ""}{ep.episode_title ? " - " + ep.episode_title : ""}</div>
                 <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>{ep.title}</div>
               </div>
             </div>
