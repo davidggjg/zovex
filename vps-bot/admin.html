@@ -505,12 +505,20 @@ async function removeUpload(cmid){
   loadUploads();
 }
 function useUpload(i){ const u=window["_u"+i]; if(!u) return; openAdd();
-  $("f_kind").value=(u.media_kind==="tv")?"series":"movie"; toggleSeries();
-  $("f_title").value=u.title||""; if($("f_kind").value==="series")$("f_series").value=u.title||"";
+  const isSer=(u.media_kind==="tv")||!!u.series_name;
+  $("f_kind").value=isSer?"series":"movie"; toggleSeries();
+  if(isSer){
+    $("f_series").value=u.series_name||u.title||"";
+    $("f_season").value=u.season_number||"";        // ממלא אוטומטית את העונה שזוהתה
+    $("f_episode").value=u.episode_number||"";       // ואת מספר הפרק
+    $("f_title").value=u.episode_title||u.title||u.series_name||"";
+  } else {
+    $("f_title").value=u.title||"";
+  }
   $("f_year").value=u.year||""; $("f_video").value=u.video_url||""; $("f_thumb").value=u.thumbnail_url||""; $("f_desc").value=u.description||"";
-  $("f_category").value=($("f_kind").value==="series")?"סדרות":"סרטים"; detectType();
+  $("f_category").value=isSer?"סדרות":"סרטים"; detectType();
   _fromUploadCmid = (u.channel_msg_id!=null)?u.channel_msg_id:null;
-  $("addMsg").innerHTML='<span class="ok">מולא מההעלאה — בדוק ושמור (יוסר מהרשימה אחרי שמירה)</span>';
+  $("addMsg").innerHTML='<span class="ok">מולא מההעלאה (כולל עונה/פרק) — בדוק ושמור</span>';
 }
 
 // ── מנהלים ──
