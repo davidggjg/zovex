@@ -48,6 +48,24 @@ export function useMovieLibrary() {
   };
 
   useEffect(() => { loadMovies(); }, []);
+
+  // רענון אוטומטי כשחוזרים לטאב (כמו באפליקציה) — כדי שתוכן חדש שהועלה יופיע
+  // בלי צורך לרענן ידנית. מוגבל לפעם בדקה כדי לא להוריד את קובץ התוכן הגדול שוב ושוב.
+  useEffect(() => {
+    let last = Date.now();
+    const refresh = () => {
+      if (document.visibilityState && document.visibilityState !== "visible") return;
+      if (Date.now() - last < 60000) return;
+      last = Date.now();
+      loadMovies();
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
   useEffect(() => {
     loadLiveFromGitHub();
     // אם אין שידורים חיים כרגע — בדוק פעם אחת בטעינה ועצור (אין טעם לפולינג מתמשך)
