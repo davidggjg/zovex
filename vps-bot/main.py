@@ -1419,7 +1419,31 @@ _HE_SEASON_EP = re.compile(r'ע(?:ונה)?\s*0*(\d{1,2})\s*[·.\-]?\s*פ(?:רק)
 _HE_EP_ONLY = re.compile(r'(?:^|\s)פ(?:רק)?\s*0*(\d{1,3})')
 _HE_SEASON_ONLY = re.compile(r'(?:^|\s)ע(?:ונה)?\s*0*(\d{1,2})')
 # תגיות מקור/ערוץ נפוצות שמופיעות בתחילת שם הקובץ ולא שייכות לשם הסדרה
-_SOURCE_TAGS = re.compile(r'^(?:זירה\s*מדיה|zira\s*media|zira)\s*', re.I)
+_SOURCE_TAGS = re.compile(r'^(?:זירה\s*מדיה|נתי\s*מדיה|נתי\s*מידע|zira\s*media|zira|nati\s*media)\s*', re.I)
+
+# ── כינויי סדרות: שם שמזוהה מהקובץ → שם קנוני באתר. פותר מקרים שבהם שם הקובץ
+# מכיל ראשי-תיבות/גרשיים (למשל "תאג''ד") אבל הסדרה באתר נקראת "תאגד". קובץ
+# series_aliases.json ניתן לעריכה בשרת להוספת כינויים נוספים בעתיד.
+SERIES_ALIASES_FILE = DATA_DIR / "series_aliases.json"
+def _norm_alias(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+def _load_series_aliases() -> dict:
+    default = {"תאג''ד": "תאגד", 'תאג"ד': "תאגד", "תאג״ד": "תאגד", "תאג׳׳ד": "תאגד"}
+    if SERIES_ALIASES_FILE.exists():
+        try:
+            default.update(json.loads(SERIES_ALIASES_FILE.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    else:
+        try:
+            SERIES_ALIASES_FILE.write_text(
+                json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+    return {_norm_alias(k): v for k, v in default.items()}
+SERIES_ALIASES = _load_series_aliases()
+def _series_alias(name: str) -> str:
+    return SERIES_ALIASES.get(_norm_alias(name), name)
 
 def parse_episode_info(fname: str):
     if not fname:
@@ -1450,6 +1474,7 @@ def parse_episode_info(fname: str):
     if not series:
         series = clean_name(n)
     series = _SOURCE_TAGS.sub("", series).strip()  # מסיר תגית מקור מתחילת השם
+    series = _series_alias(series)                  # מנרמל כינויים (תאג''ד → תאגד)
     return {"series": series or "סדרה", "season": season or 1, "episode": episode}
 
 def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
