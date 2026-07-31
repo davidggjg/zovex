@@ -1408,11 +1408,18 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "")
     return entry
 
 # ── זיהוי פרק סדרה משם הקובץ (להעלאה מרובה) ─────────────────────────────────
-# תומך: S01E05 / 1x05 / "עונה 1 פרק 5" / "פרק 5". שם הסדרה = מה שלפני הסימון.
+# תומך: S01E05 / 1x05 / "עונה 1 פרק 5" / "ע4 פ7" / "פרק 5". שם הסדרה = מה שלפני הסימון.
 _EP_PATTERNS = [
     re.compile(r'\bS\s*0*(\d{1,2})\s*E\s*0*(\d{1,3})\b', re.I),   # S01E05
     re.compile(r'\b(\d{1,2})\s*[xX]\s*0*(\d{1,3})\b'),            # 1x05
 ]
+# עונה+פרק בעברית, כולל קיצורים: "עונה 4 פרק 7" / "ע4 פ7" / "ע 4 פ 7"
+_HE_SEASON_EP = re.compile(r'ע(?:ונה)?\s*0*(\d{1,2})\s*[·.\-]?\s*פ(?:רק)?\s*0*(\d{1,3})')
+# פרק בלבד (עונה תיקבע ל-1). "פ" חייב לבוא בתחילת מילה כדי לא לתפוס אמצע מילה.
+_HE_EP_ONLY = re.compile(r'(?:^|\s)פ(?:רק)?\s*0*(\d{1,3})')
+_HE_SEASON_ONLY = re.compile(r'(?:^|\s)ע(?:ונה)?\s*0*(\d{1,2})')
+# תגיות מקור/ערוץ נפוצות שמופיעות בתחילת שם הקובץ ולא שייכות לשם הסדרה
+_SOURCE_TAGS = re.compile(r'^(?:זירה\s*מדיה|zira\s*media|zira)\s*', re.I)
 
 def parse_episode_info(fname: str):
     if not fname:
@@ -1421,16 +1428,20 @@ def parse_episode_info(fname: str):
     n = n.replace('.', ' ').replace('_', ' ').replace('-', ' ')
     season = episode = None
     cut = None
-    for pat in _EP_PATTERNS:
+    for pat in _EP_PATTERNS:                       # S01E05 / 1x05
         m = pat.search(n)
         if m:
             season, episode, cut = int(m.group(1)), int(m.group(2)), m.start()
             break
-    if episode is None:
-        me = re.search(r'פרק\s*0*(\d+)', n)
-        ms = re.search(r'עונה\s*0*(\d+)', n)
+    if episode is None:                            # עברית משולב: עונה+פרק / ע4 פ7
+        m = _HE_SEASON_EP.search(n)
+        if m:
+            season, episode, cut = int(m.group(1)), int(m.group(2)), m.start()
+    if episode is None:                            # פרק בלבד (+ עונה נפרדת אם יש)
+        me = _HE_EP_ONLY.search(n)
         if me:
             episode = int(me.group(1))
+            ms = _HE_SEASON_ONLY.search(n)
             season = int(ms.group(1)) if ms else 1
             cut = min(x.start() for x in (ms, me) if x)
     if episode is None:
@@ -1438,6 +1449,7 @@ def parse_episode_info(fname: str):
     series = clean_name(n[:cut]).strip() if cut else ""
     if not series:
         series = clean_name(n)
+    series = _SOURCE_TAGS.sub("", series).strip()  # מסיר תגית מקור מתחילת השם
     return {"series": series or "סדרה", "season": season or 1, "episode": episode}
 
 def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
