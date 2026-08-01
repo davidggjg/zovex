@@ -697,6 +697,83 @@ async def channel_stream_range(chat_id, message_id, start, end):
     if pos <= end:
         yield b"\x00" * (end - pos + 1)
 
+# ── הזרמה מקבילה (FastTelethon-style, בטוח) ─────────────────────────────────
+# במקום צינור אחד ל-~4MB/s, מפצלים כל "חלון" של הסרט לכמה תת-טווחים שנמשכים
+# בו-זמנית דרך כמה בוטים שונים מה-pool (כל בוט = חיבור נפרד לטלגרם), ומגישים
+# לפי הסדר. זה עוקף את תקרת החיבור הבודד בלי לשמור שום דבר לדיסק (pass-through).
+# נשלט ע"י STREAM_PARALLEL_PARTS (ברירת מחדל 1 = ההתנהגות הישנה, בלי סיכון).
+STREAM_PARALLEL_PARTS  = int(os.environ.get("STREAM_PARALLEL_PARTS", "1"))
+STREAM_PARALLEL_WINDOW = int(os.environ.get("STREAM_PARALLEL_WINDOW", str(16 * 1024 * 1024)))
+
+async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
+    """מושך את הבייטים [lo, hi] (כולל) דרך בוט מה-pool, עם ניסיונות על כמה בוטים.
+    מחזיר תמיד בדיוק (hi-lo+1) בייטים (משלים באפסים אם נכשל — לשמירת Content-Length)."""
+    CHUNK = PYROGRAM_CHUNK_SIZE
+    need = hi - lo + 1
+    for _ in range(min(max(1, len(_stream_bots)), 4)):
+        bot = await pick_stream_bot()
+        if bot is None:
+            break
+        try:
+            msg = await _get_bot_msg(bot, chat_id, message_id)
+            if msg is None:
+                _mark_choked(bot, 15)
+                continue
+            out = bytearray()
+            off_chunks = lo // CHUNK
+            produced = off_chunks * CHUNK
+            async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
+                c_start = produced
+                c_end = produced + len(chunk)
+                a = max(lo, c_start) - c_start
+                b = min(hi + 1, c_end) - c_start
+                if a < b:
+                    out += chunk[a:b]
+                produced = c_end
+                if produced > hi:
+                    break
+            if len(out) >= need:
+                return bytes(out[:need])
+            return bytes(out) + b"\x00" * (need - len(out))
+        except FileReferenceExpired:
+            _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+        except FloodWait as e:
+            _mark_choked(bot, e.value)
+        except Exception as e:
+            log.warning("subrange שגיאה: %s", e)
+            _mark_choked(bot, 30)
+    return b"\x00" * need
+
+async def channel_stream_range_parallel(chat_id, message_id, start, end):
+    """גרסה מקבילה: מעבדת חלון-אחר-חלון, וכל חלון נמשך בכמה תת-טווחים במקביל."""
+    parts = max(2, STREAM_PARALLEL_PARTS)
+    window = max(STREAM_PARALLEL_WINDOW, parts * 512 * 1024)
+    MIN_PART = 512 * 1024   # לא לפצל לחתיכות קטנות מדי
+    pos = start
+    while pos <= end:
+        wend = min(pos + window - 1, end)
+        total = wend - pos + 1
+        n = max(1, min(parts, total // MIN_PART))
+        step = -(-total // n)   # ceil
+        ranges = []
+        s = pos
+        while s <= wend:
+            e2 = min(s + step - 1, wend)
+            ranges.append((s, e2))
+            s = e2 + 1
+        # מושכים את כל תת-הטווחים של החלון במקביל, ומגישים לפי הסדר
+        results = await asyncio.gather(
+            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in ranges])
+        for r in results:
+            yield r
+        pos = wend + 1
+
+def _channel_range_gen(chat_id, message_id, start, end):
+    """בורר בין הזרמה מקבילה (אם הופעלה) לרגילה."""
+    if STREAM_PARALLEL_PARTS > 1 and len(_stream_bots) >= 2:
+        return channel_stream_range_parallel(chat_id, message_id, start, end)
+    return channel_stream_range(chat_id, message_id, start, end)
+
 async def stream_from_channel(chat_id: int, message_id: int, request: Request):
     media = await channel_get_media(chat_id, message_id)
     if not media:
@@ -716,7 +793,7 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
             "Content-Disposition": disposition,
         }
         return StreamingResponse(
-            channel_stream_range(chat_id, message_id, start, end),
+            _channel_range_gen(chat_id, message_id, start, end),
             status_code=206, media_type=mime_type, headers=headers)
     headers = {
         "Accept-Ranges": "bytes",
@@ -724,7 +801,7 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
         "Content-Disposition": disposition,
     }
     return StreamingResponse(
-        channel_stream_range(chat_id, message_id, 0, file_size - 1),
+        _channel_range_gen(chat_id, message_id, 0, file_size - 1),
         status_code=200, media_type=mime_type, headers=headers)
 
 # ── Stream Route ──────────────────────────────────────────────────────────────
