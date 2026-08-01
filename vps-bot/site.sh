@@ -54,6 +54,17 @@ server {
     root $SITE_DIR;
     index index.html;
 
+    # ── אבטחה: מסתיר גרסת nginx (מונע זיהוי חולשות לפי גרסה) + כותרות אבטחה ──
+    server_tokens off;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    # CSP מרשה (default-src *) כדי לא לשבור פרסומות/וידאו/תמונות/iframes, אבל
+    # קיים ומגן מפני clickjacking (frame-ancestors) — מספק את דרישת ה-CSP.
+    add_header Content-Security-Policy "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'" always;
+
     # דחיסה — רק לטקסט/JSON (לא לוידאו!). מקטין את /content פי ~10 → טעינה מהירה.
     gzip on;
     gzip_proxied any;
