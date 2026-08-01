@@ -90,6 +90,12 @@ server {
     location = /restart    { include snippets/zovex-proxy.conf; }
     location = /dashboard  { include snippets/zovex-proxy.conf; }
 
+    # ── חוסם probing של קבצים רגישים: מחזיר 404 במקום דף הבית (SPA fallback) ──
+    # בלי זה סורקים חושבים ש-/.env /.git /wp-config.php וכו' "חשופים" (הם לא —
+    # הם סתם מקבלים את index.html). מחזירים 404 → הסורק מבין שאין שם כלום.
+    location ~ /\.(?!well-known) { return 404; }               # .env .git .htaccess ...
+    location ~* \.(php|sql|env|ini|conf|cfg|bak|old|log|sqlite|db)$ { return 404; }
+
     # ── נכסים ישנים עם קידומת /zovex/ (למשל לוגו של שידור חי) ──
     location /zovex/ { alias $SITE_DIR/; }
 
