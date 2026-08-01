@@ -863,6 +863,55 @@ async def stream(chat_id: int, message_id: int, request: Request,
         status_code=200, media_type=mime_type, headers=headers,
     )
 
+# ── Cast Route: אודיו→AAC ל-Chromecast ──────────────────────────────────────
+# Chromecast לא מפענח AC3/DTS ולפעמים תופס audio-track שגוי → וידאו בלי קול.
+# כאן מעבירים את הזרם דרך ffmpeg: הוידאו נשאר כמו שהוא (copy, אפס עומס), והאודיו
+# מומר ל-AAC סטריאו יחיד — כך ל-TV יש קול. משמש רק במצב שידור לטלוויזיה; צפייה
+# רגילה ממשיכה דרך /stream. ה-input הוא /stream המקומי (מנצל את כל בריכת הבוטים).
+@api.get("/cast/{chat_id}/{message_id}")
+async def cast_remux(chat_id: int, message_id: int, request: Request,
+                     exp: int = 0, sig: str = ""):
+    check_hotlink(request)
+    if SIGN_SECRET:
+        if not exp or exp < int(time.time()):
+            raise HTTPException(status_code=403, detail="הקישור פג תוקף")
+        if not hmac.compare_digest(sig, _stream_sig(str(chat_id), str(message_id), exp)):
+            raise HTTPException(status_code=403, detail="חתימה שגויה")
+    # קישור פנימי חתום ל-/stream המקומי (ffmpeg מושך ממנו, דרך בריכת הבוטים)
+    iexp = int(time.time()) + SIGN_TTL
+    isig = _stream_sig(str(chat_id), str(message_id), iexp) if SIGN_SECRET else ""
+    q = f"?exp={iexp}&sig={isig}" if SIGN_SECRET else ""
+    src = f"http://127.0.0.1:8000/stream/{chat_id}/{message_id}{q}"
+    args = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", src,
+        "-map", "0:v:0", "-map", "0:a:0?",       # וידאו ראשון + אודיו ראשון (אם יש)
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4", "pipe:1",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffmpeg לא מותקן בשרת")
+
+    async def gen():
+        try:
+            while True:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    return StreamingResponse(gen(), media_type="video/mp4",
+                             headers={"Content-Disposition": "inline"})
+
 # ── HLS Relay (עוקף "http משודרג אוטומטית ל-https ושבור" בדפדפן) ────────────
 # חלק מספקי שידור חי (למשל stream.mcquack.net) מגישים רק http:// תקין -
 # ה-https שלהם מציג תעודת SSL שלא תואמת לדומיין בכלל (בדקנו ישירות: התעודה

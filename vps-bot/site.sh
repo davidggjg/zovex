@@ -63,6 +63,7 @@ server {
 
     # ── API → הבוט (uvicorn 127.0.0.1:8000) ──
     location /stream/      { include snippets/zovex-stream.conf; }
+    location /cast/        { include snippets/zovex-stream.conf; }
     location /hls-relay/   { include snippets/zovex-stream.conf; }
     location /speedtest    { include snippets/zovex-stream.conf; }
     location /content      { include snippets/zovex-proxy.conf; }
