@@ -180,8 +180,8 @@
   <!-- בוטים (בריכת סטרימינג) -->
   <div id="pane-pool" class="hidden">
     <div class="card"><h2>בוטי סטרימינג</h2>
-      <div class="muted">כל בוט נוסף = יותר צופים במקביל ומהירות טובה יותר. <b>לפני ההוספה:</b> צור בוט ב-@BotFather, ו<b>הוסף אותו כאדמין בערוץ הסטרימינג</b> (חובה!), ואז הדבק כאן את הטוקן.</div>
-      <input id="p_token" placeholder="הדבק טוקן בוט (123456:AA...)" style="margin-top:10px">
+      <div class="muted">כל בוט נוסף = יותר צופים במקביל ומהירות טובה יותר. <b>לפני ההוספה:</b> צור בוט ב-@BotFather, ו<b>הוסף אותו כאדמין בערוץ הסטרימינג</b> (חובה!), ואז הדבק כאן את הטוקן.<br>אפשר גם להדביק <b>session string של חשבון משתמש</b> (userbot — מהיר יותר; חייב להיות חבר בערוץ). ליצירת session הרץ בשרת את <code>gen_session.py</code>.</div>
+      <input id="p_token" placeholder="טוקן בוט (123456:AA...) או session string של חשבון" style="margin-top:10px">
       <button onclick="addPoolBot()" style="width:100%;margin-top:8px">➕ הוסף בוט לבריכה</button>
       <div id="poolMsg" class="muted" style="margin-top:6px"></div></div>
     <div class="card"><div class="toprow"><h2>בוטים פעילים <span id="poolCount" class="pill"></span></h2>
@@ -704,8 +704,8 @@ async function loadPool(){
     $("poolCount").textContent=(d.active||0)+" פעילים";
     if(!d.bots||!d.bots.length){ $("poolList").innerHTML='<div class="muted">אין בוטים בבריכה עדיין.</div>'; return; }
     $("poolList").innerHTML=d.bots.map(b=>`<div class="item">
-      <div class="meta"><div class="t">${esc(b.name)} ${b.status==="פעיל"?'<span class="pill" style="background:#e6f9ec;color:#1a7f37">פעיל</span>':'<span class="pill" style="background:#fff4e5;color:#b26a00">מתקרר</span>'}</div>
-      <div class="s">…${esc(b.token_tail||"")}</div></div>
+      <div class="meta"><div class="t">${b.kind==="user"?"👤":"🤖"} ${esc(b.name)} ${b.status==="פעיל"?'<span class="pill" style="background:#e6f9ec;color:#1a7f37">פעיל</span>':'<span class="pill" style="background:#fff4e5;color:#b26a00">מתקרר</span>'}</div>
+      <div class="s">${b.kind==="user"?"חשבון":"בוט"} · …${esc(b.token_tail||"")}</div></div>
       <button class="mini gray" onclick="removePoolBot('${esc(b.name)}')">הסר</button></div>`).join("");
   }catch(e){ $("poolList").innerHTML='<span class="err">טעינה נכשלה</span>'; }
 }

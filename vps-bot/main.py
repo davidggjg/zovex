@@ -529,11 +529,21 @@ _stream_rr_lock = asyncio.Lock()
 async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
+def _is_bot_token(s: str) -> bool:
+    return bool(re.match(r'^\d{5,}:[A-Za-z0-9_-]{20,}$', (s or "").strip()))
+
 async def _start_one_pool_bot(i, tok: str):
-    """מעלה בוט pool בודד ומוסיף אותו לרשימה. בטוח להרצה במקביל."""
+    """מעלה חבר pool בודד (טוקן בוט או session string של חשבון) ומוסיף לרשימה."""
     try:
-        c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
-                   in_memory=False, no_updates=False, workdir=str(DATA_DIR))
+        if _is_bot_token(tok):
+            c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
+                       in_memory=False, no_updates=False, workdir=str(DATA_DIR))
+            kind = "bot"
+        else:
+            # session string = חשבון משתמש (userbot) — בד"כ מהיר יותר מבוט
+            c = Client(f"pool_user_{i}", api_id=API_ID, api_hash=API_HASH,
+                       session_string=tok, in_memory=True, no_updates=True)
+            kind = "user"
         c.add_handler(MessageHandler(_pool_noop, filters.channel))
         await asyncio.wait_for(c.start(), timeout=40)
         if STREAM_CHANNEL_ID:
@@ -541,10 +551,11 @@ async def _start_one_pool_bot(i, tok: str):
                 await c.get_chat(STREAM_CHANNEL_ID)
             except Exception:
                 pass  # יזוהה כשיגיע פוסט חדש לערוץ
-        _stream_bots.append({"client": c, "name": f"pool_{i}", "cooldown_until": 0.0, "token": tok})
-        log.info("✅ pool bot %s עלה (%d פעילים)", i, len(_stream_bots))
+        _stream_bots.append({"client": c, "name": f"{kind}_{i}", "cooldown_until": 0.0,
+                             "token": tok, "kind": kind})
+        log.info("✅ pool %s %s עלה (%d פעילים)", kind, i, len(_stream_bots))
     except Exception as e:
-        log.warning("⚠️ pool bot %s לא עלה: %s", i, e)
+        log.warning("⚠️ pool member %s לא עלה: %s", i, e)
 
 async def start_stream_pool():
     if not STREAM_BOTS_FILE.exists():
@@ -2058,16 +2069,17 @@ class PoolAddReq(BaseModel):
 async def pool_add(req: PoolAddReq, request: Request):
     check_panel_password(request, req.password)
     tok = (req.token or "").strip()
-    if not re.match(r'^\d{5,}:[A-Za-z0-9_-]{20,}$', tok):
-        raise HTTPException(status_code=400, detail="טוקן לא תקין (פורמט: 123456:AA...)")
+    # מקבל טוקן בוט (123456:AA...) או session string של חשבון (מחרוזת ארוכה)
+    if not (_is_bot_token(tok) or len(tok) >= 80):
+        raise HTTPException(status_code=400, detail="לא טוקן בוט ולא session string תקין")
     if tok in _pool_tokens_in_file() or any(b.get("token") == tok for b in _stream_bots):
-        raise HTTPException(status_code=400, detail="הבוט כבר קיים בבריכה")
+        raise HTTPException(status_code=400, detail="כבר קיים בבריכה")
     before = len(_stream_bots)
     uid = f"live_{int(time.time())}"
     await _start_one_pool_bot(uid, tok)          # מנסה להעלות אותו מיד
     if len(_stream_bots) <= before:
         raise HTTPException(status_code=400,
-            detail="הבוט לא עלה — ודא שהוא אדמין בערוץ ושהטוקן נכון")
+            detail="לא עלה — ודא שהוא חבר/אדמין בערוץ ושהטוקן/session נכון")
     try:                                          # נשמר לקובץ כדי לשרוד restart
         with open(STREAM_BOTS_FILE, "a", encoding="utf-8") as f:
             f.write(tok + "\n")
@@ -2084,6 +2096,7 @@ async def pool_list(req: PoolPwReq, request: Request):
     now = time.time()
     bots = [{"name": b["name"],
              "status": "פעיל" if b["cooldown_until"] < now else "מתקרר",
+             "kind": b.get("kind", "bot"),
              "token_tail": (b.get("token") or "")[-6:]} for b in _stream_bots]
     return {"active": len(_stream_bots), "in_file": len(_pool_tokens_in_file()), "bots": bots}
 
