@@ -529,7 +529,7 @@ _stream_rr_lock = asyncio.Lock()
 async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
-async def _start_one_pool_bot(i: int, tok: str):
+async def _start_one_pool_bot(i, tok: str):
     """מעלה בוט pool בודד ומוסיף אותו לרשימה. בטוח להרצה במקביל."""
     try:
         c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
@@ -541,10 +541,10 @@ async def _start_one_pool_bot(i: int, tok: str):
                 await c.get_chat(STREAM_CHANNEL_ID)
             except Exception:
                 pass  # יזוהה כשיגיע פוסט חדש לערוץ
-        _stream_bots.append({"client": c, "name": f"pool_{i}", "cooldown_until": 0.0})
-        log.info("✅ pool bot %d עלה (%d פעילים)", i, len(_stream_bots))
+        _stream_bots.append({"client": c, "name": f"pool_{i}", "cooldown_until": 0.0, "token": tok})
+        log.info("✅ pool bot %s עלה (%d פעילים)", i, len(_stream_bots))
     except Exception as e:
-        log.warning("⚠️ pool bot %d לא עלה: %s", i, e)
+        log.warning("⚠️ pool bot %s לא עלה: %s", i, e)
 
 async def start_stream_pool():
     if not STREAM_BOTS_FILE.exists():
@@ -2043,6 +2043,73 @@ async def seed_content_if_empty():
 async def admin_tmdb(q: str = ""):
     """חיפוש TMDB דרך השרת — המפתח (TMDB_API_KEY) נשאר בשרת, לא בדפדפן."""
     return {"results": await tmdb_search(q)}
+
+# ── ניהול בריכת בוטי הסטרימינג מהפאנל (הוספה/רשימה/הסרה בלי SSH) ──────────────
+def _pool_tokens_in_file() -> list:
+    if STREAM_BOTS_FILE.exists():
+        return [t.strip() for t in STREAM_BOTS_FILE.read_text().splitlines() if t.strip()]
+    return []
+
+class PoolAddReq(BaseModel):
+    password: str
+    token: str
+
+@api.post("/pool/add")
+async def pool_add(req: PoolAddReq, request: Request):
+    check_panel_password(request, req.password)
+    tok = (req.token or "").strip()
+    if not re.match(r'^\d{5,}:[A-Za-z0-9_-]{20,}$', tok):
+        raise HTTPException(status_code=400, detail="טוקן לא תקין (פורמט: 123456:AA...)")
+    if tok in _pool_tokens_in_file() or any(b.get("token") == tok for b in _stream_bots):
+        raise HTTPException(status_code=400, detail="הבוט כבר קיים בבריכה")
+    before = len(_stream_bots)
+    uid = f"live_{int(time.time())}"
+    await _start_one_pool_bot(uid, tok)          # מנסה להעלות אותו מיד
+    if len(_stream_bots) <= before:
+        raise HTTPException(status_code=400,
+            detail="הבוט לא עלה — ודא שהוא אדמין בערוץ ושהטוקן נכון")
+    try:                                          # נשמר לקובץ כדי לשרוד restart
+        with open(STREAM_BOTS_FILE, "a", encoding="utf-8") as f:
+            f.write(tok + "\n")
+    except Exception as e:
+        log.warning("שמירת טוקן לקובץ נכשלה: %s", e)
+    return {"ok": True, "active": len(_stream_bots)}
+
+class PoolPwReq(BaseModel):
+    password: str
+
+@api.post("/pool/list")
+async def pool_list(req: PoolPwReq, request: Request):
+    check_panel_password(request, req.password)
+    now = time.time()
+    bots = [{"name": b["name"],
+             "status": "פעיל" if b["cooldown_until"] < now else "מתקרר",
+             "token_tail": (b.get("token") or "")[-6:]} for b in _stream_bots]
+    return {"active": len(_stream_bots), "in_file": len(_pool_tokens_in_file()), "bots": bots}
+
+class PoolRemoveReq(BaseModel):
+    password: str
+    name: str
+
+@api.post("/pool/remove")
+async def pool_remove(req: PoolRemoveReq, request: Request):
+    check_panel_password(request, req.password)
+    target = next((b for b in _stream_bots if b["name"] == req.name), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="בוט לא נמצא")
+    tok = target.get("token")
+    try:
+        await target["client"].stop()
+    except Exception:
+        pass
+    _stream_bots[:] = [b for b in _stream_bots if b["name"] != req.name]
+    if tok:                                        # מסירים מהקובץ כדי שלא יחזור ב-restart
+        rest = [t for t in _pool_tokens_in_file() if t != tok]
+        try:
+            STREAM_BOTS_FILE.write_text("\n".join(rest) + ("\n" if rest else ""), encoding="utf-8")
+        except Exception as e:
+            log.warning("עדכון קובץ הבוטים נכשל: %s", e)
+    return {"ok": True, "active": len(_stream_bots)}
 
 @api.get("/content")
 async def content_get():

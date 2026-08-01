@@ -62,6 +62,7 @@
     <button id="tab-live" onclick="showTab('live')">שידורים חיים</button>
     <button id="tab-uploads" onclick="showTab('uploads')">העלאות מהבוט</button>
     <button id="tab-support" onclick="showTab('support')">תמיכה <span id="supBadge" class="badge hidden">0</span></button>
+    <button id="tab-pool" onclick="showTab('pool')">בוטים</button>
     <button id="tab-admins" onclick="showTab('admins')">מנהלים</button>
   </div>
 
@@ -176,6 +177,18 @@
     </div>
   </div>
 
+  <!-- בוטים (בריכת סטרימינג) -->
+  <div id="pane-pool" class="hidden">
+    <div class="card"><h2>בוטי סטרימינג</h2>
+      <div class="muted">כל בוט נוסף = יותר צופים במקביל ומהירות טובה יותר. <b>לפני ההוספה:</b> צור בוט ב-@BotFather, ו<b>הוסף אותו כאדמין בערוץ הסטרימינג</b> (חובה!), ואז הדבק כאן את הטוקן.</div>
+      <input id="p_token" placeholder="הדבק טוקן בוט (123456:AA...)" style="margin-top:10px">
+      <button onclick="addPoolBot()" style="width:100%;margin-top:8px">➕ הוסף בוט לבריכה</button>
+      <div id="poolMsg" class="muted" style="margin-top:6px"></div></div>
+    <div class="card"><div class="toprow"><h2>בוטים פעילים <span id="poolCount" class="pill"></span></h2>
+      <button class="mini gray" onclick="loadPool()">↻ רענן</button></div>
+      <div id="poolList"></div></div>
+  </div>
+
   <!-- מנהלים -->
   <div id="pane-admins" class="hidden">
     <div class="card"><h2>מנהלים מורשים (Telegram ID)</h2>
@@ -244,7 +257,7 @@ async function doLogin(){
 
 // ── טאבים ──
 function showTab(n){
-  ["add","manage","cats","live","uploads","support","admins"].forEach(x=>{
+  ["add","manage","cats","live","uploads","support","pool","admins"].forEach(x=>{
     $("pane-"+x).classList.add("hidden"); const t=$("tab-"+x); if(t)t.classList.remove("active");});
   $("pane-"+n).classList.remove("hidden"); $("tab-"+n).classList.add("active");
   if(n==="manage") renderManage();
@@ -252,6 +265,7 @@ function showTab(n){
   if(n==="live"){ liveReset(); renderLive(); }
   if(n==="uploads") loadUploads();
   if(n==="support") loadSupport();
+  if(n==="pool") loadPool();
   if(n==="admins"){ loadAdmins(); loadVersion(); }
 }
 
@@ -680,6 +694,42 @@ async function loadVersion(){
   try{ const v=await (await fetch("/app/version")).json();
     $("v_latest").value=v.latest||""; $("v_min").value=v.min||"";
     $("v_url").value=v.url||""; $("v_notes").value=v.notes||""; }catch{}
+}
+// ── בריכת בוטים ──
+async function loadPool(){
+  $("poolList").innerHTML="טוען…";
+  try{
+    const d=await (await fetch("/pool/list",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS})})).json();
+    $("poolCount").textContent=(d.active||0)+" פעילים";
+    if(!d.bots||!d.bots.length){ $("poolList").innerHTML='<div class="muted">אין בוטים בבריכה עדיין.</div>'; return; }
+    $("poolList").innerHTML=d.bots.map(b=>`<div class="item">
+      <div class="meta"><div class="t">${esc(b.name)} ${b.status==="פעיל"?'<span class="pill" style="background:#e6f9ec;color:#1a7f37">פעיל</span>':'<span class="pill" style="background:#fff4e5;color:#b26a00">מתקרר</span>'}</div>
+      <div class="s">…${esc(b.token_tail||"")}</div></div>
+      <button class="mini gray" onclick="removePoolBot('${esc(b.name)}')">הסר</button></div>`).join("");
+  }catch(e){ $("poolList").innerHTML='<span class="err">טעינה נכשלה</span>'; }
+}
+async function addPoolBot(){
+  const tok=$("p_token").value.trim();
+  if(!tok){ $("poolMsg").innerHTML='<span class="err">חסר טוקן</span>'; return; }
+  $("poolMsg").textContent="מוסיף ומעלה את הבוט… (כמה שניות)";
+  try{
+    const r=await fetch("/pool/add",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,token:tok})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||"שגיאה");
+    $("p_token").value=""; $("poolMsg").innerHTML=`<span class="ok">נוסף! ${d.active} בוטים פעילים ✓</span>`;
+    loadPool();
+  }catch(e){ $("poolMsg").innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+async function removePoolBot(name){
+  if(!confirm("להסיר את הבוט "+name+" מהבריכה?")) return;
+  try{
+    const r=await fetch("/pool/remove",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,name})});
+    if(!r.ok) throw new Error((await r.json()).detail||"שגיאה");
+    loadPool();
+  }catch(e){ alert(e.message); }
 }
 async function saveVersion(){
   $("verMsg").textContent="שומר...";
