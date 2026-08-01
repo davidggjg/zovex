@@ -79,6 +79,10 @@ export function extractVideoInfo(url) {
     const m = url.match(/video\/(\d+)/);
     return { type: "okru", video_id: m?.[1] || url };
   }
+  if (url.includes("pixeldrain.com")) {
+    const m = url.match(/pixeldrain\.com\/(?:u|api\/file)\/([^/?#]+)/);
+    return { type: "direct", video_id: m ? `https://pixeldrain.com/api/file/${m[1]}` : url };
+  }
   if (url.includes("t.me")) return { type: "telegram", video_id: url.replace("https://t.me/", "") };
   if (url.includes("kaltura.com") || url.match(/^\d+\/\d+\/[a-zA-Z0-9_]+$/)) {
     const m = url.match(/\/p\/(\d+).*uiconf_id\/(\d+).*entry_id=([^&]+)/);
