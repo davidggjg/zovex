@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>ZOVEX · עברנו לאתר חדש 🚀</title>
+<meta name="description" content="ZOVEX שדרג! עברנו לאתר חדש, מהיר ומטורף. עוברים אוטומטית..." />
+<link rel="icon" href="favicon.ico" sizes="any" />
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<meta name="robots" content="noindex" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; overflow:hidden; }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    background:#05060a; color:#fff; position:relative;
+    display:flex; align-items:center; justify-content:center; min-height:100vh; min-height:100dvh;
+    text-align:center;
+  }
+  /* רקע גרדיאנט חי שנע כל הזמן */
+  .bg {
+    position:fixed; inset:0; z-index:0;
+    background:
+      radial-gradient(circle at 20% 20%, rgba(229,9,20,.35), transparent 45%),
+      radial-gradient(circle at 80% 30%, rgba(255,60,0,.28), transparent 45%),
+      radial-gradient(circle at 50% 90%, rgba(120,0,20,.4), transparent 55%),
+      linear-gradient(135deg,#0a0b12,#05060a 60%);
+    animation:bgpulse 8s ease-in-out infinite alternate;
+  }
+  @keyframes bgpulse { 0%{filter:hue-rotate(0deg) brightness(1);} 100%{filter:hue-rotate(-12deg) brightness(1.15);} }
+  #fx { position:fixed; inset:0; z-index:1; pointer-events:none; }
+  .wrap { position:relative; z-index:2; padding:24px 20px; max-width:560px; width:100%; }
+
+  .badge {
+    display:inline-block; font-size:13px; font-weight:800; letter-spacing:2px;
+    color:#ffd7d7; background:rgba(229,9,20,.15); border:1px solid rgba(229,9,20,.5);
+    padding:6px 16px; border-radius:999px; margin-bottom:22px;
+    animation:fadeDown .8s both; text-transform:uppercase;
+  }
+  .logo {
+    font-size:clamp(64px,22vw,140px); font-weight:900; letter-spacing:4px; line-height:1;
+    background:linear-gradient(90deg,#ff2d2d,#ff7a00,#ffd000,#ff2d2d);
+    background-size:300% 100%;
+    -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;
+    filter:drop-shadow(0 0 24px rgba(255,60,0,.65));
+    animation:shine 3s linear infinite, pop 1s cubic-bezier(.2,1.4,.4,1) both;
+  }
+  @keyframes shine { to { background-position:300% 0; } }
+  @keyframes pop { 0%{transform:scale(.3) rotate(-8deg);opacity:0;} 60%{transform:scale(1.15);} 100%{transform:scale(1);opacity:1;} }
+  .tagline {
+    font-size:clamp(20px,5.5vw,30px); font-weight:900; margin-top:14px;
+    animation:fadeUp .9s .2s both;
+  }
+  .tagline .hi { color:#ff3b30; text-shadow:0 0 18px rgba(255,59,48,.7); }
+  .sub {
+    font-size:clamp(14px,3.8vw,17px); color:#c9cbd6; margin-top:12px; line-height:1.6;
+    animation:fadeUp .9s .35s both;
+  }
+  .sub b { color:#ffd000; }
+
+  .btns { margin-top:30px; display:flex; flex-direction:column; gap:14px; animation:fadeUp .9s .5s both; }
+  .btn {
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    font-size:18px; font-weight:900; padding:17px 22px; border-radius:16px;
+    text-decoration:none; color:#fff; border:none; cursor:pointer; position:relative; overflow:hidden;
+    transition:transform .15s ease, box-shadow .15s ease;
+  }
+  .btn:active { transform:scale(.97); }
+  .btn-main {
+    background:linear-gradient(90deg,#e50914,#ff3d00);
+    box-shadow:0 10px 30px rgba(229,9,20,.5), 0 0 0 1px rgba(255,255,255,.08) inset;
+    animation:glow 1.8s ease-in-out infinite;
+  }
+  @keyframes glow { 0%,100%{box-shadow:0 10px 30px rgba(229,9,20,.45);} 50%{box-shadow:0 14px 44px rgba(255,61,0,.8);} }
+  .btn-app {
+    background:rgba(255,255,255,.07); border:1.5px solid rgba(255,255,255,.25);
+    backdrop-filter:blur(6px);
+  }
+  .btn-app:active { background:rgba(255,255,255,.12); }
+  .btn .em { font-size:22px; }
+
+  .count {
+    margin-top:26px; font-size:15px; color:#aeb0bd; animation:fadeUp .9s .65s both;
+  }
+  .count #n {
+    display:inline-flex; align-items:center; justify-content:center;
+    min-width:40px; height:40px; padding:0 6px; margin:0 6px; border-radius:50%;
+    background:rgba(229,9,20,.2); border:2px solid #e50914; color:#fff; font-weight:900; font-size:20px;
+    box-shadow:0 0 18px rgba(229,9,20,.6); animation:tick 1s ease-in-out infinite;
+  }
+  @keyframes tick { 0%,100%{transform:scale(1);} 50%{transform:scale(1.18);} }
+  .old { margin-top:16px; font-size:12px; color:#6a6d7a; animation:fadeUp .9s .8s both; }
+
+  @keyframes fadeDown { from{opacity:0;transform:translateY(-14px);} to{opacity:1;transform:none;} }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(16px);} to{opacity:1;transform:none;} }
+
+  @media (prefers-reduced-motion: reduce){
+    .bg,.logo,.btn-main,.count #n{animation:none;}
+  }
+</style>
+</head>
+<body>
+  <div class="bg"></div>
+  <canvas id="fx"></canvas>
+  <div class="wrap">
+    <div class="badge">🚀 שדרוג ענק</div>
+    <div class="logo">ZOVEX</div>
+    <div class="tagline">עברנו ל<span class="hi">בית חדש!</span> 💥</div>
+    <div class="sub">
+      אתר חדש, <b>מהיר ומטורף</b> — עם עוד יותר סרטים, סדרות ואנימה.<br/>
+      האתר הישן נסגר. כל הכיף עכשיו כאן 👇
+    </div>
+    <div class="btns">
+      <a class="btn btn-main" id="go" href="https://zovex.duckdns.org">
+        <span class="em">🍿</span> כניסה לאתר החדש עכשיו
+      </a>
+      <a class="btn btn-app" href="https://github.com/davidggjg/zovex-android/releases/latest/download/zovex.apk">
+        <span class="em">📱</span> הורדת האפליקציה
+      </a>
+    </div>
+    <div class="count">מעבר אוטומטי בעוד <span id="n">20</span> שניות</div>
+    <div class="old">הכתובת הישנה כבר לא בשימוש — שמור/י את הכתובת החדשה: zovex.duckdns.org</div>
+  </div>
+
+<script>
+(function(){
+  var NEW_SITE = "https://zovex.duckdns.org";
+  // ── ספירה לאחור 20 שניות ואז מעבר אוטומטי ──
+  var secs = 20, el = document.getElementById('n');
+  var t = setInterval(function(){
+    secs--; if(el) el.textContent = secs;
+    if(secs<=0){ clearInterval(t); location.replace(NEW_SITE); }
+  },1000);
+  document.getElementById('go').addEventListener('click',function(){ clearInterval(t); });
+
+  // ── אפקט "בום": זיקוקים + קונפטי על קנבס ──
+  var c = document.getElementById('fx'), x = c.getContext('2d'), W,H,parts=[];
+  function size(){ W=c.width=innerWidth; H=c.height=innerHeight; }
+  size(); addEventListener('resize',size);
+  var COLORS=['#e50914','#ff7a00','#ffd000','#ff3b6b','#4fc3ff','#ffffff','#22e07a'];
+  function rnd(a,b){return a+Math.random()*(b-a);}
+  function burst(cx,cy,n){
+    for(var i=0;i<n;i++){
+      var ang=rnd(0,Math.PI*2), sp=rnd(2,8);
+      parts.push({x:cx,y:cy,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,
+        life:rnd(50,90),age:0,col:COLORS[(Math.random()*COLORS.length)|0],
+        size:rnd(2,5),grav:rnd(.03,.09),spin:rnd(-.2,.2),rot:rnd(0,6)});
+    }
+  }
+  // קונפטי מתמשך שנופל מלמעלה
+  function confetti(){
+    parts.push({x:rnd(0,W),y:-10,vx:rnd(-1,1),vy:rnd(1.5,4),
+      life:rnd(120,200),age:0,col:COLORS[(Math.random()*COLORS.length)|0],
+      size:rnd(3,7),grav:.02,spin:rnd(-.25,.25),rot:rnd(0,6),flat:1});
+  }
+  function loop(){
+    x.clearRect(0,0,W,H);
+    for(var i=parts.length-1;i>=0;i--){
+      var p=parts[i]; p.age++; p.vy+=p.grav; p.x+=p.vx; p.y+=p.vy; p.rot+=p.spin;
+      var a=Math.max(0,1-p.age/p.life);
+      x.save(); x.globalAlpha=a; x.translate(p.x,p.y); x.rotate(p.rot); x.fillStyle=p.col;
+      if(p.flat){ x.fillRect(-p.size/2,-p.size,p.size,p.size*2); }
+      else { x.beginPath(); x.arc(0,0,p.size,0,7); x.fill(); }
+      x.restore();
+      if(p.age>=p.life || p.y>H+30) parts.splice(i,1);
+    }
+    requestAnimationFrame(loop);
+  }
+  loop();
+  // בום ראשוני מרובה
+  var boomN=0, boomT=setInterval(function(){
+    burst(rnd(W*.2,W*.8),rnd(H*.2,H*.5),60);
+    if(++boomN>=6) clearInterval(boomT);
+  },260);
+  burst(W/2,H*.4,120);
+  // קונפטי מתמשך (עדין) למשך כל הזמן שהדף פתוח
+  setInterval(confetti,120);
+})();
+</script>
+</body>
+</html>
