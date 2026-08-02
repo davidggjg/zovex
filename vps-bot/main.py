@@ -2310,6 +2310,147 @@ async def pool_remove(req: PoolRemoveReq, request: Request):
             log.warning("עדכון קובץ הבוטים נכשל: %s", e)
     return {"ok": True, "active": len(_stream_bots)}
 
+# ── ייבוא מרובה ממאגר (ערוץ טלגרם חיצוני) ─────────────────────────────────────
+# עובר על ערוץ מקור (של חבר וכו'), מעתיק כל וידאו לערוץ שלנו כדי שכל בוטי ה-pool
+# יוכלו להגיש, מזהה שם (TMDB) ומוסיף ל-new_uploads לאישור בפאנל. ההעתקה נעשית
+# ע"י חשבון-משתמש (userbot) מה-pool — רק הוא יכול לקרוא ערוץ של מישהו אחר וגם
+# לפרסם לערוץ שלנו. איטי בכוונה (טלגרם מגביל) — רץ ברקע ומדלג על כפילויות.
+_import = {"running": False, "source": "", "found": 0, "imported": 0,
+           "skipped": 0, "errors": 0, "msg": "מוכן", "started": 0}
+
+def _pick_pool_userbot():
+    for b in _stream_bots:
+        if b.get("kind") == "user":
+            return b
+    return None
+
+async def _bulk_import_worker(source, per_min: int, limit: int):
+    ub = _pick_pool_userbot()
+    if not ub:
+        _import.update(running=False, msg="אין userbot ב-pool — הוסף חשבון-משתמש בטאב 'בוטים'")
+        return
+    client = ub["client"]
+    _import.update(running=True, source=str(source), found=0, imported=0,
+                   skipped=0, errors=0, msg="סורק את הערוץ...", started=int(time.time()))
+    per_min = max(1, int(per_min or 5))     # כמה קבצים להעביר בכל דקה
+    window_start = time.time()
+    batch = 0
+    # טוענים פעם אחת את מה שכבר קיים (מהיר — בלי לקרוא קבצים בכל פריט)
+    seen_fuid, seen_ep = set(), set()
+    for e in load_content() + load_new_uploads():
+        if e.get("file_unique_id"):
+            seen_fuid.add(e["file_unique_id"])
+        if e.get("series_name") and e.get("episode_number") is not None:
+            try:
+                seen_ep.add((_norm_series(e["series_name"]), int(e.get("season_number") or 1), int(e["episode_number"])))
+            except Exception:
+                pass
+    done = 0
+    try:
+        async for msg in client.get_chat_history(source):
+            if not _import["running"]:
+                _import["msg"] = "נעצר ידנית"; break
+            media = msg.video or msg.document
+            if not media:
+                continue
+            fname = getattr(media, "file_name", "") or (msg.caption or "") or ""
+            if msg.document and not re.search(r'\.(mkv|mp4|avi|mov|webm|m4v|ts)$', fname, re.I):
+                continue  # מסמך שאינו וידאו
+            _import["found"] += 1
+            fuid = getattr(media, "file_unique_id", "") or ""
+            if fuid and fuid in seen_fuid:
+                _import["skipped"] += 1; continue
+            ep = parse_episode_info(fname)
+            if ep:
+                epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
+                if epkey in seen_ep:
+                    _import["skipped"] += 1; continue
+            # העתקה לערוץ שלנו (דרך ה-userbot) עם retry על FloodWait
+            new_id = None
+            async with _upload_lock:
+                for attempt in range(6):
+                    try:
+                        copied = await client.copy_message(STREAM_CHANNEL_ID, source, msg.id)
+                        new_id = copied.id; break
+                    except FloodWait as e:
+                        _import["msg"] = f"טלגרם ביקש להמתין {int(getattr(e,'value',30))}ש — ממתין..."
+                        await asyncio.sleep(int(getattr(e, "value", 30)) + 2)
+                    except Exception as e:
+                        log.warning("import: copy נכשל: %s", e); break
+            if not new_id:
+                _import["errors"] += 1; continue
+            try:
+                if ep:
+                    add_episode_entry(ep, new_id, fuid)
+                    seen_ep.add((_norm_series(ep["series"]), ep["season"], ep["episode"]))
+                else:
+                    _q, options = await smart_tmdb_search(fname)
+                    if options:
+                        add_movie_entry(options[0], new_id, fuid)
+                    else:
+                        add_movie_entry({"title": clean_name(fname) or f"קובץ {new_id}",
+                                         "year": "", "tmdb_id": 0, "type": "movie",
+                                         "poster": "", "overview": ""}, new_id, fuid)
+                if fuid:
+                    seen_fuid.add(fuid)
+                _import["imported"] += 1
+            except Exception as e:
+                log.warning("import: הוספה נכשלה: %s", e); _import["errors"] += 1
+            done += 1
+            _import["msg"] = f"מייבא... ({_import['imported']} נוספו, {_import['skipped']} דילוגים)"
+            if limit and done >= limit:
+                _import["msg"] = f"הגיע למגבלה ({limit}) — הרץ שוב להמשך"; break
+            # קצב: אחרי per_min העברות, ממתין עד סוף הדקה (טפטוף עדין + זמן לאשר)
+            batch += 1
+            if batch >= per_min:
+                wait = max(0, 60 - (time.time() - window_start))
+                _import["msg"] = (f"הועברו {per_min} קבצים בדקה זו — ממתין {int(wait)}ש "
+                                  f"({_import['imported']} סה\"כ). אפשר לאשר בפאנל בינתיים.")
+                slept = 0
+                while slept < wait and _import["running"]:
+                    await asyncio.sleep(1); slept += 1
+                window_start = time.time(); batch = 0
+        else:
+            _import["msg"] = "הסתיים — עבר על כל הערוץ ✅"
+    except Exception as e:
+        log.exception("bulk import failed")
+        _import["msg"] = f"שגיאה: {e}"
+    _import["running"] = False
+
+class ImportStartReq(BaseModel):
+    password: str
+    source: str
+    per_min: int = 5     # כמה קבצים להעביר בכל דקה (טפטוף)
+    limit: int = 0       # מגבלת סה"כ (0 = עד שהערוץ נגמר / עצירה ידנית)
+
+@api.post("/import/start")
+async def import_start(req: ImportStartReq, request: Request):
+    check_panel_password(request, req.password)
+    if _import["running"]:
+        raise HTTPException(status_code=400, detail="ייבוא כבר רץ")
+    src = (req.source or "").strip()
+    if not src:
+        raise HTTPException(status_code=400, detail="חסר מקור (שם/לינק/ID של הערוץ)")
+    if not _pick_pool_userbot():
+        raise HTTPException(status_code=400, detail="אין userbot ב-pool — הוסף חשבון-משתמש בטאב 'בוטים'")
+    try:
+        src_val = int(src)          # תמיכה ב-ID מספרי (-100...)
+    except ValueError:
+        src_val = src               # שם משתמש/לינק
+    asyncio.create_task(_bulk_import_worker(src_val, int(req.per_min or 5), max(0, int(req.limit or 0))))
+    return {"ok": True}
+
+@api.post("/import/status")
+async def import_status(req: PoolPwReq, request: Request):
+    check_panel_password(request, req.password)
+    return dict(_import)
+
+@api.post("/import/stop")
+async def import_stop(req: PoolPwReq, request: Request):
+    check_panel_password(request, req.password)
+    _import["running"] = False
+    return {"ok": True}
+
 @api.get("/content")
 async def content_get():
     """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית)."""

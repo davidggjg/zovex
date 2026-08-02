@@ -63,6 +63,7 @@
     <button id="tab-uploads" onclick="showTab('uploads')">העלאות מהבוט</button>
     <button id="tab-support" onclick="showTab('support')">תמיכה <span id="supBadge" class="badge hidden">0</span></button>
     <button id="tab-pool" onclick="showTab('pool')">בוטים</button>
+    <button id="tab-import" onclick="showTab('import')">ייבוא ממאגר</button>
     <button id="tab-admins" onclick="showTab('admins')">מנהלים</button>
   </div>
 
@@ -188,6 +189,27 @@
       <div id="poolList"></div></div>
   </div>
 
+  <!-- ייבוא ממאגר (ערוץ חיצוני) -->
+  <div id="pane-import" class="hidden">
+    <div class="card"><h2>ייבוא ממאגר טלגרם</h2>
+      <div class="muted">מייבא וידאו מערוץ חיצוני: מעתיק כל קובץ <b>לערוץ שלנו</b> (כך שכל הבוטים יגישו אותו), מזהה שם, ומוסיף ל<b>«העלאות מהבוט»</b> לאישור.
+      <br><b>דרישות:</b> חייב להיות <b>userbot (חשבון) בבריכת הבוטים</b>, והחשבון הזה חייב להיות <b>חבר בערוץ המקור</b> וגם <b>אדמין עם הרשאת פרסום בערוץ שלנו</b>.</div>
+      <label style="margin-top:10px">ערוץ מקור (שם משתמש / לינק / ID)</label>
+      <input id="imp_src" placeholder="@channelname או -100xxxxxxxxxx">
+      <div class="grid2" style="margin-top:8px">
+        <div><label>קבצים לדקה</label><input id="imp_rate" type="number" value="5" min="1" max="30"></div>
+        <div><label>מגבלת סה"כ (0 = הכל)</label><input id="imp_limit" type="number" value="0" min="0"></div>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <button onclick="startImport()">▶ התחל ייבוא</button>
+        <button class="gray" onclick="stopImport()">⏹ עצור</button>
+      </div>
+      <div id="impMsg" class="muted" style="margin-top:6px"></div>
+    </div>
+    <div class="card"><div class="toprow"><h2>סטטוס ייבוא</h2><button class="mini gray" onclick="pollImport()">↻ רענן</button></div>
+      <div id="impStatus" class="muted">—</div></div>
+  </div>
+
   <!-- מנהלים -->
   <div id="pane-admins" class="hidden">
     <div class="card"><h2>מנהלים מורשים (Telegram ID)</h2>
@@ -257,15 +279,17 @@ async function doLogin(){
 
 // ── טאבים ──
 function showTab(n){
-  ["add","manage","cats","live","uploads","support","pool","admins"].forEach(x=>{
+  ["add","manage","cats","live","uploads","support","pool","import","admins"].forEach(x=>{
     $("pane-"+x).classList.add("hidden"); const t=$("tab-"+x); if(t)t.classList.remove("active");});
   $("pane-"+n).classList.remove("hidden"); $("tab-"+n).classList.add("active");
+  if(n!=="import") stopImportPoll();
   if(n==="manage") renderManage();
   if(n==="cats") renderCats();
   if(n==="live"){ liveReset(); renderLive(); }
   if(n==="uploads") loadUploads();
   if(n==="support") loadSupport();
   if(n==="pool") loadPool();
+  if(n==="import"){ pollImport(); startImportPoll(); }
   if(n==="admins"){ loadAdmins(); loadVersion(); }
 }
 
@@ -758,6 +782,45 @@ async function removePoolBot(name){
     loadPool();
   }catch(e){ alert(e.message); }
 }
+
+// ── ייבוא ממאגר ──
+let _impTimer=null;
+async function startImport(){
+  const source=$("imp_src").value.trim();
+  if(!source){ $("impMsg").innerHTML='<span class="err">חסר ערוץ מקור</span>'; return; }
+  const per_min=parseInt($("imp_rate").value)||5, limit=parseInt($("imp_limit").value)||0;
+  $("impMsg").textContent="מתחיל…";
+  try{
+    const r=await fetch("/import/start",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,source,per_min,limit})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||"שגיאה");
+    $("impMsg").innerHTML='<span class="ok">הייבוא התחיל ✓ רץ ברקע — אפשר לעבור ל«העלאות מהבוט» ולאשר תוך כדי.</span>';
+    pollImport();
+  }catch(e){ $("impMsg").innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+async function stopImport(){
+  try{
+    await fetch("/import/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PASS})});
+    $("impMsg").innerHTML='<span class="muted">נשלחה בקשת עצירה…</span>'; pollImport();
+  }catch(e){ alert(e.message); }
+}
+async function pollImport(){
+  try{
+    const d=await (await fetch("/import/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PASS})})).json();
+    $("impStatus").innerHTML=
+      `<div><b>מצב:</b> ${d.running?'<span class="ok">רץ ▶</span>':'<span class="muted">לא רץ</span>'}</div>
+       <div style="margin-top:6px">${esc(d.msg||"")}</div>
+       <div style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap">
+         <span class="pill" style="background:#e6f9ec;color:#1a7f37">נוספו ${d.imported||0}</span>
+         <span class="pill">נמצאו ${d.found||0}</span>
+         <span class="pill" style="background:#fff4e5;color:#b26a00">דילוגים ${d.skipped||0}</span>
+         <span class="pill" style="background:#fdeaea;color:#c0392b">שגיאות ${d.errors||0}</span>
+       </div>`;
+  }catch(e){ $("impStatus").innerHTML='<span class="err">טעינת סטטוס נכשלה</span>'; }
+}
+function startImportPoll(){ stopImportPoll(); _impTimer=setInterval(pollImport, 4000); }
+function stopImportPoll(){ if(_impTimer){ clearInterval(_impTimer); _impTimer=null; } }
 async function saveVersion(){
   $("verMsg").textContent="שומר...";
   try{
