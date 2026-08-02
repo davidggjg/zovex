@@ -562,13 +562,14 @@ async def start_stream_pool():
         log.info("אין stream_bots.txt — pool בוטים לא פעיל")
         return
     tokens = [t.strip() for t in STREAM_BOTS_FILE.read_text().splitlines() if t.strip()]
-    # העלאה במקביל בקבוצות של 8 — מהיר גם עם עשרות בוטים (במקום אחד-אחד)
-    BATCH = 8
-    for start in range(0, len(tokens), BATCH):
-        batch = tokens[start:start + BATCH]
-        await asyncio.gather(*[_start_one_pool_bot(start + j, t) for j, t in enumerate(batch)])
-        await asyncio.sleep(1)   # הפוגה קצרה בין קבוצות
-    log.info("🚀 stream pool: %d בוטים פעילים", len(_stream_bots))
+    # מעלים אחד-אחד עם הפוגה בין בוט לבוט. הצפת טלגרם בעשרות התחברויות בו-זמנית
+    # (מה שקרה עם BATCH=8) גורמת לחסימת IP → כל הבוטים "לא עלה" ולולאת קריסה.
+    # לאט ויציב עדיף. POOL_START_DELAY ניתן לכוונון דרך משתנה סביבה.
+    delay = float(os.environ.get("POOL_START_DELAY", "4"))
+    for i, tok in enumerate(tokens):
+        await _start_one_pool_bot(i, tok)
+        await asyncio.sleep(delay)
+    log.info("🚀 stream pool: %d/%d בוטים פעילים", len(_stream_bots), len(tokens))
     asyncio.create_task(warm_stream_pool())
 
 async def warm_stream_pool():
@@ -2681,12 +2682,16 @@ async def keep_alive():
 # ה-Pyrogram מבפנים בלי restart מלא - זו הדרך היחידה שבדוקה בפועל (הכפתור
 # הידני שכבר עבד).
 WATCHDOG_CHECK_INTERVAL_SECS = 60
-WATCHDOG_TIMEOUT_SECS = 20
-WATCHDOG_MAX_CONSECUTIVE_FAILURES = 2
+WATCHDOG_TIMEOUT_SECS = 25
+# 3 כישלונות רצופים (ולא 2) לפני restart — כדי לא להרוג את התהליך על חסימת
+# flood זמנית של טלגרם שמתפוגגת לבד. חסימה אמיתית תיכשל 3 פעמים ברצף בכל מקרה.
+WATCHDOG_MAX_CONSECUTIVE_FAILURES = 3
+# המתנה ארוכה לפני הבדיקה הראשונה — נותנת לכל הבוטים לעלות בהדרגה קודם
+WATCHDOG_INITIAL_DELAY_SECS = 120
 
 async def telegram_watchdog():
     consecutive_failures = 0
-    await asyncio.sleep(WATCHDOG_CHECK_INTERVAL_SECS)
+    await asyncio.sleep(WATCHDOG_INITIAL_DELAY_SECS)
     while True:
         try:
             await asyncio.wait_for(bot_client.get_me(), timeout=WATCHDOG_TIMEOUT_SECS)
@@ -3001,28 +3006,55 @@ async def startup():
     restore_from_dataset()
     await bot_client.start()
     _hls_relay_client = httpx.AsyncClient(timeout=15)
-    # ה-workers/pool עולים ברקע כדי לא לעכב את עליית השרת
-    asyncio.create_task(start_download_workers())
-    asyncio.create_task(start_stream_pool())
-    asyncio.create_task(start_upload_bot())
+    # הכל עולה בהדרגה ברקע כדי לא להציף את טלגרם בעשרות חיבורים בבת אחת (מה
+    # שגרם לחסימת IP: כל הבוטים "לא עלה", Watchdog הרג את התהליך, ולולאת קריסה).
     asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
-    asyncio.create_task(telegram_watchdog())
+    asyncio.create_task(staged_bot_startup())
     log.info("All systems ready ✅ BASE_URL=%s", BASE_URL)
+
+async def staged_bot_startup():
+    """מעלה את הבוטים בשלבים, לאט, כדי לא להציף את טלגרם בחיבורים בו-זמנית:
+    1) בוט ההעלאה (הכי חשוב — קליטת תוכן)  2) workers להורדה  3) pool אחד-אחד.
+    רק אחרי שהכל התייצב מפעילים את ה-Watchdog, כדי שלא יהרוג את התהליך בזמן
+    שהבוטים עוד עולים."""
+    try:
+        await asyncio.sleep(4)                 # שהבוט הראשי יתייצב קודם
+        await start_upload_bot()
+        await asyncio.sleep(3)
+        await start_download_workers()
+        await asyncio.sleep(3)
+        await start_stream_pool()
+    except Exception as e:
+        log.warning("staged_bot_startup: שגיאה בהעלאה מדורגת: %s", e)
+    finally:
+        # ה-Watchdog מתחיל רק עכשיו — אחרי שכל הבוטים ניסו לעלות
+        asyncio.create_task(telegram_watchdog())
 
 @api.on_event("shutdown")
 async def shutdown():
-    await stop_download_workers()
-    await stop_stream_pool()
-    await stop_upload_bot()
-    await bot_client.stop()
+    # כל שלב עטוף ב-try/except: אם קליינט של Pyrogram נכשל בעצירה (למשל
+    # RuntimeError: "attached to a different loop") — לא רוצים שזה יפיל את כל
+    # הכיבוי ויגרום ל-systemd להרוג בכוח (SIGKILL). מכבים כמה שאפשר ובשקט.
+    async def _safe(coro, what):
+        try:
+            await asyncio.wait_for(coro, timeout=15)
+        except Exception as e:
+            log.warning("shutdown: %s נכשל: %s", what, e)
+    await _safe(stop_download_workers(), "workers")
+    await _safe(stop_stream_pool(), "pool")
+    await _safe(stop_upload_bot(), "upload_bot")
+    await _safe(bot_client.stop(), "bot_client")
     if _hls_relay_client:
-        await _hls_relay_client.aclose()
+        await _safe(_hls_relay_client.aclose(), "hls_client")
     # גיבוי אחרון-רגע — תופס גם peer-ים שנוספו בין הגיבוי התקופתי האחרון לכיבוי
-    if SESSION_FILE.exists():
-        backup_to_dataset(f"{SESSION_NAME}.session", SESSION_FILE)
+    try:
+        if SESSION_FILE.exists():
+            backup_to_dataset(f"{SESSION_NAME}.session", SESSION_FILE)
+    except Exception as e:
+        log.warning("shutdown: גיבוי אחרון נכשל: %s", e)
 
 if __name__ == "__main__":
     uvicorn.run("main:api", host="0.0.0.0", port=PORT, log_level="info")
