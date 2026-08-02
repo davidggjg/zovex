@@ -2483,8 +2483,10 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
     per_min = max(1, int(per_min or 5))     # כמה קבצים להעביר בכל דקה
     window_start = time.time()
     batch = 0
-    # טוענים פעם אחת את מה שכבר קיים (מהיר — בלי לקרוא קבצים בכל פריט)
-    seen_fuid, seen_ep = set(), set()
+    # טוענים פעם אחת את מה שכבר קיים (מהיר — בלי לקרוא קבצים בכל פריט):
+    # קובץ (fuid), פרק (סדרה+עונה+פרק), וסרט (tmdb_id / שם+שנה) — למניעת כפילויות
+    # מול כל התוכן שכבר באתר.
+    seen_fuid, seen_ep, seen_mov_tmdb, seen_mov_title = set(), set(), set(), set()
     for e in load_content() + load_new_uploads():
         if e.get("file_unique_id"):
             seen_fuid.add(e["file_unique_id"])
@@ -2493,6 +2495,13 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 seen_ep.add((_norm_series(e["series_name"]), int(e.get("season_number") or 1), int(e["episode_number"])))
             except Exception:
                 pass
+        elif not e.get("series_name"):   # סרט
+            if e.get("tmdb_id"):
+                try: seen_mov_tmdb.add(int(e["tmdb_id"]))
+                except Exception: pass
+            t = _norm_title(e.get("title") or e.get("en_title") or "")
+            if t:
+                seen_mov_title.add((t, str(e.get("year") or "")))
     done = 0
     try:
         async for msg in client.get_chat_history(source):
@@ -2514,9 +2523,19 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 _import["skipped"] += 1; continue
             # פרק סדרה? מזהים מהכיתוב או משם הקובץ
             ep = parse_episode_info(cap) or parse_episode_info(fname)
+            options, ryear = None, ""
             if ep:
                 epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
                 if epkey in seen_ep:
+                    _import["skipped"] += 1; continue
+            else:
+                # סרט — מזהים לפני ההעתקה כדי לדלג על כפילות בלי להעתיק לחינם
+                options, ryear, _t = await recognize_media(cap, fname)
+                if options and options[0].get("tmdb_id") and int(options[0]["tmdb_id"]) in seen_mov_tmdb:
+                    _import["skipped"] += 1; continue
+                mtitle = _norm_title(options[0]["title"]) if options else _norm_title(
+                    (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname))
+                if mtitle and (mtitle, str((options[0].get("year") if options else "") or ryear)) in seen_mov_title:
                     _import["skipped"] += 1; continue
             # העתקה לערוץ הפעיל שלנו (גלישה אוטומטית כשמתמלא) דרך ה-userbot
             new_id = None
@@ -2539,18 +2558,21 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 if ep:
                     add_episode_entry(ep, new_id, fuid, dest)
                     seen_ep.add((_norm_series(ep["series"]), ep["season"], ep["episode"]))
+                elif options:
+                    ch = dict(options[0]); ch["year"] = ch.get("year") or ryear
+                    add_movie_entry(ch, new_id, fuid, dest)
+                    if ch.get("tmdb_id"):
+                        try: seen_mov_tmdb.add(int(ch["tmdb_id"]))
+                        except Exception: pass
+                    seen_mov_title.add((_norm_title(ch.get("title", "")), str(ch.get("year") or "")))
                 else:
-                    options, year, _t = await recognize_media(cap, fname)
-                    if options:
-                        ch = dict(options[0]); ch["year"] = ch.get("year") or year
-                        add_movie_entry(ch, new_id, fuid, dest)
-                    else:
-                        # לא זוהה ב-TMDB — נכנס לאישור מסומן (tmdb_id=0) לטיפול נפרד
-                        _import["unmatched"] += 1
-                        cap_title = (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname)
-                        add_movie_entry({"title": cap_title or f"קובץ {new_id}",
-                                         "year": year, "tmdb_id": 0, "type": "movie",
-                                         "poster": "", "overview": ""}, new_id, fuid, dest)
+                    # לא זוהה ב-TMDB — נכנס לאישור מסומן (tmdb_id=0) לטיפול נפרד
+                    _import["unmatched"] += 1
+                    cap_title = (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname)
+                    add_movie_entry({"title": cap_title or f"קובץ {new_id}",
+                                     "year": ryear, "tmdb_id": 0, "type": "movie",
+                                     "poster": "", "overview": ""}, new_id, fuid, dest)
+                    seen_mov_title.add((_norm_title(cap_title), str(ryear or "")))
                 if fuid:
                     seen_fuid.add(fuid)
                 _import["imported"] += 1
