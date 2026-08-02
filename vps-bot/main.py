@@ -2462,7 +2462,24 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
         return
     client = ub["client"]
     _import.update(running=True, source=str(source), found=0, imported=0,
-                   skipped=0, errors=0, unmatched=0, msg="סורק את הערוץ...", started=int(time.time()))
+                   skipped=0, errors=0, unmatched=0, msg="מזהה את ערוץ המקור...", started=int(time.time()))
+    # ה-userbot רץ in_memory → מטמון ה-peers מתאפס ב-restart, אז ערוץ פרטי לפי
+    # ID נכשל ב-"Peer id invalid". מסנכרנים dialogs כדי לאכלס את המטמון, ואז
+    # מנסים לפתור את הערוץ. אם עדיין נכשל — החשבון כנראה לא חבר בערוץ.
+    try:
+        await client.get_chat(source)
+    except Exception:
+        try:
+            n = 0
+            async for _d in client.get_dialogs():
+                n += 1
+            log.info("import: סונכרנו %d dialogs לאיכלוס peers", n)
+            await client.get_chat(source)
+        except Exception as e:
+            _import.update(running=False, msg=f"❌ אין גישה לערוץ המקור ({e}). ודא שחשבון ה-userbot (user_8) חבר בערוץ.")
+            log.warning("import: לא ניתן לפתור את ערוץ המקור %s: %s", source, e)
+            return
+    _import["msg"] = "סורק את הערוץ..."
     per_min = max(1, int(per_min or 5))     # כמה קבצים להעביר בכל דקה
     window_start = time.time()
     batch = 0
