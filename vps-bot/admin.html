@@ -103,8 +103,7 @@
       <input id="f_slug" dir="ltr" placeholder="fauda">
       <div class="grid2">
         <div><label>שנה</label><input id="f_year" type="number"></div>
-        <div><label>קטגוריה</label><input id="f_category" list="catlist" placeholder="בחר/הקלד">
-          <datalist id="catlist"></datalist></div>
+        <div><label>קטגוריה</label><select id="f_category" onchange="onCatChange()"></select></div>
       </div>
       <label>קישור וידאו <span class="muted">(הסוג יזוהה אוטומטית)</span></label>
       <input id="f_video" dir="ltr" placeholder="קישור סטרימינג / YouTube / Drive / mp4 / Kaltura…" oninput="detectType()">
@@ -292,9 +291,36 @@ function seriesMap(){
   const m={}; movies.forEach(x=>{ if(x.series_name){ (m[x.series_name]=m[x.series_name]||[]).push(x); } }); return m;
 }
 function catList(){ return [...new Set(movies.map(m=>m.category).filter(Boolean))]; }
+// ── בורר קטגוריה: <select> אמיתי (החץ עובד גם במובייל) + "קטגוריה חדשה" ──
+function fillCategorySelect(){
+  const sel=$("f_category"); const cur=sel.value; const cats=catList();
+  let html='<option value="">— בחר קטגוריה —</option>';
+  html+=cats.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  html+='<option value="__new__">➕ קטגוריה חדשה…</option>';
+  sel.innerHTML=html;
+  if(cur && cur!=="__new__"){
+    if(!cats.includes(cur)){ const o=document.createElement("option"); o.value=cur; o.textContent=cur; sel.insertBefore(o, sel.options[1]); }
+    sel.value=cur;
+  }
+}
+function setCategory(val){
+  const sel=$("f_category");
+  if(!val){ sel.value=""; return; }
+  if(![...sel.options].some(o=>o.value===val)){
+    const o=document.createElement("option"); o.value=val; o.textContent=val; sel.insertBefore(o, sel.options[1]||null);
+  }
+  sel.value=val;
+}
+function onCatChange(){
+  const sel=$("f_category");
+  if(sel.value==="__new__"){
+    const nn=prompt("שם הקטגוריה החדשה:");
+    if(nn && nn.trim()) setCategory(nn.trim()); else sel.value="";
+  }
+}
 function refreshDerived(){
   $("totalCount").textContent = `סה"כ ${movies.length}`;
-  $("catlist").innerHTML = catList().map(c=>`<option value="${esc(c)}">`).join("");
+  fillCategorySelect();
   const sm=seriesMap(); const sel=$("f_existing");
   sel.innerHTML='<option value="">— סדרה חדשה —</option>'+Object.keys(sm).sort().map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join("");
 }
@@ -309,7 +335,7 @@ function toggleSeries(){
 function pickExisting(){
   const n=$("f_existing").value; if(!n) return;
   const eps=seriesMap()[n]||[]; const s=eps[0]||{};
-  $("f_series").value=n; if(s.category)$("f_category").value=s.category;
+  $("f_series").value=n; if(s.category)setCategory(s.category);
   if(s.thumbnail_url)$("f_thumb").value=s.thumbnail_url; if(s.custom_slug)$("f_slug").value=s.custom_slug;
   const maxEp=Math.max(0,...eps.filter(e=>(e.season_number||1)==(parseInt($("f_season").value)||1)).map(e=>e.episode_number||0));
   if(!$("f_episode").value) $("f_episode").value=maxEp+1;
@@ -317,7 +343,7 @@ function pickExisting(){
 function clearForm(){
   ["f_title","f_slug","f_year","f_video","f_thumb","f_desc","f_series","f_season","f_episode","f_episode_end","tmdbq"].forEach(i=>$(i).value="");
   $("tmdbRes").innerHTML=""; $("addMsg").textContent=""; $("typeHint").textContent=""; $("f_existing").value="";
-  $("f_kind").value="movie"; $("f_category").value=""; _fromUploadCmid=null; toggleSeries();
+  $("f_kind").value="movie"; setCategory(""); _fromUploadCmid=null; toggleSeries();
 }
 function openAdd(){
   editingId=null; clearForm();
@@ -330,7 +356,7 @@ function startEdit(id){
   $("editTitle").textContent="עריכת פריט"; $("delBtn").classList.remove("hidden"); $("cancelEdit").classList.remove("hidden");
   $("f_kind").value=m.series_name?"series":"movie";
   $("f_title").value=m.title||""; $("f_slug").value=m.custom_slug||""; $("f_year").value=m.year||"";
-  $("f_category").value=m.category||""; $("f_video").value=m.video_url||m.video_id||"";
+  setCategory(m.category||""); $("f_video").value=m.video_url||m.video_id||"";
   $("f_thumb").value=m.thumbnail_url||""; $("f_desc").value=m.description||"";
   $("f_series").value=m.series_name||""; $("f_season").value=m.season_number||""; $("f_episode").value=m.episode_number||"";
   $("f_episode_end").value=m.episode_number_end||"";
@@ -610,7 +636,7 @@ function useUpload(i){ const u=window["_u"+i]; if(!u) return; openAdd();
   $("f_thumb").value=u.thumbnail_url||(inh?inh.thumbnail_url||"":"");   // יורש פוסטר מהסדרה
   $("f_desc").value=u.description||(inh?inh.description||"":"");
   $("f_slug").value=inh?inh.custom_slug||"":"";
-  $("f_category").value=isSer?(inh&&inh.category?inh.category:"סדרות"):"סרטים";
+  setCategory(isSer?(inh&&inh.category?inh.category:"סדרות"):"סרטים");
   detectType();
   _fromUploadCmid = (u.channel_msg_id!=null)?u.channel_msg_id:null;
   $("addMsg").innerHTML=inh
