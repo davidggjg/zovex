@@ -571,12 +571,15 @@ async function loadUploads(){
       html+=`</div>`;
     });
     if(singles.length){
-      html+='<div class="muted" style="margin:8px 0 4px">סרטים בודדים:</div>';
-      html+=singles.map(i=>{const u=_uploads[i];
+      const renderMovie=i=>{const u=_uploads[i];
         return `<div class="item"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
-          <div class="meta"><div class="t">${esc(u.title||"—")}</div><div class="s">${esc((u.video_url||"").slice(0,40))}…</div></div>
+          <div class="meta"><div class="t">${esc(u.title||"—")} ${u.year?'<span class="pill">'+esc(String(u.year))+'</span>':''}</div>
+          <div class="s">${u.tmdb_id?'✓ זוהה ב-TMDB':'🔍 לא זוהה — הקלד שם ידני'}</div></div>
           <button class="mini" onclick="useUpload(${i})">ערוך+הוסף</button>
-          <button class="mini gray" onclick="removeUpload(${u.channel_msg_id})">הסר</button></div>`;}).join("");
+          <button class="mini gray" onclick="removeUpload(${u.channel_msg_id})">הסר</button></div>`;};
+      const rec=singles.filter(i=>_uploads[i].tmdb_id), unrec=singles.filter(i=>!_uploads[i].tmdb_id);
+      if(rec.length){ html+='<div class="muted" style="margin:8px 0 4px">🎬 סרטים שזוהו ('+rec.length+'):</div>'+rec.map(renderMovie).join(""); }
+      if(unrec.length){ html+='<div class="muted" style="margin:10px 0 4px;color:#b26a00">🔍 לא זוהו ב-TMDB — לבדיקה ידנית ('+unrec.length+'):</div>'+unrec.map(renderMovie).join(""); }
     }
     el.innerHTML=html;
   }catch(e){ el.innerHTML='<span class="err">'+e.message+'</span>'; }
@@ -818,10 +821,11 @@ async function pollImport(){
     $("impStatus").innerHTML=
       `<div><b>מצב:</b> ${d.running?'<span class="ok">רץ ▶</span>':'<span class="muted">לא רץ</span>'}</div>
        <div style="margin-top:6px">${esc(d.msg||"")}</div>
-       <div style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap">
+       <div style="margin-top:8px;display:flex;gap:10px;flex-wrap:wrap">
          <span class="pill" style="background:#e6f9ec;color:#1a7f37">נוספו ${d.imported||0}</span>
          <span class="pill">נמצאו ${d.found||0}</span>
          <span class="pill" style="background:#fff4e5;color:#b26a00">דילוגים ${d.skipped||0}</span>
+         <span class="pill" style="background:#eef">לא זוהו ב-TMDB ${d.unmatched||0}</span>
          <span class="pill" style="background:#fdeaea;color:#c0392b">שגיאות ${d.errors||0}</span>
        </div>`;
   }catch(e){ $("impStatus").innerHTML='<span class="err">טעינת סטטוס נכשלה</span>'; }

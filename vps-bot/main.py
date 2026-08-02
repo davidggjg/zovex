@@ -1545,9 +1545,10 @@ def _query_candidates(fname: str) -> list:
       4) השם בלי שנה בסוף. מסננים כפילויות ומחרוזות קצרות מדי."""
     base = clean_name(fname)
     cands = [base]
-    # קטע לטיני רציף (מילים באנגלית/ספרות) — עדיף ל-TMDB (בסיס נתונים אנגלי)
+    # קטע לטיני רציף (מילים באנגלית/ספרות) — עדיף ל-TMDB (בסיס נתונים אנגלי).
+    # חייב להכיל אות אמיתית (לא רק ספרות/שנה) כדי לא לחפש "2022" לבד.
     latin = " ".join(re.findall(r"[A-Za-z0-9][A-Za-z0-9'&:!]*", base)).strip()
-    if latin and latin.lower() != base.lower():
+    if latin and re.search(r"[A-Za-z]", latin) and latin.lower() != base.lower():
         cands.append(latin)
     # קטע עברי רציף
     heb = " ".join(re.findall(r"[א-ת][א-ת'\"״׳]*", base)).strip()
@@ -1561,7 +1562,7 @@ def _query_candidates(fname: str) -> list:
     for c in cands:
         c = c.strip()
         k = c.lower()
-        if len(c) >= 2 and k not in seen:
+        if len(c) >= 2 and not re.fullmatch(r"\d{2,4}", c) and k not in seen:
             seen.add(k); out.append(c)
     return out
 
@@ -1576,10 +1577,52 @@ async def smart_tmdb_search(fname: str):
         last_q = q
     return last_q, []
 
-async def tmdb_search(query: str) -> list:
+# ── זיהוי מתוך כיתוב (caption) של קבצי מאגר — שם עברי+אנגלי+שנה בשורות נפרדות ──
+_TRAILER_RE = re.compile(r'טריילר|טרילר|trailer|טיזר|teaser|קדימון', re.I)
+_YEAR_RE = re.compile(r'(?<!\d)(19\d{2}|20[0-3]\d)(?!\d)')
+# שורות מטא-דאטה בכיתוב שאינן חלק מהשם (עוצרים לפניהן)
+_CAP_NOISE = re.compile(r'(איכות|ז[\'׳"]?אנר|סוגה|תרגום|תקציר|הועלה|בלעדי|מנויים|'
+                        r'צפיות|שיתוף|קרדיט|quality|genre|subtitle)', re.I)
+
+def _recognition_candidates(caption: str, fname: str):
+    """מחזיר (candidates, year, is_trailer) לזיהוי מדויק. מעדיף את שורות הכותרת
+    שבכיתוב (שם עברי/אנגלי+שנה) על פני שם הקובץ (שלרוב פחות אמין)."""
+    caption = caption or ""
+    is_trailer = bool(_TRAILER_RE.search(caption))
+    m = _YEAR_RE.search(caption) or _YEAR_RE.search(fname or "")
+    year = m.group(1) if m else ""
+    # שורות כותרת: מתחילת הכיתוב עד השורה הראשונה שהיא מטא-דאטה (עד 2 שורות)
+    title_lines = []
+    for line in caption.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if _CAP_NOISE.search(line):
+            break
+        title_lines.append(line)
+        if len(title_lines) >= 2:
+            break
+    cands = []
+    for src in title_lines + [fname or ""]:
+        for c in _query_candidates(src):
+            if c not in cands:
+                cands.append(c)
+    return cands, year, is_trailer
+
+async def recognize_media(caption: str, fname: str):
+    """זיהוי TMDB מתוך כיתוב+שם קובץ, עם שנה. מחזיר (options, year, is_trailer)."""
+    cands, year, is_trailer = _recognition_candidates(caption, fname)
+    for q in cands:
+        opts = await tmdb_search(q, year)
+        if opts:
+            return opts, year, is_trailer
+    return [], year, is_trailer
+
+async def tmdb_search(query: str, year: str = "") -> list:
     """מחזיר עד 6 תוצאות TMDB (movie/tv). לכל תוצאה: שם עברי לתצוגה (title),
     שם אנגלי (en_title) לקישור נקי, שנה, פוסטר, סוג. תמיד מושך גם עברית וגם
-    אנגלית כדי שגם לתוכן עברי יהיה שם אנגלי לכתובת (slug)."""
+    אנגלית כדי שגם לתוכן עברי יהיה שם אנגלי לכתובת (slug). אם ניתנה שנה —
+    תוצאות עם אותה שנה מדורגות ראשונות (דיוק גבוה יותר)."""
     if not TMDB_API_KEY or not query:
         return []
     he_out, en_out, en_map = [], [], {}
@@ -1618,6 +1661,15 @@ async def tmdb_search(query: str) -> list:
     out = he_out or en_out          # עברית עדיפה לתצוגה; אם אין — אנגלית
     for o in out:                    # מצמידים שם אנגלי לכל תוצאה (לקישור)
         o["en_title"] = en_map.get((o["tmdb_id"], o["type"])) or o.get("original") or o["title"]
+    if year:                         # דירוג לפי התאמת שנה (±1 שנה = קרוב)
+        def _yr_rank(o):
+            oy = o.get("year") or ""
+            if oy == year: return 0
+            try:
+                return 1 if abs(int(oy) - int(year)) <= 1 else 2
+            except Exception:
+                return 3
+        out.sort(key=_yr_rank)
     return out[:6]
 
 # ── תעתיק עברית→לטינית (גיבוי ל-slug כשאין שם אנגלי ב-TMDB, למשל תוכן ישראלי) ──
@@ -2395,7 +2447,7 @@ async def pool_remove(req: PoolRemoveReq, request: Request):
 # ע"י חשבון-משתמש (userbot) מה-pool — רק הוא יכול לקרוא ערוץ של מישהו אחר וגם
 # לפרסם לערוץ שלנו. איטי בכוונה (טלגרם מגביל) — רץ ברקע ומדלג על כפילויות.
 _import = {"running": False, "source": "", "found": 0, "imported": 0,
-           "skipped": 0, "errors": 0, "msg": "מוכן", "started": 0}
+           "skipped": 0, "errors": 0, "unmatched": 0, "msg": "מוכן", "started": 0}
 
 def _pick_pool_userbot():
     for b in _stream_bots:
@@ -2410,7 +2462,7 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
         return
     client = ub["client"]
     _import.update(running=True, source=str(source), found=0, imported=0,
-                   skipped=0, errors=0, msg="סורק את הערוץ...", started=int(time.time()))
+                   skipped=0, errors=0, unmatched=0, msg="סורק את הערוץ...", started=int(time.time()))
     per_min = max(1, int(per_min or 5))     # כמה קבצים להעביר בכל דקה
     window_start = time.time()
     batch = 0
@@ -2432,14 +2484,19 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
             media = msg.video or msg.document
             if not media:
                 continue
-            fname = getattr(media, "file_name", "") or (msg.caption or "") or ""
-            if msg.document and not re.search(r'\.(mkv|mp4|avi|mov|webm|m4v|ts)$', fname, re.I):
+            cap = msg.caption or ""
+            fname = getattr(media, "file_name", "") or ""
+            if msg.document and fname and not re.search(r'\.(mkv|mp4|avi|mov|webm|m4v|ts)$', fname, re.I):
                 continue  # מסמך שאינו וידאו
+            # דלג על טריילרים/טיזרים/קדימונים (לא הסרט עצמו)
+            if _TRAILER_RE.search(cap):
+                _import["skipped"] += 1; continue
             _import["found"] += 1
             fuid = getattr(media, "file_unique_id", "") or ""
             if fuid and fuid in seen_fuid:
                 _import["skipped"] += 1; continue
-            ep = parse_episode_info(fname)
+            # פרק סדרה? מזהים מהכיתוב או משם הקובץ
+            ep = parse_episode_info(cap) or parse_episode_info(fname)
             if ep:
                 epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
                 if epkey in seen_ep:
@@ -2466,12 +2523,16 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                     add_episode_entry(ep, new_id, fuid, dest)
                     seen_ep.add((_norm_series(ep["series"]), ep["season"], ep["episode"]))
                 else:
-                    _q, options = await smart_tmdb_search(fname)
+                    options, year, _t = await recognize_media(cap, fname)
                     if options:
-                        add_movie_entry(options[0], new_id, fuid, dest)
+                        ch = dict(options[0]); ch["year"] = ch.get("year") or year
+                        add_movie_entry(ch, new_id, fuid, dest)
                     else:
-                        add_movie_entry({"title": clean_name(fname) or f"קובץ {new_id}",
-                                         "year": "", "tmdb_id": 0, "type": "movie",
+                        # לא זוהה ב-TMDB — נכנס לאישור מסומן (tmdb_id=0) לטיפול נפרד
+                        _import["unmatched"] += 1
+                        cap_title = (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname)
+                        add_movie_entry({"title": cap_title or f"קובץ {new_id}",
+                                         "year": year, "tmdb_id": 0, "type": "movie",
                                          "poster": "", "overview": ""}, new_id, fuid, dest)
                 if fuid:
                     seen_fuid.add(fuid)
