@@ -526,6 +526,76 @@ _stream_bots: list = []
 _stream_rr = 0
 _stream_rr_lock = asyncio.Lock()
 
+# ── ריבוי ערוצי אחסון + גלישה אוטומטית ────────────────────────────────────────
+# ערוץ טלגרם מוגבל במספר הודעות; כשהוא מתמלא עוברים לערוץ הבא. מזהי-הודעה
+# סדרתיים בערוץ, אז copied.id ≈ מספר הקבצים בערוץ — כשהוא חוצה את הסף עוברים
+# הלאה. הכתובת של כל קובץ כוללת את מזהה-הערוץ שלו, אז הגשה עובדת מכל הערוצים
+# (בתנאי שהבוטים חברים בכולם). רשימת הערוצים ב-stream_channels.txt (ID בכל שורה),
+# והערוץ הראשי (STREAM_CHANNEL_ID) תמיד ראשון.
+STREAM_CHANNELS_FILE = DATA_DIR.parent / "stream_channels.txt"
+CHANNEL_MAX_MESSAGES = int(os.environ.get("CHANNEL_MAX_MESSAGES", "950000"))
+def _load_stream_channels() -> list:
+    chans = []
+    if STREAM_CHANNEL_ID:
+        chans.append(STREAM_CHANNEL_ID)
+    if STREAM_CHANNELS_FILE.exists():
+        try:
+            for line in STREAM_CHANNELS_FILE.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    cid = int(line)
+                except ValueError:
+                    continue
+                if cid not in chans:
+                    chans.append(cid)
+        except Exception as e:
+            log.warning("קריאת stream_channels.txt נכשלה: %s", e)
+    return chans or ([STREAM_CHANNEL_ID] if STREAM_CHANNEL_ID else [])
+STREAM_CHANNELS = _load_stream_channels()
+_active_idx = 0
+
+def current_upload_channel() -> int:
+    """הערוץ שאליו מעלים עכשיו קבצים חדשים (האחרון שעדיין לא מלא)."""
+    if not STREAM_CHANNELS:
+        return STREAM_CHANNEL_ID
+    return STREAM_CHANNELS[min(_active_idx, len(STREAM_CHANNELS) - 1)]
+
+def note_uploaded_msg_id(chat_id: int, msg_id: int):
+    """אחרי העלאה: אם הערוץ הפעיל חצה את הסף — עוברים לערוץ הבא."""
+    global _active_idx
+    if not STREAM_CHANNELS or chat_id != STREAM_CHANNELS[min(_active_idx, len(STREAM_CHANNELS) - 1)]:
+        return
+    if msg_id >= CHANNEL_MAX_MESSAGES:
+        if _active_idx < len(STREAM_CHANNELS) - 1:
+            _active_idx += 1
+            log.warning("📦 ערוץ %s מלא (msg %s ≥ %s) — עובר לערוץ הבא: %s",
+                        chat_id, msg_id, CHANNEL_MAX_MESSAGES, STREAM_CHANNELS[_active_idx])
+        else:
+            log.critical("🛑 כל הערוצים מלאים! הוסף ערוץ חדש (stream_channels.txt / פאנל).")
+
+async def resolve_active_channel():
+    """בהפעלה: מוצא את הערוץ הפעיל (הראשון שעדיין לא מלא) לפי מזהה-ההודעה האחרון.
+    דורש userbot ב-pool (רק חשבון יכול לקרוא היסטוריה). אם אין — נשאר על 0
+    והמעבר יקרה אוטומטית כשהעתקה תחזיר id מעל הסף."""
+    global _active_idx
+    ub = _pick_pool_userbot() if "_pick_pool_userbot" in globals() else None
+    if not ub or len(STREAM_CHANNELS) < 2:
+        return
+    for i, ch in enumerate(STREAM_CHANNELS):
+        try:
+            last_id = 0
+            async for m in ub["client"].get_chat_history(ch, limit=1):
+                last_id = m.id
+            if last_id < CHANNEL_MAX_MESSAGES:
+                _active_idx = i
+                log.info("📦 ערוץ פעיל: %s (הודעה אחרונה %s)", ch, last_id)
+                return
+        except Exception as e:
+            log.warning("בדיקת ערוץ %s נכשלה: %s", ch, e)
+    _active_idx = len(STREAM_CHANNELS) - 1
+
 async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
@@ -1351,8 +1421,8 @@ TMDB_IMG = "https://image.tmdb.org/t/p/w500"
 # (STREAM_PUBLIC_BASE) והכל מתעדכן, בלי לשכתב אף קישור.
 BASE_TOKEN = "%BASE%"
 
-def stored_stream_url(msg_id) -> str:
-    return f"{BASE_TOKEN}/stream/{STREAM_CHANNEL_ID}/{msg_id}"
+def stored_stream_url(msg_id, chat_id=None) -> str:
+    return f"{BASE_TOKEN}/stream/{chat_id or STREAM_CHANNEL_ID}/{msg_id}"
 
 def expand_base(s):
     return s.replace(BASE_TOKEN, STREAM_PUBLIC_BASE) if isinstance(s, str) else s
@@ -1639,10 +1709,12 @@ def find_existing_episode(series: str, season, episode):
             continue
     return None
 
-def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
+def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None) -> dict:
     """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json.
-    שומר קישור נייד (%BASE%) — הכתובת האמיתית מוזרקת בזמן ההגשה/התצוגה."""
-    stream_url = stored_stream_url(channel_msg_id)
+    שומר קישור נייד (%BASE%) — הכתובת האמיתית מוזרקת בזמן ההגשה/התצוגה.
+    chat_id = הערוץ שאליו הועתק הקובץ (לתמיכה בריבוי ערוצים)."""
+    chat_id = chat_id or STREAM_CHANNEL_ID
+    stream_url = stored_stream_url(channel_msg_id, chat_id)
     en_title = chosen.get("en_title") or chosen.get("original") or chosen["title"]
     entry = {
         "id": _slugify(en_title, chosen["tmdb_id"]) + "-" + str(channel_msg_id),
@@ -1657,13 +1729,14 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "")
         "video_url": stream_url,
         "thumbnail_url": chosen.get("poster", ""),
         "description": chosen.get("overview", ""),
+        "channel_id": chat_id,
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
     }
     lst = load_new_uploads()
-    # מניעת כפילות — לפי מזהה ההודעה בערוץ וגם לפי הקובץ עצמו (file_unique_id)
-    lst = [e for e in lst if e.get("channel_msg_id") != channel_msg_id
+    # מניעת כפילות — לפי (ערוץ+מזהה הודעה) וגם לפי הקובץ עצמו (file_unique_id)
+    lst = [e for e in lst if not (e.get("channel_msg_id") == channel_msg_id and (e.get("channel_id") or STREAM_CHANNEL_ID) == chat_id)
            and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
     lst.append(entry)
     save_new_uploads(lst)
@@ -1740,8 +1813,10 @@ def parse_episode_info(fname: str):
     series = _series_alias(series)                  # מנרמל כינויים (תאג''ד → תאגד)
     return {"series": series or "סדרה", "season": season or 1, "episode": episode}
 
-def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
-    """מוסיף פרק סדרה אוטומטית ל-new_uploads (בלי TMDB) — לאישור בפאנל + פוסטר."""
+def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None) -> dict:
+    """מוסיף פרק סדרה אוטומטית ל-new_uploads (בלי TMDB) — לאישור בפאנל + פוסטר.
+    chat_id = הערוץ שאליו הועתק הקובץ (לתמיכה בריבוי ערוצים)."""
+    chat_id = chat_id or STREAM_CHANNEL_ID
     entry = {
         "id": _slugify(ep["series"], "ep") + f"-s{ep['season']}e{ep['episode']}-{channel_msg_id}",
         "title": ep["series"],
@@ -1756,15 +1831,16 @@ def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "") -
         "type": "telegram",
         "media_kind": "tv",
         "tmdb_id": 0,
-        "video_url": stored_stream_url(channel_msg_id),
+        "video_url": stored_stream_url(channel_msg_id, chat_id),
         "thumbnail_url": "",
         "description": "",
+        "channel_id": chat_id,
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
     }
     lst = load_new_uploads()
-    lst = [e for e in lst if e.get("channel_msg_id") != channel_msg_id
+    lst = [e for e in lst if not (e.get("channel_msg_id") == channel_msg_id and (e.get("channel_id") or STREAM_CHANNEL_ID) == chat_id)
            and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
     lst.append(entry)
     save_new_uploads(lst)
@@ -1812,7 +1888,7 @@ async def _handle_custom_name(client: Client, message: Message, uid: int):
         entry = add_movie_entry(
             {"title": name, "year": "", "tmdb_id": 0, "type": "movie",
              "poster": "", "overview": ""}, pending["channel_msg_id"],
-            pending.get("file_unique_id", ""))
+            pending.get("file_unique_id", ""), pending.get("dest_channel"))
         _pending_uploads.pop(cmid, None)
         await message.reply_text(
             f"✅ נשמר בשם: <b>{name}</b>\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(entry['video_url']))}")
@@ -1850,15 +1926,17 @@ async def on_upload(client: Client, message: Message):
     # תור: מעבירים קובץ-קובץ (לא כולם בבת אחת) + retry עם המתנה על FloodWait,
     # כדי שהעלאה מרובה לא תיחסם ע"י טלגרם (420 FLOOD_WAIT).
     channel_msg_id = None
+    dest_channel = current_upload_channel()      # הערוץ הפעיל (גלישה אוטומטית כשמתמלא)
     async with _upload_lock:
         for attempt in range(6):
             try:
                 copied = await client.copy_message(
-                    chat_id=STREAM_CHANNEL_ID,
+                    chat_id=dest_channel,
                     from_chat_id=message.chat.id,
                     message_id=message.id,
                 )
                 channel_msg_id = copied.id
+                note_uploaded_msg_id(dest_channel, channel_msg_id)
                 break
             except FloodWait as e:
                 wait = int(getattr(e, "value", 30)) + 2
@@ -1888,13 +1966,13 @@ async def on_upload(client: Client, message: Message):
         # מניעת כפילות פרק: אותה סדרה+עונה+פרק כבר קיימים (בתוכן או בהעלאות)?
         exist = find_existing_episode(ep["series"], ep["season"], ep["episode"])
         if exist:
-            add_episode_entry(ep, channel_msg_id, fuid)  # עדיין שומרים ליתר ביטחון
+            add_episode_entry(ep, channel_msg_id, fuid, dest_channel)  # עדיין שומרים ליתר ביטחון
             await status.edit_text(
                 f"⚠️ הפרק הזה כבר קיים: <b>{exist.get('series_name', ep['series'])}</b> — "
                 f"עונה {ep['season']} פרק {ep['episode']}.\n"
                 f"נוסף לרשימת ההעלאות אבל כנראה כפול — בדוק בפאנל לפני אישור.")
             return
-        add_episode_entry(ep, channel_msg_id, fuid)
+        add_episode_entry(ep, channel_msg_id, fuid, dest_channel)
         await status.edit_text(
             f"✅ פרק נוסף: <b>{ep['series']}</b> — עונה {ep['season']} פרק {ep['episode']}\n"
             f"אשר בפאנל («הוסף הכל») והוסף פוסטר לסדרה.")
@@ -1903,6 +1981,7 @@ async def on_upload(client: Client, message: Message):
     query, options = await smart_tmdb_search(fname)
     _pending_uploads[str(channel_msg_id)] = {
         "channel_msg_id": channel_msg_id, "chat_id": message.chat.id,
+        "dest_channel": dest_channel,
         "user_id": uid, "fname": fname, "options": options,
         "raw_name": query or fname, "file_unique_id": fuid,
     }
@@ -1947,7 +2026,7 @@ async def on_select(client: Client, cq: CallbackQuery):
         entry = add_movie_entry(
             {"title": raw, "year": "", "tmdb_id": 0, "type": "movie",
              "poster": "", "overview": ""}, pending["channel_msg_id"],
-            pending.get("file_unique_id", ""))
+            pending.get("file_unique_id", ""), pending.get("dest_channel"))
         _pending_uploads.pop(cmid, None)
         await cq.message.edit_text(
             f"✅ נשמר בשם: <b>{raw}</b>\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(entry['video_url']))}")
@@ -1969,7 +2048,7 @@ async def on_select(client: Client, cq: CallbackQuery):
             await cq.answer("כבר קיים")
             return
     entry = add_movie_entry(chosen, pending["channel_msg_id"],
-                            pending.get("file_unique_id", ""))
+                            pending.get("file_unique_id", ""), pending.get("dest_channel"))
     _pending_uploads.pop(cmid, None)
     poster_line = f"\n🖼 {entry['thumbnail_url']}" if entry["thumbnail_url"] else ""
     await cq.message.edit_text(
@@ -2365,13 +2444,16 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
                 if epkey in seen_ep:
                     _import["skipped"] += 1; continue
-            # העתקה לערוץ שלנו (דרך ה-userbot) עם retry על FloodWait
+            # העתקה לערוץ הפעיל שלנו (גלישה אוטומטית כשמתמלא) דרך ה-userbot
             new_id = None
+            dest = current_upload_channel()
             async with _upload_lock:
                 for attempt in range(6):
                     try:
-                        copied = await client.copy_message(STREAM_CHANNEL_ID, source, msg.id)
-                        new_id = copied.id; break
+                        copied = await client.copy_message(dest, source, msg.id)
+                        new_id = copied.id
+                        note_uploaded_msg_id(dest, new_id)
+                        break
                     except FloodWait as e:
                         _import["msg"] = f"טלגרם ביקש להמתין {int(getattr(e,'value',30))}ש — ממתין..."
                         await asyncio.sleep(int(getattr(e, "value", 30)) + 2)
@@ -2381,16 +2463,16 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 _import["errors"] += 1; continue
             try:
                 if ep:
-                    add_episode_entry(ep, new_id, fuid)
+                    add_episode_entry(ep, new_id, fuid, dest)
                     seen_ep.add((_norm_series(ep["series"]), ep["season"], ep["episode"]))
                 else:
                     _q, options = await smart_tmdb_search(fname)
                     if options:
-                        add_movie_entry(options[0], new_id, fuid)
+                        add_movie_entry(options[0], new_id, fuid, dest)
                     else:
                         add_movie_entry({"title": clean_name(fname) or f"קובץ {new_id}",
                                          "year": "", "tmdb_id": 0, "type": "movie",
-                                         "poster": "", "overview": ""}, new_id, fuid)
+                                         "poster": "", "overview": ""}, new_id, fuid, dest)
                 if fuid:
                     seen_fuid.add(fuid)
                 _import["imported"] += 1
@@ -2450,6 +2532,37 @@ async def import_stop(req: PoolPwReq, request: Request):
     check_panel_password(request, req.password)
     _import["running"] = False
     return {"ok": True}
+
+# ── ניהול ערוצי אחסון (ריבוי ערוצים + גלישה) ─────────────────────────────────
+class ChannelAddReq(BaseModel):
+    password: str
+    channel_id: str
+
+@api.post("/channels/add")
+async def channels_add(req: ChannelAddReq, request: Request):
+    check_panel_password(request, req.password)
+    raw = (req.channel_id or "").strip()
+    try:
+        cid = int(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="מזהה ערוץ חייב להיות מספר (למשל -100...)")
+    if cid in STREAM_CHANNELS:
+        raise HTTPException(status_code=400, detail="הערוץ כבר ברשימה")
+    STREAM_CHANNELS.append(cid)
+    # שומרים לקובץ (בלי הערוץ הראשי — הוא תמיד ראשון מ-.env)
+    try:
+        extra = [c for c in STREAM_CHANNELS if c != STREAM_CHANNEL_ID]
+        STREAM_CHANNELS_FILE.write_text("\n".join(str(c) for c in extra) + ("\n" if extra else ""), encoding="utf-8")
+    except Exception as e:
+        log.warning("שמירת stream_channels.txt נכשלה: %s", e)
+    return {"ok": True, "channels": STREAM_CHANNELS}
+
+@api.post("/channels/list")
+async def channels_list(req: PoolPwReq, request: Request):
+    check_panel_password(request, req.password)
+    active = current_upload_channel()
+    return {"channels": STREAM_CHANNELS, "active": active,
+            "max_per_channel": CHANNEL_MAX_MESSAGES}
 
 @api.get("/content")
 async def content_get():
@@ -3168,6 +3281,7 @@ async def staged_bot_startup():
         await start_download_workers()
         await asyncio.sleep(3)
         await start_stream_pool()
+        await resolve_active_channel()         # קובע את הערוץ הפעיל (ריבוי ערוצים)
     except Exception as e:
         log.warning("staged_bot_startup: שגיאה בהעלאה מדורגת: %s", e)
     finally:

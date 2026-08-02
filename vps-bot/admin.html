@@ -208,6 +208,13 @@
     </div>
     <div class="card"><div class="toprow"><h2>סטטוס ייבוא</h2><button class="mini gray" onclick="pollImport()">↻ רענן</button></div>
       <div id="impStatus" class="muted">—</div></div>
+    <div class="card"><div class="toprow"><h2>ערוצי אחסון</h2><button class="mini gray" onclick="loadChannels()">↻ רענן</button></div>
+      <div class="muted">כשערוץ מתמלא (~950 אלף קבצים) הבוט עובר אוטומטית לערוץ הבא. פתח ערוץ חדש, הוסף אליו את <b>כל הבוטים + ה-userbot כאדמינים</b>, ואז הוסף כאן את ה-ID שלו.</div>
+      <div id="chanList" style="margin-top:8px" class="muted">—</div>
+      <input id="ch_id" placeholder="ID של ערוץ חדש (-100...)" style="margin-top:8px">
+      <button onclick="addChannel()" style="width:100%;margin-top:8px">➕ הוסף ערוץ אחסון</button>
+      <div id="chanMsg" class="muted" style="margin-top:6px"></div>
+    </div>
   </div>
 
   <!-- מנהלים -->
@@ -289,7 +296,7 @@ function showTab(n){
   if(n==="uploads") loadUploads();
   if(n==="support") loadSupport();
   if(n==="pool") loadPool();
-  if(n==="import"){ pollImport(); startImportPoll(); }
+  if(n==="import"){ pollImport(); startImportPoll(); loadChannels(); }
   if(n==="admins"){ loadAdmins(); loadVersion(); }
 }
 
@@ -821,6 +828,22 @@ async function pollImport(){
 }
 function startImportPoll(){ stopImportPoll(); _impTimer=setInterval(pollImport, 4000); }
 function stopImportPoll(){ if(_impTimer){ clearInterval(_impTimer); _impTimer=null; } }
+async function loadChannels(){
+  try{
+    const d=await (await fetch("/channels/list",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PASS})})).json();
+    $("chanList").innerHTML=(d.channels||[]).map((c,i)=>`<div class="item"><div class="meta"><div class="t">${c==d.active?'🟢 ':''}<code>${esc(String(c))}</code></div><div class="s">${c==d.active?'ערוץ פעיל (מעלים לכאן)':'ערוץ '+(i+1)}</div></div></div>`).join("")||'<span class="muted">אין ערוצים</span>';
+  }catch(e){ $("chanList").innerHTML='<span class="err">טעינה נכשלה</span>'; }
+}
+async function addChannel(){
+  const cid=$("ch_id").value.trim();
+  if(!cid){ $("chanMsg").innerHTML='<span class="err">חסר ID</span>'; return; }
+  try{
+    const r=await fetch("/channels/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PASS,channel_id:cid})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||"שגיאה");
+    $("ch_id").value=""; $("chanMsg").innerHTML='<span class="ok">נוסף ✓</span>'; loadChannels();
+  }catch(e){ $("chanMsg").innerHTML='<span class="err">'+e.message+'</span>'; }
+}
 async function saveVersion(){
   $("verMsg").textContent="שומר...";
   try{
