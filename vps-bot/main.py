@@ -2458,7 +2458,7 @@ def _pick_pool_userbot():
             return b
     return None
 
-async def _bulk_import_worker(source, per_min: int, limit: int):
+async def _bulk_import_worker(source, per_min: int, limit: int, kinds: str = "all"):
     ub = _pick_pool_userbot()
     if not ub:
         _import.update(running=False, msg="אין userbot ב-pool — הוסף חשבון-משתמש בטאב 'בוטים'")
@@ -2544,6 +2544,9 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 _import["skipped"] += 1; continue
             # פרק סדרה? מזהים מהכיתוב או משם הקובץ
             ep = parse_episode_info(cap) or parse_episode_info(fname)
+            # סינון לפי בחירת המשתמש: רק סרטים / רק סדרות / משולב
+            if (kinds == "movies" and ep) or (kinds == "series" and not ep):
+                continue
             options, ryear = None, ""
             if ep:
                 epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
@@ -2635,6 +2638,7 @@ class ImportStartReq(BaseModel):
     source: str
     per_min: int = 5     # כמה קבצים להעביר בכל דקה (טפטוף)
     limit: int = 0       # מגבלת סה"כ (0 = עד שהערוץ נגמר / עצירה ידנית)
+    kinds: str = "all"   # "all" / "movies" / "series" — מה לייבא
 
 @api.post("/import/start")
 async def import_start(req: ImportStartReq, request: Request):
@@ -2650,7 +2654,8 @@ async def import_start(req: ImportStartReq, request: Request):
         src_val = int(src)          # תמיכה ב-ID מספרי (-100...)
     except ValueError:
         src_val = src               # שם משתמש/לינק
-    asyncio.create_task(_bulk_import_worker(src_val, int(req.per_min or 5), max(0, int(req.limit or 0))))
+    kinds = req.kinds if req.kinds in ("all", "movies", "series") else "all"
+    asyncio.create_task(_bulk_import_worker(src_val, int(req.per_min or 5), max(0, int(req.limit or 0)), kinds))
     return {"ok": True}
 
 @api.post("/import/status")

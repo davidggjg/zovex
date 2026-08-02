@@ -196,6 +196,12 @@
       <br><b>דרישות:</b> חייב להיות <b>userbot (חשבון) בבריכת הבוטים</b>, והחשבון הזה חייב להיות <b>חבר בערוץ המקור</b> וגם <b>אדמין עם הרשאת פרסום בערוץ שלנו</b>.</div>
       <label style="margin-top:10px">ערוץ מקור (שם משתמש / לינק / ID)</label>
       <input id="imp_src" placeholder="@channelname או -100xxxxxxxxxx">
+      <div><label>מה לייבא</label>
+        <select id="imp_kinds">
+          <option value="all">משולב — סרטים + סדרות</option>
+          <option value="movies">רק סרטים</option>
+          <option value="series">רק סדרות</option>
+        </select></div>
       <div class="grid2" style="margin-top:8px">
         <div><label>קבצים לדקה</label><input id="imp_rate" type="number" value="5" min="1" max="30"></div>
         <div><label>מגבלת סה"כ (0 = הכל)</label><input id="imp_limit" type="number" value="0" min="0"></div>
@@ -798,11 +804,11 @@ let _impTimer=null;
 async function startImport(){
   const source=$("imp_src").value.trim();
   if(!source){ $("impMsg").innerHTML='<span class="err">חסר ערוץ מקור</span>'; return; }
-  const per_min=parseInt($("imp_rate").value)||5, limit=parseInt($("imp_limit").value)||0;
+  const per_min=parseInt($("imp_rate").value)||5, limit=parseInt($("imp_limit").value)||0, kinds=$("imp_kinds").value;
   $("impMsg").textContent="מתחיל…";
   try{
     const r=await fetch("/import/start",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({password:PASS,source,per_min,limit})});
+      body:JSON.stringify({password:PASS,source,per_min,limit,kinds})});
     const d=await r.json();
     if(!r.ok) throw new Error(d.detail||"שגיאה");
     $("impMsg").innerHTML='<span class="ok">הייבוא התחיל ✓ רץ ברקע — אפשר לעבור ל«העלאות מהבוט» ולאשר תוך כדי.</span>';
