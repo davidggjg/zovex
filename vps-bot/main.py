@@ -1430,17 +1430,80 @@ def load_new_uploads() -> list:
 def save_new_uploads(lst: list):
     NEW_UPLOADS_FILE.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
 
+# תגיות איכות/מקור/קודק/קבוצות-שחרור שכיחות — יש להסיר משם הקובץ לפני חיפוש TMDB
+_JUNK_TAGS = re.compile(
+    r"\b(?:1080p|720p|2160p|480p|360p|4k|uhd|fhd|hd|sd|"
+    r"x264|x265|h\.?264|h\.?265|hevc|avc|xvid|divx|"
+    r"bluray|blu[- ]?ray|brrip|bdrip|webrip|web[- ]?dl|web|hdrip|dvdrip|dvd|hdtv|cam|ts|tc|"
+    r"aac|ac3|eac3|dts(?:[- ]?hd)?|ddp?5[.\s]?1|dd5[.\s]?1|dd\+?|truehd|opus|flac|mp3|2ch|6ch|"
+    r"10bit|8bit|hdr10?|sdr|dolby|atmos|vision|"
+    r"hebdub|hebsub|hebrew|engsub|eng|dubbed|subbed|multi|dual|"
+    r"proper|repack|internal|limited|extended|unrated|uncut|remastered|complete|"
+    r"amzn|nf|dsnp|hulu|hmax|atvp|itunes|pcok|"
+    r"yts|yify|rarbg|evo|fgt|ettv|ctrlhd|ntb|galaxytv|galaxyrg|psa|tgx|mkvcage)\b",
+    re.I)
+# סימוני עונה/פרק להסרה לפני חיפוש שם הסרט/סדרה
+_EP_MARKERS = re.compile(
+    r"\bS\s*\d{1,2}\s*E\s*\d{1,3}\b|\b\d{1,2}\s*[xX]\s*\d{1,3}\b|"
+    r"ע(?:ונה)?\s*\d{1,2}\s*[·.\-]?\s*פ(?:רק)?\s*\d{1,3}|"
+    r"(?:^|\s)פרק\s*\d{1,3}|(?:^|\s)עונה\s*\d{1,2}",
+    re.I)
+
 def clean_name(fname: str) -> str:
-    """מנקה שם קובץ לשם חיפוש: מוריד סיומת, נקודות/קווים, איכות/קודק וכו'."""
+    """מנקה שם קובץ לשם חיפוש: מוריד סיומת, סוגריים, תגיות איכות/קודק/קבוצה,
+    סימוני עונה/פרק ומילות מקור — כדי שיישאר שם נקי לחיפוש ב-TMDB."""
     n = fname or ""
     n = re.sub(r"\.(mkv|mp4|avi|mov|webm|m4v|ts|wmv|flv)$", "", n, flags=re.I)
+    # מסירים תוכן בסוגריים מרובעים [group] וגם עברית "מדובב/מתורגם" שדבקה
+    n = re.sub(r"\[[^\]]*\]", " ", n)
+    n = re.sub(r"[‎‏‪-‮]", "", n)   # תווי כיווניות נסתרים
     n = n.replace(".", " ").replace("_", " ").replace("-", " ")
-    # הסרת תגיות איכות/מקור נפוצות
-    n = re.sub(r"\b(1080p|720p|2160p|480p|4k|x264|x265|h264|h265|hevc|bluray|brrip|"
-               r"webrip|web[- ]?dl|hdrip|dvdrip|hdtv|aac|ac3|dts|hebdub|hebsub|heb|"
-               r"proper|repack|remux|10bit|amzn|nf|dsnp)\b", "", n, flags=re.I)
-    n = re.sub(r"\s+", " ", n).strip()
+    n = re.sub(r"[\|/\\]", " ", n)
+    n = _SOURCE_TAGS.sub("", n).strip()                # תגית מקור בתחילת השם
+    n = re.sub(r"\b(?:מדובב|מתורגם|לצפייה ישירה|צפייה ישירה)\b", " ", n)
+    n = _EP_MARKERS.sub(" ", n)                          # סימוני עונה/פרק
+    n = _JUNK_TAGS.sub(" ", n)                           # תגיות איכות/מקור/קבוצה
+    n = re.sub(r"\(\s*\)|\[\s*\]", " ", n)               # סוגריים ריקים שנשארו
+    n = re.sub(r"\s+", " ", n).strip(" -–—·.")
     return n
+
+def _query_candidates(fname: str) -> list:
+    """בונה רשימת מועמדים לחיפוש TMDB לפי סדר עדיפות, לטיפול בשמות מעורבים
+    עברית+אנגלית. מנסים כל אחד עד שמתקבלות תוצאות:
+      1) השם הנקי המלא   2) קטע לטיני בלבד   3) קטע עברי בלבד
+      4) השם בלי שנה בסוף. מסננים כפילויות ומחרוזות קצרות מדי."""
+    base = clean_name(fname)
+    cands = [base]
+    # קטע לטיני רציף (מילים באנגלית/ספרות) — עדיף ל-TMDB (בסיס נתונים אנגלי)
+    latin = " ".join(re.findall(r"[A-Za-z0-9][A-Za-z0-9'&:!]*", base)).strip()
+    if latin and latin.lower() != base.lower():
+        cands.append(latin)
+    # קטע עברי רציף
+    heb = " ".join(re.findall(r"[א-ת][א-ת'\"״׳]*", base)).strip()
+    if heb and heb != base:
+        cands.append(heb)
+    # בלי שנה בסוף (למשל "Dune 2021" → "Dune")
+    noyear = re.sub(r"\b(19|20)\d{2}\b\s*$", "", base).strip()
+    if noyear and noyear != base:
+        cands.append(noyear)
+    out, seen = [], set()
+    for c in cands:
+        c = c.strip()
+        k = c.lower()
+        if len(c) >= 2 and k not in seen:
+            seen.add(k); out.append(c)
+    return out
+
+async def smart_tmdb_search(fname: str):
+    """מחפש ב-TMDB לפי כמה מועמדים (עברית/אנגלית/מלא) עד שמתקבלות תוצאות.
+    מחזיר (query_used, options)."""
+    last_q = clean_name(fname)
+    for q in _query_candidates(fname):
+        opts = await tmdb_search(q)
+        if opts:
+            return q, opts
+        last_q = q
+    return last_q, []
 
 async def tmdb_search(query: str) -> list:
     """מחזיר עד 6 תוצאות TMDB (movie/tv). לכל תוצאה: שם עברי לתצוגה (title),
@@ -1512,13 +1575,67 @@ def _custom_slug(en_title: str, he_title: str, tmdb_id) -> str:
         return f"{base}-{tmdb_id}" if tmdb_id else base
     return f"movie-{tmdb_id}" if tmdb_id else ""
 
+def _all_entries() -> list:
+    """כל הכניסות לבדיקת כפילויות — גם התוכן החי (content.json) וגם ההעלאות
+    הממתינות (new_uploads.json). ככה קובץ שכבר קיים באתר לא יתווסף שוב."""
+    try:
+        return load_content() + load_new_uploads()
+    except Exception:
+        return load_new_uploads()
+
+def _norm_title(s: str) -> str:
+    """נרמול שם להשוואה: אותיות קטנות, בלי גרשיים/סימני פיסוק/רווחים כפולים."""
+    s = (s or "").lower()
+    s = re.sub(r"[\"'`׳״’‘“”\-–—_.,:!?()\[\]]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _norm_series(name: str) -> str:
+    """שם סדרה מנורמל להשוואה — כולל כינויים (תאג''ד→תאגד)."""
+    return _norm_title(_series_alias(name or ""))
+
 def find_upload_by_fuid(fuid: str):
-    """מחזיר כניסה קיימת עם אותו file_unique_id (מניעת כפילויות), או None."""
+    """מחזיר כניסה קיימת (בתוכן או בהעלאות) עם אותו file_unique_id, או None."""
     if not fuid:
         return None
-    for e in load_new_uploads():
+    for e in _all_entries():
         if e.get("file_unique_id") and e["file_unique_id"] == fuid:
             return e
+    return None
+
+def find_existing_movie(tmdb_id, title: str = "", year: str = ""):
+    """מחזיר סרט קיים (בתוכן/בהעלאות) לפי tmdb_id, ואם אין — לפי שם+שנה מנורמלים.
+    מונע כפילות של אותו סרט שהועלה שוב (גם באיכות אחרת)."""
+    nt, yr = _norm_title(title), str(year or "").strip()
+    for e in _all_entries():
+        if e.get("series_name") or e.get("episode_number") is not None:
+            continue  # פרק סדרה — לא סרט
+        if tmdb_id and e.get("tmdb_id") and int(e["tmdb_id"]) == int(tmdb_id):
+            return e
+        if nt and _norm_title(e.get("title") or e.get("en_title") or "") == nt:
+            ey = str(e.get("year") or "").strip()
+            if not yr or not ey or yr == ey:
+                return e
+    return None
+
+def find_existing_episode(series: str, season, episode):
+    """מחזיר פרק קיים (בתוכן/בהעלאות) עם אותה סדרה (מנורמלת)+עונה+פרק, או None.
+    זו ההגנה מפני 'אותו פרק פעמיים' שגרמה לכפילויות בעבר."""
+    ns = _norm_series(series)
+    try:
+        se, ep = int(season), int(episode)
+    except Exception:
+        return None
+    for e in _all_entries():
+        sn = e.get("series_name")
+        if not sn or e.get("episode_number") is None:
+            continue
+        if _norm_series(sn) != ns:
+            continue
+        try:
+            if int(e.get("season_number") or 1) == se and int(e["episode_number"]) == ep:
+                return e
+        except Exception:
+            continue
     return None
 
 def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "") -> dict:
@@ -1767,14 +1884,22 @@ async def on_upload(client: Client, message: Message):
     # כפרק סדרה, בלי TMDB אינטראקטיבי. מתאים להעלאה מרובה (עד 20 קבצים ברצף).
     ep = parse_episode_info(fname)
     if ep:
+        # מניעת כפילות פרק: אותה סדרה+עונה+פרק כבר קיימים (בתוכן או בהעלאות)?
+        exist = find_existing_episode(ep["series"], ep["season"], ep["episode"])
+        if exist:
+            add_episode_entry(ep, channel_msg_id, fuid)  # עדיין שומרים ליתר ביטחון
+            await status.edit_text(
+                f"⚠️ הפרק הזה כבר קיים: <b>{exist.get('series_name', ep['series'])}</b> — "
+                f"עונה {ep['season']} פרק {ep['episode']}.\n"
+                f"נוסף לרשימת ההעלאות אבל כנראה כפול — בדוק בפאנל לפני אישור.")
+            return
         add_episode_entry(ep, channel_msg_id, fuid)
         await status.edit_text(
             f"✅ פרק נוסף: <b>{ep['series']}</b> — עונה {ep['season']} פרק {ep['episode']}\n"
             f"אשר בפאנל («הוסף הכל») והוסף פוסטר לסדרה.")
         return
-    query = clean_name(fname)
-    await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{query or '—'}</b>...")
-    options = await tmdb_search(query)
+    await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{clean_name(fname) or '—'}</b>...")
+    query, options = await smart_tmdb_search(fname)
     _pending_uploads[str(channel_msg_id)] = {
         "channel_msg_id": channel_msg_id, "chat_id": message.chat.id,
         "user_id": uid, "fname": fname, "options": options,
@@ -1831,6 +1956,17 @@ async def on_select(client: Client, cq: CallbackQuery):
         chosen = pending["options"][int(idx)]
     except Exception:
         await cq.answer("בחירה לא תקינה", show_alert=True); return
+    # מניעת כפילות: הסרט הזה כבר קיים באתר (לפי TMDB id או שם+שנה)?
+    if chosen.get("type") == "movie":
+        dup = find_existing_movie(chosen.get("tmdb_id"), chosen.get("title"), chosen.get("year"))
+        if dup:
+            _pending_uploads.pop(cmid, None)
+            await cq.message.edit_text(
+                f"♻️ «{chosen['title']}» ({chosen.get('year') or '?'}) כבר קיים באתר — "
+                f"לא הוספתי כפילות.\nהקובץ נשאר בערוץ. אם בכל זאת תרצה גרסה נוספת, "
+                f"הוסף אותה ידנית בפאנל.")
+            await cq.answer("כבר קיים")
+            return
     entry = add_movie_entry(chosen, pending["channel_msg_id"],
                             pending.get("file_unique_id", ""))
     _pending_uploads.pop(cmid, None)
