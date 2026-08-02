@@ -113,19 +113,28 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
   const items = useMemo(() => {
     const DAY_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
+    // תאריך לפי כל שדה זמין (תוכן מיובא נשמר עם added_at, לא created_date)
+    const getT = (m) => {
+      const v = m.created_date || m.added_at || m.created_at;
+      const t = v ? new Date(v).getTime() : NaN;
+      return isNaN(t) ? 0 : t;
+    };
     const seen = {};
+    const sorted = movies
+      .map(m => ({ m, t: getT(m) }))
+      .filter(x => x.t > 0)
+      .sort((a, b) => b.t - a.t);
     const recent = [];
-    for (const m of movies) {
-      if (!m.created_date) continue;
-      const t = new Date(m.created_date).getTime();
-      if (isNaN(t) || now - t > DAY_MS) continue;
+    for (const { m, t } of sorted) {
       const key = m.series_name || m.id;
       if (seen[key]) continue;
       seen[key] = true;
-      recent.push(m);
-      if (recent.length >= 8) break;
+      recent.push({ m, fresh: now - t <= 3 * DAY_MS });   // "עלה עכשיו" = 3 ימים אחרונים
+      if (recent.length >= 12) break;
     }
-    return recent;
+    // מעדיפים תוכן טרי (3 ימים); אם אין — מציגים בכל זאת את ה-8 החדשים ביותר
+    const fresh = recent.filter(r => r.fresh).map(r => r.m);
+    return (fresh.length ? fresh : recent.slice(0, 8).map(r => r.m)).slice(0, 12);
   }, [movies]);
 
   const [index, setIndex] = useState(0);
@@ -158,18 +167,22 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
       onClick={e => { e.preventDefault(); handleItemClick(displayItem, isSer); }}
       style={{
         position: "relative", margin: "6px 14px 16px", borderRadius: 16, overflow: "hidden",
-        cursor: "pointer", height: 170, background: "#111",
+        cursor: "pointer", height: 200, background: "#111",
         opacity: visible ? 1 : 0, transition: "opacity .35s ease",
         display: "block", textDecoration: "none", color: "inherit",
       }}
     >
       {movie.thumbnail_url && (
-        <img
-          src={movie.thumbnail_url} alt={title}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
-        />
+        <>
+          {/* רקע מטושטש שממלא את הבאנר יפה גם לפוסטר אנכי */}
+          <img src={movie.thumbnail_url} alt="" aria-hidden="true"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", filter: "blur(20px) brightness(.45)", transform: "scale(1.15)" }} />
+          {/* הפוסטר המלא — contain כדי לא לחתוך */}
+          <img src={movie.thumbnail_url} alt={title}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />
+        </>
       )}
-      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(0,0,0,.88), rgba(0,0,0,.1) 65%)" }} />
+      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(0,0,0,.9), rgba(0,0,0,.05) 70%)" }} />
       <div style={{ position: "absolute", top: 10, right: 10, background: "#e50914", color: "#fff", fontSize: 11, fontWeight: 800, padding: "3px 10px", borderRadius: 20 }}>
         עלה עכשיו
       </div>
