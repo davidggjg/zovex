@@ -3,27 +3,36 @@ import { NetflixRow, buildCardHref } from "./NetflixCard";
 import LiveBanner from "../LiveBanner";
 
 function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user }) {
-  const q = searchTerm.toLowerCase();
+  // נרמול לחיפוש: מסיר ניקוד עברי + גרשיים, אותיות קטנות, רווחים כפולים — כך
+  // "אס" מוצא גם "אָס". תמיכה בכמה מילים (כל מילה חייבת להימצא) וגם בשם האנגלי.
+  const norm = (s) => (s || "").toLowerCase()
+    .replace(/[֑-ׇ]/g, "").replace(/["'`׳״’‘“”]/g, "")
+    .replace(/\s+/g, " ").trim();
+  const qTokens = norm(searchTerm).split(" ").filter(Boolean);
+  const matchQ = (...fields) => {
+    if (!qTokens.length) return true;
+    const hay = fields.map(norm).join(" ");
+    return qTokens.every(t => hay.includes(t));
+  };
 
   // בנה map: קטגוריה → פריטים
   const buildItems = (cat) => {
     const regularMovies = movies.filter(m =>
       !m.series_name &&
-      (m.title || "").toLowerCase().includes(q) &&
+      matchQ(m.title, m.en_title, m.original_title) &&
       (cat === "הכל" || m.category === cat)
     );
     const seen = {};
     const seriesList = [];
     movies.forEach(m => {
       if (!m.series_name || seen[m.series_name]) return;
-      const matchQ = m.series_name.toLowerCase().includes(q) || (m.title || "").toLowerCase().includes(q);
       const matchC = cat === "הכל" || m.category === cat;
-      if (matchQ && matchC) { seen[m.series_name] = true; seriesList.push(seriesMap[m.series_name]); }
+      if (matchQ(m.series_name, m.title, m.en_title) && matchC) { seen[m.series_name] = true; seriesList.push(seriesMap[m.series_name]); }
     });
     return [...seriesList, ...regularMovies];
   };
 
-  const liveItems = liveChannels.filter(ch => ch.title.toLowerCase().includes(q)).map(ch => ({ ...ch, is_live: true }));
+  const liveItems = liveChannels.filter(ch => matchQ(ch.title, ch.name)).map(ch => ({ ...ch, is_live: true }));
   const hasLiveRow = (selectedCategory === "הכל" || selectedCategory === "שידורים חיים") && liveItems.length > 0;
 
   // קבע אילו שורות להציג לפי selectedCategory
