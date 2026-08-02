@@ -86,6 +86,8 @@ server {
     location /feedback/    { include snippets/zovex-proxy.conf; }
     location /app/         { include snippets/zovex-proxy.conf; }
     location /pool/        { include snippets/zovex-proxy.conf; }
+    location /import/      { include snippets/zovex-proxy.conf; }
+    location /channels/    { include snippets/zovex-proxy.conf; }
     location = /ping       { include snippets/zovex-proxy.conf; }
     location = /restart    { include snippets/zovex-proxy.conf; }
     location = /dashboard  { include snippets/zovex-proxy.conf; }
