@@ -30,7 +30,7 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
         onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,.18)"; }}
         onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,.10)"; }}>
         {isLive && item.thumbnail_url ? (
-          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
+          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", padding: 10, boxSizing: "border-box", display: "block" }} onError={e => e.target.style.display = "none"} />
         ) : isLive ? (
           <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "linear-gradient(135deg,#1a1a1a,#2a0a0c)" }}>
             <Eye size={30} color="#e50914" strokeWidth={2} />
