@@ -1707,8 +1707,11 @@ def _all_entries() -> list:
         return load_new_uploads()
 
 def _norm_title(s: str) -> str:
-    """נרמול שם להשוואה: אותיות קטנות, בלי גרשיים/סימני פיסוק/רווחים כפולים."""
+    """נרמול שם להשוואה: אותיות קטנות, בלי ניקוד עברי, בלי גרשיים/פיסוק/שנה/
+    רווחים כפולים — כדי ש'אָס' == 'אס' ו'שם 2022' == 'שם'."""
     s = (s or "").lower()
+    s = re.sub(r"[֑-ׇ]", "", s)          # ניקוד/טעמים עבריים
+    s = re.sub(r"\b(19|20)\d{2}\b", " ", s)         # שנה בתוך השם
     s = re.sub(r"[\"'`׳״’‘“”\-–—_.,:!?()\[\]]", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -2529,14 +2532,24 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
                 if epkey in seen_ep:
                     _import["skipped"] += 1; continue
             else:
-                # סרט — מזהים לפני ההעתקה כדי לדלג על כפילות בלי להעתיק לחינם
-                options, ryear, _t = await recognize_media(cap, fname)
-                if options and options[0].get("tmdb_id") and int(options[0]["tmdb_id"]) in seen_mov_tmdb:
+                # סרט — מזהים מועמדי-שם (עברי/אנגלי) + שנה מהכיתוב, לפני ההעתקה
+                cands, ryear, _t = _recognition_candidates(cap, fname)
+                def _title_seen(nt):
+                    return bool(nt) and ((nt, str(ryear or "")) in seen_mov_title or (nt, "") in seen_mov_title)
+                # דדופ מול הקיים לפי כל צורת-שם (כולל השם העברי מהכיתוב) + שנה
+                if any(_title_seen(_norm_title(c)) for c in cands):
                     _import["skipped"] += 1; continue
-                mtitle = _norm_title(options[0]["title"]) if options else _norm_title(
-                    (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname))
-                if mtitle and (mtitle, str((options[0].get("year") if options else "") or ryear)) in seen_mov_title:
-                    _import["skipped"] += 1; continue
+                # חיפוש TMDB לפי המועמדים
+                options = None
+                for q in cands:
+                    options = await tmdb_search(q, ryear)
+                    if options:
+                        break
+                if options:
+                    if options[0].get("tmdb_id") and int(options[0]["tmdb_id"]) in seen_mov_tmdb:
+                        _import["skipped"] += 1; continue
+                    if _title_seen(_norm_title(options[0].get("title", ""))):
+                        _import["skipped"] += 1; continue
             # העתקה לערוץ הפעיל שלנו (גלישה אוטומטית כשמתמלא) דרך ה-userbot
             new_id = None
             dest = current_upload_channel()
