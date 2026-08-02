@@ -2466,23 +2466,21 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
     client = ub["client"]
     _import.update(running=True, source=str(source), found=0, imported=0,
                    skipped=0, errors=0, unmatched=0, msg="מזהה את ערוץ המקור...", started=int(time.time()))
-    # ה-userbot רץ in_memory → מטמון ה-peers מתאפס ב-restart, אז ערוץ פרטי לפי
-    # ID נכשל ב-"Peer id invalid". מסנכרנים dialogs כדי לאכלס את המטמון, ואז
-    # מנסים לפתור את הערוץ. אם עדיין נכשל — החשבון כנראה לא חבר בערוץ.
+    # ה-userbot רץ in_memory → מטמון ה-peers מתאפס ב-restart. מסנכרנים dialogs
+    # פעם אחת כדי לאכלס peers של ערוץ המקור *וגם* של הערוצים שלנו, ואז פותרים
+    # את המקור. אם נכשל — החשבון כנראה לא חבר בערוץ.
+    _import["msg"] = "מסנכרן צ'אטים..."
+    try:
+        async for _d in client.get_dialogs():
+            pass
+    except Exception as e:
+        log.warning("import: get_dialogs נכשל: %s", e)
     try:
         await client.get_chat(source)
-    except Exception:
-        try:
-            n = 0
-            async for _d in client.get_dialogs():
-                n += 1
-            log.info("import: סונכרנו %d dialogs לאיכלוס peers", n)
-            await client.get_chat(source)
-        except Exception as e:
-            _import.update(running=False, msg=f"❌ אין גישה לערוץ המקור ({e}). ודא שחשבון ה-userbot (user_8) חבר בערוץ.")
-            log.warning("import: לא ניתן לפתור את ערוץ המקור %s: %s", source, e)
-            return
-    _import["msg"] = "סורק את הערוץ..."
+    except Exception as e:
+        _import.update(running=False, msg=f"❌ אין גישה לערוץ המקור ({e}). ודא שחשבון ה-userbot חבר בערוץ.")
+        log.warning("import: לא ניתן לפתור את ערוץ המקור %s: %s", source, e)
+        return
     per_min = max(1, int(per_min or 5))     # כמה קבצים להעביר בכל דקה
     window_start = time.time()
     batch = 0
@@ -2505,6 +2503,26 @@ async def _bulk_import_worker(source, per_min: int, limit: int):
             t = _norm_title(e.get("title") or e.get("en_title") or "")
             if t:
                 seen_mov_title.add((t, str(e.get("year") or "")))
+    # סורק את הערוצים שלנו (שהבוט שולח אליהם הכל) ואוסף file_unique_id — כך קובץ
+    # שכבר קיים אצלנו (גם אם לא רשום ב-content.json) יידלג. אותו קובץ = אותו fuid.
+    _import["msg"] = "מסנכרן את הערוצים שלנו (מניעת כפילויות)..."
+    for ch in STREAM_CHANNELS:
+        try:
+            cnt = 0
+            async for m in client.get_chat_history(ch):
+                if not _import["running"]:
+                    break
+                md = m.video or m.document or m.audio
+                fu = getattr(md, "file_unique_id", "") if md else ""
+                if fu:
+                    seen_fuid.add(fu)
+                cnt += 1
+                if cnt % 1000 == 0:
+                    _import["msg"] = f"מסנכרן את הערוצים שלנו... ({len(seen_fuid)} קבצים ידועים)"
+        except Exception as e:
+            log.warning("import: סריקת ערוץ שלנו %s נכשלה: %s", ch, e)
+    log.info("import: %d fuid ידועים לפני סריקת המקור", len(seen_fuid))
+    _import["msg"] = f"סורק את המקור ({len(seen_fuid)} קבצים כבר אצלנו)..."
     done = 0
     try:
         async for msg in client.get_chat_history(source):
