@@ -2715,6 +2715,11 @@ async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "a
                         if options:
                             break
                     if options:
+                        # כיבוד בחירת "רק סרטים": קובץ בלי סימון פרק בשם עדיין יכול
+                        # להיות סדרה לפי TMDB (למשל דרמה יפנית). אם המשתמש ביקש רק
+                        # סרטים ו-TMDB אומר שזו סדרה — מדלגים (לא מכניסים סדרה).
+                        if kinds == "movies" and options[0].get("type") == "tv":
+                            _import["skipped"] += 1; continue
                         if options[0].get("tmdb_id") and int(options[0]["tmdb_id"]) in seen_mov_tmdb:
                             _import["skipped"] += 1; continue
                         if _title_seen(_norm_title(options[0].get("title", ""))):
