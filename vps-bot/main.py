@@ -1975,9 +1975,12 @@ async def on_upload(client: Client, message: Message):
     if dup:
         await message.reply_text(
             f"♻️ הקובץ הזה כבר קיים במערכת:\n<b>{dup.get('title','—')}</b>"
-            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(dup['video_url']))}")
+            f" ({dup.get('year') or '?'})\n\n🔗 קישור סטרימינג:\n{sign_stream_url(expand_base(dup['video_url']))}",
+            quote=True)
         return
-    status = await message.reply_text("⏳ מעלה לערוץ...")
+    # quote=True → התגובה "מצטטת" את הודעת הקובץ. לחיצה עליה קופצת ישר לקובץ,
+    # כך שרואים בדיוק לאיזה קובץ כל תגובה שייכת (חשוב בהעלאה מרובה).
+    status = await message.reply_text("⏳ מעלה לערוץ...", quote=True)
     # תור: מעבירים קובץ-קובץ (לא כולם בבת אחת) + retry עם המתנה על FloodWait,
     # כדי שהעלאה מרובה לא תיחסם ע"י טלגרם (420 FLOOD_WAIT).
     channel_msg_id = None
