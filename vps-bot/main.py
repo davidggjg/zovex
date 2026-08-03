@@ -1655,6 +1655,10 @@ async def tmdb_search(query: str, year: str = "") -> list:
                         "poster": (TMDB_IMG + it["poster_path"]) if it.get("poster_path") else "",
                         "overview": (it.get("overview") or "")[:300],
                         "original": orig,
+                        # מטא לזיהוי קטגוריה אוטומטי (ז'אנר/מוצא/שפה)
+                        "genre_ids": it.get("genre_ids") or [],
+                        "origin": it.get("origin_country") or [],
+                        "lang": (it.get("original_language") or "").lower(),
                     })
     except Exception as e:
         log.warning("tmdb_search נכשל: %s", e)
@@ -1671,6 +1675,37 @@ async def tmdb_search(query: str, year: str = "") -> list:
                 return 3
         out.sort(key=_yr_rank)
     return out[:6]
+
+# ── זיהוי קטגוריה אוטומטי מ-TMDB (ז'אנר/מוצא/שפה) ────────────────────────────
+# מ-genre_ids של TMDB: 16=אנימציה, 27=אימה, 10751=משפחה, 10762=ילדים (טלוויזיה).
+# מוצא/שפה: JP/ja=יפני (אנימה), IL/he=ישראלי. מיפוי לקטגוריות האתר. הבחירה
+# היא "ניחוש טוב" — המשתמש עובר על זה אחר כך ומתקן במידת הצורך.
+def _auto_category(item: dict) -> str:
+    g = set(item.get("genre_ids") or [])
+    origin = {str(x).upper() for x in (item.get("origin") or [])}
+    lang = (item.get("lang") or "").lower()
+    is_tv = item.get("type") == "tv"
+    is_anim = 16 in g
+    is_jp = ("JP" in origin) or (lang == "ja")
+    is_il = ("IL" in origin) or (lang == "he")
+    if is_tv:
+        if is_anim and is_jp:
+            return "אנימה"
+        if is_il:
+            return "סדרות ישראליות"
+        # רק תיוג מפורש של ילדים/משפחה → סדרות לילדים (אנימציה למבוגרים כמו
+        # ריק ומורטי לא מתויגת ככה ולכן נשארת ב'סדרות')
+        if (10762 in g) or (10751 in g):
+            return "סדרות לילדים"
+        return "סדרות"
+    # סרט
+    if is_anim and is_jp:
+        return "אנימה"
+    if 27 in g:
+        return "אימה"
+    if is_anim or (10751 in g):
+        return "סרטים לילדים (מתאים גם למשפחה)"
+    return "סרטים"
 
 # ── תעתיק עברית→לטינית (גיבוי ל-slug כשאין שם אנגלי ב-TMDB, למשל תוכן ישראלי) ──
 _HE_TRANSLIT = {
@@ -1764,8 +1799,11 @@ def find_existing_episode(series: str, season, episode):
             continue
     return None
 
-def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None) -> dict:
-    """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ, ושומר ל-new_uploads.json.
+def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None,
+                    category: str = None, to_content: bool = False) -> dict:
+    """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ.
+    to_content=False → שומר ל-new_uploads.json (ממתין לאישור).
+    to_content=True  → מוסיף ישירות ל-content.json (עולה לאתר) עם category.
     שומר קישור נייד (%BASE%) — הכתובת האמיתית מוזרקת בזמן ההגשה/התצוגה.
     chat_id = הערוץ שאליו הועתק הקובץ (לתמיכה בריבוי ערוצים)."""
     chat_id = chat_id or STREAM_CHANNEL_ID
@@ -1789,12 +1827,14 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "",
         "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
     }
-    lst = load_new_uploads()
+    if category:
+        entry["category"] = category
+    lst = load_content() if to_content else load_new_uploads()
     # מניעת כפילות — לפי (ערוץ+מזהה הודעה) וגם לפי הקובץ עצמו (file_unique_id)
     lst = [e for e in lst if not (e.get("channel_msg_id") == channel_msg_id and (e.get("channel_id") or STREAM_CHANNEL_ID) == chat_id)
            and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
     lst.append(entry)
-    save_new_uploads(lst)
+    (save_content if to_content else save_new_uploads)(lst)
     return entry
 
 # ── זיהוי פרק סדרה משם הקובץ (להעלאה מרובה) ─────────────────────────────────
@@ -1878,37 +1918,43 @@ def parse_episode_info(fname: str):
     series = _series_alias(series)                  # מנרמל כינויים (תאג''ד → תאגד)
     return {"series": series or "סדרה", "season": season or 1, "episode": episode}
 
-def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None) -> dict:
-    """מוסיף פרק סדרה אוטומטית ל-new_uploads (בלי TMDB) — לאישור בפאנל + פוסטר.
+def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None,
+                      category: str = "סדרות", meta: dict = None, to_content: bool = False) -> dict:
+    """מוסיף פרק סדרה. to_content=False → new_uploads (ממתין); True → content (עולה
+    לאתר). meta (אופציונלי, מ-TMDB של הסדרה): poster/overview/tmdb_id/en_title/slug
+    — משמש כשמעלים ישירות לאתר עם קטגוריה אמיתית.
     chat_id = הערוץ שאליו הועתק הקובץ (לתמיכה בריבוי ערוצים)."""
     chat_id = chat_id or STREAM_CHANNEL_ID
+    meta = meta or {}
+    slug = meta.get("custom_slug") or (_slug_base(ep["series"]) or None)
     entry = {
         "id": _slugify(ep["series"], "ep") + f"-s{ep['season']}e{ep['episode']}-{channel_msg_id}",
         "title": ep["series"],
         # slug נקי לכתובת הסדרה (תעתיק אם השם עברי) — כל הפרקים חולקים אותו
-        "custom_slug": _slug_base(ep["series"]) or None,
+        "custom_slug": slug,
         "series_name": ep["series"],
         "season_number": ep["season"],
         "episode_number": ep["episode"],
         "episode_title": "",
         "year": "",
-        "category": "סדרות",
+        "category": category,
         "type": "telegram",
         "media_kind": "tv",
-        "tmdb_id": 0,
+        "tmdb_id": meta.get("tmdb_id", 0),
+        "en_title": meta.get("en_title", ""),
         "video_url": stored_stream_url(channel_msg_id, chat_id),
-        "thumbnail_url": "",
-        "description": "",
+        "thumbnail_url": meta.get("poster", ""),
+        "description": meta.get("overview", ""),
         "channel_id": chat_id,
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
     }
-    lst = load_new_uploads()
+    lst = load_content() if to_content else load_new_uploads()
     lst = [e for e in lst if not (e.get("channel_msg_id") == channel_msg_id and (e.get("channel_id") or STREAM_CHANNEL_ID) == chat_id)
            and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
     lst.append(entry)
-    save_new_uploads(lst)
+    (save_content if to_content else save_new_uploads)(lst)
     return entry
 
 async def _upload_noop(client, message):
@@ -2522,7 +2568,8 @@ async def pool_remove(req: PoolRemoveReq, request: Request):
 # ע"י חשבון-משתמש (userbot) מה-pool — רק הוא יכול לקרוא ערוץ של מישהו אחר וגם
 # לפרסם לערוץ שלנו. איטי בכוונה (טלגרם מגביל) — רץ ברקע ומדלג על כפילויות.
 _import = {"running": False, "source": "", "found": 0, "imported": 0,
-           "skipped": 0, "errors": 0, "unmatched": 0, "msg": "מוכן", "started": 0}
+           "skipped": 0, "errors": 0, "unmatched": 0, "to_site": 0, "to_pending": 0,
+           "msg": "מוכן", "started": 0}
 
 def _pick_pool_userbot():
     for b in _stream_bots:
@@ -2530,30 +2577,31 @@ def _pick_pool_userbot():
             return b
     return None
 
-async def _bulk_import_worker(source, per_min: int, limit: int, kinds: str = "all"):
+async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "all"):
+    """סורק מאגר/מאגרים, מעתיק כל וידאו לערוץ שלנו, ומזהה דרך TMDB:
+    • זוהה בוודאות → מעלה *ישירות לאתר* עם קטגוריה אוטומטית (לפי ז'אנר/מוצא).
+    • לא זוהה → נשאר בהמתנה (new_uploads) לאישור ידני.
+    תומך בכמה מאגרים ברצף. איטי בכוונה (per_min בדקה) — טפטוף מבוקר."""
     ub = _pick_pool_userbot()
     if not ub:
         _import.update(running=False, msg="אין userbot ב-pool — הוסף חשבון-משתמש בטאב 'בוטים'")
         return
     client = ub["client"]
-    _import.update(running=True, source=str(source), found=0, imported=0,
-                   skipped=0, errors=0, unmatched=0, msg="מזהה את ערוץ המקור...", started=int(time.time()))
+    if isinstance(sources, (str, int)):
+        sources = [sources]
+    sources = [s for s in sources if str(s).strip() != ""]
+    _import.update(running=True, source=", ".join(str(s) for s in sources), found=0, imported=0,
+                   skipped=0, errors=0, unmatched=0, to_site=0, to_pending=0,
+                   msg="מזהה את ערוצי המקור...", started=int(time.time()))
     # ה-userbot רץ in_memory → מטמון ה-peers מתאפס ב-restart. מסנכרנים dialogs
-    # פעם אחת כדי לאכלס peers של ערוץ המקור *וגם* של הערוצים שלנו, ואז פותרים
-    # את המקור. אם נכשל — החשבון כנראה לא חבר בערוץ.
+    # פעם אחת כדי לאכלס peers של ערוצי המקור *וגם* של הערוצים שלנו.
     _import["msg"] = "מסנכרן צ'אטים..."
     try:
         async for _d in client.get_dialogs():
             pass
     except Exception as e:
         log.warning("import: get_dialogs נכשל: %s", e)
-    try:
-        await client.get_chat(source)
-    except Exception as e:
-        _import.update(running=False, msg=f"❌ אין גישה לערוץ המקור ({e}). ודא שחשבון ה-userbot חבר בערוץ.")
-        log.warning("import: לא ניתן לפתור את ערוץ המקור %s: %s", source, e)
-        return
-    per_min = max(1, int(per_min or 5))     # כמה קבצים להעביר בכל דקה
+    per_min = max(1, int(per_min or 10))     # כמה קבצים להעביר בכל דקה
     window_start = time.time()
     batch = 0
     # טוענים פעם אחת את מה שכבר קיים (מהיר — בלי לקרוא קבצים בכל פריט):
@@ -2594,121 +2642,162 @@ async def _bulk_import_worker(source, per_min: int, limit: int, kinds: str = "al
         except Exception as e:
             log.warning("import: סריקת ערוץ שלנו %s נכשלה: %s", ch, e)
     log.info("import: %d fuid ידועים לפני סריקת המקור", len(seen_fuid))
-    _import["msg"] = f"סורק את המקור ({len(seen_fuid)} קבצים כבר אצלנו)..."
+    _series_cache: dict = {}   # שם-סדרה מנורמל → התאמת tv מ-TMDB (או None), לחיסכון בקריאות
+
+    async def _series_tmdb(name):
+        key = _norm_series(name)
+        if key in _series_cache:
+            return _series_cache[key]
+        tv = None
+        try:
+            opts = await tmdb_search(name)
+            tv = next((o for o in opts if o.get("type") == "tv"), None)
+        except Exception as e:
+            log.warning("import: חיפוש סדרה ב-TMDB נכשל: %s", e)
+        _series_cache[key] = tv
+        return tv
+
     done = 0
-    try:
-        async for msg in client.get_chat_history(source):
-            if not _import["running"]:
-                _import["msg"] = "נעצר ידנית"; break
-            media = msg.video or msg.document
-            if not media:
-                continue
-            cap = msg.caption or ""
-            fname = getattr(media, "file_name", "") or ""
-            if msg.document and fname and not re.search(r'\.(mkv|mp4|avi|mov|webm|m4v|ts)$', fname, re.I):
-                continue  # מסמך שאינו וידאו
-            # דלג על טריילרים/טיזרים/קדימונים (לא הסרט עצמו)
-            if _TRAILER_RE.search(cap):
-                _import["skipped"] += 1; continue
-            _import["found"] += 1
-            fuid = getattr(media, "file_unique_id", "") or ""
-            if fuid and fuid in seen_fuid:
-                _import["skipped"] += 1; continue
-            # פרק סדרה? מזהים מהכיתוב או משם הקובץ
-            ep = parse_episode_info(cap) or parse_episode_info(fname)
-            # סינון לפי בחירת המשתמש: רק סרטים / רק סדרות / משולב
-            if (kinds == "movies" and ep) or (kinds == "series" and not ep):
-                continue
-            options, ryear = None, ""
-            if ep:
-                epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
-                if epkey in seen_ep:
+    for source in sources:
+        if not _import["running"]:
+            break
+        try:
+            await client.get_chat(source)
+        except Exception as e:
+            log.warning("import: אין גישה למקור %s: %s", source, e)
+            _import["msg"] = f"⚠️ דילגתי על מקור {source} (אין גישה — ודא שה-userbot חבר בו)"
+            continue
+        _import["msg"] = f"סורק מקור {source} ({len(seen_fuid)} קבצים כבר אצלנו)..."
+        try:
+            async for msg in client.get_chat_history(source):
+                if not _import["running"]:
+                    _import["msg"] = "נעצר ידנית"; break
+                media = msg.video or msg.document
+                if not media:
+                    continue
+                cap = msg.caption or ""
+                fname = getattr(media, "file_name", "") or ""
+                if msg.document and fname and not re.search(r'\.(mkv|mp4|avi|mov|webm|m4v|ts)$', fname, re.I):
+                    continue  # מסמך שאינו וידאו
+                # דלג על טריילרים/טיזרים/קדימונים (לא הסרט עצמו)
+                if _TRAILER_RE.search(cap):
                     _import["skipped"] += 1; continue
-            else:
-                # סרט — מזהים מועמדי-שם (עברי/אנגלי) + שנה מהכיתוב, לפני ההעתקה
-                cands, ryear, _t = _recognition_candidates(cap, fname)
-                def _title_seen(nt):
-                    return bool(nt) and ((nt, str(ryear or "")) in seen_mov_title or (nt, "") in seen_mov_title)
-                # דדופ מול הקיים לפי כל צורת-שם (כולל השם העברי מהכיתוב) + שנה
-                if any(_title_seen(_norm_title(c)) for c in cands):
+                _import["found"] += 1
+                fuid = getattr(media, "file_unique_id", "") or ""
+                if fuid and fuid in seen_fuid:
                     _import["skipped"] += 1; continue
-                # חיפוש TMDB לפי המועמדים
-                options = None
-                for q in cands:
-                    options = await tmdb_search(q, ryear)
-                    if options:
-                        break
-                if options:
-                    if options[0].get("tmdb_id") and int(options[0]["tmdb_id"]) in seen_mov_tmdb:
-                        _import["skipped"] += 1; continue
-                    if _title_seen(_norm_title(options[0].get("title", ""))):
-                        _import["skipped"] += 1; continue
-            # העתקה לערוץ הפעיל שלנו (גלישה אוטומטית כשמתמלא) דרך ה-userbot
-            new_id = None
-            dest = current_upload_channel()
-            async with _upload_lock:
-                for attempt in range(6):
-                    try:
-                        copied = await client.copy_message(dest, source, msg.id)
-                        new_id = copied.id
-                        note_uploaded_msg_id(dest, new_id)
-                        break
-                    except FloodWait as e:
-                        _import["msg"] = f"טלגרם ביקש להמתין {int(getattr(e,'value',30))}ש — ממתין..."
-                        await asyncio.sleep(int(getattr(e, "value", 30)) + 2)
-                    except Exception as e:
-                        log.warning("import: copy נכשל: %s", e); break
-            if not new_id:
-                _import["errors"] += 1; continue
-            try:
+                # פרק סדרה? מזהים מהכיתוב או משם הקובץ
+                ep = parse_episode_info(cap) or parse_episode_info(fname)
+                # סינון לפי בחירת המשתמש: רק סרטים / רק סדרות / משולב
+                if (kinds == "movies" and ep) or (kinds == "series" and not ep):
+                    continue
+                options, ryear = None, ""
                 if ep:
-                    add_episode_entry(ep, new_id, fuid, dest)
-                    seen_ep.add((_norm_series(ep["series"]), ep["season"], ep["episode"]))
-                elif options:
-                    ch = dict(options[0]); ch["year"] = ch.get("year") or ryear
-                    add_movie_entry(ch, new_id, fuid, dest)
-                    if ch.get("tmdb_id"):
-                        try: seen_mov_tmdb.add(int(ch["tmdb_id"]))
-                        except Exception: pass
-                    seen_mov_title.add((_norm_title(ch.get("title", "")), str(ch.get("year") or "")))
+                    epkey = (_norm_series(ep["series"]), ep["season"], ep["episode"])
+                    if epkey in seen_ep:
+                        _import["skipped"] += 1; continue
                 else:
-                    # לא זוהה ב-TMDB — נכנס לאישור מסומן (tmdb_id=0) לטיפול נפרד
-                    _import["unmatched"] += 1
-                    cap_title = (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname)
-                    add_movie_entry({"title": cap_title or f"קובץ {new_id}",
-                                     "year": ryear, "tmdb_id": 0, "type": "movie",
-                                     "poster": "", "overview": ""}, new_id, fuid, dest)
-                    seen_mov_title.add((_norm_title(cap_title), str(ryear or "")))
-                if fuid:
-                    seen_fuid.add(fuid)
-                _import["imported"] += 1
-            except Exception as e:
-                log.warning("import: הוספה נכשלה: %s", e); _import["errors"] += 1
-            done += 1
-            _import["msg"] = f"מייבא... ({_import['imported']} נוספו, {_import['skipped']} דילוגים)"
-            if limit and done >= limit:
-                _import["msg"] = f"הגיע למגבלה ({limit}) — הרץ שוב להמשך"; break
-            # קצב: אחרי per_min העברות, ממתין עד סוף הדקה (טפטוף עדין + זמן לאשר)
-            batch += 1
-            if batch >= per_min:
-                wait = max(0, 60 - (time.time() - window_start))
-                _import["msg"] = (f"הועברו {per_min} קבצים בדקה זו — ממתין {int(wait)}ש "
-                                  f"({_import['imported']} סה\"כ). אפשר לאשר בפאנל בינתיים.")
-                slept = 0
-                while slept < wait and _import["running"]:
-                    await asyncio.sleep(1); slept += 1
-                window_start = time.time(); batch = 0
-        else:
-            _import["msg"] = "הסתיים — עבר על כל הערוץ ✅"
-    except Exception as e:
-        log.exception("bulk import failed")
-        _import["msg"] = f"שגיאה: {e}"
+                    # סרט — מזהים מועמדי-שם (עברי/אנגלי) + שנה מהכיתוב, לפני ההעתקה
+                    cands, ryear, _t = _recognition_candidates(cap, fname)
+                    def _title_seen(nt):
+                        return bool(nt) and ((nt, str(ryear or "")) in seen_mov_title or (nt, "") in seen_mov_title)
+                    # דדופ מול הקיים לפי כל צורת-שם (כולל השם העברי מהכיתוב) + שנה
+                    if any(_title_seen(_norm_title(c)) for c in cands):
+                        _import["skipped"] += 1; continue
+                    # חיפוש TMDB לפי המועמדים
+                    options = None
+                    for q in cands:
+                        options = await tmdb_search(q, ryear)
+                        if options:
+                            break
+                    if options:
+                        if options[0].get("tmdb_id") and int(options[0]["tmdb_id"]) in seen_mov_tmdb:
+                            _import["skipped"] += 1; continue
+                        if _title_seen(_norm_title(options[0].get("title", ""))):
+                            _import["skipped"] += 1; continue
+                # העתקה לערוץ הפעיל שלנו (גלישה אוטומטית כשמתמלא) דרך ה-userbot
+                new_id = None
+                dest = current_upload_channel()
+                async with _upload_lock:
+                    for attempt in range(6):
+                        try:
+                            copied = await client.copy_message(dest, source, msg.id)
+                            new_id = copied.id
+                            note_uploaded_msg_id(dest, new_id)
+                            break
+                        except FloodWait as e:
+                            _import["msg"] = f"טלגרם ביקש להמתין {int(getattr(e,'value',30))}ש — ממתין..."
+                            await asyncio.sleep(int(getattr(e, "value", 30)) + 2)
+                        except Exception as e:
+                            log.warning("import: copy נכשל: %s", e); break
+                if not new_id:
+                    _import["errors"] += 1; continue
+                try:
+                    if ep:
+                        # זיהוי סדרה ב-TMDB (עם cache) → קטגוריה + פוסטר + תיאור.
+                        tv = await _series_tmdb(ep["series"])
+                        if tv:
+                            cat = _auto_category(tv)
+                            en = tv.get("en_title") or tv.get("original") or tv.get("title")
+                            meta = {"poster": tv.get("poster", ""), "overview": tv.get("overview", ""),
+                                    "tmdb_id": tv.get("tmdb_id", 0), "en_title": en,
+                                    "custom_slug": _custom_slug(en, tv.get("title", ""), tv.get("tmdb_id"))}
+                            add_episode_entry(ep, new_id, fuid, dest, category=cat, meta=meta, to_content=True)
+                            _import["to_site"] += 1
+                        else:
+                            add_episode_entry(ep, new_id, fuid, dest)   # לא זוהה → בהמתנה
+                            _import["to_pending"] += 1; _import["unmatched"] += 1
+                        seen_ep.add((_norm_series(ep["series"]), ep["season"], ep["episode"]))
+                    elif options:
+                        ch = dict(options[0]); ch["year"] = ch.get("year") or ryear
+                        cat = _auto_category(ch)
+                        add_movie_entry(ch, new_id, fuid, dest, category=cat, to_content=True)
+                        _import["to_site"] += 1
+                        if ch.get("tmdb_id"):
+                            try: seen_mov_tmdb.add(int(ch["tmdb_id"]))
+                            except Exception: pass
+                        seen_mov_title.add((_norm_title(ch.get("title", "")), str(ch.get("year") or "")))
+                    else:
+                        # לא זוהה ב-TMDB — נכנס לאישור מסומן (tmdb_id=0) לטיפול נפרד
+                        _import["unmatched"] += 1; _import["to_pending"] += 1
+                        cap_title = (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname)
+                        add_movie_entry({"title": cap_title or f"קובץ {new_id}",
+                                         "year": ryear, "tmdb_id": 0, "type": "movie",
+                                         "poster": "", "overview": ""}, new_id, fuid, dest)
+                        seen_mov_title.add((_norm_title(cap_title), str(ryear or "")))
+                    if fuid:
+                        seen_fuid.add(fuid)
+                    _import["imported"] += 1
+                except Exception as e:
+                    log.warning("import: הוספה נכשלה: %s", e); _import["errors"] += 1
+                done += 1
+                _import["msg"] = (f"מייבא... {_import['to_site']} עלו לאתר, "
+                                  f"{_import['to_pending']} בהמתנה, {_import['skipped']} דילוגים")
+                if limit and done >= limit:
+                    _import["msg"] = f"הגיע למגבלה ({limit}) — הרץ שוב להמשך"; _import["running"] = False; break
+                # קצב: אחרי per_min העברות, ממתין עד סוף הדקה (טפטוף עדין + זמן לאשר)
+                batch += 1
+                if batch >= per_min:
+                    wait = max(0, 60 - (time.time() - window_start))
+                    _import["msg"] = (f"הועברו {per_min} קבצים בדקה זו — ממתין {int(wait)}ש "
+                                      f"({_import['to_site']} באתר, {_import['to_pending']} בהמתנה)")
+                    slept = 0
+                    while slept < wait and _import["running"]:
+                        await asyncio.sleep(1); slept += 1
+                    window_start = time.time(); batch = 0
+        except Exception as e:
+            log.exception("bulk import source failed")
+            _import["msg"] = f"שגיאה במקור {source}: {e}"
+    if _import["running"]:
+        _import["msg"] = (f"הסתיים ✅ — {_import['to_site']} עלו לאתר, "
+                          f"{_import['to_pending']} נשארו בהמתנה לאישור")
     _import["running"] = False
 
 class ImportStartReq(BaseModel):
     password: str
     source: str
-    per_min: int = 5     # כמה קבצים להעביר בכל דקה (טפטוף)
+    source2: str = ""    # מאגר שני (אופציונלי) — נסרק אחרי הראשון
+    per_min: int = 10    # כמה קבצים להעביר בכל דקה (טפטוף)
     limit: int = 0       # מגבלת סה"כ (0 = עד שהערוץ נגמר / עצירה ידנית)
     kinds: str = "all"   # "all" / "movies" / "series" — מה לייבא
 
@@ -2717,17 +2806,21 @@ async def import_start(req: ImportStartReq, request: Request):
     check_panel_password(request, req.password)
     if _import["running"]:
         raise HTTPException(status_code=400, detail="ייבוא כבר רץ")
-    src = (req.source or "").strip()
-    if not src:
-        raise HTTPException(status_code=400, detail="חסר מקור (שם/לינק/ID של הערוץ)")
     if not _pick_pool_userbot():
         raise HTTPException(status_code=400, detail="אין userbot ב-pool — הוסף חשבון-משתמש בטאב 'בוטים'")
-    try:
-        src_val = int(src)          # תמיכה ב-ID מספרי (-100...)
-    except ValueError:
-        src_val = src               # שם משתמש/לינק
+    def _norm_src(s):
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            return int(s)           # תמיכה ב-ID מספרי (-100...)
+        except ValueError:
+            return s                # שם משתמש/לינק
+    srcs = [x for x in (_norm_src(req.source), _norm_src(req.source2)) if x is not None]
+    if not srcs:
+        raise HTTPException(status_code=400, detail="חסר מקור (שם/לינק/ID של הערוץ)")
     kinds = req.kinds if req.kinds in ("all", "movies", "series") else "all"
-    asyncio.create_task(_bulk_import_worker(src_val, int(req.per_min or 5), max(0, int(req.limit or 0)), kinds))
+    asyncio.create_task(_bulk_import_worker(srcs, int(req.per_min or 10), max(0, int(req.limit or 0)), kinds))
     return {"ok": True}
 
 @api.post("/import/status")

@@ -205,10 +205,14 @@
   <!-- ייבוא ממאגר (ערוץ חיצוני) -->
   <div id="pane-import" class="hidden">
     <div class="card"><h2>ייבוא ממאגר טלגרם</h2>
-      <div class="muted">מייבא וידאו מערוץ חיצוני: מעתיק כל קובץ <b>לערוץ שלנו</b> (כך שכל הבוטים יגישו אותו), מזהה שם, ומוסיף ל<b>«העלאות מהבוט»</b> לאישור.
-      <br><b>דרישות:</b> חייב להיות <b>userbot (חשבון) בבריכת הבוטים</b>, והחשבון הזה חייב להיות <b>חבר בערוץ המקור</b> וגם <b>אדמין עם הרשאת פרסום בערוץ שלנו</b>.</div>
-      <label style="margin-top:10px">ערוץ מקור (שם משתמש / לינק / ID)</label>
+      <div class="muted">מייבא וידאו ממאגר חיצוני: מעתיק כל קובץ <b>לערוץ שלנו</b> (כך שכל הבוטים יגישו אותו), ומזהה דרך TMDB —
+      <br>• <b>זוהה בוודאות</b> → עולה <b>ישירות לאתר</b> עם קטגוריה אוטומטית (לפי ז'אנר/מוצא: ילדים/אנימה/ישראלי/אימה…).
+      <br>• <b>לא זוהה</b> → נשאר ב<b>«העלאות מהבוט»</b> לאישור ידני, שתעבור עליו אחד-אחד.
+      <br><b>דרישות:</b> חייב להיות <b>userbot (חשבון) בבריכת הבוטים</b>, חבר בערוצי המקור ואדמין עם הרשאת פרסום בערוץ שלנו.</div>
+      <label style="margin-top:10px">מאגר מקור 1 (שם משתמש / לינק / ID)</label>
       <input id="imp_src" placeholder="@channelname או -100xxxxxxxxxx">
+      <label style="margin-top:8px">מאגר מקור 2 (לא חובה — נסרק אחרי הראשון)</label>
+      <input id="imp_src2" placeholder="ריק אם רק מאגר אחד">
       <div><label>מה לייבא</label>
         <select id="imp_kinds">
           <option value="all">משולב — סרטים + סדרות</option>
@@ -216,7 +220,7 @@
           <option value="series">רק סדרות</option>
         </select></div>
       <div class="grid2" style="margin-top:8px">
-        <div><label>קבצים לדקה</label><input id="imp_rate" type="number" value="5" min="1" max="30"></div>
+        <div><label>קבצים לדקה</label><input id="imp_rate" type="number" value="10" min="1" max="30"></div>
         <div><label>מגבלת סה"כ (0 = הכל)</label><input id="imp_limit" type="number" value="0" min="0"></div>
       </div>
       <div class="grid2" style="margin-top:8px">
@@ -845,12 +849,13 @@ async function removePoolBot(name){
 let _impTimer=null;
 async function startImport(){
   const source=$("imp_src").value.trim();
+  const source2=($("imp_src2")?$("imp_src2").value.trim():"");
   if(!source){ $("impMsg").innerHTML='<span class="err">חסר ערוץ מקור</span>'; return; }
-  const per_min=parseInt($("imp_rate").value)||5, limit=parseInt($("imp_limit").value)||0, kinds=$("imp_kinds").value;
+  const per_min=parseInt($("imp_rate").value)||10, limit=parseInt($("imp_limit").value)||0, kinds=$("imp_kinds").value;
   $("impMsg").textContent="מתחיל…";
   try{
     const r=await fetch("/import/start",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({password:PASS,source,per_min,limit,kinds})});
+      body:JSON.stringify({password:PASS,source,source2,per_min,limit,kinds})});
     const d=await r.json();
     if(!r.ok) throw new Error(d.detail||"שגיאה");
     $("impMsg").innerHTML='<span class="ok">הייבוא התחיל ✓ רץ ברקע — אפשר לעבור ל«העלאות מהבוט» ולאשר תוך כדי.</span>';
@@ -870,10 +875,10 @@ async function pollImport(){
       `<div><b>מצב:</b> ${d.running?'<span class="ok">רץ ▶</span>':'<span class="muted">לא רץ</span>'}</div>
        <div style="margin-top:6px">${esc(d.msg||"")}</div>
        <div style="margin-top:8px;display:flex;gap:10px;flex-wrap:wrap">
-         <span class="pill" style="background:#e6f9ec;color:#1a7f37">נוספו ${d.imported||0}</span>
+         <span class="pill" style="background:#e6f9ec;color:#1a7f37">עלו לאתר ${d.to_site||0}</span>
+         <span class="pill" style="background:#eef;color:#3b3bb6">בהמתנה לאישור ${d.to_pending||0}</span>
          <span class="pill">נמצאו ${d.found||0}</span>
-         <span class="pill" style="background:#fff4e5;color:#b26a00">דילוגים ${d.skipped||0}</span>
-         <span class="pill" style="background:#eef">לא זוהו ב-TMDB ${d.unmatched||0}</span>
+         <span class="pill" style="background:#fff4e5;color:#b26a00">דילוגים (כפילות) ${d.skipped||0}</span>
          <span class="pill" style="background:#fdeaea;color:#c0392b">שגיאות ${d.errors||0}</span>
        </div>`;
   }catch(e){ $("impStatus").innerHTML='<span class="err">טעינת סטטוס נכשלה</span>'; }
