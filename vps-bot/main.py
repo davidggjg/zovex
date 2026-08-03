@@ -2390,20 +2390,41 @@ def load_content() -> list:
 
 CONTENT_BAK_DIR = DATA_DIR / "content_backups"
 
+# ── גרסת תוכן (optimistic lock) ───────────────────────────────────────────────
+# מונה שעולה בכל שמירה. הפאנל טוען את הגרסה הנוכחית, ובשמירה שולח אותה בחזרה.
+# אם התוכן כבר השתנה בינתיים (מישהו אחר שמר) — הגרסאות לא תואמות והשרת דוחה את
+# השמירה במקום לדרוס. כך שני עורכים במקביל לא מוחקים אחד לשני את העבודה.
+CONTENT_VERSION_FILE = DATA_DIR / "content_version.txt"
+
+def get_content_version() -> int:
+    try:
+        return int(CONTENT_VERSION_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return 0
+
+def _bump_content_version() -> int:
+    v = get_content_version() + 1
+    try:
+        CONTENT_VERSION_FILE.write_text(str(v), encoding="utf-8")
+    except Exception as e:
+        log.warning("עדכון גרסת content נכשל: %s", e)
+    return v
+
 def save_content(arr: list):
     # גיבוי בטיחות לפני דריסה — content.json הוא מקור האמת, ורוצים אפשרות לשחזר
-    # אם מישהו מחק/דרס בטעות. שומרים עד 10 גיבויים אחרונים.
+    # אם מישהו מחק/דרס בטעות. שומרים עד 30 גיבויים אחרונים.
     try:
         if CONTENT_FILE.exists():
             CONTENT_BAK_DIR.mkdir(parents=True, exist_ok=True)
             bak = CONTENT_BAK_DIR / f"content_{int(time.time())}.json"
             bak.write_text(CONTENT_FILE.read_text(encoding="utf-8"), encoding="utf-8")
             baks = sorted(CONTENT_BAK_DIR.glob("content_*.json"))
-            for old in baks[:-10]:
+            for old in baks[:-30]:
                 old.unlink(missing_ok=True)
     except Exception as e:
         log.warning("גיבוי content נכשל (ממשיכים בשמירה): %s", e)
     CONTENT_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
+    _bump_content_version()
 
 async def seed_content_if_empty():
     """בהפעלה ראשונה — זורע את content.json מתוך movies.json הקיים בגיטהאב, כדי
@@ -2753,17 +2774,21 @@ async def channels_list(req: PoolPwReq, request: Request):
 
 @api.get("/content")
 async def content_get():
-    """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית)."""
-    return _expand_urls(load_content())
+    """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית).
+    כותרת X-Content-Version מאפשרת לפאנל לדעת על איזו גרסה הוא עורך (optimistic lock)."""
+    return JSONResponse(_expand_urls(load_content()),
+                        headers={"X-Content-Version": str(get_content_version())})
 
 @api.get("/movies.json")
 async def content_movies_alias():
     """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
-    return _expand_urls(load_content())
+    return JSONResponse(_expand_urls(load_content()),
+                        headers={"X-Content-Version": str(get_content_version())})
 
 class ContentSaveReq(BaseModel):
     password: str
     movies: list
+    base_version: Optional[int] = None
 
 @api.post("/content/save")
 async def content_save(req: ContentSaveReq, request: Request):
@@ -2771,9 +2796,18 @@ async def content_save(req: ContentSaveReq, request: Request):
     check_panel_password(request, req.password)
     if not isinstance(req.movies, list):
         raise HTTPException(status_code=400, detail="movies חייב להיות מערך")
+    # ── הגנת עריכה במקביל (optimistic lock) ──────────────────────────────────
+    # אם הפאנל שלח base_version והתוכן כבר השתנה מאז (מישהו אחר שמר) — דוחים
+    # במקום לדרוס. זה מונע את מחיקת התוכן שקורית כשכמה אנשים עורכים מטאבים ישנים.
+    cur_ver = get_content_version()
+    if req.base_version is not None and req.base_version != cur_ver:
+        raise HTTPException(status_code=409, detail=(
+            f"⚠️ התוכן עודכן על ידי מישהו אחר בזמן שערכת (גרסה בשרת {cur_ver}, "
+            f"אצלך {req.base_version}). התוכן נטען מחדש — אנא בצע את השינוי שוב "
+            "כדי לא לדרוס עבודה של אחרים."))
     # מכווצים את הכתובת שלנו חזרה ל-%BASE% כדי שהקישורים יישארו ניידים
     save_content(_collapse_urls(req.movies))
-    return {"ok": True, "count": len(req.movies)}
+    return {"ok": True, "count": len(req.movies), "version": get_content_version()}
 
 @api.get("/content/relink")
 async def content_relink(request: Request, dry: int = 1):
