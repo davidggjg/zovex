@@ -1826,6 +1826,8 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "",
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
+        # created_date (UTC עם Z) — כדי שהפריט יופיע בבאנר "עלה עכשיו" באתר/אפליקציה
+        "created_date": datetime.utcnow().isoformat() + "Z",
     }
     if category:
         entry["category"] = category
@@ -1949,6 +1951,8 @@ def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "", c
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
         "added_at": datetime.utcnow().isoformat(),
+        # created_date (UTC עם Z) — כדי שהפריט יופיע בבאנר "עלה עכשיו" באתר/אפליקציה
+        "created_date": datetime.utcnow().isoformat() + "Z",
     }
     lst = load_content() if to_content else load_new_uploads()
     lst = [e for e in lst if not (e.get("channel_msg_id") == channel_msg_id and (e.get("channel_id") or STREAM_CHANNEL_ID) == chat_id)
