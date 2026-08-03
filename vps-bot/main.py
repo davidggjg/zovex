@@ -1809,7 +1809,17 @@ _HE_SEASON_EP = re.compile(r'ע(?:ונה)?\s*0*(\d{1,2})\s*[·.\-]?\s*פ(?:רק)
 _HE_EP_ONLY = re.compile(r'(?:^|\s)פ(?:רק)?\s*0*(\d{1,3})')
 _HE_SEASON_ONLY = re.compile(r'(?:^|\s)ע(?:ונה)?\s*0*(\d{1,2})')
 # תגיות מקור/ערוץ נפוצות שמופיעות בתחילת שם הקובץ ולא שייכות לשם הסדרה
-_SOURCE_TAGS = re.compile(r'^(?:זירה\s*מדיה|נתי\s*מדיה|נתי\s*מידע|zira\s*media|zira|nati\s*media)\s*', re.I)
+# תגיות מקור/ערוצים/מעלים שמופיעות בתחילת השם ולא שייכות לשם הסדרה. מוסר
+# חזרה על עצמו (תג + אימוג'י + hashtag) עד שנשאר רק השם. פותר פיצול סדרה לכמה
+# חלקים בגלל שמות מקור שונים ("חננאל סרטים", "נטפליקס Kids", "השימיה"...).
+_SOURCE_TAGS = re.compile(
+    r'^(?:(?:'
+    r'זירה\s*מדיה|נתי\s*מדיה|נתי\s*מידע|zira\s*media|zira|nati\s*media|'
+    r'חננאל(?:\s*סרטים|\s*ס)?|דב\s*סרטים|השימיה|'
+    r'נטפליקס(?:\s*kids)?|netflix(?:\s*kids)?|'
+    r'בנק(?:\s*סרטים(?:\s*וסדרות)?)?|כל\s*הסדרות(?:\s*בחיפוש)?|israellasry\w*|'
+    r'#\S+|[\U0001F000-\U0001FAFF☀-➿✅❗]+'
+    r')[\s\-:·|]*)+', re.I)
 
 # ── כינויי סדרות: שם שמזוהה מהקובץ → שם קנוני באתר. פותר מקרים שבהם שם הקובץ
 # מכיל ראשי-תיבות/גרשיים (למשל "תאג''ד") אבל הסדרה באתר נקראת "תאגד". קובץ
@@ -2182,6 +2192,44 @@ async def uploads_clear(req: UploadsClearReq, request: Request):
         lst = []
     save_new_uploads(lst)
     return {"ok": True, "remaining": len(lst)}
+
+class UploadsMergeReq(BaseModel):
+    password: str
+    series_name: str
+    category: str = "סדרות"
+
+@api.post("/uploads/merge")
+async def uploads_merge(req: UploadsMergeReq, request: Request):
+    """מאחד את *כל* הפרקים הממתינים לסדרה אחת (שם+קטגוריה+slug אחידים) ומוסיף
+    אותם לאתר. פותר את הפיצול לכמה סדרות בגלל תגיות מקור/שגיאות כתיב. סרטים
+    (בלי מספר פרק) נשארים בממתינים."""
+    check_panel_password(request, req.password)
+    name = (req.series_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="חסר שם סדרה")
+    slug = _slug_base(name) or None
+    ups = load_new_uploads()
+    content = load_content()
+    poster = next((e.get("thumbnail_url") for e in ups if e.get("thumbnail_url")), "")
+    merged, remaining = 0, []
+    for e in ups:
+        is_ep = (e.get("episode_number") is not None) or (e.get("season_number") is not None) or bool(e.get("series_name"))
+        if is_ep:
+            x = dict(e)
+            x["series_name"] = name
+            x["title"] = name
+            x["custom_slug"] = slug
+            x["category"] = req.category
+            x["media_kind"] = "tv"
+            if poster and not x.get("thumbnail_url"):
+                x["thumbnail_url"] = poster
+            content.append(x)
+            merged += 1
+        else:
+            remaining.append(e)
+    save_content(content)
+    save_new_uploads(remaining)
+    return {"ok": True, "merged": merged, "series": name, "remaining": len(remaining)}
 
 # ── מערכת תמיכה/משוב: משתמשים כותבים, המנהל רואה בפאנל ומגיב ──────────────────
 # feedback.json: { user_id: {user_id,name,email,fcm_token,messages:[{from,text,ts,kind}],

@@ -157,6 +157,19 @@
 
   <!-- העלאות -->
   <div id="pane-uploads" class="hidden">
+    <div class="card" style="border:1px solid #e50914">
+      <h2>🔗 אחד את כל הממתינים לסדרה אחת</h2>
+      <div class="muted">העלית סדרה והיא התפצלה לכמה חלקים (בגלל שמות מקור שונים)? הזן שם אחד + קטגוריה, לחץ, וכל הפרקים הממתינים ייכנסו כ<b>סדרה אחת</b>.</div>
+      <input id="mrg_name" placeholder="שם הסדרה (למשל: מורשות)" style="margin-top:8px">
+      <div style="margin-top:8px"><label>קטגוריה</label><select id="mrg_cat">
+        <option value="סדרות">סדרות</option>
+        <option value="סדרות לילדים">סדרות לילדים</option>
+        <option value="סדרות ישראליות">סדרות ישראליות</option>
+        <option value="אנימה">אנימה</option>
+      </select></div>
+      <button onclick="mergeUploads()" style="width:100%;margin-top:8px">🔗 אחד הכל והוסף לאתר</button>
+      <div id="mrgMsg" class="muted" style="margin-top:6px"></div>
+    </div>
     <div class="card"><div class="toprow"><h2>העלאות שממתינות מהבוט</h2>
       <div class="row"><button class="mini green" onclick="addAllUploads()">✓ הוסף הכל לאתר</button>
         <button class="mini gray" onclick="loadUploads()">↻</button></div></div>
@@ -623,6 +636,22 @@ async function addSeriesUploads(gi){
       ? ' — עם פוסטר ותיאור מהסדרה הקיימת ✓'
       : ' (סדרה חדשה — ערוך פרק אחד, שים פוסטר, ולחץ "עדכן פוסטר לכל הסדרה")'));
   }
+}
+async function mergeUploads(){
+  const name=$("mrg_name").value.trim(), cat=$("mrg_cat").value;
+  if(!name){ $("mrgMsg").innerHTML='<span class="err">חסר שם סדרה</span>'; return; }
+  if(!confirm(`לאחד את כל הפרקים הממתינים לסדרה «${name}» ולהוסיף לאתר?`)) return;
+  $("mrgMsg").textContent="מאחד…";
+  try{
+    const r=await fetch("/uploads/merge",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,series_name:name,category:cat})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||"שגיאה");
+    $("mrg_name").value="";
+    $("mrgMsg").innerHTML=`<span class="ok">אוחדו ${d.merged} פרקים → «${esc(d.series)}» ✓ נכנסו לאתר!</span>`;
+    if(typeof loadContent==="function") await loadContent();
+    loadUploads();
+  }catch(e){ $("mrgMsg").innerHTML='<span class="err">'+e.message+'</span>'; }
 }
 async function addAllUploads(){
   if(!_uploads.length){ await loadUploads(); if(!_uploads.length) return; }
