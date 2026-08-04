@@ -9,22 +9,26 @@ function postNative(msg) {
 }
 
 function setupMediaSession(videoEl, movie) {
-  if (!("mediaSession" in navigator)) return;
-  const artwork = movie.poster_url
-    ? [{ src: movie.poster_url, sizes: "512x512", type: "image/jpeg" }]
-    : [];
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: movie.title || "ZOVEX",
-    artist: movie.year ? String(movie.year) : "",
-    artwork,
-  });
-  const seek = (s) => { try { videoEl.currentTime = Math.max(0, videoEl.currentTime + s); } catch {} };
-  navigator.mediaSession.setActionHandler("play", () => videoEl.play().catch?.(() => {}));
-  navigator.mediaSession.setActionHandler("pause", () => videoEl.pause());
-  navigator.mediaSession.setActionHandler("seekbackward", (d) => seek(-(d?.seekOffset ?? 10)));
-  navigator.mediaSession.setActionHandler("seekforward", (d) => seek(d?.seekOffset ?? 10));
-  navigator.mediaSession.setActionHandler("stop", () => { videoEl.pause(); videoEl.currentTime = 0; });
-  navigator.mediaSession.playbackState = "playing";
+  // כל הבלוק ב-try: ב-WebView של חלק מהטלוויזיות ה-API קיים חלקית
+  // (למשל בלי MediaMetadata) וזריקה כאן הייתה מפילה את הנגן.
+  try {
+    if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+    const artwork = movie.poster_url
+      ? [{ src: movie.poster_url, sizes: "512x512", type: "image/jpeg" }]
+      : [];
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: movie.title || "ZOVEX",
+      artist: movie.year ? String(movie.year) : "",
+      artwork,
+    });
+    const seek = (s) => { try { videoEl.currentTime = Math.max(0, videoEl.currentTime + s); } catch {} };
+    navigator.mediaSession.setActionHandler("play", () => videoEl.play().catch?.(() => {}));
+    navigator.mediaSession.setActionHandler("pause", () => videoEl.pause());
+    navigator.mediaSession.setActionHandler("seekbackward", (d) => seek(-(d?.seekOffset ?? 10)));
+    navigator.mediaSession.setActionHandler("seekforward", (d) => seek(d?.seekOffset ?? 10));
+    navigator.mediaSession.setActionHandler("stop", () => { videoEl.pause(); videoEl.currentTime = 0; });
+    navigator.mediaSession.playbackState = "playing";
+  } catch {}
 }
 
 function clearMediaSession() {
@@ -789,12 +793,12 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     let destroyed = false;
     setVideoReady(false);
     currentSrcRef.current = src;
+    const inApp = !!window.ReactNativeWebView;   // בתוך אפליקציית ה-WebView (כולל Smart TV)
     const init = async () => {
-      loadStyles([VENDOR_BASE + "video-js.min.css"]);
-      await loadScripts([
-        VENDOR_BASE + "video.min.js",
-        VENDOR_BASE + "shaka-player.compiled.js",
-      ]);
+      // טוענים *רק* את Shaka. video.js נטען כנגן-גיבוי בלבד ורק אם Shaka נכשל.
+      // קודם הרצנו את שניהם על אותו אלמנט וידאו בו-זמנית — כבד ומתנגש, וזה
+      // הפיל את ה-WebView (במיוחד בטלוויזיות חכמות חלשות: קריסה ויציאה מהאפליקציה).
+      await loadScripts([VENDOR_BASE + "shaka-player.compiled.js"]);
       if (destroyed) return;
       window.shaka.polyfill.installAll();
       const videoEl = document.createElement("video");
@@ -804,26 +808,38 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       containerRef.current.appendChild(videoEl);
       videoElRef.current = videoEl;
       setVideoReady(true);
-      const vjs = window.videojs(videoEl, { controls: false, autoplay: true, fill: true });
       const shaka = new window.shaka.Player();
-      // תיקון: שידורים חיים מ-CDN חיצוני (כמו כאן 11) נראו "נתקעים וקופצים
-      // אחורה" אצלנו כל כמה שניות, בזמן שאותו שידור בדיוק חלק לגמרי באתר
-      // המקור - כלומר זו לא בעיה בשידור עצמו, זו הגדרת ה-buffering ברירת
-      // המחדל של Shaka (מכוונת ל-VOD, לא לשידור חי מ-CDN שיכול להיות קצת
-      // פחות יציב). מגדילים את חלון ה-buffer רק לשידורים חיים - זה עולה
-      // בכמה שניות עיכוב מול "הקצה החי", אבל נותן הרבה יותר כרית נגד
-      // קפיצות ברשת לפני שהנגן צריך לעצור ולהמתין.
+      // buffer: לשידור חי חלון גדול נגד קפיצות ברשת (ראו הסבר בהיסטוריה);
+      // בתוך האפליקציה מקטינים את חלון ה-buffer כדי לצמצם זיכרון ולמנוע קריסה.
+      const cfg = {};
       if (isLive) {
-        shaka.configure({
-          streaming: {
-            bufferingGoal: 30,
-            rebufferingGoal: 4,
-            retryParameters: { maxAttempts: 5, baseDelay: 500, backoffFactor: 2, timeout: 15000 },
-          },
-        });
+        cfg.streaming = { bufferingGoal: 30, rebufferingGoal: 4,
+          retryParameters: { maxAttempts: 5, baseDelay: 500, backoffFactor: 2, timeout: 15000 } };
+      } else if (inApp) {
+        cfg.streaming = { bufferingGoal: 20, rebufferingGoal: 3 };
       }
+      if (Object.keys(cfg).length) shaka.configure(cfg);
       await shaka.attach(videoEl);
-      playerRef.current = { vjs, shaka };
+      playerRef.current = { shaka };
+
+      // נגן-גיבוי: נטען *רק* אם Shaka נכשל (רשת/קודק לא נתמך).
+      const startFallback = async () => {
+        try {
+          loadStyles([VENDOR_BASE + "video-js.min.css"]);
+          await loadScripts([VENDOR_BASE + "video.min.js"]);
+          if (destroyed) return;
+          const vjs = window.videojs(videoEl, { controls: false, autoplay: true, fill: true });
+          playerRef.current = { ...(playerRef.current || {}), vjs };
+          vjs.src({ src, type: "application/x-mpegURL" });
+          if (!isLive && startTime > 1) { try { vjs.currentTime(startTime); } catch {} }
+          vjs.play().catch(() => {});
+          setLoading(false);
+          setupMediaSession(videoEl, movie);
+          postNative({ type: "video_playing", value: true });
+          startRefreshTimer();
+        } catch { if (!destroyed) setLoading(false); }
+      };
+
       try {
         await shaka.load(src);
         if (!destroyed) {
@@ -835,15 +851,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות
         }
       } catch {
-        if (!destroyed) {
-          vjs.src({ src, type: "application/x-mpegURL" });
-          if (!isLive && startTime > 1) { try { vjs.currentTime(startTime); } catch {} }
-          vjs.play().catch(() => {});
-          setLoading(false);
-          setupMediaSession(videoEl, movie);
-          postNative({ type: "video_playing", value: true });
-          startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות (fallback)
-        }
+        if (!destroyed) await startFallback();
       }
     };
     // loadScripts יכולה להיכשל (רשת/timeout) - בלי catch כאן זה היה משאיר
