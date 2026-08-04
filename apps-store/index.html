@@ -71,14 +71,12 @@
   .sheet{position:fixed;inset:0;z-index:50;display:none;flex-direction:column;background:var(--bg);overflow-y:auto}
   .sheet.open{display:flex;animation:slideup .3s cubic-bezier(.2,.85,.25,1)}
   @keyframes slideup{from{transform:translateY(24px);opacity:.4}to{transform:none;opacity:1}}
-  .hero{position:relative;height:270px;background:#e9edf5;overflow:hidden}
-  .hero .bg{position:absolute;inset:0;background-size:cover;background-position:center;
-    filter:blur(30px) saturate(1.25);transform:scale(1.25);opacity:.6}
-  .hero img{position:relative;z-index:1;width:100%;height:100%;object-fit:contain;display:block}
-  .hph{position:absolute;inset:0;z-index:1;display:none;place-items:center;font-size:88px;font-weight:900;color:#fff;
+  .hero{position:relative;background:#0a0d14;overflow:hidden}
+  .hero img{display:block;width:100%;height:56vw;max-height:380px;object-fit:cover}
+  .hph{display:none;width:100%;height:56vw;max-height:380px;place-items:center;font-size:26vw;font-weight:900;color:#fff;
     background:linear-gradient(135deg,var(--accent),#7c5cff)}
-  .hero .fade{position:absolute;inset:0;z-index:2;pointer-events:none;
-    background:linear-gradient(180deg,rgba(245,247,251,0) 60%,var(--bg))}
+  .hero .fade{position:absolute;left:0;right:0;bottom:0;height:90px;z-index:2;pointer-events:none;
+    background:linear-gradient(180deg,rgba(245,247,251,0),var(--bg))}
   .back{position:absolute;top:14px;right:14px;z-index:3;width:40px;height:40px;border-radius:50%;
     background:rgba(255,255,255,.92);display:grid;place-items:center;box-shadow:var(--shadow);cursor:pointer;border:0}
   .back svg{width:20px;height:20px;color:var(--ink)}
@@ -122,9 +120,8 @@
   <!-- מסך פרטים -->
   <div class="sheet" id="sheet">
     <div class="hero">
-      <div class="bg" id="d_bg"></div>
-      <div class="hph" id="d_ph"></div>
       <img id="d_hero" alt="">
+      <div class="hph" id="d_ph"></div>
       <div class="fade"></div>
       <button class="back" onclick="closeSheet()" aria-label="חזרה">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m9 6 6 6-6 6"/></svg>
@@ -194,11 +191,10 @@ function render(){
 }
 function openApp(id,fromUrl){
   const a=APPS.find(x=>x.id===id); if(!a) return; current=a;
-  const src=img(a), hero=document.getElementById("d_hero"), ph=document.getElementById("d_ph"), bg=document.getElementById("d_bg");
+  const src=img(a), hero=document.getElementById("d_hero"), ph=document.getElementById("d_ph");
   ph.textContent=initial(a);
-  const showPh=()=>{ hero.style.display="none"; ph.style.display="grid"; bg.style.backgroundImage=""; };
-  if(src){ hero.style.display="block"; ph.style.display="none"; bg.style.backgroundImage=`url("${src}")`;
-    hero.onerror=showPh; hero.src=src; }
+  const showPh=()=>{ hero.style.display="none"; ph.style.display="grid"; };
+  if(src){ hero.style.display="block"; ph.style.display="none"; hero.onerror=showPh; hero.src=src; }
   else showPh();
   document.getElementById("d_name").textContent=a.name||"";
   document.getElementById("d_cat").textContent=a.category||"";
