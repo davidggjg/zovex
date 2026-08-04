@@ -53,19 +53,19 @@ def save_apps(arr: list):
     APPS_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def load_cats() -> list:
-    if CATS_FILE.exists():
+    if CATS_FILE.exists():                     # אם נשמר (גם ריק) — מכבדים בדיוק
         try:
             c = json.loads(CATS_FILE.read_text(encoding="utf-8"))
-            if isinstance(c, list) and c: return c
+            if isinstance(c, list): return c
         except Exception: pass
-    return list(DEFAULT_CATS)
+        return []
+    return list(DEFAULT_CATS)                   # רק בפעם הראשונה — זריעת ברירת מחדל
 
 def save_cats(arr: list):
     clean = [str(x).strip() for x in arr if str(x).strip()]
     seen, out = set(), []
     for c in clean:
-        if c not in seen: seen.add(c); out.append(c)
-    if not out: out = list(DEFAULT_CATS)
+        if c not in seen: seen.add(c); out.append(c)   # מכבד גם רשימה ריקה
     CATS_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
@@ -141,7 +141,7 @@ def add_from_post(post: dict):
     cats = load_cats()
     entry = {
         "id": uuid.uuid4().hex[:12],
-        "name": name, "category": cats[0] if cats else "כללי",
+        "name": name, "category": cats[0] if cats else "",
         "image": "", "icon": "", "banner": "",
         "description": cap if cap else "",
         "version": "", "size": human_size(doc.get("file_size", 0)),
