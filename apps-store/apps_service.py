@@ -250,10 +250,16 @@ async def _stop():
     try: await bot.stop()
     except Exception: pass
 
+NOCACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
+
+def _html(name: str) -> HTMLResponse:
+    f = HERE / name
+    body = f.read_text(encoding="utf-8") if f.exists() else "<h1>AppMod</h1>"
+    return HTMLResponse(body, headers=NOCACHE)   # תמיד גרסה טרייה — לא נתקע על מטמון בדפדפן
+
 @api.get("/", response_class=HTMLResponse)
 async def index():
-    f = HERE / "index.html"
-    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("<h1>AppMod</h1>")
+    return _html("index.html")
 
 @api.get("/apps/content")
 async def content():
@@ -306,8 +312,7 @@ class SaveReq(BaseModel):
 
 @api.get("/apps/admin", response_class=HTMLResponse)
 async def admin_page():
-    f = HERE / "admin.html"
-    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("<h1>admin.html חסר</h1>")
+    return _html("admin.html")
 
 @api.post("/apps/list")
 async def admin_list(req: dict):
@@ -338,8 +343,7 @@ async def ping(): return {"ok": True, "apps": len(load_apps())}
 # חייב להיות אחרון: מגיש את האתר לכל /<slug> כדי שכתובת יפה (domain/netflix) תעבוד.
 @api.get("/{slug}", response_class=HTMLResponse)
 async def app_page(slug: str):
-    f = HERE / "index.html"
-    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("<h1>AppMod</h1>")
+    return _html("index.html")
 
 if __name__ == "__main__":
     import uvicorn

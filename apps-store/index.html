@@ -194,11 +194,12 @@ function render(){
 }
 function openApp(id,fromUrl){
   const a=APPS.find(x=>x.id===id); if(!a) return; current=a;
-  const src=img(a), hero=document.getElementById("d_hero"), ph=document.getElementById("d_ph");
-  if(src){ hero.style.display="block"; hero.src=src; ph.style.display="none";
-    document.getElementById("d_bg").style.backgroundImage=`url("${src}")`; }
-  else { hero.style.display="none"; ph.style.display="grid"; ph.textContent=initial(a);
-    document.getElementById("d_bg").style.backgroundImage=""; }
+  const src=img(a), hero=document.getElementById("d_hero"), ph=document.getElementById("d_ph"), bg=document.getElementById("d_bg");
+  ph.textContent=initial(a);
+  const showPh=()=>{ hero.style.display="none"; ph.style.display="grid"; bg.style.backgroundImage=""; };
+  if(src){ hero.style.display="block"; ph.style.display="none"; bg.style.backgroundImage=`url("${src}")`;
+    hero.onerror=showPh; hero.src=src; }
+  else showPh();
   document.getElementById("d_name").textContent=a.name||"";
   document.getElementById("d_cat").textContent=a.category||"";
   document.getElementById("d_ver").textContent=a.version||"—";
