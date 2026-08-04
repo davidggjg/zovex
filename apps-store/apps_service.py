@@ -120,6 +120,14 @@ api = FastAPI(title="AppMod")
 @api.on_event("startup")
 async def _start():
     await bot.start()
+    # קריטי: טוענים את הערוץ למטמון ה-peers. בלי זה, כשמגיע פוסט חדש
+    # Pyrogram לא מצליח לזהות את הערוץ (in_memory) ומפיל את העדכון בשקט —
+    # ואז ה-handler לא נורה. get_chat מאכלס את ה-access_hash של הערוץ.
+    try:
+        ch = await bot.get_chat(CHANNEL_ID)
+        log.info("✅ ערוץ נטען למטמון: %s (%s)", getattr(ch, "title", ""), CHANNEL_ID)
+    except Exception as e:
+        log.warning("⚠️ טעינת ערוץ נכשלה: %s", e)
     log.info("בוט AppMod פעיל. ערוץ=%s", CHANNEL_ID)
 
 @api.on_event("shutdown")
