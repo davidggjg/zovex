@@ -2,20 +2,26 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # AppMod · שירות חנות האפליקציות (נפרד לגמרי משרת הסרטים)
 #   • מגיש את האתר (index.html) ואת רשימת האפליקציות (/apps/content)
-#   • בוט טלגרם שמאזין לערוץ: כל APK שמעלים → נכנס לרשימה אוטומטית
-#   • הורדה: /apps/dl/<id> → מזרים את ה-APK מהערוץ למשתמש
+#   • קבלה: Bot API (getUpdates) — טלגרם פותר את הערוץ בשרת שלו, בלי Peer id invalid
+#   • הורדה: Pyrogram stream_media לפי file_id — בלי הגבלת 20MB, בלי לפתור את הערוץ
 #   • פאנל ניהול קטן לעריכת פרטים (אייקון/תיאור/קטגוריה/צילומי מסך)
 # רץ על פורט 8001 (שרת הסרטים על 8000) — לא נוגעים אחד בשני.
+#
+# למה שתי טכנולוגיות?
+#   בוטים לא יכולים לפתור ערוץ פרטי ב-Pyrogram (Peer id invalid / CheckChatInvite
+#   אסור לבוטים), אז *קבלת* הפוסטים חייבת לעבור דרך Bot API. אבל Bot API מגביל
+#   הורדות ל-20MB, ו-APK גדול מזה — לכן *ההורדה* עוברת דרך Pyrogram לפי file_id,
+#   ש-מקודד בתוכו את כל מה שצריך (dc/מזהה/access_hash) ולא דורש לפתור את הערוץ.
 # ─────────────────────────────────────────────────────────────────────────────
 import os, re, json, time, asyncio, logging, uuid
+import urllib.request, urllib.parse
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from pyrogram import Client, filters
+from pyrogram import Client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("appmod")
@@ -25,13 +31,15 @@ BOT_TOKEN   = os.environ["APPS_BOT_TOKEN"]                       # הטוקן ש
 API_ID      = int(os.environ.get("APPS_API_ID", os.environ.get("API_ID", "0")))
 API_HASH    = os.environ.get("APPS_API_HASH", os.environ.get("API_HASH", ""))
 CHANNEL_ID  = int(os.environ.get("APPS_CHANNEL_ID", "-1004358130306"))
-CHANNEL_INVITE = os.environ.get("APPS_CHANNEL_INVITE", "")   # קישור הזמנה — לפתרון ערוץ פרטי
 PANEL_PASS  = os.environ.get("APPS_PANEL_PASSWORD", "changeme")
 PUBLIC_BASE = os.environ.get("APPS_PUBLIC_BASE", "https://appmod.duckdns.org").rstrip("/")
 DATA_DIR    = Path(os.environ.get("APPS_DATA_DIR", "/opt/appmod/data"))
 HERE        = Path(__file__).resolve().parent
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 APPS_FILE   = DATA_DIR / "apps.json"
+OFFSET_FILE = DATA_DIR / "update_offset.txt"
+
+BOT_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def load_apps() -> list:
     if APPS_FILE.exists():
@@ -56,87 +64,104 @@ def clean_app_name(fname: str) -> str:
     n = re.sub(r"\b(v?\d+(\.\d+)+|mod|premium|pro|apk|android)\b", " ", n, flags=re.I)
     return re.sub(r"\s+", " ", n).strip() or "אפליקציה"
 
-# ── בוט טלגרם ────────────────────────────────────────────────────────────────
-bot = Client("appmod_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
-             in_memory=True, workdir=str(DATA_DIR))
+# ── לקוח Pyrogram — לשימוש *רק להורדה* לפי file_id (לא מאזין לעדכונים) ─────────
+# no_updates=True: לא מושך עדכונים כלל, כדי לא להתנגש עם ה-getUpdates של ה-Bot API.
+bot = Client("appmod_dl", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
+             in_memory=True, no_updates=True, workdir=str(DATA_DIR))
 
-def _is_apk(msg) -> bool:
-    d = getattr(msg, "document", None)
-    if not d: return False
-    fn = (getattr(d, "file_name", "") or "").lower()
-    mt = (getattr(d, "mime_type", "") or "").lower()
+# ── Bot API (HTTP) — קבלת פוסטים מהערוץ ──────────────────────────────────────
+def _api(method: str, params: dict = None, timeout: int = 65) -> dict:
+    """קריאה סינכרונית ל-Bot API (רצה ב-thread כדי לא לחסום את asyncio)."""
+    data = urllib.parse.urlencode(params or {}).encode()
+    req = urllib.request.Request(f"{BOT_API}/{method}", data=data)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def load_offset() -> int:
+    try: return int(OFFSET_FILE.read_text().strip())
+    except Exception: return 0
+
+def save_offset(v: int):
+    try: OFFSET_FILE.write_text(str(v))
+    except Exception: pass
+
+def _is_apk_doc(doc: dict) -> bool:
+    fn = (doc.get("file_name") or "").lower()
+    mt = (doc.get("mime_type") or "").lower()
     return fn.endswith(".apk") or "android.package" in mt
 
-# יומן אבחון: רושם כל הודעה שהבוט מקבל (עוזר לזהות אם הוא בכלל מקבל מהערוץ)
-@bot.on_message(group=1)
-async def _debug_any(client, msg):
+def handle_channel_post(post: dict):
+    """פוסט מהערוץ (Bot API). כל APK → נכנס אוטומטית לרשימה."""
+    doc = post.get("document")
+    if not doc or not _is_apk_doc(doc):
+        return
+    chat_id = post.get("chat", {}).get("id", CHANNEL_ID)
+    msg_id  = post.get("message_id")
+    apps = load_apps()
+    if any(a.get("channel_msg_id") == msg_id and a.get("channel_id") == chat_id for a in apps):
+        return
+    cap  = (post.get("caption") or "").strip()
+    name = (cap.splitlines()[0].strip() if cap else "") or clean_app_name(doc.get("file_name", ""))
+    entry = {
+        "id": uuid.uuid4().hex[:12],
+        "name": name, "category": "כללי",
+        "icon": "", "banner": "",
+        "description": cap if cap else "",
+        "version": "", "size": human_size(doc.get("file_size", 0)),
+        "updated": datetime.utcnow().strftime("%d/%m/%Y"),
+        "screenshots": [],
+        "channel_id": chat_id, "channel_msg_id": msg_id,
+        "file_id": doc.get("file_id", ""),
+        "file_name": doc.get("file_name", "app.apk"),
+        "file_size": doc.get("file_size", 0),
+    }
+    apps.insert(0, entry)
+    save_apps(apps)
+    log.info("✅ APK חדש נוסף: %s (msg %s)", name, msg_id)
     try:
-        ch = getattr(msg.chat, "id", None)
-        d = getattr(msg, "document", None)
-        log.info("📩 הודעה התקבלה · chat=%s · doc=%s · שם=%s",
-                 ch, bool(d), getattr(d, "file_name", None) if d else None)
+        _api("sendMessage", {
+            "chat_id": chat_id,
+            "reply_to_message_id": msg_id,
+            "text": f"✅ «{name}» נוסף לחנות.\nערוך פרטים בפאנל:\n{PUBLIC_BASE}/apps/admin",
+        }, timeout=20)
     except Exception:
         pass
 
-@bot.on_message(filters.document)
-async def on_channel_post(client, msg):
-    """כל APK שמועלה (מכל צ'אט שהבוט חבר בו) נכנס אוטומטית לרשימה."""
+async def poll_loop():
+    """לולאת long-polling של getUpdates — מאזינה לפוסטים בערוץ."""
+    # מבטלים webhook אם הוגדר בעבר (אחרת getUpdates מחזיר 409)
     try:
-        if not _is_apk(msg):
-            return
-        d = msg.document
-        chat_id = getattr(msg.chat, "id", CHANNEL_ID)
-        apps = load_apps()
-        # דדופ לפי (צ'אט + הודעה)
-        if any(a.get("channel_msg_id") == msg.id and a.get("channel_id") == chat_id for a in apps):
-            return
-        cap = (msg.caption or "").strip()
-        name = (cap.splitlines()[0].strip() if cap else "") or clean_app_name(getattr(d, "file_name", ""))
-        entry = {
-            "id": uuid.uuid4().hex[:12],
-            "name": name, "category": "כללי",
-            "icon": "", "banner": "",
-            "description": cap if cap else "",
-            "version": "", "size": human_size(getattr(d, "file_size", 0)),
-            "updated": datetime.utcnow().strftime("%d/%m/%Y"),
-            "screenshots": [],
-            "channel_id": chat_id, "channel_msg_id": msg.id,
-            "file_name": getattr(d, "file_name", "app.apk"),
-            "file_size": getattr(d, "file_size", 0),
-        }
-        apps.insert(0, entry)
-        save_apps(apps)
-        log.info("APK חדש נוסף: %s (msg %s)", name, msg.id)
-        try:
-            await msg.reply_text(f"✅ «{name}» נוסף לחנות.\nערוך פרטים (אייקון/תיאור) בפאנל:\n{PUBLIC_BASE}/apps/admin",
-                                 quote=True)
-        except Exception:
-            pass
+        await asyncio.to_thread(_api, "deleteWebhook", {"drop_pending_updates": "false"}, 20)
     except Exception as e:
-        log.warning("שגיאה בהוספת APK: %s", e)
+        log.warning("deleteWebhook: %s", e)
+    offset = load_offset()
+    log.info("📡 מאזין לערוץ %s דרך Bot API (offset=%s)", CHANNEL_ID, offset)
+    allowed = json.dumps(["channel_post", "edited_channel_post"])
+    while True:
+        try:
+            resp = await asyncio.to_thread(_api, "getUpdates", {
+                "offset": offset, "timeout": 50, "allowed_updates": allowed,
+            }, 65)
+            for upd in resp.get("result", []):
+                offset = upd["update_id"] + 1
+                post = upd.get("channel_post") or upd.get("edited_channel_post")
+                if post:
+                    try:
+                        await asyncio.to_thread(handle_channel_post, post)
+                    except Exception as e:
+                        log.warning("עיבוד פוסט נכשל: %s", e)
+            save_offset(offset)
+        except Exception as e:
+            log.warning("getUpdates נכשל: %s", e)
+            await asyncio.sleep(3)
 
 # ── FastAPI ──────────────────────────────────────────────────────────────────
 api = FastAPI(title="AppMod")
 
 @api.on_event("startup")
 async def _start():
-    await bot.start()
-    # קריטי: מאכלסים את ה-access_hash של הערוץ במטמון ה-peers. בלי זה, כשמגיע
-    # פוסט חדש Pyrogram לא מזהה את הערוץ (Peer id invalid) ומפיל את העדכון בשקט.
-    # ערוץ פרטי אי-אפשר לפתור לפי מספר — פותרים דרך קישור ההזמנה.
-    primed = False
-    for target in (CHANNEL_INVITE, CHANNEL_ID):
-        if not target:
-            continue
-        try:
-            ch = await bot.get_chat(target)
-            log.info("✅ ערוץ נטען למטמון: %s (%s)", getattr(ch, "title", ""), getattr(ch, "id", target))
-            primed = True
-            break
-        except Exception as e:
-            log.warning("⚠️ טעינת ערוץ דרך %s נכשלה: %s", target, e)
-    if not primed:
-        log.warning("⚠️ הערוץ לא נטען — הוסף APPS_CHANNEL_INVITE=<קישור הזמנה> ל-.env והפעל מחדש")
+    await bot.start()                       # ללקוח ההורדה (Pyrogram)
+    asyncio.create_task(poll_loop())        # לולאת הקבלה (Bot API)
     log.info("בוט AppMod פעיל. ערוץ=%s", CHANNEL_ID)
 
 @api.on_event("shutdown")
@@ -166,24 +191,21 @@ async def content():
 
 @api.get("/apps/dl/{app_id}")
 async def download(app_id: str):
-    """מזרים את ה-APK מהערוץ ישירות למשתמש (הורדה)."""
+    """מזרים את ה-APK מטלגרם ישירות למשתמש (הורדה) לפי file_id."""
     app = next((a for a in load_apps() if a.get("id") == app_id), None)
     if not app:
         raise HTTPException(404, "אפליקציה לא נמצאה")
-    try:
-        msg = await bot.get_messages(app["channel_id"], app["channel_msg_id"])
-    except Exception as e:
-        raise HTTPException(502, f"שליפת הקובץ נכשלה: {e}")
-    if not getattr(msg, "document", None):
+    file_id = app.get("file_id")
+    if not file_id:
         raise HTTPException(404, "הקובץ לא זמין")
     fname = app.get("file_name") or (app.get("name","app") + ".apk")
 
     async def gen():
-        async for chunk in bot.stream_media(msg):
+        async for chunk in bot.stream_media(file_id):
             yield chunk
     headers = {
         "Content-Disposition": f'attachment; filename="{fname}"',
-        "Content-Length": str(app.get("file_size") or msg.document.file_size or 0),
+        "Content-Length": str(app.get("file_size") or 0),
     }
     return StreamingResponse(gen(), media_type="application/vnd.android.package-archive", headers=headers)
 
