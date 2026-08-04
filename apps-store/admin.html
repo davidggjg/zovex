@@ -86,6 +86,7 @@
   input:focus,textarea:focus,select:focus{border-color:var(--accent)}
   textarea{min-height:120px;resize:vertical;line-height:1.6}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .slughint{font-size:12px;color:var(--accent);margin-top:5px;direction:ltr;text-align:left;word-break:break-all}
   .mfoot{display:flex;gap:10px;margin-top:18px}
   .mfoot .btn{flex:1;padding:14px;font-size:15px}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:80;background:#161c28;color:#fff;
@@ -153,6 +154,9 @@
     <div class="mbody">
       <label>שם האפליקציה</label>
       <input id="f_name" placeholder="שם האפליקציה">
+      <label>כתובת באנגלית (לדומיין)</label>
+      <input id="f_slug" placeholder="netflix" oninput="slugHint()" dir="ltr">
+      <div class="slughint" id="slugHint"></div>
       <div class="grid2">
         <div><label>קטגוריה</label><select id="f_cat"></select></div>
         <div><label>גרסה (אופציונלי)</label><input id="f_ver" placeholder="1.2.0"></div>
@@ -241,7 +245,7 @@ function renderApps(){
         <div class="nm">${esc(a.name||"ללא שם")}</div>
         <div class="sub2">
           ${a.category?`<span class="cat">${esc(a.category)}</span>`:``}
-          <span>${esc(a.size||"")}</span>${a.version?`<span>· ${esc(a.version)}</span>`:``}
+          <span>${esc(a.size||"")}</span>${a.slug?`<span dir="ltr">· /${esc(a.slug)}</span>`:``}
         </div>
       </div>
       <div class="acts" onclick="event.stopPropagation()">
@@ -260,12 +264,19 @@ async function delApp(i){
 }
 
 /* ── מודל עריכה ── */
+function slugify(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,""); }
+function slugHint(){
+  const s=slugify(document.getElementById("f_slug").value);
+  document.getElementById("slugHint").textContent = s ? (location.host+"/"+s) : "";
+}
 function openEdit(i){
   editIdx=i; const a=APPS[i];
   document.getElementById("f_name").value=a.name||"";
+  document.getElementById("f_slug").value=a.slug||"";
   document.getElementById("f_ver").value=a.version||"";
   document.getElementById("f_img").value=imgOf(a);
   document.getElementById("f_desc").value=a.description||"";
+  slugHint();
   const sel=document.getElementById("f_cat");
   let opts=CATS.slice(); const cur=a.category||"";
   if(cur&&!opts.includes(cur)) opts.unshift(cur);
@@ -283,6 +294,7 @@ function closeEdit(){ document.getElementById("mask").classList.remove("open"); 
 async function saveEdit(){
   if(editIdx<0) return; const a=APPS[editIdx];
   a.name=document.getElementById("f_name").value.trim();
+  a.slug=slugify(document.getElementById("f_slug").value);
   a.category=document.getElementById("f_cat").value;
   a.version=document.getElementById("f_ver").value.trim();
   a.image=document.getElementById("f_img").value.trim();

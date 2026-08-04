@@ -83,6 +83,21 @@ def clean_app_name(fname: str) -> str:
     n = re.sub(r"\b(v?\d+(\.\d+)+|mod|premium|pro|apk|android)\b", " ", n, flags=re.I)
     return re.sub(r"\s+", " ", n).strip() or "אפליקציה"
 
+RESERVED_SLUGS = {"apps", "ping", "app", "admin", "static", "assets", ""}
+
+def slugify(s: str) -> str:
+    s = re.sub(r"\.apk$", "", s or "", flags=re.I).lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s
+
+def unique_slug(base: str, apps: list) -> str:
+    base = slugify(base) or "app"
+    taken = {a.get("slug") for a in apps if a.get("slug")} | RESERVED_SLUGS
+    if base not in taken: return base
+    i = 2
+    while f"{base}-{i}" in taken: i += 1
+    return f"{base}-{i}"
+
 # ── לקוח Pyrogram — לשימוש *רק להורדה* לפי file_id (לא מאזין לעדכונים) ─────────
 # no_updates=True: לא מושך עדכונים כלל, כדי לא להתנגש עם ה-getUpdates של ה-Bot API.
 bot = Client("appmod_dl", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
@@ -141,7 +156,8 @@ def add_from_post(post: dict):
     cats = load_cats()
     entry = {
         "id": uuid.uuid4().hex[:12],
-        "name": name, "category": cats[0] if cats else "",
+        "name": name, "slug": unique_slug(doc.get("file_name", "") or name, apps),
+        "category": cats[0] if cats else "",
         "image": "", "icon": "", "banner": "",
         "description": cap if cap else "",
         "version": "", "size": human_size(doc.get("file_size", 0)),
@@ -245,7 +261,8 @@ async def content():
     out = []
     for a in load_apps():
         out.append({
-            "id": a["id"], "name": a.get("name",""), "category": a.get("category",""),
+            "id": a["id"], "name": a.get("name",""), "slug": a.get("slug",""),
+            "category": a.get("category",""),
             "image": a.get("image",""), "icon": a.get("icon",""), "banner": a.get("banner",""),
             "description": a.get("description",""), "version": a.get("version",""),
             "size": a.get("size",""), "updated": a.get("updated",""),
@@ -317,6 +334,12 @@ async def admin_cats_save(req: CatsReq):
 
 @api.get("/ping")
 async def ping(): return {"ok": True, "apps": len(load_apps())}
+
+# חייב להיות אחרון: מגיש את האתר לכל /<slug> כדי שכתובת יפה (domain/netflix) תעבוד.
+@api.get("/{slug}", response_class=HTMLResponse)
+async def app_page(slug: str):
+    f = HERE / "index.html"
+    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("<h1>AppMod</h1>")
 
 if __name__ == "__main__":
     import uvicorn

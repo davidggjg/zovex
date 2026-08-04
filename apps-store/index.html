@@ -52,6 +52,8 @@
   .card:active .thumb{transform:scale(.97)}
   @media(hover:hover){.card:hover .thumb{transform:translateY(-3px);box-shadow:var(--shadow-lg)}}
   .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .ph{width:100%;height:100%;display:grid;place-items:center;font-size:46px;font-weight:900;color:#fff;
+    background:linear-gradient(135deg,var(--accent),#7c5cff)}
   .badge{position:absolute;top:9px;right:9px;background:rgba(22,28,40,.7);color:#fff;
     font-size:11px;font-weight:700;padding:4px 11px;border-radius:999px;backdrop-filter:blur(4px)}
   .meta{padding:9px 4px 2px}
@@ -73,6 +75,8 @@
   .hero .bg{position:absolute;inset:0;background-size:cover;background-position:center;
     filter:blur(30px) saturate(1.25);transform:scale(1.25);opacity:.6}
   .hero img{position:relative;z-index:1;width:100%;height:100%;object-fit:contain;display:block}
+  .hph{position:absolute;inset:0;z-index:1;display:none;place-items:center;font-size:88px;font-weight:900;color:#fff;
+    background:linear-gradient(135deg,var(--accent),#7c5cff)}
   .hero .fade{position:absolute;inset:0;z-index:2;pointer-events:none;
     background:linear-gradient(180deg,rgba(245,247,251,0) 60%,var(--bg))}
   .back{position:absolute;top:14px;right:14px;z-index:3;width:40px;height:40px;border-radius:50%;
@@ -91,9 +95,6 @@
     transition:transform .12s;font-family:inherit;text-decoration:none}
   .dl:active{transform:scale(.98)}
   .dl svg{width:22px;height:22px}
-  .shots{display:flex;gap:12px;overflow-x:auto;padding:16px 0 2px;scrollbar-width:none}
-  .shots::-webkit-scrollbar{display:none}
-  .shots img{height:330px;border-radius:15px;box-shadow:var(--shadow);flex:0 0 auto}
   .desc{margin-top:18px;color:#37415a;font-size:15px;line-height:1.7;white-space:pre-wrap}
 </style>
 </head>
@@ -122,6 +123,7 @@
   <div class="sheet" id="sheet">
     <div class="hero">
       <div class="bg" id="d_bg"></div>
+      <div class="hph" id="d_ph"></div>
       <img id="d_hero" alt="">
       <div class="fade"></div>
       <button class="back" onclick="closeSheet()" aria-label="חזרה">
@@ -169,6 +171,7 @@ function buildCats(){
 function pickCat(c,el){ activeCat=c; buildCats(); render();
   if(el) el.scrollIntoView({inline:"center",block:"nearest",behavior:"smooth"}); }
 function img(a){ return a.image||a.banner||a.icon||""; }
+function initial(a){ return ((a.name||"A").trim()[0]||"A"); }
 function esc(s){ return (s||"").replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m])); }
 
 function render(){
@@ -180,7 +183,7 @@ function render(){
   g.innerHTML=list.map(a=>`
     <div class="card" onclick="openApp('${a.id}')">
       <div class="thumb">
-        ${img(a)?`<img src="${esc(img(a))}" loading="lazy" alt="">`:``}
+        ${img(a)?`<img src="${esc(img(a))}" loading="lazy" alt="">`:`<div class="ph">${esc(initial(a))}</div>`}
         ${a.category?`<span class="badge">${esc(a.category)}</span>`:``}
       </div>
       <div class="meta">
@@ -189,11 +192,13 @@ function render(){
       </div>
     </div>`).join("");
 }
-function openApp(id){
+function openApp(id,fromUrl){
   const a=APPS.find(x=>x.id===id); if(!a) return; current=a;
-  const src=img(a);
-  document.getElementById("d_hero").src=src;
-  document.getElementById("d_bg").style.backgroundImage=src?`url("${src}")`:"";
+  const src=img(a), hero=document.getElementById("d_hero"), ph=document.getElementById("d_ph");
+  if(src){ hero.style.display="block"; hero.src=src; ph.style.display="none";
+    document.getElementById("d_bg").style.backgroundImage=`url("${src}")`; }
+  else { hero.style.display="none"; ph.style.display="grid"; ph.textContent=initial(a);
+    document.getElementById("d_bg").style.backgroundImage=""; }
   document.getElementById("d_name").textContent=a.name||"";
   document.getElementById("d_cat").textContent=a.category||"";
   document.getElementById("d_ver").textContent=a.version||"—";
@@ -203,9 +208,23 @@ function openApp(id){
   document.getElementById("d_dl").href=(a.download&&a.download!=="#")?a.download:"javascript:void(0)";
   document.getElementById("sheet").classList.add("open");
   document.body.style.overflow="hidden"; window.scrollTo(0,0);
+  if(!fromUrl && a.slug) history.pushState({slug:a.slug}, "", "/"+encodeURIComponent(a.slug));
 }
-function closeSheet(){ document.getElementById("sheet").classList.remove("open"); document.body.style.overflow=""; }
-load();
+function closeSheet(fromPop){
+  document.getElementById("sheet").classList.remove("open"); document.body.style.overflow=""; current=null;
+  if(!fromPop) history.pushState({}, "", "/");
+}
+function curSlug(){
+  const p=decodeURIComponent(location.pathname).replace(/^\/+|\/+$/g,"");
+  return (p==="apps"||p==="ping"||p==="app")?"":p;
+}
+function resolveSlug(fromUrl){
+  const sl=curSlug();
+  const a=sl?APPS.find(x=>(x.slug||"")===sl):null;
+  if(a) openApp(a.id, true); else closeSheet(fromUrl);
+}
+addEventListener("popstate", ()=>resolveSlug(true));
+load().then(()=>resolveSlug(true));
 </script>
 </body>
 </html>
