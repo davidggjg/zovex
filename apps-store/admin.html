@@ -107,7 +107,7 @@ async function addCat(){
   const inp=document.getElementById("newcat"); const v=inp.value.trim();
   if(!v) return;
   if(CATS.includes(v)){ catMsg('כבר קיים','err'); return; }
-  CATS.push(v); inp.value=""; renderCats(); await saveCats();
+  CATS.push(v); inp.value=""; renderCats(); renderList(); await saveCats();
 }
 async function renameCat(i,val){
   val=(val||"").trim(); const old=CATS[i];
@@ -153,26 +153,20 @@ function renderList(){
   el.innerHTML=APPS.map((a,i)=>`
     <div class="card">
       <div class="apphead">
-        <img src="${esc(a.icon||a.banner||'')}" alt="">
+        <img src="${esc(a.image||a.icon||a.banner||'')}" alt="">
         <div><b>${esc(a.name||'')}</b><br><small>${esc(a.size||'')} · הודעה ${a.channel_msg_id||''}</small></div>
       </div>
       <div class="grid2">
         <div><label>שם</label><input value="${esc(a.name||'')}" oninput="upd(${i},'name',this.value)"></div>
         <div><label>קטגוריה</label><select onchange="upd(${i},'category',this.value)">${catOptions(a.category||'')}</select></div>
       </div>
-      <div class="grid2">
-        <div><label>גרסה</label><input value="${esc(a.version||'')}" oninput="upd(${i},'version',this.value)"></div>
-        <div><label>גודל</label><input value="${esc(a.size||'')}" oninput="upd(${i},'size',this.value)"></div>
-      </div>
-      <label>אייקון (קישור תמונה מרובעת)</label><input value="${esc(a.icon||'')}" oninput="upd(${i},'icon',this.value)">
-      <label>באנר (קישור תמונה רחבה — אופציונלי)</label><input value="${esc(a.banner||'')}" oninput="upd(${i},'banner',this.value)">
+      <label>גרסה (אופציונלי)</label><input value="${esc(a.version||'')}" placeholder="למשל 1.2.0" oninput="upd(${i},'version',this.value)">
+      <label>תמונה (קישור אחד — משמש לכרטיס ולדף האפליקציה)</label><input value="${esc(a.image||a.banner||a.icon||'')}" placeholder="https://…/image.jpg" oninput="upd(${i},'image',this.value)">
       <label>תיאור</label><textarea oninput="upd(${i},'description',this.value)">${esc(a.description||'')}</textarea>
-      <label>צילומי מסך (קישורים מופרדים בפסיק)</label><input value="${esc((a.screenshots||[]).join(', '))}" oninput="updShots(${i},this.value)">
       <div class="row"><button class="danger" onclick="del(${i})">🗑️ מחק אפליקציה</button></div>
     </div>`).join("");
 }
 function upd(i,k,v){ APPS[i][k]=v; }
-function updShots(i,v){ APPS[i].screenshots=v.split(",").map(s=>s.trim()).filter(Boolean); }
 function del(i){ if(confirm("למחוק את «"+(APPS[i].name||"")+"»?")){ APPS.splice(i,1); renderList(); saveAll(); } }
 async function saveAll(silent){
   const m=document.getElementById("saveMsg"); if(!silent) m.textContent="שומר…";

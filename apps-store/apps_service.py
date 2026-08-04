@@ -142,7 +142,7 @@ def add_from_post(post: dict):
     entry = {
         "id": uuid.uuid4().hex[:12],
         "name": name, "category": cats[0] if cats else "כללי",
-        "icon": "", "banner": "",
+        "image": "", "icon": "", "banner": "",
         "description": cap if cap else "",
         "version": "", "size": human_size(doc.get("file_size", 0)),
         "updated": datetime.utcnow().strftime("%d/%m/%Y"),
@@ -246,7 +246,7 @@ async def content():
     for a in load_apps():
         out.append({
             "id": a["id"], "name": a.get("name",""), "category": a.get("category",""),
-            "icon": a.get("icon",""), "banner": a.get("banner",""),
+            "image": a.get("image",""), "icon": a.get("icon",""), "banner": a.get("banner",""),
             "description": a.get("description",""), "version": a.get("version",""),
             "size": a.get("size",""), "updated": a.get("updated",""),
             "screenshots": a.get("screenshots",[]),

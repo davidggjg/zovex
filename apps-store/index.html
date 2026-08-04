@@ -138,12 +138,11 @@
         <div class="stat"><b id="d_size">—</b><span>גודל</span></div>
         <div class="stat"><b id="d_upd">—</b><span>עודכן</span></div>
       </div>
+      <div class="desc" id="d_desc"></div>
       <a class="dl" id="d_dl" href="#">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 21h14"/></svg>
         הורדה
       </a>
-      <div class="shots" id="d_shots"></div>
-      <div class="desc" id="d_desc"></div>
     </div>
   </div>
 
@@ -160,9 +159,8 @@ async function load(){
   buildCats(); render();
 }
 function cats(){
-  const used=new Set(APPS.map(a=>a.category).filter(Boolean));
-  const ordered=CATS.filter(c=>used.has(c));               // סדר הניהול, רק קטגוריות עם אפליקציות
-  used.forEach(c=>{ if(!ordered.includes(c)) ordered.push(c); }); // ישנות שלא ברשימת הניהול
+  const ordered=[...CATS];                                  // כל הקטגוריות המנוהלות (גם ריקות)
+  APPS.map(a=>a.category).filter(Boolean).forEach(c=>{ if(!ordered.includes(c)) ordered.push(c); });
   return ["הכל", ...ordered];
 }
 function buildCats(){
@@ -171,7 +169,7 @@ function buildCats(){
 }
 function pickCat(c,el){ activeCat=c; buildCats(); render();
   if(el) el.scrollIntoView({inline:"center",block:"nearest",behavior:"smooth"}); }
-function img(a){ return a.banner||a.icon||""; }
+function img(a){ return a.image||a.banner||a.icon||""; }
 function esc(s){ return (s||"").replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m])); }
 
 function render(){
@@ -203,7 +201,6 @@ function openApp(id){
   document.getElementById("d_upd").textContent=a.updated||"—";
   document.getElementById("d_desc").textContent=a.description||"";
   document.getElementById("d_dl").href=(a.download&&a.download!=="#")?a.download:"javascript:void(0)";
-  document.getElementById("d_shots").innerHTML=(a.screenshots||[]).map(s=>`<img src="${esc(s)}" alt="">`).join("");
   document.getElementById("sheet").classList.add("open");
   document.body.style.overflow="hidden"; window.scrollTo(0,0);
 }
