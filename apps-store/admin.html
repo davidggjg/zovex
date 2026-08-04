@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AppMod · ניהול</title>
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--ink:#1a2233;--sub:#6b7488;--line:#e6eaf2;--accent:#6d5efc}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,"Segoe UI",Rubik,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink);padding:16px;max-width:760px;margin:0 auto}
+  h1{font-size:20px;margin:6px 0 14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:14px;box-shadow:0 6px 18px rgba(40,50,90,.08)}
+  label{display:block;font-size:12px;color:var(--sub);margin:8px 0 4px;font-weight:600}
+  input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;color:var(--ink)}
+  textarea{min-height:70px;resize:vertical}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  button{border:0;border-radius:11px;padding:11px 16px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit}
+  .primary{background:linear-gradient(135deg,#6d5efc,#9b6bff);color:#fff}
+  .gray{background:#eef1f7;color:#41496a}
+  .danger{background:#fde8e8;color:#c0392b}
+  .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  .apphead{display:flex;gap:10px;align-items:center}
+  .apphead img{width:46px;height:46px;border-radius:11px;object-fit:cover;background:#eef1f7;flex:0 0 auto}
+  .apphead b{font-size:15px}
+  .apphead small{color:var(--sub)}
+  .msg{font-size:13px;color:var(--sub);margin-top:8px}
+  .ok{color:#1a7f37}.err{color:#c0392b}
+</style>
+</head>
+<body>
+  <h1>🛠️ ניהול AppMod</h1>
+  <div class="card" id="login">
+    <label>סיסמת ניהול</label>
+    <input id="pw" type="password" placeholder="סיסמה" onkeydown="if(event.key==='Enter')doLogin()">
+    <div class="row"><button class="primary" onclick="doLogin()">כניסה</button></div>
+    <div class="msg" id="loginMsg"></div>
+  </div>
+  <div id="app" style="display:none">
+    <div class="row" style="margin-bottom:10px">
+      <button class="gray" onclick="loadList()">↻ רענן</button>
+      <button class="primary" onclick="saveAll()">💾 שמור הכל</button>
+      <span class="msg" id="saveMsg"></span>
+    </div>
+    <div id="list"></div>
+  </div>
+<script>
+let PW="", APPS=[];
+async function doLogin(){
+  PW=document.getElementById("pw").value.trim();
+  const m=document.getElementById("loginMsg"); m.textContent="בודק…";
+  try{
+    const r=await fetch("/apps/list",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW})});
+    if(!r.ok) throw new Error("סיסמה שגויה");
+    APPS=await r.json();
+    document.getElementById("login").style.display="none";
+    document.getElementById("app").style.display="";
+    renderList();
+  }catch(e){ m.innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+async function loadList(){
+  const r=await fetch("/apps/list",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW})});
+  APPS=await r.json(); renderList();
+}
+function esc(s){return (s||"").replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+function renderList(){
+  const el=document.getElementById("list");
+  if(!APPS.length){ el.innerHTML='<div class="card">אין אפליקציות עדיין. העלה APK לבוט והן יופיעו כאן.</div>'; return; }
+  el.innerHTML=APPS.map((a,i)=>`
+    <div class="card">
+      <div class="apphead">
+        <img src="${esc(a.icon||a.banner||'')}" alt="">
+        <div><b>${esc(a.name||'')}</b><br><small>${esc(a.size||'')} · הודעה ${a.channel_msg_id||''}</small></div>
+      </div>
+      <div class="grid2">
+        <div><label>שם</label><input value="${esc(a.name||'')}" oninput="upd(${i},'name',this.value)"></div>
+        <div><label>קטגוריה</label><input value="${esc(a.category||'')}" oninput="upd(${i},'category',this.value)"></div>
+      </div>
+      <div class="grid2">
+        <div><label>גרסה</label><input value="${esc(a.version||'')}" oninput="upd(${i},'version',this.value)"></div>
+        <div><label>גודל</label><input value="${esc(a.size||'')}" oninput="upd(${i},'size',this.value)"></div>
+      </div>
+      <label>אייקון (קישור תמונה מרובעת)</label><input value="${esc(a.icon||'')}" oninput="upd(${i},'icon',this.value)">
+      <label>באנר (קישור תמונה רחבה — אופציונלי)</label><input value="${esc(a.banner||'')}" oninput="upd(${i},'banner',this.value)">
+      <label>תיאור</label><textarea oninput="upd(${i},'description',this.value)">${esc(a.description||'')}</textarea>
+      <label>צילומי מסך (קישורים מופרדים בפסיק)</label><input value="${esc((a.screenshots||[]).join(', '))}" oninput="updShots(${i},this.value)">
+      <div class="row"><button class="danger" onclick="del(${i})">🗑️ מחק</button></div>
+    </div>`).join("");
+}
+function upd(i,k,v){ APPS[i][k]=v; }
+function updShots(i,v){ APPS[i].screenshots=v.split(",").map(s=>s.trim()).filter(Boolean); }
+function del(i){ if(confirm("למחוק את «"+(APPS[i].name||"")+"»?")){ APPS.splice(i,1); renderList(); saveAll(); } }
+async function saveAll(){
+  const m=document.getElementById("saveMsg"); m.textContent="שומר…";
+  try{
+    const r=await fetch("/apps/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW,apps:APPS})});
+    const d=await r.json(); if(!r.ok) throw new Error(d.detail||"שגיאה");
+    m.innerHTML='<span class="ok">נשמר ✓ ('+d.count+')</span>';
+  }catch(e){ m.innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+</script>
+</body>
+</html>

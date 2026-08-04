@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AppMod · חנות האפליקציות</title>
+<style>
+  :root{
+    --bg:#f5f7fb; --card:#ffffff; --ink:#161c28; --sub:#7a8296;
+    --line:#e9edf4; --accent:#5b6ef5; --accent-soft:#eef0ff;
+    --shadow:0 4px 16px rgba(30,40,80,.06); --shadow-lg:0 20px 48px rgba(40,45,90,.18);
+    --radius:18px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0}
+  body{
+    font-family:-apple-system,"Segoe UI",Rubik,Arial,sans-serif; color:var(--ink);
+    background:var(--bg); min-height:100dvh; padding-bottom:90px;
+  }
+  /* ── כותרת ── */
+  header{
+    position:sticky; top:0; z-index:20;
+    background:rgba(245,247,251,.85); backdrop-filter:saturate(1.3) blur(12px);
+    border-bottom:1px solid var(--line); padding:14px 16px 0;
+  }
+  .brand{display:flex; align-items:center; gap:11px}
+  .logo{width:42px;height:42px;border-radius:13px;flex:0 0 auto;
+    background:linear-gradient(135deg,#5b6ef5,#7c5cff);
+    display:grid;place-items:center;color:#fff;font-weight:900;font-size:21px}
+  .brand h1{font-size:19px;margin:0;font-weight:800;letter-spacing:-.3px}
+  .brand p{margin:1px 0 0;font-size:12px;color:var(--sub)}
+  .search{margin-top:13px;display:flex;align-items:center;gap:9px;
+    background:#fff;border:1px solid var(--line);border-radius:13px;padding:11px 14px}
+  .search input{border:0;outline:0;flex:1;font-size:15px;background:transparent;color:var(--ink);font-family:inherit}
+  .search svg{width:18px;height:18px;color:var(--sub);flex:0 0 auto}
+  /* ── קטגוריות בגלגלת ── */
+  .cats{display:flex;gap:9px;overflow-x:auto;padding:14px 16px 15px;scrollbar-width:none}
+  .cats::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto;border:1px solid var(--line);background:#fff;color:var(--sub);
+    padding:9px 17px;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;
+    transition:background .15s, color .15s, border-color .15s; white-space:nowrap}
+  .chip.active{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:800;
+    box-shadow:0 6px 16px rgba(91,110,245,.35)}
+  /* ── רשת (2 טורים) ── */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:15px;padding:2px 16px}
+  @media(min-width:620px){.grid{grid-template-columns:repeat(3,1fr)}}
+  @media(min-width:900px){.grid{grid-template-columns:repeat(4,1fr)}}
+  .card{cursor:pointer}
+  .thumb{position:relative;aspect-ratio:1/1;border-radius:var(--radius);overflow:hidden;
+    background:#eceff5;box-shadow:var(--shadow);border:1px solid var(--line);
+    transition:transform .18s ease, box-shadow .18s ease}
+  .card:active .thumb{transform:scale(.97)}
+  @media(hover:hover){.card:hover .thumb{transform:translateY(-3px);box-shadow:var(--shadow-lg)}}
+  .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .badge{position:absolute;top:9px;right:9px;background:rgba(22,28,40,.7);color:#fff;
+    font-size:11px;font-weight:700;padding:4px 11px;border-radius:999px;backdrop-filter:blur(4px)}
+  .meta{padding:9px 4px 2px}
+  .meta .nm{font-weight:800;font-size:15px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .meta .vr{color:var(--sub);font-size:12.5px;margin-top:2px;display:flex;gap:6px;align-items:center}
+  .dot{width:3px;height:3px;border-radius:50%;background:var(--sub);opacity:.55}
+  .empty{grid-column:1/-1;text-align:center;color:var(--sub);padding:60px 20px;font-size:15px}
+  /* ── כפתור תמיכה צף ── */
+  .support{position:fixed;bottom:20px;left:16px;z-index:40;display:flex;align-items:center;gap:8px;
+    background:#fff;color:var(--ink);border:1px solid var(--line);padding:11px 16px;border-radius:999px;
+    font-weight:700;font-size:14px;text-decoration:none;box-shadow:var(--shadow-lg)}
+  .support:active{transform:scale(.96)}
+  .support svg{width:19px;height:19px;color:#2aabee}
+  /* ── מסך פרטים ── */
+  .sheet{position:fixed;inset:0;z-index:50;display:none;flex-direction:column;background:var(--bg);overflow-y:auto}
+  .sheet.open{display:flex;animation:slideup .3s cubic-bezier(.2,.85,.25,1)}
+  @keyframes slideup{from{transform:translateY(24px);opacity:.4}to{transform:none;opacity:1}}
+  .hero{position:relative;height:220px;background:#e9edf5;overflow:hidden}
+  .hero img{width:100%;height:100%;object-fit:cover}
+  .hero .fade{position:absolute;inset:0;background:linear-gradient(180deg,rgba(245,247,251,0) 45%,var(--bg))}
+  .back{position:absolute;top:14px;right:14px;width:40px;height:40px;border-radius:50%;
+    background:rgba(255,255,255,.92);display:grid;place-items:center;box-shadow:var(--shadow);cursor:pointer;border:0}
+  .back svg{width:20px;height:20px;color:var(--ink)}
+  .dwrap{padding:0 18px 40px;margin-top:-60px;position:relative}
+  .dhead{display:flex;gap:14px;align-items:flex-end}
+  .dicon{width:90px;height:90px;border-radius:21px;object-fit:cover;border:4px solid #fff;
+    box-shadow:var(--shadow-lg);background:#fff;flex:0 0 auto}
+  .dhead h2{margin:0;font-size:22px;font-weight:900;letter-spacing:-.4px}
+  .dhead .c{color:var(--sub);font-size:13px;margin-top:3px}
+  .dhead .t{padding-bottom:6px}
+  .stats{display:flex;gap:10px;margin:18px 0 6px}
+  .stat{flex:1;background:#fff;border:1px solid var(--line);border-radius:14px;padding:11px 8px;text-align:center;box-shadow:var(--shadow)}
+  .stat b{display:block;font-size:15px}
+  .stat span{font-size:11px;color:var(--sub)}
+  .dl{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;margin:18px 0 4px;
+    background:linear-gradient(135deg,#5b6ef5,#7c5cff);color:#fff;border:0;padding:16px;border-radius:15px;
+    font-size:17px;font-weight:800;cursor:pointer;box-shadow:0 10px 24px rgba(91,110,245,.42);
+    transition:transform .12s;font-family:inherit;text-decoration:none}
+  .dl:active{transform:scale(.98)}
+  .dl svg{width:22px;height:22px}
+  .shots{display:flex;gap:12px;overflow-x:auto;padding:16px 0 2px;scrollbar-width:none}
+  .shots::-webkit-scrollbar{display:none}
+  .shots img{height:330px;border-radius:15px;box-shadow:var(--shadow);flex:0 0 auto}
+  .desc{margin-top:18px;color:#37415a;font-size:15px;line-height:1.7;white-space:pre-wrap}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">A</div>
+      <div><h1>AppMod</h1><p>האפליקציות שלי · הורדה מהירה</p></div>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" placeholder="חיפוש אפליקציה…" oninput="render()">
+    </div>
+    <div class="cats" id="cats"></div>
+  </header>
+
+  <div class="grid" id="grid"></div>
+
+  <!-- כפתור תמיכה צף -->
+  <a class="support" href="https://t.me/mod554cgg" target="_blank" rel="noopener">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9.8 15.6 9.6 19c.4 0 .6-.2.8-.4l1.9-1.8 3.9 2.9c.7.4 1.2.2 1.4-.7l2.6-12.2c.2-1-.4-1.5-1.1-1.2L3.4 9.9c-1 .4-1 .9-.2 1.2l4.2 1.3 9.7-6.1c.5-.3.9-.1.5.2z"/></svg>
+    תמיכה
+  </a>
+
+  <!-- מסך פרטים -->
+  <div class="sheet" id="sheet">
+    <div class="hero">
+      <img id="d_hero" alt="">
+      <div class="fade"></div>
+      <button class="back" onclick="closeSheet()" aria-label="חזרה">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+    </div>
+    <div class="dwrap">
+      <div class="dhead">
+        <img class="dicon" id="d_icon" alt="">
+        <div class="t"><h2 id="d_name"></h2><div class="c" id="d_cat"></div></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="d_ver">—</b><span>גרסה</span></div>
+        <div class="stat"><b id="d_size">—</b><span>גודל</span></div>
+        <div class="stat"><b id="d_upd">—</b><span>עודכן</span></div>
+      </div>
+      <a class="dl" id="d_dl" href="#">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 21h14"/></svg>
+        הורדה
+      </a>
+      <div class="shots" id="d_shots"></div>
+      <div class="desc" id="d_desc"></div>
+    </div>
+  </div>
+
+<script>
+let APPS = [], activeCat = "הכל", current = null;
+const DEMO = [{id:"demo1",name:"האפליקציה שלי",category:"כללי",icon:"",banner:"",version:"1.0.0",size:"24 MB",updated:"עכשיו",
+  description:"אפליקציית דמו. ברגע שתעלה APK לבוט — היא תופיע כאן עם אייקון, תיאור וכפתור הורדה.",download:"#"}];
+
+async function load(){
+  try{ const r=await fetch("/apps/content?t="+Date.now()); APPS=await r.json();
+       if(!Array.isArray(APPS)||!APPS.length) APPS=DEMO; }catch(e){ APPS=DEMO; }
+  buildCats(); render();
+}
+function cats(){ return ["הכל", ...[...new Set(APPS.map(a=>a.category).filter(Boolean))]]; }
+function buildCats(){
+  document.getElementById("cats").innerHTML = cats().map(c=>
+    `<div class="chip ${c===activeCat?'active':''}" onclick="pickCat('${c.replace(/'/g,"\\'")}',this)">${esc(c)}</div>`).join("");
+}
+function pickCat(c,el){ activeCat=c; buildCats(); render();
+  if(el) el.scrollIntoView({inline:"center",block:"nearest",behavior:"smooth"}); }
+function img(a){ return a.banner||a.icon||""; }
+function esc(s){ return (s||"").replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m])); }
+
+function render(){
+  const q=(document.getElementById("q").value||"").trim().toLowerCase();
+  const list=APPS.filter(a=>(activeCat==="הכל"||a.category===activeCat)&&
+    (!q||(a.name||"").toLowerCase().includes(q)||(a.description||"").toLowerCase().includes(q)));
+  const g=document.getElementById("grid");
+  if(!list.length){ g.innerHTML=`<div class="empty">לא נמצאו אפליקציות</div>`; return; }
+  g.innerHTML=list.map(a=>`
+    <div class="card" onclick="openApp('${a.id}')">
+      <div class="thumb">
+        ${img(a)?`<img src="${esc(img(a))}" loading="lazy" alt="">`:``}
+        ${a.category?`<span class="badge">${esc(a.category)}</span>`:``}
+      </div>
+      <div class="meta">
+        <p class="nm">${esc(a.name)}</p>
+        <div class="vr"><span>${esc(a.version||"אפליקציה")}</span>${a.size?`<span class="dot"></span><span>${esc(a.size)}</span>`:``}</div>
+      </div>
+    </div>`).join("");
+}
+function openApp(id){
+  const a=APPS.find(x=>x.id===id); if(!a) return; current=a;
+  document.getElementById("d_hero").src=img(a);
+  document.getElementById("d_icon").src=a.icon||img(a);
+  document.getElementById("d_name").textContent=a.name||"";
+  document.getElementById("d_cat").textContent=a.category||"";
+  document.getElementById("d_ver").textContent=a.version||"—";
+  document.getElementById("d_size").textContent=a.size||"—";
+  document.getElementById("d_upd").textContent=a.updated||"—";
+  document.getElementById("d_desc").textContent=a.description||"";
+  document.getElementById("d_dl").href=(a.download&&a.download!=="#")?a.download:"javascript:void(0)";
+  document.getElementById("d_shots").innerHTML=(a.screenshots||[]).map(s=>`<img src="${esc(s)}" alt="">`).join("");
+  document.getElementById("sheet").classList.add("open");
+  document.body.style.overflow="hidden"; window.scrollTo(0,0);
+}
+function closeSheet(){ document.getElementById("sheet").classList.remove("open"); document.body.style.overflow=""; }
+load();
+</script>
+</body>
+</html>
