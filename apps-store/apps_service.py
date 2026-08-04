@@ -25,6 +25,7 @@ BOT_TOKEN   = os.environ["APPS_BOT_TOKEN"]                       # הטוקן ש
 API_ID      = int(os.environ.get("APPS_API_ID", os.environ.get("API_ID", "0")))
 API_HASH    = os.environ.get("APPS_API_HASH", os.environ.get("API_HASH", ""))
 CHANNEL_ID  = int(os.environ.get("APPS_CHANNEL_ID", "-1004358130306"))
+CHANNEL_INVITE = os.environ.get("APPS_CHANNEL_INVITE", "")   # קישור הזמנה — לפתרון ערוץ פרטי
 PANEL_PASS  = os.environ.get("APPS_PANEL_PASSWORD", "changeme")
 PUBLIC_BASE = os.environ.get("APPS_PUBLIC_BASE", "https://appmod.duckdns.org").rstrip("/")
 DATA_DIR    = Path(os.environ.get("APPS_DATA_DIR", "/opt/appmod/data"))
@@ -120,14 +121,22 @@ api = FastAPI(title="AppMod")
 @api.on_event("startup")
 async def _start():
     await bot.start()
-    # קריטי: טוענים את הערוץ למטמון ה-peers. בלי זה, כשמגיע פוסט חדש
-    # Pyrogram לא מצליח לזהות את הערוץ (in_memory) ומפיל את העדכון בשקט —
-    # ואז ה-handler לא נורה. get_chat מאכלס את ה-access_hash של הערוץ.
-    try:
-        ch = await bot.get_chat(CHANNEL_ID)
-        log.info("✅ ערוץ נטען למטמון: %s (%s)", getattr(ch, "title", ""), CHANNEL_ID)
-    except Exception as e:
-        log.warning("⚠️ טעינת ערוץ נכשלה: %s", e)
+    # קריטי: מאכלסים את ה-access_hash של הערוץ במטמון ה-peers. בלי זה, כשמגיע
+    # פוסט חדש Pyrogram לא מזהה את הערוץ (Peer id invalid) ומפיל את העדכון בשקט.
+    # ערוץ פרטי אי-אפשר לפתור לפי מספר — פותרים דרך קישור ההזמנה.
+    primed = False
+    for target in (CHANNEL_INVITE, CHANNEL_ID):
+        if not target:
+            continue
+        try:
+            ch = await bot.get_chat(target)
+            log.info("✅ ערוץ נטען למטמון: %s (%s)", getattr(ch, "title", ""), getattr(ch, "id", target))
+            primed = True
+            break
+        except Exception as e:
+            log.warning("⚠️ טעינת ערוץ דרך %s נכשלה: %s", target, e)
+    if not primed:
+        log.warning("⚠️ הערוץ לא נטען — הוסף APPS_CHANNEL_INVITE=<קישור הזמנה> ל-.env והפעל מחדש")
     log.info("בוט AppMod פעיל. ערוץ=%s", CHANNEL_ID)
 
 @api.on_event("shutdown")
