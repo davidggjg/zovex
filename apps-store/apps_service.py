@@ -66,16 +66,28 @@ def _is_apk(msg) -> bool:
     mt = (getattr(d, "mime_type", "") or "").lower()
     return fn.endswith(".apk") or "android.package" in mt
 
-@bot.on_message(filters.chat(CHANNEL_ID))
+# יומן אבחון: רושם כל הודעה שהבוט מקבל (עוזר לזהות אם הוא בכלל מקבל מהערוץ)
+@bot.on_message(group=1)
+async def _debug_any(client, msg):
+    try:
+        ch = getattr(msg.chat, "id", None)
+        d = getattr(msg, "document", None)
+        log.info("📩 הודעה התקבלה · chat=%s · doc=%s · שם=%s",
+                 ch, bool(d), getattr(d, "file_name", None) if d else None)
+    except Exception:
+        pass
+
+@bot.on_message(filters.document)
 async def on_channel_post(client, msg):
-    """כל APK שמועלה לערוץ נכנס אוטומטית לרשימה (לעריכת פרטים בפאנל)."""
+    """כל APK שמועלה (מכל צ'אט שהבוט חבר בו) נכנס אוטומטית לרשימה."""
     try:
         if not _is_apk(msg):
             return
         d = msg.document
+        chat_id = getattr(msg.chat, "id", CHANNEL_ID)
         apps = load_apps()
-        # דדופ לפי הודעה/קובץ
-        if any(a.get("channel_msg_id") == msg.id for a in apps):
+        # דדופ לפי (צ'אט + הודעה)
+        if any(a.get("channel_msg_id") == msg.id and a.get("channel_id") == chat_id for a in apps):
             return
         cap = (msg.caption or "").strip()
         name = (cap.splitlines()[0].strip() if cap else "") or clean_app_name(getattr(d, "file_name", ""))
@@ -87,7 +99,7 @@ async def on_channel_post(client, msg):
             "version": "", "size": human_size(getattr(d, "file_size", 0)),
             "updated": datetime.utcnow().strftime("%d/%m/%Y"),
             "screenshots": [],
-            "channel_id": CHANNEL_ID, "channel_msg_id": msg.id,
+            "channel_id": chat_id, "channel_msg_id": msg.id,
             "file_name": getattr(d, "file_name", "app.apk"),
             "file_size": getattr(d, "file_size", 0),
         }
