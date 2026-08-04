@@ -148,16 +148,23 @@
   </div>
 
 <script>
-let APPS = [], activeCat = "הכל", current = null;
+let APPS = [], CATS = [], activeCat = "הכל", current = null;
 const DEMO = [{id:"demo1",name:"האפליקציה שלי",category:"כללי",icon:"",banner:"",version:"1.0.0",size:"24 MB",updated:"עכשיו",
   description:"אפליקציית דמו. ברגע שתעלה APK לבוט — היא תופיע כאן עם אייקון, תיאור וכפתור הורדה.",download:"#"}];
 
 async function load(){
   try{ const r=await fetch("/apps/content?t="+Date.now()); APPS=await r.json();
        if(!Array.isArray(APPS)||!APPS.length) APPS=DEMO; }catch(e){ APPS=DEMO; }
+  try{ const r=await fetch("/apps/cats?t="+Date.now()); const c=await r.json();
+       CATS=Array.isArray(c)?c:[]; }catch(e){ CATS=[]; }
   buildCats(); render();
 }
-function cats(){ return ["הכל", ...[...new Set(APPS.map(a=>a.category).filter(Boolean))]]; }
+function cats(){
+  const used=new Set(APPS.map(a=>a.category).filter(Boolean));
+  const ordered=CATS.filter(c=>used.has(c));               // סדר הניהול, רק קטגוריות עם אפליקציות
+  used.forEach(c=>{ if(!ordered.includes(c)) ordered.push(c); }); // ישנות שלא ברשימת הניהול
+  return ["הכל", ...ordered];
+}
 function buildCats(){
   document.getElementById("cats").innerHTML = cats().map(c=>
     `<div class="chip ${c===activeCat?'active':''}" onclick="pickCat('${c.replace(/'/g,"\\'")}',this)">${esc(c)}</div>`).join("");

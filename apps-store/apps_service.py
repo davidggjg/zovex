@@ -37,9 +37,11 @@ DATA_DIR    = Path(os.environ.get("APPS_DATA_DIR", "/opt/appmod/data"))
 HERE        = Path(__file__).resolve().parent
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 APPS_FILE   = DATA_DIR / "apps.json"
+CATS_FILE   = DATA_DIR / "categories.json"
 OFFSET_FILE = DATA_DIR / "update_offset.txt"
 
 BOT_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+DEFAULT_CATS = ["כללי"]
 
 def load_apps() -> list:
     if APPS_FILE.exists():
@@ -49,6 +51,23 @@ def load_apps() -> list:
 
 def save_apps(arr: list):
     APPS_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_cats() -> list:
+    if CATS_FILE.exists():
+        try:
+            c = json.loads(CATS_FILE.read_text(encoding="utf-8"))
+            if isinstance(c, list) and c: return c
+        except Exception: pass
+    return list(DEFAULT_CATS)
+
+def save_cats(arr: list):
+    clean = [str(x).strip() for x in arr if str(x).strip()]
+    seen, out = set(), []
+    for c in clean:
+        if c not in seen: seen.add(c); out.append(c)
+    if not out: out = list(DEFAULT_CATS)
+    CATS_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
 
 def human_size(n) -> str:
     n = float(n or 0)
@@ -90,21 +109,39 @@ def _is_apk_doc(doc: dict) -> bool:
     mt = (doc.get("mime_type") or "").lower()
     return fn.endswith(".apk") or "android.package" in mt
 
-def handle_channel_post(post: dict):
-    """פוסט מהערוץ (Bot API). כל APK → נכנס אוטומטית לרשימה."""
+# ── הרשאות: רק מנהלי הערוץ יכולים להוסיף אפליקציות דרך הבוט ───────────────────
+_admin_ids: set = set()
+_admin_ts: float = 0.0
+
+def get_admin_ids(force: bool = False) -> set:
+    global _admin_ids, _admin_ts
+    if not force and _admin_ids and (time.time() - _admin_ts) < 300:
+        return _admin_ids
+    try:
+        r = _api("getChatAdministrators", {"chat_id": CHANNEL_ID}, 20)
+        ids = {m["user"]["id"] for m in r.get("result", []) if m.get("user")}
+        if ids:
+            _admin_ids, _admin_ts = ids, time.time()
+    except Exception as e:
+        log.warning("getChatAdministrators נכשל: %s", e)
+    return _admin_ids
+
+def add_from_post(post: dict):
+    """מוסיף APK לחנות מתוך הודעת ערוץ (Bot API). מחזיר את הרשומה או None אם כבר קיים."""
     doc = post.get("document")
     if not doc or not _is_apk_doc(doc):
-        return
+        return None
     chat_id = post.get("chat", {}).get("id", CHANNEL_ID)
     msg_id  = post.get("message_id")
     apps = load_apps()
     if any(a.get("channel_msg_id") == msg_id and a.get("channel_id") == chat_id for a in apps):
-        return
+        return None
     cap  = (post.get("caption") or "").strip()
     name = (cap.splitlines()[0].strip() if cap else "") or clean_app_name(doc.get("file_name", ""))
+    cats = load_cats()
     entry = {
         "id": uuid.uuid4().hex[:12],
-        "name": name, "category": "כללי",
+        "name": name, "category": cats[0] if cats else "כללי",
         "icon": "", "banner": "",
         "description": cap if cap else "",
         "version": "", "size": human_size(doc.get("file_size", 0)),
@@ -118,17 +155,42 @@ def handle_channel_post(post: dict):
     apps.insert(0, entry)
     save_apps(apps)
     log.info("✅ APK חדש נוסף: %s (msg %s)", name, msg_id)
+    return entry
+
+def handle_private_message(msg: dict):
+    """שליחת APK בפרטי לבוט → מעביר לערוץ (ארכיון) ומוסיף לחנות. מנהלי ערוץ בלבד."""
+    chat_id = msg.get("chat", {}).get("id")
+    uid = (msg.get("from") or {}).get("id")
+    doc = msg.get("document")
+    if not doc:
+        _api("sendMessage", {"chat_id": chat_id,
+             "text": "שלח לי קובץ APK ואוסיף אותו לחנות אוטומטית."}, 20)
+        return
+    if uid not in get_admin_ids() and uid not in get_admin_ids(force=True):
+        _api("sendMessage", {"chat_id": chat_id,
+             "text": "⛔ רק מנהלי הערוץ יכולים להוסיף אפליקציות."}, 20)
+        return
+    if not _is_apk_doc(doc):
+        _api("sendMessage", {"chat_id": chat_id, "text": "זה לא קובץ APK. שלח קובץ .apk."}, 20)
+        return
+    # מעביר לערוץ (מקור הורדה יציב + ארכיון), משתמש שוב ב-file_id
+    params = {"chat_id": CHANNEL_ID, "document": doc["file_id"]}
+    cap = (msg.get("caption") or "").strip()
+    if cap: params["caption"] = cap
     try:
-        _api("sendMessage", {
-            "chat_id": chat_id,
-            "reply_to_message_id": msg_id,
-            "text": f"✅ «{name}» נוסף לחנות.\nערוך פרטים בפאנל:\n{PUBLIC_BASE}/apps/admin",
-        }, timeout=20)
-    except Exception:
-        pass
+        r = _api("sendDocument", params, 90)
+    except Exception as e:
+        log.warning("sendDocument לערוץ נכשל: %s", e)
+        _api("sendMessage", {"chat_id": chat_id, "text": "ההעברה לערוץ נכשלה, נסה שוב."}, 20)
+        return
+    post = r.get("result")
+    entry = add_from_post(post) if post else None
+    name = entry["name"] if entry else clean_app_name(doc.get("file_name", ""))
+    _api("sendMessage", {"chat_id": chat_id,
+         "text": f"✅ «{name}» נוסף לחנות.\nערוך פרטים (אייקון/תיאור/קטגוריה) בפאנל:\n{PUBLIC_BASE}/apps/admin"}, 20)
 
 async def poll_loop():
-    """לולאת long-polling של getUpdates — מאזינה לפוסטים בערוץ."""
+    """לולאת long-polling של getUpdates — מאזינה לערוץ ולהודעות פרטיות."""
     # מבטלים webhook אם הוגדר בעבר (אחרת getUpdates מחזיר 409)
     try:
         await asyncio.to_thread(_api, "deleteWebhook", {"drop_pending_updates": "false"}, 20)
@@ -136,7 +198,7 @@ async def poll_loop():
         log.warning("deleteWebhook: %s", e)
     offset = load_offset()
     log.info("📡 מאזין לערוץ %s דרך Bot API (offset=%s)", CHANNEL_ID, offset)
-    allowed = json.dumps(["channel_post", "edited_channel_post"])
+    allowed = json.dumps(["channel_post", "edited_channel_post", "message"])
     while True:
         try:
             resp = await asyncio.to_thread(_api, "getUpdates", {
@@ -145,11 +207,14 @@ async def poll_loop():
             for upd in resp.get("result", []):
                 offset = upd["update_id"] + 1
                 post = upd.get("channel_post") or upd.get("edited_channel_post")
-                if post:
-                    try:
-                        await asyncio.to_thread(handle_channel_post, post)
-                    except Exception as e:
-                        log.warning("עיבוד פוסט נכשל: %s", e)
+                msg  = upd.get("message")
+                try:
+                    if post:
+                        await asyncio.to_thread(add_from_post, post)
+                    elif msg and (msg.get("chat") or {}).get("type") == "private":
+                        await asyncio.to_thread(handle_private_message, msg)
+                except Exception as e:
+                    log.warning("עיבוד עדכון נכשל: %s", e)
             save_offset(offset)
         except Exception as e:
             log.warning("getUpdates נכשל: %s", e)
@@ -188,6 +253,11 @@ async def content():
             "download": f"/apps/dl/{a['id']}",
         })
     return JSONResponse(out)
+
+@api.get("/apps/cats")
+async def public_cats():
+    """רשימת הקטגוריות (לגלגלת באתר)."""
+    return JSONResponse(load_cats())
 
 @api.get("/apps/dl/{app_id}")
 async def download(app_id: str):
@@ -233,6 +303,17 @@ async def admin_save(req: SaveReq):
     if not isinstance(req.apps, list): raise HTTPException(400, "apps חייב להיות מערך")
     save_apps(req.apps)
     return {"ok": True, "count": len(req.apps)}
+
+class CatsReq(BaseModel):
+    password: str
+    categories: list
+
+@api.post("/apps/cats/save")
+async def admin_cats_save(req: CatsReq):
+    check_pass(req.password)
+    if not isinstance(req.categories, list): raise HTTPException(400, "categories חייב להיות מערך")
+    out = save_cats(req.categories)
+    return {"ok": True, "categories": out}
 
 @api.get("/ping")
 async def ping(): return {"ok": True, "apps": len(load_apps())}

@@ -9,6 +9,7 @@
   *{box-sizing:border-box}
   body{font-family:-apple-system,"Segoe UI",Rubik,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink);padding:16px;max-width:760px;margin:0 auto}
   h1{font-size:20px;margin:6px 0 14px}
+  h2{font-size:15px;margin:0 0 10px;display:flex;align-items:center;gap:7px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:14px;box-shadow:0 6px 18px rgba(40,50,90,.08)}
   label{display:block;font-size:12px;color:var(--sub);margin:8px 0 4px;font-weight:600}
   input,textarea,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;color:var(--ink)}
@@ -18,6 +19,7 @@
   .primary{background:linear-gradient(135deg,#6d5efc,#9b6bff);color:#fff}
   .gray{background:#eef1f7;color:#41496a}
   .danger{background:#fde8e8;color:#c0392b}
+  .mini{padding:8px 11px;font-size:13px}
   .row{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
   .apphead{display:flex;gap:10px;align-items:center}
   .apphead img{width:46px;height:46px;border-radius:11px;object-fit:cover;background:#eef1f7;flex:0 0 auto}
@@ -25,6 +27,13 @@
   .apphead small{color:var(--sub)}
   .msg{font-size:13px;color:var(--sub);margin-top:8px}
   .ok{color:#1a7f37}.err{color:#c0392b}
+  /* קטגוריות */
+  .catrow{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .catrow input{flex:1}
+  .catrow .ord{display:flex;flex-direction:column;gap:2px}
+  .catrow .ord button{padding:2px 8px;line-height:1;background:#eef1f7;color:#41496a;border-radius:7px;font-size:12px}
+  .addcat{display:flex;gap:8px;margin-top:6px}
+  .hint{font-size:12px;color:var(--sub);margin:2px 0 10px}
 </style>
 </head>
 <body>
@@ -35,16 +44,31 @@
     <div class="row"><button class="primary" onclick="doLogin()">כניסה</button></div>
     <div class="msg" id="loginMsg"></div>
   </div>
+
   <div id="app" style="display:none">
+    <!-- ניהול קטגוריות -->
+    <div class="card">
+      <h2>🏷️ קטגוריות</h2>
+      <div class="hint">הוסף / שנה שם / מחק. השינויים חלים גם על האפליקציות המשויכות.</div>
+      <div id="catlist"></div>
+      <div class="addcat">
+        <input id="newcat" placeholder="שם קטגוריה חדשה" onkeydown="if(event.key==='Enter')addCat()">
+        <button class="primary mini" onclick="addCat()">➕ הוסף</button>
+      </div>
+      <div class="msg" id="catMsg"></div>
+    </div>
+
+    <!-- אפליקציות -->
     <div class="row" style="margin-bottom:10px">
-      <button class="gray" onclick="loadList()">↻ רענן</button>
-      <button class="primary" onclick="saveAll()">💾 שמור הכל</button>
+      <button class="gray" onclick="loadAll()">↻ רענן</button>
+      <button class="primary" onclick="saveAll()">💾 שמור אפליקציות</button>
       <span class="msg" id="saveMsg"></span>
     </div>
     <div id="list"></div>
   </div>
 <script>
-let PW="", APPS=[];
+let PW="", APPS=[], CATS=[];
+
 async function doLogin(){
   PW=document.getElementById("pw").value.trim();
   const m=document.getElementById("loginMsg"); m.textContent="בודק…";
@@ -52,19 +76,80 @@ async function doLogin(){
     const r=await fetch("/apps/list",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW})});
     if(!r.ok) throw new Error("סיסמה שגויה");
     APPS=await r.json();
+    CATS=await (await fetch("/apps/cats")).json();
+    if(!Array.isArray(CATS)||!CATS.length) CATS=["כללי"];
     document.getElementById("login").style.display="none";
     document.getElementById("app").style.display="";
-    renderList();
+    renderCats(); renderList();
   }catch(e){ m.innerHTML='<span class="err">'+e.message+'</span>'; }
 }
-async function loadList(){
-  const r=await fetch("/apps/list",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW})});
-  APPS=await r.json(); renderList();
+async function loadAll(){
+  APPS=await (await fetch("/apps/list",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW})})).json();
+  CATS=await (await fetch("/apps/cats")).json();
+  if(!Array.isArray(CATS)||!CATS.length) CATS=["כללי"];
+  renderCats(); renderList();
 }
 function esc(s){return (s||"").replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+
+/* ── קטגוריות ── */
+function renderCats(){
+  document.getElementById("catlist").innerHTML=CATS.map((c,i)=>`
+    <div class="catrow">
+      <div class="ord">
+        <button onclick="moveCat(${i},-1)" ${i===0?'disabled style=opacity:.3':''}>▲</button>
+        <button onclick="moveCat(${i},1)" ${i===CATS.length-1?'disabled style=opacity:.3':''}>▼</button>
+      </div>
+      <input value="${esc(c)}" onchange="renameCat(${i},this.value)">
+      <button class="danger mini" onclick="delCat(${i})">🗑️</button>
+    </div>`).join("");
+}
+async function addCat(){
+  const inp=document.getElementById("newcat"); const v=inp.value.trim();
+  if(!v) return;
+  if(CATS.includes(v)){ catMsg('כבר קיים','err'); return; }
+  CATS.push(v); inp.value=""; renderCats(); await saveCats();
+}
+async function renameCat(i,val){
+  val=(val||"").trim(); const old=CATS[i];
+  if(!val){ renderCats(); return; }
+  if(val!==old && CATS.includes(val)){ catMsg('שם כבר קיים','err'); renderCats(); return; }
+  if(val!==old){
+    APPS.forEach(a=>{ if(a.category===old) a.category=val; });
+    CATS[i]=val; renderCats(); renderList();
+    await saveCats(); await saveAll(true);
+  }
+}
+async function delCat(i){
+  const name=CATS[i];
+  if(!confirm('למחוק את הקטגוריה «'+name+'»? אפליקציות בקטגוריה זו יעברו ל-«'+(CATS[0]===name?(CATS[1]||'כללי'):CATS[0])+'».')) return;
+  CATS.splice(i,1);
+  const fallback=CATS[0]||'כללי';
+  APPS.forEach(a=>{ if(a.category===name) a.category=fallback; });
+  renderCats(); renderList();
+  await saveCats(); await saveAll(true);
+}
+async function moveCat(i,d){
+  const j=i+d; if(j<0||j>=CATS.length) return;
+  [CATS[i],CATS[j]]=[CATS[j],CATS[i]]; renderCats(); await saveCats();
+}
+function catMsg(t,cls){ document.getElementById("catMsg").innerHTML='<span class="'+(cls||'ok')+'">'+t+'</span>'; }
+async function saveCats(){
+  try{
+    const r=await fetch("/apps/cats/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW,categories:CATS})});
+    const d=await r.json(); if(!r.ok) throw new Error(d.detail||"שגיאה");
+    CATS=d.categories||CATS; catMsg('קטגוריות נשמרו ✓');
+  }catch(e){ catMsg(e.message,'err'); }
+}
+
+/* ── אפליקציות ── */
+function catOptions(sel){
+  const opts=CATS.slice();
+  if(sel && !opts.includes(sel)) opts.unshift(sel);
+  return opts.map(c=>`<option value="${esc(c)}" ${c===sel?'selected':''}>${esc(c)}</option>`).join("");
+}
 function renderList(){
   const el=document.getElementById("list");
-  if(!APPS.length){ el.innerHTML='<div class="card">אין אפליקציות עדיין. העלה APK לבוט והן יופיעו כאן.</div>'; return; }
+  if(!APPS.length){ el.innerHTML='<div class="card">אין אפליקציות עדיין. שלח APK לבוט בפרטי והן יופיעו כאן.</div>'; return; }
   el.innerHTML=APPS.map((a,i)=>`
     <div class="card">
       <div class="apphead">
@@ -73,7 +158,7 @@ function renderList(){
       </div>
       <div class="grid2">
         <div><label>שם</label><input value="${esc(a.name||'')}" oninput="upd(${i},'name',this.value)"></div>
-        <div><label>קטגוריה</label><input value="${esc(a.category||'')}" oninput="upd(${i},'category',this.value)"></div>
+        <div><label>קטגוריה</label><select onchange="upd(${i},'category',this.value)">${catOptions(a.category||'')}</select></div>
       </div>
       <div class="grid2">
         <div><label>גרסה</label><input value="${esc(a.version||'')}" oninput="upd(${i},'version',this.value)"></div>
@@ -83,14 +168,14 @@ function renderList(){
       <label>באנר (קישור תמונה רחבה — אופציונלי)</label><input value="${esc(a.banner||'')}" oninput="upd(${i},'banner',this.value)">
       <label>תיאור</label><textarea oninput="upd(${i},'description',this.value)">${esc(a.description||'')}</textarea>
       <label>צילומי מסך (קישורים מופרדים בפסיק)</label><input value="${esc((a.screenshots||[]).join(', '))}" oninput="updShots(${i},this.value)">
-      <div class="row"><button class="danger" onclick="del(${i})">🗑️ מחק</button></div>
+      <div class="row"><button class="danger" onclick="del(${i})">🗑️ מחק אפליקציה</button></div>
     </div>`).join("");
 }
 function upd(i,k,v){ APPS[i][k]=v; }
 function updShots(i,v){ APPS[i].screenshots=v.split(",").map(s=>s.trim()).filter(Boolean); }
 function del(i){ if(confirm("למחוק את «"+(APPS[i].name||"")+"»?")){ APPS.splice(i,1); renderList(); saveAll(); } }
-async function saveAll(){
-  const m=document.getElementById("saveMsg"); m.textContent="שומר…";
+async function saveAll(silent){
+  const m=document.getElementById("saveMsg"); if(!silent) m.textContent="שומר…";
   try{
     const r=await fetch("/apps/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:PW,apps:APPS})});
     const d=await r.json(); if(!r.ok) throw new Error(d.detail||"שגיאה");
