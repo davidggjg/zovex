@@ -223,10 +223,17 @@
         <div><label>קבצים לדקה</label><input id="imp_rate" type="number" value="10" min="1" max="30"></div>
         <div><label>מגבלת סה"כ (0 = הכל)</label><input id="imp_limit" type="number" value="0" min="0"></div>
       </div>
-      <div class="grid2" style="margin-top:8px">
-        <button onclick="startImport()">▶ התחל ייבוא</button>
-        <button class="gray" onclick="stopImport()">⏹ עצור</button>
+      <div style="margin-top:8px"><label>כמות לא-מזוהים להביא (רק ל«בלי זיהוי» · 0 = ללא הגבלה)</label>
+        <input id="imp_unmatched" type="number" value="0" min="0"></div>
+      <div class="muted" style="margin-top:8px;font-size:13px">
+        🟢 <b>יבוא עם זיהוי</b> — רק מה שזוהה (עולה ישר לאתר). לא-מזוהים נדלגים.<br>
+        🔵 <b>יבוא בלי זיהוי</b> — הכל: מזוהים לאתר + לא-מזוהים לאישור (עד הכמות שקבעת).
       </div>
+      <div class="grid2" style="margin-top:10px">
+        <button onclick="startImport(true)">🟢 יבוא עם זיהוי</button>
+        <button onclick="startImport(false)">🔵 יבוא בלי זיהוי</button>
+      </div>
+      <div style="margin-top:8px"><button class="gray" style="width:100%" onclick="stopImport()">⏹ עצור</button></div>
       <div id="impMsg" class="muted" style="margin-top:6px"></div>
     </div>
     <div class="card"><div class="toprow"><h2>סטטוס ייבוא</h2><button class="mini gray" onclick="pollImport()">↻ רענן</button></div>
@@ -847,15 +854,17 @@ async function removePoolBot(name){
 
 // ── ייבוא ממאגר ──
 let _impTimer=null;
-async function startImport(){
+async function startImport(onlyMatched){
   const source=$("imp_src").value.trim();
   const source2=($("imp_src2")?$("imp_src2").value.trim():"");
   if(!source){ $("impMsg").innerHTML='<span class="err">חסר ערוץ מקור</span>'; return; }
   const per_min=parseInt($("imp_rate").value)||10, limit=parseInt($("imp_limit").value)||0, kinds=$("imp_kinds").value;
+  const unmatched_limit=parseInt($("imp_unmatched").value)||0;
   $("impMsg").textContent="מתחיל…";
   try{
     const r=await fetch("/import/start",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({password:PASS,source,source2,per_min,limit,kinds})});
+      body:JSON.stringify({password:PASS,source,source2,per_min,limit,kinds,
+        only_matched:!!onlyMatched, unmatched_limit:(onlyMatched?0:unmatched_limit)})});
     const d=await r.json();
     if(!r.ok) throw new Error(d.detail||"שגיאה");
     $("impMsg").innerHTML='<span class="ok">הייבוא התחיל ✓ רץ ברקע — אפשר לעבור ל«העלאות מהבוט» ולאשר תוך כדי.</span>';

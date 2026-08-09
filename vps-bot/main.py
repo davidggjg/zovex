@@ -1693,6 +1693,8 @@ def _auto_category(item: dict) -> str:
             return "אנימה"
         if is_il:
             return "סדרות ישראליות"
+        if 27 in g:                       # ז'אנר אימה → קטגוריית אימה (גם לסדרות)
+            return "אימה"
         # רק תיוג מפורש של ילדים/משפחה → סדרות לילדים (אנימציה למבוגרים כמו
         # ריק ומורטי לא מתויגת ככה ולכן נשארת ב'סדרות')
         if (10762 in g) or (10751 in g):
@@ -1727,10 +1729,12 @@ def _slugify(title: str, tmdb_id) -> str:
     return (_slug_base(title) or "movie") + "-" + str(tmdb_id)
 
 def _custom_slug(en_title: str, he_title: str, tmdb_id) -> str:
-    """slug לכתובת: מעדיף שם אנגלי; נופל לתעתיק עברי; ואז ל-tmdb id."""
+    """slug נקי לכתובת: מעדיף שם אנגלי; נופל לתעתיק עברי; ואז ל-tmdb id.
+    בלי סיומת מספר כברירת מחדל (כתובת יפה: /us). הייחודיות נאכפת ב-add_movie_entry
+    (מוסיף סיומת רק אם יש התנגשות)."""
     base = _slug_base(en_title) or _slug_base(he_title)
     if base:
-        return f"{base}-{tmdb_id}" if tmdb_id else base
+        return base
     return f"movie-{tmdb_id}" if tmdb_id else ""
 
 def _all_entries() -> list:
@@ -1835,6 +1839,13 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "",
     # מניעת כפילות — לפי (ערוץ+מזהה הודעה) וגם לפי הקובץ עצמו (file_unique_id)
     lst = [e for e in lst if not (e.get("channel_msg_id") == channel_msg_id and (e.get("channel_id") or STREAM_CHANNEL_ID) == chat_id)
            and not (file_unique_id and e.get("file_unique_id") == file_unique_id)]
+    # ייחודיות ה-slug הנקי: אם שם אנגלי זהה כבר תפוס ע"י סרט אחר — מוסיפים סיומת
+    # (קודם מזהה TMDB, אחרת מספר ההודעה) כדי ששתי כתובות לא יתנגשו.
+    want = entry.get("custom_slug")
+    if want:
+        used = {e.get("custom_slug") for e in (lst + (load_new_uploads() if to_content else load_content())) if e.get("custom_slug")}
+        if want in used:
+            entry["custom_slug"] = f"{want}-{chosen.get('tmdb_id') or channel_msg_id}"
     lst.append(entry)
     (save_content if to_content else save_new_uploads)(lst)
     return entry
@@ -2581,7 +2592,8 @@ def _pick_pool_userbot():
             return b
     return None
 
-async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "all"):
+async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "all",
+                              only_matched: bool = False, unmatched_limit: int = 0):
     """סורק מאגר/מאגרים, מעתיק כל וידאו לערוץ שלנו, ומזהה דרך TMDB:
     • זוהה בוודאות → מעלה *ישירות לאתר* עם קטגוריה אוטומטית (לפי ז'אנר/מוצא).
     • לא זוהה → נשאר בהמתנה (new_uploads) לאישור ידני.
@@ -2724,6 +2736,14 @@ async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "a
                             _import["skipped"] += 1; continue
                         if _title_seen(_norm_title(options[0].get("title", ""))):
                             _import["skipped"] += 1; continue
+                # ── סינון "עם/בלי זיהוי" (לפני ההעתקה — לא מבזבזים העתקה על מדלגים) ──
+                # מזוהה = סרט שנמצא ב-TMDB, או פרק שסדרתו נמצאה ב-TMDB.
+                _matched = bool(await _series_tmdb(ep["series"])) if ep else bool(options)
+                if not _matched:
+                    if only_matched:
+                        _import["skipped"] += 1; continue          # "עם זיהוי" — מדלג על לא-מזוהה
+                    if unmatched_limit and _import["unmatched"] >= unmatched_limit:
+                        _import["skipped"] += 1; continue          # הגיע למכסת הלא-מזוהים
                 # העתקה לערוץ הפעיל שלנו (גלישה אוטומטית כשמתמלא) דרך ה-userbot
                 new_id = None
                 dest = current_upload_channel()
@@ -2809,6 +2829,8 @@ class ImportStartReq(BaseModel):
     per_min: int = 10    # כמה קבצים להעביר בכל דקה (טפטוף)
     limit: int = 0       # מגבלת סה"כ (0 = עד שהערוץ נגמר / עצירה ידנית)
     kinds: str = "all"   # "all" / "movies" / "series" — מה לייבא
+    only_matched: bool = False   # "יבוא עם זיהוי" — רק פריטים שזוהו (מדלג על לא-מזוהים)
+    unmatched_limit: int = 0     # "יבוא בלי זיהוי" — כמה לא-מזוהים להביא (0 = ללא הגבלה)
 
 @api.post("/import/start")
 async def import_start(req: ImportStartReq, request: Request):
@@ -2829,7 +2851,8 @@ async def import_start(req: ImportStartReq, request: Request):
     if not srcs:
         raise HTTPException(status_code=400, detail="חסר מקור (שם/לינק/ID של הערוץ)")
     kinds = req.kinds if req.kinds in ("all", "movies", "series") else "all"
-    asyncio.create_task(_bulk_import_worker(srcs, int(req.per_min or 10), max(0, int(req.limit or 0)), kinds))
+    asyncio.create_task(_bulk_import_worker(srcs, int(req.per_min or 10), max(0, int(req.limit or 0)), kinds,
+                                            bool(req.only_matched), max(0, int(req.unmatched_limit or 0))))
     return {"ok": True}
 
 @api.post("/import/status")
