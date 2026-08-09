@@ -2897,18 +2897,38 @@ async def channels_list(req: PoolPwReq, request: Request):
     return {"channels": STREAM_CHANNELS, "active": active,
             "max_per_channel": CHANNEL_MAX_MESSAGES}
 
+# ── מטמון תגובת /content ──────────────────────────────────────────────────────
+# בניית התגובה (טעינת 10MB + הרחבה+חתימה של ~10K קישורים) לקחה ~2.5ש בכל בקשה,
+# מה שהאט כל טעינת דף באתר. מוחזק כאן גוף JSON מוכן, שנבנה מחדש רק כשהתוכן משתנה
+# (לפי הגרסה) או כל CONTENT_CACHE_TTL שניות (כדי לרענן את חתימות הקישורים — הן
+# תקפות 6 שעות, אז רענון כל כמה דקות בטוח). כך כמעט כל בקשה מוגשת מיידית.
+_content_resp_cache = {"ver": None, "built": 0.0, "body": None}
+CONTENT_CACHE_TTL = 180
+
+def _cached_content_body():
+    ver = get_content_version()
+    now = time.time()
+    c = _content_resp_cache
+    if c["body"] is not None and c["ver"] == ver and (now - c["built"]) < CONTENT_CACHE_TTL:
+        return c["body"], ver
+    body = json.dumps(_expand_urls(load_content()), ensure_ascii=False)
+    c.update(ver=ver, built=now, body=body)
+    return body, ver
+
 @api.get("/content")
 async def content_get():
     """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית).
     כותרת X-Content-Version מאפשרת לפאנל לדעת על איזו גרסה הוא עורך (optimistic lock)."""
-    return JSONResponse(_expand_urls(load_content()),
-                        headers={"X-Content-Version": str(get_content_version())})
+    body, ver = _cached_content_body()
+    return Response(content=body, media_type="application/json",
+                    headers={"X-Content-Version": str(ver)})
 
 @api.get("/movies.json")
 async def content_movies_alias():
     """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
-    return JSONResponse(_expand_urls(load_content()),
-                        headers={"X-Content-Version": str(get_content_version())})
+    body, ver = _cached_content_body()
+    return Response(content=body, media_type="application/json",
+                    headers={"X-Content-Version": str(ver)})
 
 class ContentSaveReq(BaseModel):
     password: str
