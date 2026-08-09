@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-vps/
+__pycache__/
 .env
 .env.local
 .env.*.local
