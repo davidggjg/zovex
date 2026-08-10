@@ -599,6 +599,41 @@ async def resolve_active_channel():
 async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
+
+async def _resolve_peer(client, name) -> bool:
+    """מוודא שהלקוח מזהה את ערוץ התוכן.
+
+    בלי זיהוי, *כל* משיכת מדיה של אותו חבר pool נכשלת ב-'Peer id invalid',
+    הוא נכנס ל-cooldown, יוצא, נכשל שוב — לולאה אינסופית. קודם הכישלון כאן
+    נבלע ב-except: pass בלי שום לוג, ולכן התקלה הייתה בלתי נראית לגמרי
+    והתגלתה רק מתלונות של צופים ("הלייב עובד והסרטים נתקעים").
+    """
+    if not STREAM_CHANNEL_ID:
+        return True
+    try:
+        await asyncio.wait_for(client.get_chat(STREAM_CHANNEL_ID), timeout=20)
+        return True
+    except Exception as e:
+        log.warning("⚠️ %s לא מזהה את ערוץ התוכן (%s) — ינוסה שוב ברקע", name, e)
+        return False
+
+
+async def peer_retry_loop():
+    """ריפוי עצמי לחברי pool שלא זיהו את הערוץ בעלייה.
+
+    קריטי במיוחד ל-userbot: הוא מוגדר no_updates=True + in_memory=True, כלומר
+    לא מקבל עדכונים (אז הודעה חדשה בערוץ *לא* תלמד אותו) ולא שומר כלום לדיסק.
+    get_chat היא הדרך היחידה שלו לזהות את הערוץ — ואם היא נכשלה פעם אחת
+    בעלייה (למשל בגלל תקלת רשת רגעית), הוא נשאר מושבת עד ה-restart הבא.
+    """
+    while True:
+        await asyncio.sleep(60)
+        for b in [x for x in _stream_bots if not x.get("peer_ok")]:
+            if await _resolve_peer(b["client"], b["name"]):
+                b["peer_ok"] = True
+                b["cooldown_until"] = 0.0
+                log.info("✅ %s זיהה את ערוץ התוכן וחזר לפעולה", b["name"])
+
 def _is_bot_token(s: str) -> bool:
     return bool(re.match(r'^\d{5,}:[A-Za-z0-9_-]{20,}$', (s or "").strip()))
 
@@ -616,13 +651,12 @@ async def _start_one_pool_bot(i, tok: str):
             kind = "user"
         c.add_handler(MessageHandler(_pool_noop, filters.channel))
         await asyncio.wait_for(c.start(), timeout=40)
+        name = f"{kind}_{i}"
+        entry = {"client": c, "name": name, "cooldown_until": 0.0,
+                 "token": tok, "kind": kind, "peer_ok": True}
         if STREAM_CHANNEL_ID:
-            try:
-                await c.get_chat(STREAM_CHANNEL_ID)
-            except Exception:
-                pass  # יזוהה כשיגיע פוסט חדש לערוץ
-        _stream_bots.append({"client": c, "name": f"{kind}_{i}", "cooldown_until": 0.0,
-                             "token": tok, "kind": kind})
+            entry["peer_ok"] = await _resolve_peer(c, name)
+        _stream_bots.append(entry)
         log.info("✅ pool %s %s עלה (%d פעילים)", kind, i, len(_stream_bots))
     except Exception as e:
         log.warning("⚠️ pool member %s לא עלה: %s", i, e)
@@ -691,8 +725,13 @@ async def pick_stream_bot():
         _stream_rr += 1
         return b
 
-def _mark_choked(bot, seconds):
+def _mark_choked(bot, seconds, err=None):
     bot["cooldown_until"] = time.time() + seconds
+    # "Peer id invalid" הוא לא חניקה אלא בוט ששכח את הערוץ: cooldown לבדו לא
+    # יעזור לו, הוא פשוט ייכשל שוב בעוד 30 שניות. מסמנים אותו כדי ש-
+    # peer_retry_loop ינסה לזהות עבורו את הערוץ מחדש.
+    if err is not None and "peer id invalid" in str(err).lower():
+        bot["peer_ok"] = False
     log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
 
 # cache של אובייקט ההודעה — *per-bot*. קריטי: ה-file_reference בתוך ההודעה
@@ -745,7 +784,7 @@ async def channel_get_media(chat_id, message_id):
             _mark_choked(bot, e.value)
         except Exception as e:
             log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
-            _mark_choked(bot, 30)
+            _mark_choked(bot, 30, e)
     return None
 
 async def channel_stream_range(chat_id, message_id, start, end):
@@ -787,7 +826,7 @@ async def channel_stream_range(chat_id, message_id, start, end):
                 break   # כבר שלחנו בייטים — אי אפשר להחליף בוט באמצע
         except Exception as e:
             log.warning("channel stream שגיאה: %s", e)
-            _mark_choked(bot, 30)
+            _mark_choked(bot, 30, e)
             if pos > start:
                 break
     if pos <= end:
@@ -837,7 +876,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
             _mark_choked(bot, e.value)
         except Exception as e:
             log.warning("subrange שגיאה: %s", e)
-            _mark_choked(bot, 30)
+            _mark_choked(bot, 30, e)
     return b"\x00" * need
 
 async def channel_stream_range_parallel(chat_id, message_id, start, end):
@@ -4147,6 +4186,7 @@ async def startup():
     asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
     asyncio.create_task(_hls_fix_reaper())   # סוגר ffmpeg של ערוצים ללא צופים
+    asyncio.create_task(peer_retry_loop())   # מחזיר לפעולה בוטים ששכחו את הערוץ
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
     asyncio.create_task(staged_bot_startup())
