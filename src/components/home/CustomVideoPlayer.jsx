@@ -1014,7 +1014,10 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   }, []);
 
   return (
-    <div data-cvp style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column" }}>
+    /* zIndex 10500: מעל הכפתורים הצפים של HomePage (תמיכה = 10000) ומעל באנר
+       הפרסומת (9999), ומתחת לפתיח (99999). בשידור חי הנגן מוצג *לצד* HomePage
+       ולא במקומו, ולכן ב-9999 כפתור התמיכה היה צף על הוידאו. */
+    <div data-cvp style={{ position: "fixed", inset: 0, background: "#000", zIndex: 10500, display: "flex", flexDirection: "column" }}>
       <style>{spinStyle}</style>
       {!src ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
