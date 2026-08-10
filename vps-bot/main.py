@@ -1215,6 +1215,13 @@ async def hls_relay(host: str, path: str, request: Request):
                 resp = await _hls_relay_client.get(upstream_url)
             except httpx.HTTPError as e:
                 raise HTTPException(502, f"hls_relay: upstream fetch failed - {e}")
+            # אם המקור לא החזיר manifest תקין (שגיאה, redirect שלא נופה, דף
+            # HTML כלשהו) - חשוב לעצור כאן. אחרת שכתוב-שורה-שורה "יצליח" גם
+            # על HTML ומחזיר ללקוח playlist שבור בלי שום שגיאה ברורה.
+            if resp.status_code != 200 or not resp.text.lstrip().startswith("#EXTM3U"):
+                raise HTTPException(
+                    502, f"hls_relay: upstream did not return a valid m3u8 "
+                         f"(status {resp.status_code})")
             rewritten = _rewrite_hls_manifest(resp.text, upstream_url)
             _hls_manifest_cache[upstream_url] = (now + MANIFEST_CACHE_TTL, rewritten)
         return Response(
@@ -1245,6 +1252,10 @@ async def hls_relay(host: str, path: str, request: Request):
         _hls_segment_inflight[upstream_url] = (chunks, done_event)
         try:
             async with _hls_relay_client.stream("GET", upstream_url) as resp:
+                if resp.status_code != 200:
+                    log.error("hls_relay: segment upstream returned %s for %s",
+                              resp.status_code, upstream_url)
+                    return
                 async for chunk in resp.aiter_bytes():
                     chunks.append(chunk)
                     yield chunk
@@ -3950,7 +3961,7 @@ async def startup():
     global _hls_relay_client
     restore_from_dataset()
     await bot_client.start()
-    _hls_relay_client = httpx.AsyncClient(timeout=15)
+    _hls_relay_client = httpx.AsyncClient(timeout=15, follow_redirects=True)
     # הכל עולה בהדרגה ברקע כדי לא להציף את טלגרם בעשרות חיבורים בבת אחת (מה
     # שגרם לחסימת IP: כל הבוטים "לא עלה", Watchdog הרג את התהליך, ולולאת קריסה).
     asyncio.create_task(seed_content_if_empty())
