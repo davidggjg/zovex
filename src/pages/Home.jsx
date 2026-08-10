@@ -255,6 +255,9 @@ function HomeMain({ user, onLogout, isGuest }) {
       )}
 
       <HomePage
+        /* הנגן של הלייב מוצג *מעל* HomePage (בניגוד לסרט רגיל, שם יש return
+           מוקדם), ולכן הכפתורים הצפים של HomePage היו נשארים מעליו. */
+        playerOpen={!!showLivePlayer}
         user={user}
         onLogout={onLogout}
         searchTerm={searchTerm}

@@ -402,12 +402,27 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
     const v = videoRef.current;
     if (!v) return;
     try {
+      // ניקוי הגנתי: אם משהו בשרשרת (video.js/Shaka) סימן את האלמנט כחסום
+      // ל-PiP, הבקשה נכשלת. לא אומת שזה המצב כאן — הסיבה האמיתית תופיע
+      // בקונסול בזכות ה-warn למטה, שקודם לכן נבלע ב-catch ריק.
+      v.disablePictureInPicture = false;
+      v.removeAttribute("disablepictureinpicture");
+      // iOS/Safari: אין requestPictureInPicture על אלמנט וידאו — יש API נפרד.
+      if (typeof v.requestPictureInPicture !== "function"
+          && typeof v.webkitSetPresentationMode === "function") {
+        v.webkitSetPresentationMode(
+          v.webkitPresentationMode === "picture-in-picture" ? "inline" : "picture-in-picture");
+        return;
+      }
       if (document.pictureInPictureElement) {
         await document.exitPictureInPicture();
       } else {
         await v.requestPictureInPicture();
       }
-    } catch {}
+    } catch (e) {
+      // לא בולעים בשקט: בלי זה אי אפשר לאבחן למה הכפתור לא הגיב.
+      console.warn("PiP נכשל:", e?.name, e?.message);
+    }
   };
 
   const progress = duration ? (currentTime / duration) * 100 : 0;
