@@ -2403,6 +2403,79 @@ async def feedback_all(req: FeedbackListReq, request: Request):
     unread = sum(1 for t in threads if t.get("unread_admin"))
     return {"threads": threads, "unread": unread}
 
+# ── סטטיסטיקות צפייה לפאנל ───────────────────────────────────────────────────
+# בלי איסוף נתונים חדש ובלי עומס: מחשבים הכל מ-history.json שכבר נשמר ממילא
+# (לכל צפייה יש media_id + watched_at). כדי שרענון הפאנל לא יקרא ויפרסר את
+# הקובץ שוב ושוב — התוצאה נשמרת במטמון ומחושבת מחדש רק אם הקובץ השתנה או
+# שעברו 60 שניות. כך גם אם פותחים את הפאנל הרבה, השרת כמעט לא מרגיש.
+#
+# הערה חשובה לפרשנות: נספרות רק צפיות של משתמשים *מחוברים* (יש user_id),
+# ובהיסטוריה נשמרת רשומה אחת לכל סרט למשתמש (צפייה חוזרת מעדכנת תאריך).
+_stats_cache = {"mtime": None, "built": 0.0, "data": None}
+STATS_TTL = 60
+
+class StatsReq(BaseModel):
+    password: str
+
+def _build_stats() -> dict:
+    hist = load_json(HISTORY_FILE)
+    now = time.time()
+    day = 86400
+    # גבול "היום" = חצות מקומית, כדי שהמספר יתאים למה שמנהל מצפה לראות
+    lt = time.localtime(now)
+    midnight = now - (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec)
+
+    users_today, users_week = set(), set()
+    views_today = views_week = 0
+    top_today, top_week = {}, {}
+    per_day = {}
+
+    for uid, items in (hist.items() if isinstance(hist, dict) else []):
+        if not isinstance(items, list):
+            continue
+        for it in items:
+            ts = it.get("watched_at") or 0
+            if not ts:
+                continue
+            title = (it.get("title") or "").strip() or "(ללא שם)"
+            if ts >= midnight:
+                users_today.add(uid); views_today += 1
+                top_today[title] = top_today.get(title, 0) + 1
+            if now - ts <= 7 * day:
+                users_week.add(uid); views_week += 1
+                top_week[title] = top_week.get(title, 0) + 1
+                d = time.strftime("%Y-%m-%d", time.localtime(ts))
+                per_day[d] = per_day.get(d, 0) + 1
+
+    def top(dct, n=15):
+        return [{"title": k, "views": v}
+                for k, v in sorted(dct.items(), key=lambda kv: -kv[1])[:n]]
+
+    return {
+        "today":  {"viewers": len(users_today), "views": views_today},
+        "week":   {"viewers": len(users_week),  "views": views_week},
+        "total_users": len(hist) if isinstance(hist, dict) else 0,
+        "top_today": top(top_today),
+        "top_week": top(top_week),
+        "per_day": [{"date": d, "views": per_day[d]} for d in sorted(per_day)],
+        "generated": int(now),
+    }
+
+@api.post("/stats/summary")
+async def stats_summary(req: StatsReq, request: Request):
+    check_panel_password(request, req.password)
+    try:
+        mtime = HISTORY_FILE.stat().st_mtime if HISTORY_FILE.exists() else 0
+    except Exception:
+        mtime = 0
+    c = _stats_cache
+    if (c["data"] is not None and c["mtime"] == mtime
+            and time.time() - c["built"] < STATS_TTL):
+        return {**c["data"], "cached": True}
+    data = await asyncio.to_thread(_build_stats)
+    _stats_cache.update({"mtime": mtime, "built": time.time(), "data": data})
+    return {**data, "cached": False}
+
 async def send_reply_push(thread: dict, text: str):
     """שולח התראת push למשתמש כשהמנהל מגיב. פעיל רק אם הוגדר FCM (מפתח שירות
     Firebase בשרת) ולמשתמש יש fcm_token. אחרת — המשתמש יראה את התשובה בפתיחה."""
