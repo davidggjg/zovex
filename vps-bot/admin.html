@@ -959,13 +959,41 @@ async function loadPool(){
   try{
     const d=await (await fetch("/pool/list",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({password:PASS})})).json();
-    $("poolCount").textContent=(d.active||0)+" פעילים";
+    // "בריאים" = פעילים *וגם* מזהים את ערוץ התוכן. בוט שלא מזהה את הערוץ
+    // מוצג כ"פעיל" אבל חסר תועלת לגמרי — כל משיכה שלו נכשלת.
+    $("poolCount").textContent=(d.healthy!=null? d.healthy+" בריאים מתוך "+(d.active||0) : (d.active||0)+" פעילים");
     if(!d.bots||!d.bots.length){ $("poolList").innerHTML='<div class="muted">אין בוטים בבריכה עדיין.</div>'; return; }
-    $("poolList").innerHTML=d.bots.map(b=>`<div class="item">
-      <div class="meta"><div class="t">${b.kind==="user"?"👤":"🤖"} ${esc(b.name)} ${b.status==="פעיל"?'<span class="pill" style="background:#e6f9ec;color:#1a7f37">פעיל</span>':'<span class="pill" style="background:#fff4e5;color:#b26a00">מתקרר</span>'}</div>
+    const bad=d.bots.filter(b=>!b.peer_ok).length;
+    $("poolList").innerHTML=(bad?`<div class="err" style="margin-bottom:8px">⚠️ ${bad} בוטים לא מזהים את ערוץ התוכן —
+        הם לא מושכים כלום. <button class="mini" onclick="reconnectPool()">נסה לחבר את כולם</button></div>`:"")
+      + d.bots.map(b=>{
+      const st = !b.peer_ok
+        ? '<span class="pill" style="background:#ffe5e5;color:#b00020">לא מחובר לערוץ</span>'
+        : (b.status==="פעיל"
+            ? '<span class="pill" style="background:#e6f9ec;color:#1a7f37">פעיל</span>'
+            : `<span class="pill" style="background:#fff4e5;color:#b26a00">מתקרר ${b.cooldown_left||0}ש'</span>`);
+      return `<div class="item">
+      <div class="meta"><div class="t">${b.kind==="user"?"👤":"🤖"} ${esc(b.name)} ${st}</div>
       <div class="s">${b.kind==="user"?"חשבון":"בוט"} · …${esc(b.token_tail||"")}</div></div>
-      <button class="mini gray" onclick="removePoolBot('${esc(b.name)}')">הסר</button></div>`).join("");
+      ${b.peer_ok?"":`<button class="mini" onclick="reconnectPool('${esc(b.name)}')">חבר</button>`}
+      <button class="mini gray" onclick="removePoolBot('${esc(b.name)}')">הסר</button></div>`;
+    }).join("");
   }catch(e){ $("poolList").innerHTML='<span class="err">טעינה נכשלה</span>'; }
+}
+// מנסה לזהות מחדש את ערוץ התוכן. בלי שם — לכל מי שנכשל.
+async function reconnectPool(name){
+  $("poolMsg").textContent="מנסה לחבר לערוץ…";
+  try{
+    const r=await fetch("/pool/reconnect",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS, name:name||null})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||("שגיאה "+r.status));
+    const ok=(d.results||[]).filter(x=>x.peer_ok).length, tot=(d.results||[]).length;
+    $("poolMsg").innerHTML = ok===tot
+      ? `<span class="ok">✓ ${ok} מתוך ${tot} מחוברים לערוץ</span>`
+      : `<span class="err">${ok} מתוך ${tot} הצליחו. מי שנכשל — ודא שהוא חבר בערוץ, או שלח הודעה לערוץ ונסה שוב.</span>`;
+    loadPool();
+  }catch(e){ $("poolMsg").innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
 async function addPoolBot(){
   const tok=$("p_token").value.trim();

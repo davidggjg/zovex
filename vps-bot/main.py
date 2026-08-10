@@ -658,8 +658,12 @@ async def _start_one_pool_bot(i, tok: str):
             entry["peer_ok"] = await _resolve_peer(c, name)
         _stream_bots.append(entry)
         log.info("✅ pool %s %s עלה (%d פעילים)", kind, i, len(_stream_bots))
+        return None
     except Exception as e:
         log.warning("⚠️ pool member %s לא עלה: %s", i, e)
+        # מחזירים את הסיבה האמיתית: הפאנל הציג עד עכשיו ניחוש קבוע על הרשאות
+        # אדמין, גם כשהכשל היה session פגום, טוקן שגוי או תקלת רשת.
+        return f"{type(e).__name__}: {e}"
 
 async def start_stream_pool():
     if not STREAM_BOTS_FILE.exists():
@@ -3090,10 +3094,10 @@ async def pool_add(req: PoolAddReq, request: Request):
         raise HTTPException(status_code=400, detail="כבר קיים בבריכה")
     before = len(_stream_bots)
     uid = f"live_{int(time.time())}"
-    await _start_one_pool_bot(uid, tok)          # מנסה להעלות אותו מיד
+    err = await _start_one_pool_bot(uid, tok)     # מנסה להעלות אותו מיד
     if len(_stream_bots) <= before:
         raise HTTPException(status_code=400,
-            detail="לא עלה — ודא שהוא חבר/אדמין בערוץ ושהטוקן/session נכון")
+            detail="לא עלה — %s" % (err or "סיבה לא ידועה, ראה journalctl"))
     try:                                          # נשמר לקובץ כדי לשרוד restart
         with open(STREAM_BOTS_FILE, "a", encoding="utf-8") as f:
             f.write(tok + "\n")
@@ -3108,11 +3112,45 @@ class PoolPwReq(BaseModel):
 async def pool_list(req: PoolPwReq, request: Request):
     check_panel_password(request, req.password)
     now = time.time()
-    bots = [{"name": b["name"],
-             "status": "פעיל" if b["cooldown_until"] < now else "מתקרר",
-             "kind": b.get("kind", "bot"),
-             "token_tail": (b.get("token") or "")[-6:]} for b in _stream_bots]
-    return {"active": len(_stream_bots), "in_file": len(_pool_tokens_in_file()), "bots": bots}
+    bots = []
+    for b in _stream_bots:
+        cd = max(0, int(b["cooldown_until"] - now))
+        bots.append({
+            "name": b["name"],
+            "status": "פעיל" if cd == 0 else "מתקרר",
+            "cooldown_left": cd,               # כמה שניות נשארו לעונשין
+            # peer_ok: האם הבוט מזהה את ערוץ התוכן. בלעדיו כל משיכת מדיה שלו
+            # נכשלת ב-'Peer id invalid' והוא חסר תועלת — גם אם הוא "פעיל".
+            "peer_ok": bool(b.get("peer_ok", True)),
+            "kind": b.get("kind", "bot"),
+            "token_tail": (b.get("token") or "")[-6:],
+        })
+    healthy = sum(1 for b in bots if b["status"] == "פעיל" and b["peer_ok"])
+    return {"active": len(_stream_bots), "healthy": healthy,
+            "in_file": len(_pool_tokens_in_file()),
+            "channel": STREAM_CHANNEL_ID, "bots": bots}
+
+class PoolNameReq(BaseModel):
+    password: str
+    name: Optional[str] = None     # ריק = כל מי שלא מזהה את הערוץ
+
+@api.post("/pool/reconnect")
+async def pool_reconnect(req: PoolNameReq, request: Request):
+    """מנסה מחדש לזהות את ערוץ התוכן עבור בוט (או כל מי שנכשל).
+    משמש את הכפתור בפאנל כשבוט מוצג כ'לא מחובר לערוץ'."""
+    check_panel_password(request, req.password)
+    targets = [b for b in _stream_bots
+               if (req.name and b["name"] == req.name) or (not req.name and not b.get("peer_ok", True))]
+    if not targets:
+        raise HTTPException(404, "לא נמצא בוט מתאים")
+    out = []
+    for b in targets:
+        ok = await _resolve_peer(b["client"], b["name"])
+        b["peer_ok"] = ok
+        if ok:
+            b["cooldown_until"] = 0.0          # מזוהה שוב — משחררים מעונשין
+        out.append({"name": b["name"], "peer_ok": ok})
+    return {"ok": True, "results": out}
 
 class PoolRemoveReq(BaseModel):
     password: str
