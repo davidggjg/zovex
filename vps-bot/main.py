@@ -1197,6 +1197,147 @@ def _rewrite_hls_manifest(text: str, base_url: str) -> str:
     return "\n".join(out_lines)
 
 
+# ── רלֵיי עם המרת מיכל (remux) — לערוצים ש-Shaka נתקע עליהם ──────────────────
+# חלק מהמקודדים (למשל ספורט 5 סטארס ב-tv.embyil.tv) משדרים ב-open-GOP: יש
+# פריימי I אבל אף IDR. VLC/ffmpeg מנגנים את זה מצוין - הם מסמנים כל פריים I
+# כנקודת כניסה. mux.js (שבו Shaka משתמש כדי לפרק MPEG-TS) מחפש אך ורק NAL מסוג
+# IDR ומשליך כל פריים עד שימצא אחד; כשאין - הוא ממתין לנצח, וזה ה"ספינר
+# האינסופי" באפליקציה. הנגן באפליקציה מוטמע ב-APK ולכן אי אפשר לתקן אותו בלי
+# release, אבל אפשר לתקן את *הזרם*: מעבירים אותו דרך ffmpeg ב-copy מוחלט
+# (בלי קידוד מחדש - אפס עומס על ה-CPU) ל-fMP4, ושם ffmpeg מסמן כל פריים I
+# כ-sync sample. נמדד: סגמנט של ערוץ 140 יצא עם 10 sync samples.
+#
+# ffmpeg מושך מה-relay המקומי שלנו (127.0.0.1) ולא ישירות מהמקור, כדי לא לשכפל
+# את הטיפול ב-TLS/allowlist/User-Agent שכבר קיים ב-hls_relay.
+HLS_FIX_DIR = Path("/tmp/zovex-hlsfix")
+HLS_FIX_IDLE_SEC = 90          # ffmpeg נסגר אחרי שאין צופים
+_hls_fix: dict = {}            # key -> {"proc","dir","last","ready"}
+_hls_fix_lock = asyncio.Lock()
+
+
+def _hls_fix_key(host: str, path: str) -> str:
+    import hashlib as _h
+    return _h.sha1(f"{host}/{path}".encode()).hexdigest()[:16]
+
+
+async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
+    """מפעיל (או מחזיר קיים) תהליך ffmpeg שממיר את הערוץ ל-HLS/fMP4 מקומי."""
+    key = _hls_fix_key(host, path)
+    async with _hls_fix_lock:
+        ent = _hls_fix.get(key)
+        if ent and ent["proc"].returncode is None:
+            ent["last"] = time.time()
+            return ent
+        outdir = HLS_FIX_DIR / key
+        try:
+            import shutil
+            shutil.rmtree(outdir, ignore_errors=True)
+            outdir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.error("hls_fix: יצירת תיקייה נכשלה - %s", e)
+            return None
+        src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
+        args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-fflags", "+genpts", "-i", src,
+            "-c", "copy",                       # בלי קידוד מחדש - רק החלפת מיכל
+            # AAC ב-MPEG-TS ארוז ב-ADTS, וב-MP4 צריך ASC. בלי הפילטר הזה
+            # ffmpeg נכשל על כל חבילת אודיו ("Malformed AAC bitstream") ומייצר
+            # פלט קטוע - נתפס בבדיקה מקומית לפני הפריסה.
+            "-bsf:a", "aac_adtstoasc",
+            "-f", "hls", "-hls_time", "4", "-hls_list_size", "6",
+            "-hls_flags", "delete_segments+independent_segments+omit_endlist",
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", str(outdir / "s%d.m4s"),
+            str(outdir / "index.m3u8"),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+        except FileNotFoundError:
+            log.error("hls_fix: ffmpeg לא מותקן בשרת")
+            return None
+        ent = {"proc": proc, "dir": outdir, "last": time.time()}
+        _hls_fix[key] = ent
+        return ent
+
+
+async def _hls_fix_reaper():
+    """סוגר תהליכי ffmpeg של ערוצים שאיש כבר לא צופה בהם."""
+    import shutil
+    while True:
+        await asyncio.sleep(30)
+        now = time.time()
+        for key, ent in list(_hls_fix.items()):
+            if now - ent["last"] < HLS_FIX_IDLE_SEC:
+                continue
+            try:
+                if ent["proc"].returncode is None:
+                    ent["proc"].kill()
+            except Exception:
+                pass
+            shutil.rmtree(ent["dir"], ignore_errors=True)
+            _hls_fix.pop(key, None)
+            log.info("hls_fix: נסגר ערוץ לא פעיל %s", key)
+
+
+# חייב להירשם *לפני* המסלול הכללי /hls-relay/{host}/{path} — אחרת "_fix" ייחשב
+# ל-host. גם חייב לשבת תחת /hls-relay/ כי nginx מעביר רק קידומות מוכרות.
+@api.get("/hls-relay/_fix/{host}/{path:path}")
+async def hls_relay_fixed(host: str, path: str, request: Request):
+    check_hotlink(request)
+    if host not in HLS_RELAY_ALLOWED_HOSTS:
+        raise HTTPException(403, "host not allowed")
+
+    # קבצים שה-ffmpeg כבר מייצר (init.mp4 / s3.m4s) מוגשים ישירות מהדיסק.
+    name = path.rsplit("/", 1)[-1]
+    if name == "init.mp4" or name.endswith(".m4s"):
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        ent = _hls_fix.get(_hls_fix_key(host, parent))
+        if not ent:
+            raise HTTPException(404, "stream not active")
+        ent["last"] = time.time()
+        f = ent["dir"] / name
+        if not f.exists():
+            raise HTTPException(404, "segment not ready")
+        return Response(
+            content=f.read_bytes(),
+            media_type="video/mp4" if name == "init.mp4" else "video/iso.segment",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
+
+    # בקשה ל-playlist: מוודאים שה-ffmpeg רץ, מחכים שייווצר, ומשכתבים נתיבים.
+    ent = await _hls_fix_start(host, path)
+    if ent is None:
+        raise HTTPException(502, "hls_fix: לא ניתן להפעיל את ההמרה")
+    idx = ent["dir"] / "index.m3u8"
+    for _ in range(120):                      # עד ~12 שניות לסגמנטים ראשונים
+        if idx.exists() and idx.read_text(encoding="utf-8", errors="ignore").count(".m4s") >= 1:
+            break
+        if ent["proc"].returncode is not None:
+            raise HTTPException(502, "hls_fix: ffmpeg נכשל")
+        await asyncio.sleep(0.1)
+    else:
+        raise HTTPException(504, "hls_fix: הזרם לא התחיל בזמן")
+
+    base = f"/hls-relay/_fix/{host}/{path.rstrip('/')}"
+    base = base.rsplit("/", 1)[0] if "." in base.rsplit("/", 1)[-1] else base
+    out = []
+    for line in idx.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("#EXT-X-MAP:"):
+            out.append(f'#EXT-X-MAP:URI="{base}/init.mp4"')
+        elif s and not s.startswith("#"):
+            out.append(f"{base}/{s}")
+        else:
+            out.append(line)
+    return Response(content="\n".join(out),
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-cache"})
+
+
 @api.get("/hls-relay/{host}/{path:path}")
 async def hls_relay(host: str, path: str, request: Request):
     check_hotlink(request)
@@ -3996,6 +4137,7 @@ async def startup():
     # שגרם לחסימת IP: כל הבוטים "לא עלה", Watchdog הרג את התהליך, ולולאת קריסה).
     asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
+    asyncio.create_task(_hls_fix_reaper())   # סוגר ffmpeg של ערוצים ללא צופים
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
     asyncio.create_task(staged_bot_startup())
