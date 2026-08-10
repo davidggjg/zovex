@@ -839,6 +839,8 @@ async def channel_stream_range(chat_id, message_id, start, end):
 # נשלט ע"י STREAM_PARALLEL_PARTS (ברירת מחדל 1 = ההתנהגות הישנה, בלי סיכון).
 STREAM_PARALLEL_PARTS  = int(os.environ.get("STREAM_PARALLEL_PARTS", "1"))
 STREAM_PARALLEL_WINDOW = int(os.environ.get("STREAM_PARALLEL_WINDOW", str(16 * 1024 * 1024)))
+# כמה זמן מחכים לבוט בודד לפני שמוותרים עליו ועוברים לבא. ניתן לכוונון מ-.env.
+SUBRANGE_TIMEOUT = int(os.environ.get("STREAM_SUBRANGE_TIMEOUT", "25"))
 
 async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
     """מושך את הבייטים [lo, hi] (כולל) דרך בוט מה-pool, עם ניסיונות על כמה בוטים.
@@ -854,22 +856,35 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
             if msg is None:
                 _mark_choked(bot, 15)
                 continue
-            out = bytearray()
-            off_chunks = lo // CHUNK
-            produced = off_chunks * CHUNK
-            async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
-                c_start = produced
-                c_end = produced + len(chunk)
-                a = max(lo, c_start) - c_start
-                b = min(hi + 1, c_end) - c_start
-                if a < b:
-                    out += chunk[a:b]
-                produced = c_end
-                if produced > hi:
-                    break
+
+            async def _pull():
+                out = bytearray()
+                off_chunks = lo // CHUNK
+                produced = off_chunks * CHUNK
+                async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
+                    c_start = produced
+                    c_end = produced + len(chunk)
+                    a = max(lo, c_start) - c_start
+                    b = min(hi + 1, c_end) - c_start
+                    if a < b:
+                        out += chunk[a:b]
+                    produced = c_end
+                    if produced > hi:
+                        break
+                return out
+
+            # timeout חובה: ל-stream_media אין מגבלת זמן משלו, וכשהחיבור של הבוט
+            # ל-DC של טלגרם נופל בלולאה (Retrying upload.GetFile) הלולאה תלויה
+            # לנצח. החלון המקבילי מוגש רק כשכל תת-הטווחים הסתיימו, ולכן בוט תקוע
+            # אחד הקפיא את כל הבקשה גם כששאר ה-pool בריא — הצופה קיבל 0 בייטים.
+            out = await asyncio.wait_for(_pull(), timeout=SUBRANGE_TIMEOUT)
             if len(out) >= need:
                 return bytes(out[:need])
             return bytes(out) + b"\x00" * (need - len(out))
+        except asyncio.TimeoutError:
+            log.warning("subrange: %s לא סיפק בייטים תוך %ds — עובר לבוט אחר",
+                        bot["name"], SUBRANGE_TIMEOUT)
+            _mark_choked(bot, 30)
         except FileReferenceExpired:
             _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
         except FloodWait as e:
