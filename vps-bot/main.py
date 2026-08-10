@@ -676,8 +676,16 @@ async def _start_one_pool_bot(i, tok: str):
         c.add_handler(MessageHandler(_pool_noop, filters.channel))
         await asyncio.wait_for(c.start(), timeout=40)
         name = f"{kind}_{i}"
+        # שומרים את המזהה פעם אחת בעלייה: בלעדיו הפאנל מציג bot_5/user_8 בלבד
+        # ואי אפשר לדעת איזה בוט זה בפועל (למשל את מי להוסיף לערוץ).
+        who = ""
+        try:
+            me = await asyncio.wait_for(c.get_me(), timeout=15)
+            who = ("@" + me.username) if me.username else (me.first_name or "")
+        except Exception:
+            pass
         entry = {"client": c, "name": name, "cooldown_until": 0.0,
-                 "token": tok, "kind": kind, "peer_ok": True}
+                 "token": tok, "kind": kind, "peer_ok": True, "who": who}
         if STREAM_CHANNEL_ID:
             entry["peer_ok"] = await _resolve_peer(c, name)
         _stream_bots.append(entry)
@@ -3141,6 +3149,7 @@ async def pool_list(req: PoolPwReq, request: Request):
         cd = max(0, int(b["cooldown_until"] - now))
         bots.append({
             "name": b["name"],
+            "who": b.get("who", ""),           # @username — לזיהוי איזה בוט זה
             "status": "פעיל" if cd == 0 else "מתקרר",
             "cooldown_left": cd,               # כמה שניות נשארו לעונשין
             # peer_ok: האם הבוט מזהה את ערוץ התוכן. בלעדיו כל משיכת מדיה שלו

@@ -973,8 +973,8 @@ async function loadPool(){
             ? '<span class="pill" style="background:#e6f9ec;color:#1a7f37">פעיל</span>'
             : `<span class="pill" style="background:#fff4e5;color:#b26a00">מתקרר ${b.cooldown_left||0}ש'</span>`);
       return `<div class="item">
-      <div class="meta"><div class="t">${b.kind==="user"?"👤":"🤖"} ${esc(b.name)} ${st}</div>
-      <div class="s">${b.kind==="user"?"חשבון":"בוט"} · …${esc(b.token_tail||"")}</div></div>
+      <div class="meta"><div class="t">${b.kind==="user"?"👤":"🤖"} ${esc(b.who||b.name)} ${st}</div>
+      <div class="s">${esc(b.name)} · ${b.kind==="user"?"חשבון":"בוט"} · …${esc(b.token_tail||"")}</div></div>
       ${b.peer_ok?"":`<button class="mini" onclick="reconnectPool('${esc(b.name)}')">חבר</button>`}
       <button class="mini gray" onclick="removePoolBot('${esc(b.name)}')">הסר</button></div>`;
     }).join("");
