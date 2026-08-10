@@ -1016,7 +1016,82 @@ async def cast_remux(chat_id: int, message_id: int, request: Request,
 # הרגיל אין שום בעיה) ומגישים אותו הלאה דרך ה-https התקין של ה-Space הזה,
 # כולל שכתוב ההפניות היחסיות בתוך ה-m3u8 (גם ה-manifest המקונן וגם המקטעים
 # .ts) כך שהכל ממשיך לעבור דרך אותו יחסור.
-HLS_RELAY_ALLOWED_HOSTS = {"stream.mcquack.net"}
+# רשימת ה-hosts שמותר להעביר דרך ה-relay. *לא* open proxy: רק hosts שהמנהל
+# הוסיף במפורש מהפאנל מותרים. הרשימה נשמרת לקובץ כדי לשרוד restart, ותמיד כוללת
+# את ברירת המחדל המובנית. stream.mcquack.net מובנה ולא ניתן להסרה כדי שהערוצים
+# הקיימים לא יישברו.
+RELAY_HOSTS_FILE = DATA_DIR / "relay_hosts.json"
+_DEFAULT_RELAY_HOSTS = {"stream.mcquack.net"}
+
+def _load_relay_hosts() -> set:
+    hosts = set(_DEFAULT_RELAY_HOSTS)
+    try:
+        if RELAY_HOSTS_FILE.exists():
+            data = json.loads(RELAY_HOSTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                hosts |= {str(h).strip().lower() for h in data if str(h).strip()}
+    except Exception as e:
+        log.warning("טעינת relay_hosts נכשלה: %s", e)
+    return hosts
+
+def _save_relay_hosts(hosts: set):
+    RELAY_HOSTS_FILE.write_text(
+        json.dumps(sorted(hosts), ensure_ascii=False, indent=2), encoding="utf-8")
+
+HLS_RELAY_ALLOWED_HOSTS = _load_relay_hosts()
+
+# ולידציית hostname + חסימת כתובות פנימיות/פרטיות (הגנת SSRF): גם ברשימה
+# מנוהלת, אסור שהרלֵיי יוכל לפנות ל-localhost/רשת פנימית של השרת.
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+
+def _host_is_public(host: str) -> bool:
+    try:
+        import ipaddress, socket
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+class RelayHostReq(BaseModel):
+    password: str
+    action: str            # list / add / remove
+    host: Optional[str] = None
+
+@api.post("/api/relay/hosts")
+async def relay_hosts_manage(req: RelayHostReq, request: Request):
+    """ניהול רשימת ה-hosts המותרים לרלֵיי (מוגן בסיסמת פאנל)."""
+    check_panel_password(request, req.password)
+    global HLS_RELAY_ALLOWED_HOSTS
+    def _result():
+        return {"hosts": sorted(HLS_RELAY_ALLOWED_HOSTS),
+                "builtin": sorted(_DEFAULT_RELAY_HOSTS)}
+    if req.action == "list":
+        return _result()
+    if req.action == "add":
+        h = (req.host or "").strip().lower()
+        if "://" in h:
+            h = urlparse(h).hostname or ""
+        h = h.split("/")[0].split(":")[0].strip()   # רק ה-host, בלי פורט/נתיב
+        if not h or not _HOSTNAME_RE.match(h):
+            raise HTTPException(400, "שם host לא תקין")
+        if not await asyncio.to_thread(_host_is_public, h):
+            raise HTTPException(400, "ה-host לא נגיש או מפנה לכתובת פנימית — נחסם")
+        HLS_RELAY_ALLOWED_HOSTS = set(HLS_RELAY_ALLOWED_HOSTS) | {h}
+        _save_relay_hosts(HLS_RELAY_ALLOWED_HOSTS)
+        return _result()
+    if req.action == "remove":
+        h = (req.host or "").strip().lower()
+        if h in _DEFAULT_RELAY_HOSTS:
+            raise HTTPException(400, "אי אפשר להסיר host מובנה")
+        HLS_RELAY_ALLOWED_HOSTS = {x for x in HLS_RELAY_ALLOWED_HOSTS if x != h}
+        _save_relay_hosts(HLS_RELAY_ALLOWED_HOSTS)
+        return _result()
+    raise HTTPException(400, "פעולה לא מוכרת")
 
 # לקוח משותף אחד עם keep-alive, לא לקוח חדש (וחיבור TCP חדש) בכל בקשה -
 # תיקון: "מנגן שנייה ונתקע 10 שניות" קרה כי כל מקטע וידאו (כ-3.6MB, 5

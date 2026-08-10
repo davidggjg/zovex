@@ -148,10 +148,26 @@
         <button id="liveCancel" class="mini gray hidden" onclick="liveReset()">בטל</button></div>
       <label>שם הערוץ / מה משודר</label><input id="l_title" placeholder="ערוץ 12 - חדשות">
       <label>קישור (m3u8 / iframe)</label><input id="l_url" dir="ltr" placeholder="https://…/stream.m3u8">
+      <div class="row" style="margin:4px 0 8px">
+        <button class="mini" type="button" onclick="relayifyUrl()">🔁 העבר דרך השרת שלנו</button>
+        <span id="relayMsg" class="muted" style="font-size:12px"></span>
+      </div>
       <label>פוסטר (לא חובה)</label><input id="l_thumb" dir="ltr">
       <label>כתובת אנגלית (custom_slug, לא חובה)</label><input id="l_slug" dir="ltr" placeholder="news12">
       <button onclick="saveLive()" style="width:100%">שמור שידור</button>
       <div id="liveMsg" class="ok"></div>
+    </div>
+    <div class="card">
+      <h2>🔁 שרתי מקור מותרים לרלֵיי</h2>
+      <div class="muted">כדי להעביר שידור משרת אחר דרך השרת שלנו (HTTP→HTTPS, מעקף חסימות),
+        קודם הוסף כאן את שם ה-host שלו. <b>רק</b> hosts ברשימה מותרים — זו לא רלֵיי פתוח.
+        כתובות פנימיות נחסמות אוטומטית.</div>
+      <div class="grid2" style="margin-top:8px">
+        <input id="rh_host" dir="ltr" placeholder="tv.example.com (רק שם, בלי https)">
+        <button class="mini" onclick="addRelayHost()">➕ הוסף host</button>
+      </div>
+      <div id="relayHostsList" style="margin-top:10px"></div>
+      <div id="rhMsg" class="err"></div>
     </div>
     <div class="card"><h2>שידורים פעילים</h2><div id="liveList"></div></div>
   </div>
@@ -334,7 +350,7 @@ function showTab(n){
   if(n!=="import") stopImportPoll();
   if(n==="manage") renderManage();
   if(n==="cats") renderCats();
-  if(n==="live"){ liveReset(); renderLive(); }
+  if(n==="live"){ liveReset(); renderLive(); loadRelayHosts(); }
   if(n==="uploads") loadUploads();
   if(n==="support") loadSupport();
   if(n==="pool") loadPool();
@@ -567,6 +583,49 @@ async function renameCat(c){
 }
 
 // ── שידורים חיים ──
+// ── ניהול שרתי המקור המותרים לרלֵיי ──
+let RELAY_HOSTS=[], RELAY_BUILTIN=[];
+async function relayApi(action,host){
+  const r=await fetch("/api/relay/hosts",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({password:PASS,action,host})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.detail||("שגיאה "+r.status));
+  return d;
+}
+async function loadRelayHosts(){
+  try{ const d=await relayApi("list"); RELAY_HOSTS=d.hosts||[]; RELAY_BUILTIN=d.builtin||[]; renderRelayHosts(); }
+  catch(e){ $("relayHostsList").innerHTML='<div class="err">טעינת ה-hosts נכשלה: '+esc(e.message)+'</div>'; }
+}
+function renderRelayHosts(){
+  if(!RELAY_HOSTS.length){ $("relayHostsList").innerHTML='<div class="muted">אין hosts עדיין.</div>'; return; }
+  $("relayHostsList").innerHTML=RELAY_HOSTS.map(h=>{
+    const locked=RELAY_BUILTIN.includes(h);
+    return `<div class="row" style="justify-content:space-between;border-bottom:1px solid #222;padding:6px 0">
+      <span dir="ltr" style="font-family:monospace;color:#eee">${esc(h)}${locked?' <span class="muted">(מובנה)</span>':''}</span>
+      ${locked?'':`<button class="rm mini" onclick="removeRelayHost('${esc(h)}')">הסר</button>`}</div>`;
+  }).join("");
+}
+async function addRelayHost(){
+  const h=$("rh_host").value.trim(); $("rhMsg").textContent="";
+  if(!h){ $("rhMsg").textContent="הכנס שם host"; return; }
+  try{ const d=await relayApi("add",h); RELAY_HOSTS=d.hosts||[]; $("rh_host").value=""; renderRelayHosts(); }
+  catch(e){ $("rhMsg").textContent=e.message; }
+}
+async function removeRelayHost(h){
+  try{ const d=await relayApi("remove",h); RELAY_HOSTS=d.hosts||[]; renderRelayHosts(); }
+  catch(e){ $("rhMsg").textContent=e.message; }
+}
+// ממיר קישור שהודבק לכתובת רלֵיי דרך השרת שלנו — רק אם ה-host מאושר.
+function relayifyUrl(){
+  const el=$("l_url"), msg=$("relayMsg"); msg.style.color="#ff8a8a";
+  let u; try{ u=new URL(el.value.trim()); }catch{ msg.textContent="קישור לא תקין"; return; }
+  if(u.protocol!=="http:"&&u.protocol!=="https:"){ msg.textContent="רק http/https"; return; }
+  if(!RELAY_HOSTS.includes(u.hostname)){
+    msg.textContent="ה-host הזה לא ברשימה המותרת — הוסף אותו קודם למטה."; return; }
+  el.value=location.origin+"/hls-relay/"+u.hostname+u.pathname+(u.search||"");
+  msg.style.color="#8aff9e"; msg.textContent="✓ הומר לרלֵיי דרך השרת שלנו";
+}
+
 function renderLive(){
   const live=movies.filter(m=>m.category==="שידורים חיים");
   $("liveList").innerHTML = live.map(ch=>`<div class="item">
