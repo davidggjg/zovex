@@ -700,7 +700,9 @@ def _mark_choked(bot, seconds):
 # (הקישור נשבר אחרי כמה שניות). לכן כל בוט מחזיק cache משלו, וכשה-reference
 # פג — שולפים מחדש עם אותו בוט. ל-metadata (גודל/mime) אין בעיית reference.
 _bot_msg_cache: dict = {}   # (bot_name, chat_id, message_id) -> (msg, expires_at)
-_BOT_MSG_TTL = 120          # 2 דקות — מספיק לרצף בקשות Range של אותה צפייה
+_BOT_MSG_TTL = 900          # 15 דק' — נשאר "חם" לאורך צפייה שלמה (בקשות Range
+                            # פרוסות על כל אורך הסרט). אם ה-file_reference פג
+                            # באמצע — נתפס כ-FileReferenceExpired ונשלף מחדש.
 
 async def _get_bot_msg(bot, chat_id, message_id, force=False):
     """שולף את ההודעה עבור בוט מסוים (cache פר-בוט). force=True מכריח שליפה טרייה."""
@@ -827,12 +829,21 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
     return b"\x00" * need
 
 async def channel_stream_range_parallel(chat_id, message_id, start, end):
-    """גרסה מקבילה: מעבדת חלון-אחר-חלון, וכל חלון נמשך בכמה תת-טווחים במקביל."""
+    """גרסה מקבילה עם *התחלה מהירה*: מעבדת חלון-אחר-חלון, וכל חלון נמשך בכמה
+    תת-טווחים במקביל. קריטי לזמן-התחלה: הגשה מתבצעת רק אחרי שכל תת-הטווחים של
+    החלון הושלמו — לכן חלון ראשון גדול (16MB) גרם ל-TTFB של כמה שניות ("לוקח
+    מלא זמן להיפעל"). הפתרון: רמפת-האצה — החלונות הראשונים קטנים (הבייט הראשון
+    מגיע כמעט מיד והנגינה מתחילה), ואז גדלים לחלון המלא למהירות שיא."""
     parts = max(2, STREAM_PARALLEL_PARTS)
-    window = max(STREAM_PARALLEL_WINDOW, parts * 512 * 1024)
+    full_window = max(STREAM_PARALLEL_WINDOW, parts * 512 * 1024)
     MIN_PART = 512 * 1024   # לא לפצל לחתיכות קטנות מדי
+    # רמפה: 1MB → 4MB → מלא. חלון ראשון קטן = TTFB נמוך; אחר כך מהירות מלאה.
+    ramp = [1 * 1024 * 1024, 4 * 1024 * 1024]
     pos = start
+    idx = 0
     while pos <= end:
+        window = min(ramp[idx] if idx < len(ramp) else full_window, full_window)
+        idx += 1
         wend = min(pos + window - 1, end)
         total = wend - pos + 1
         n = max(1, min(parts, total // MIN_PART))
