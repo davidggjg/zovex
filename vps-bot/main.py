@@ -1154,6 +1154,14 @@ async def relay_hosts_manage(req: RelayHostReq, request: Request):
 # מלאה, ברצף, לא במקביל), וזה בנוסף לתקורה של חיבור TCP חדש בכל פעם.
 _hls_relay_client: Optional[httpx.AsyncClient] = None
 
+# חלק מהמקורות (למשל tv.embyil.tv) חוסמים/מפנים ל-404 בקשות בלי User-Agent
+# של דפדפן/נגן אמיתי - ה-UA הדיפולטי של httpx (python-httpx/...) נחסם. אותו
+# UA ששימש בבדיקות הידניות מול המקור הזה (diag_live.sh / test_live.sh) ועבד.
+HLS_RELAY_UPSTREAM_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"),
+}
+
 # השרת הזה משותף עם הזרמת הטלגרם (אותו CPU מוגבל) - כמה צופים בו-זמנית
 # באותו ערוץ חי היו יוצרים כמה בקשות נפרדות זהות לגמרי למקור (אותו manifest,
 # אותו מקטע), כל אחת מיותרת ומכפילה עומס CPU/רשת בדיוק כשהתוכן דרך טלגרם
@@ -1212,7 +1220,7 @@ async def hls_relay(host: str, path: str, request: Request):
             rewritten = cached[1]
         else:
             try:
-                resp = await _hls_relay_client.get(upstream_url)
+                resp = await _hls_relay_client.get(upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS)
             except httpx.HTTPError as e:
                 raise HTTPException(502, f"hls_relay: upstream fetch failed - {e}")
             # אם המקור לא החזיר manifest תקין (שגיאה, redirect שלא נופה, דף
@@ -1251,7 +1259,7 @@ async def hls_relay(host: str, path: str, request: Request):
         done_event = asyncio.Event()
         _hls_segment_inflight[upstream_url] = (chunks, done_event)
         try:
-            async with _hls_relay_client.stream("GET", upstream_url) as resp:
+            async with _hls_relay_client.stream("GET", upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS) as resp:
                 if resp.status_code != 200:
                     log.error("hls_relay: segment upstream returned %s for %s",
                               resp.status_code, upstream_url)
