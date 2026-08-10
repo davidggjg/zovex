@@ -3476,20 +3476,35 @@ def _cached_content_body():
     c.update(ver=ver, built=now, body=body)
     return body, ver
 
+def _content_response(request: Request) -> Response:
+    """מחזיר את התוכן עם ETag לפי מונה הגרסה.
+
+    התוכן הוא ~10MB (כמגה אחרי gzip) ונשלח בכל טעינת עמוד מחדש, כי לא היו לו
+    שום כותרות caching. עם ETag הדפדפן שולח If-None-Match ומקבל 304 ריק כשאין
+    שינוי — במקום מגה שלם. Cache-Control: no-cache פירושו "שמור אבל תמיד אמת",
+    כך שעדכון תוכן מגיע מיד ואין סכנה שמישהו יראה קטלוג ישן.
+    """
+    body, ver = _cached_content_body()
+    etag = f'W/"c{ver}"'
+    headers = {
+        "X-Content-Version": str(ver),
+        "ETag": etag,
+        "Cache-Control": "no-cache",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
+
 @api.get("/content")
-async def content_get():
+async def content_get(request: Request):
     """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית).
     כותרת X-Content-Version מאפשרת לפאנל לדעת על איזו גרסה הוא עורך (optimistic lock)."""
-    body, ver = _cached_content_body()
-    return Response(content=body, media_type="application/json",
-                    headers={"X-Content-Version": str(ver)})
+    return _content_response(request)
 
 @api.get("/movies.json")
-async def content_movies_alias():
+async def content_movies_alias(request: Request):
     """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
-    body, ver = _cached_content_body()
-    return Response(content=body, media_type="application/json",
-                    headers={"X-Content-Version": str(ver)})
+    return _content_response(request)
 
 class ContentSaveReq(BaseModel):
     password: str

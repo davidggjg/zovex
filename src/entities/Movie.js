@@ -14,7 +14,11 @@ async function fetchMovies() {
   // מקור התוכן החדש: השרת (/content). אם מוגדר — מנסים אותו קודם.
   if (CONTENT_URL) {
     try {
-      const r = await fetch(`${CONTENT_URL}?t=` + Date.now());
+      // בלי ?t=Date.now(): ה-cache-buster הזה אילץ הורדה מלאה של הקטלוג
+      // (~10MB, כמגה אחרי gzip) בכל טעינת עמוד. השרת מחזיר ETag לפי מונה
+      // הגרסה, אז הדפדפן מאמת ומקבל 304 ריק כשאין שינוי — ועדיין רואה
+      // עדכוני תוכן מיד, כי Cache-Control הוא no-cache (אמת תמיד).
+      const r = await fetch(CONTENT_URL);
       if (r.ok) { _movies = await r.json(); return _movies; }
     } catch {}
   }
