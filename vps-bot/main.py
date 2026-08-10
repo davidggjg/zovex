@@ -2586,11 +2586,26 @@ class ApkRefreshReq(BaseModel):
 
 @api.post("/app/apk/refresh")
 async def app_apk_refresh(req: ApkRefreshReq, request: Request):
-    """מושך מחדש את ה-APK למטמון (אחרי שפרסמנו בנייה חדשה)."""
+    """מושך מחדש את ה-APK למטמון (אחרי שפרסמנו בנייה חדשה).
+    ההורדה (~60MB) ארוכה יותר מזמן ההמתנה של nginx ולכן החזירה 504 — לכן היא
+    רצה ברקע והתשובה חוזרת מיד. בודקים את התוצאה עם /app/apk/status."""
     check_panel_password(request, req.password)
-    ok = await _refresh_apk_cache(force=True)
-    return {"ok": ok,
-            "size": APK_CACHE_FILE.stat().st_size if APK_CACHE_FILE.exists() else 0}
+    old = APK_CACHE_FILE.stat().st_size if APK_CACHE_FILE.exists() else 0
+    asyncio.create_task(_refresh_apk_cache(force=True))
+    return {"ok": True, "started": True, "previous_size": old,
+            "hint": "ההורדה רצה ברקע — בדוק עם /app/apk/status בעוד ~30 שניות"}
+
+@api.post("/app/apk/status")
+async def app_apk_status(req: ApkRefreshReq, request: Request):
+    """מצב מטמון ה-APK: גודל וזמן עדכון אחרון."""
+    check_panel_password(request, req.password)
+    if not APK_CACHE_FILE.exists():
+        return {"exists": False}
+    st = APK_CACHE_FILE.stat()
+    return {"exists": True, "size": st.st_size,
+            "size_mb": round(st.st_size / 1e6, 1),
+            "age_seconds": int(time.time() - st.st_mtime),
+            "updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))}
 
 class AppVersionSetReq(BaseModel):
     password: str
