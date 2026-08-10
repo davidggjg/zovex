@@ -160,11 +160,17 @@
     <div class="card">
       <h2>🔁 שרתי מקור מותרים לרלֵיי</h2>
       <div class="muted">כדי להעביר שידור משרת אחר דרך השרת שלנו (HTTP→HTTPS, מעקף חסימות),
-        קודם הוסף כאן את שם ה-host שלו. <b>רק</b> hosts ברשימה מותרים — זו לא רלֵיי פתוח.
-        כתובות פנימיות נחסמות אוטומטית.</div>
+        קודם הוסף כאן את שם ה-host שלו. אפשר להדביק כתובת מלאה (כולל https:// ופורט
+        לא רגיל, למשל <span dir="ltr">https://tv.example.com:86</span>) - הסכימה/פורט
+        יילקחו ממנה אוטומטית, או למלא ידנית בשדות. <b>רק</b> hosts ברשימה מותרים —
+        זו לא רלֵיי פתוח. כתובות פנימיות נחסמות אוטומטית.</div>
       <div class="grid2" style="margin-top:8px">
-        <input id="rh_host" dir="ltr" placeholder="tv.example.com (רק שם, בלי https)">
+        <input id="rh_host" dir="ltr" placeholder="tv.example.com או https://tv.example.com:86">
         <button class="mini" onclick="addRelayHost()">➕ הוסף host</button>
+      </div>
+      <div class="grid2" style="margin-top:6px">
+        <select id="rh_scheme" dir="ltr"><option value="">סכימה (אוטומטי)</option><option value="http">http</option><option value="https">https</option></select>
+        <input id="rh_port" dir="ltr" type="number" min="1" max="65535" placeholder="פורט (אוטומטי)">
       </div>
       <div id="relayHostsList" style="margin-top:10px"></div>
       <div id="rhMsg" class="err"></div>
@@ -584,10 +590,12 @@ async function renameCat(c){
 
 // ── שידורים חיים ──
 // ── ניהול שרתי המקור המותרים לרלֵיי ──
+// RELAY_HOSTS: [{host, scheme, port, builtin}] - הרלֵיי שומר לכל host את ה-origin
+// האמיתי שלו (סכימה+פורט), כדי לפנות למקור נכון גם כשהוא לא http:80 רגיל.
 let RELAY_HOSTS=[], RELAY_BUILTIN=[];
-async function relayApi(action,host){
+async function relayApi(action,host,scheme,port){
   const r=await fetch("/api/relay/hosts",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({password:PASS,action,host})});
+    body:JSON.stringify({password:PASS,action,host,scheme,port})});
   const d=await r.json().catch(()=>({}));
   if(!r.ok) throw new Error(d.detail||("שגיאה "+r.status));
   return d;
@@ -599,16 +607,22 @@ async function loadRelayHosts(){
 function renderRelayHosts(){
   if(!RELAY_HOSTS.length){ $("relayHostsList").innerHTML='<div class="muted">אין hosts עדיין.</div>'; return; }
   $("relayHostsList").innerHTML=RELAY_HOSTS.map(h=>{
-    const locked=RELAY_BUILTIN.includes(h);
+    const origin=h.scheme+"://"+h.host+((h.scheme==="https"&&h.port===443)||(h.scheme==="http"&&h.port===80)?"":(":"+h.port));
     return `<div class="row" style="justify-content:space-between;border-bottom:1px solid #222;padding:6px 0">
-      <span dir="ltr" style="font-family:monospace;color:#eee">${esc(h)}${locked?' <span class="muted">(מובנה)</span>':''}</span>
-      ${locked?'':`<button class="rm mini" onclick="removeRelayHost('${esc(h)}')">הסר</button>`}</div>`;
+      <span dir="ltr" style="font-family:monospace;color:#eee">${esc(origin)}${h.builtin?' <span class="muted">(מובנה)</span>':''}</span>
+      ${h.builtin?'':`<button class="rm mini" onclick="removeRelayHost('${esc(h.host)}')">הסר</button>`}</div>`;
   }).join("");
 }
 async function addRelayHost(){
   const h=$("rh_host").value.trim(); $("rhMsg").textContent="";
-  if(!h){ $("rhMsg").textContent="הכנס שם host"; return; }
-  try{ const d=await relayApi("add",h); RELAY_HOSTS=d.hosts||[]; $("rh_host").value=""; renderRelayHosts(); }
+  const scheme=$("rh_scheme").value||undefined;
+  const port=$("rh_port").value?parseInt($("rh_port").value,10):undefined;
+  if(!h){ $("rhMsg").textContent="הכנס שם host (או כתובת מלאה)"; return; }
+  try{
+    const d=await relayApi("add",h,scheme,port);
+    RELAY_HOSTS=d.hosts||[]; $("rh_host").value=""; $("rh_port").value="";
+    renderRelayHosts();
+  }
   catch(e){ $("rhMsg").textContent=e.message; }
 }
 async function removeRelayHost(h){
@@ -620,7 +634,7 @@ function relayifyUrl(){
   const el=$("l_url"), msg=$("relayMsg"); msg.style.color="#ff8a8a";
   let u; try{ u=new URL(el.value.trim()); }catch{ msg.textContent="קישור לא תקין"; return; }
   if(u.protocol!=="http:"&&u.protocol!=="https:"){ msg.textContent="רק http/https"; return; }
-  if(!RELAY_HOSTS.includes(u.hostname)){
+  if(!RELAY_HOSTS.some(h=>h.host===u.hostname)){
     msg.textContent="ה-host הזה לא ברשימה המותרת — הוסף אותו קודם למטה."; return; }
   el.value=location.origin+"/hls-relay/"+u.hostname+u.pathname+(u.search||"");
   msg.style.color="#8aff9e"; msg.textContent="✓ הומר לרלֵיי דרך השרת שלנו";

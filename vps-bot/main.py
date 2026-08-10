@@ -1020,23 +1020,50 @@ async def cast_remux(chat_id: int, message_id: int, request: Request,
 # הוסיף במפורש מהפאנל מותרים. הרשימה נשמרת לקובץ כדי לשרוד restart, ותמיד כוללת
 # את ברירת המחדל המובנית. stream.mcquack.net מובנה ולא ניתן להסרה כדי שהערוצים
 # הקיימים לא יישברו.
+# כל host שמור עם ה-origin האמיתי שלו (scheme+port), לא רק השם - חלק מהמקורות
+# (למשל tv.embyil.tv:86, https) לא יושבים על http:80 הרגיל, והרלֵיי חייב לפנות
+# בדיוק לסכימה/פורט הנכונים כדי שהמקור בכלל יענה.
 RELAY_HOSTS_FILE = DATA_DIR / "relay_hosts.json"
-_DEFAULT_RELAY_HOSTS = {"stream.mcquack.net"}
+_DEFAULT_RELAY_HOSTS = {"stream.mcquack.net": {"scheme": "http", "port": 80}}
 
-def _load_relay_hosts() -> set:
-    hosts = set(_DEFAULT_RELAY_HOSTS)
+def _normalize_relay_origin(scheme, port) -> dict:
+    scheme = scheme if scheme in ("http", "https") else "http"
+    try:
+        port = int(port)
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except (TypeError, ValueError):
+        port = 443 if scheme == "https" else 80
+    return {"scheme": scheme, "port": port}
+
+def _load_relay_hosts() -> dict:
+    hosts = dict(_DEFAULT_RELAY_HOSTS)
     try:
         if RELAY_HOSTS_FILE.exists():
             data = json.loads(RELAY_HOSTS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                hosts |= {str(h).strip().lower() for h in data if str(h).strip()}
+            if isinstance(data, dict):
+                for h, info in data.items():
+                    h = str(h).strip().lower()
+                    if not h:
+                        continue
+                    if isinstance(info, dict):
+                        hosts[h] = _normalize_relay_origin(info.get("scheme"), info.get("port"))
+                    else:
+                        hosts[h] = _normalize_relay_origin("http", 80)
+            elif isinstance(data, list):
+                # פורמט ישן: רשימת שמות בלבד (מלפני תמיכה בסכימה/פורט) - http:80.
+                for h in data:
+                    h = str(h).strip().lower()
+                    if h:
+                        hosts[h] = _normalize_relay_origin("http", 80)
     except Exception as e:
         log.warning("טעינת relay_hosts נכשלה: %s", e)
     return hosts
 
-def _save_relay_hosts(hosts: set):
+def _save_relay_hosts(hosts: dict):
     RELAY_HOSTS_FILE.write_text(
-        json.dumps(sorted(hosts), ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps({h: hosts[h] for h in sorted(hosts)}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
 
 HLS_RELAY_ALLOWED_HOSTS = _load_relay_hosts()
 
@@ -1061,6 +1088,8 @@ class RelayHostReq(BaseModel):
     password: str
     action: str            # list / add / remove
     host: Optional[str] = None
+    scheme: Optional[str] = None   # http / https - אופציונלי, נגזר מהכתובת אם לא צוין
+    port: Optional[int] = None     # אופציונלי - נגזר מהכתובת/מהסכימה אם לא צוין
 
 @api.post("/api/relay/hosts")
 async def relay_hosts_manage(req: RelayHostReq, request: Request):
@@ -1068,27 +1097,52 @@ async def relay_hosts_manage(req: RelayHostReq, request: Request):
     check_panel_password(request, req.password)
     global HLS_RELAY_ALLOWED_HOSTS
     def _result():
-        return {"hosts": sorted(HLS_RELAY_ALLOWED_HOSTS),
-                "builtin": sorted(_DEFAULT_RELAY_HOSTS)}
+        return {
+            "hosts": [
+                {"host": h, "scheme": info["scheme"], "port": info["port"],
+                 "builtin": h in _DEFAULT_RELAY_HOSTS}
+                for h, info in sorted(HLS_RELAY_ALLOWED_HOSTS.items())
+            ],
+            "builtin": sorted(_DEFAULT_RELAY_HOSTS),
+        }
     if req.action == "list":
         return _result()
     if req.action == "add":
-        h = (req.host or "").strip().lower()
-        if "://" in h:
-            h = urlparse(h).hostname or ""
-        h = h.split("/")[0].split(":")[0].strip()   # רק ה-host, בלי פורט/נתיב
+        raw = (req.host or "").strip().lower()
+        scheme, port = None, None
+        if "://" in raw:
+            p = urlparse(raw)
+            h = p.hostname or ""
+            scheme = p.scheme if p.scheme in ("http", "https") else None
+            port = p.port
+        else:
+            h = raw.split("/")[0]
+            if ":" in h:
+                h, _, pp = h.partition(":")
+                try:
+                    port = int(pp)
+                except ValueError:
+                    port = None
         if not h or not _HOSTNAME_RE.match(h):
             raise HTTPException(400, "שם host לא תקין")
+        # שדות מפורשים בבקשה גוברים על מה שנגזר מהכתובת שהודבקה.
+        if req.scheme in ("http", "https"):
+            scheme = req.scheme
+        if req.port:
+            port = req.port
+        if port is not None and not (1 <= port <= 65535):
+            raise HTTPException(400, "פורט לא תקין")
         if not await asyncio.to_thread(_host_is_public, h):
             raise HTTPException(400, "ה-host לא נגיש או מפנה לכתובת פנימית — נחסם")
-        HLS_RELAY_ALLOWED_HOSTS = set(HLS_RELAY_ALLOWED_HOSTS) | {h}
+        origin = _normalize_relay_origin(scheme or "http", port)
+        HLS_RELAY_ALLOWED_HOSTS = {**HLS_RELAY_ALLOWED_HOSTS, h: origin}
         _save_relay_hosts(HLS_RELAY_ALLOWED_HOSTS)
         return _result()
     if req.action == "remove":
         h = (req.host or "").strip().lower()
         if h in _DEFAULT_RELAY_HOSTS:
             raise HTTPException(400, "אי אפשר להסיר host מובנה")
-        HLS_RELAY_ALLOWED_HOSTS = {x for x in HLS_RELAY_ALLOWED_HOSTS if x != h}
+        HLS_RELAY_ALLOWED_HOSTS = {x: v for x, v in HLS_RELAY_ALLOWED_HOSTS.items() if x != h}
         _save_relay_hosts(HLS_RELAY_ALLOWED_HOSTS)
         return _result()
     raise HTTPException(400, "פעולה לא מוכרת")
@@ -1138,9 +1192,13 @@ def _rewrite_hls_manifest(text: str, base_url: str) -> str:
 @api.get("/hls-relay/{host}/{path:path}")
 async def hls_relay(host: str, path: str, request: Request):
     check_hotlink(request)
-    if host not in HLS_RELAY_ALLOWED_HOSTS:
+    origin = HLS_RELAY_ALLOWED_HOSTS.get(host)
+    if origin is None:
         raise HTTPException(403, "host not allowed")
-    upstream_url = f"http://{host}/{path}"
+    scheme, port = origin["scheme"], origin["port"]
+    default_port = 443 if scheme == "https" else 80
+    netloc = host if port == default_port else f"{host}:{port}"
+    upstream_url = f"{scheme}://{netloc}/{path}"
     if request.url.query:
         upstream_url += f"?{request.url.query}"
 
