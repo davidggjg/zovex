@@ -703,6 +703,7 @@ _bot_msg_cache: dict = {}   # (bot_name, chat_id, message_id) -> (msg, expires_a
 _BOT_MSG_TTL = 900          # 15 דק' — נשאר "חם" לאורך צפייה שלמה (בקשות Range
                             # פרוסות על כל אורך הסרט). אם ה-file_reference פג
                             # באמצע — נתפס כ-FileReferenceExpired ונשלף מחדש.
+_BOT_MSG_CACHE_MAX = 4000   # תקרת רשומות — מעליה מנקים פגי-תוקף ואז ישנים
 
 async def _get_bot_msg(bot, chat_id, message_id, force=False):
     """שולף את ההודעה עבור בוט מסוים (cache פר-בוט). force=True מכריח שליפה טרייה."""
@@ -715,6 +716,17 @@ async def _get_bot_msg(bot, chat_id, message_id, force=False):
     msg = await asyncio.wait_for(
         bot["client"].get_messages(chat_id, message_id), timeout=20)
     if msg and (msg.video or msg.audio or msg.document or msg.video_note):
+        # ניקוי רשומות שפג תוקפן: בלי זה המטמון גדל בלי הגבלה (12 בוטים ×
+        # אלפי פריטים = עשרות אלפי אובייקטי Message בזיכרון) — דליפת זיכרון
+        # שמצטברת עד שהשירות נחנק. מנקים רק כשהמטמון גדול, כדי לא לבזבז זמן.
+        if len(_bot_msg_cache) > _BOT_MSG_CACHE_MAX:
+            for k, v in [(k, v) for k, v in _bot_msg_cache.items() if v[1] <= now]:
+                _bot_msg_cache.pop(k, None)
+            # אם עדיין גדול מדי (הכול עדיין בתוקף) — זורקים את הישנים ביותר
+            if len(_bot_msg_cache) > _BOT_MSG_CACHE_MAX:
+                for k, _ in sorted(_bot_msg_cache.items(), key=lambda kv: kv[1][1]
+                                   )[:len(_bot_msg_cache) - _BOT_MSG_CACHE_MAX]:
+                    _bot_msg_cache.pop(k, None)
         _bot_msg_cache[key] = (msg, now + _BOT_MSG_TTL)
         return msg
     return None
