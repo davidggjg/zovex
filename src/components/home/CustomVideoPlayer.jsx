@@ -754,6 +754,8 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
   // ─── Auto-refresh: שומר את ה-src הנוכחי ומרענן כל 25 דקות ───
   const currentSrcRef = useRef(src);
   const refreshTimerRef = useRef(null);
+  // טיימר "נטען אבל תקוע" (ראו armStall) — מנוקה בפירוק הנגן
+  const stallTimerRef = useRef(null);
 
   // פונקציה שמושכת src חדש מהשרת ומטעינה מחדש
   const refreshStream = useCallback(async () => {
@@ -824,6 +826,41 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       }
       await shaka.attach(videoEl);
       playerRef.current = { vjs, shaka };
+
+      // מעבר ל-video.js. באנדרואיד/iOS video.js מנגן HLS דרך מפענח המערכת
+      // (overrideNative כבוי כברירת מחדל בנייד), והוא סלחן לזרמים ב-open-GOP
+      // שמפילים את Shaka - ראו הסבר ב-armStall למטה.
+      const startFallback = async () => {
+        try { await shaka.detach(); } catch { /* כבר מנותק */ }
+        if (destroyed) return;
+        vjs.src({ src, type: "application/x-mpegURL" });
+        if (!isLive && startTime > 1) { try { vjs.currentTime(startTime); } catch {} }
+        vjs.play().catch(() => {});
+        setLoading(false);
+        setupMediaSession(videoEl, movie);
+        postNative({ type: "video_playing", value: true });
+        startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות (fallback)
+      };
+
+      // שומר-סף נגד "נטען אבל תקוע": חלק מהערוצים (למשל ספורט 5 סטארס)
+      // משדרים ב-open-GOP - יש בהם I-slices אבל אף IDR. Shaka/MSE דורשים
+      // IDR כדי להתחיל להזרים לבאפר, ולכן נתקעים עליהם *בלי לזרוק שגיאה*:
+      // shaka.load() מצליח, ואז אף פריים לא מגיע לנצח. בלי הבדיקה הזו ה-catch
+      // למטה לא רץ אף פעם, נגן הגיבוי לא מופעל, והמשתמש נשאר על ספינר
+      // אינסופי - בזמן שאותה כתובת בדיוק מנוגנת מצוין ישירות בדפדפן.
+      const STALL_MS = 12000;
+      const isMoving = () => videoEl.currentTime > 0.1 && videoEl.readyState >= 2;
+      const armStall = () => {
+        stallTimerRef.current = setTimeout(() => {
+          if (!destroyed && !isMoving()) startFallback();
+        }, STALL_MS);
+      };
+      videoEl.addEventListener("timeupdate", function onMove() {
+        if (!isMoving()) return;
+        clearTimeout(stallTimerRef.current);
+        videoEl.removeEventListener("timeupdate", onMove);
+      });
+
       try {
         await shaka.load(src);
         if (!destroyed) {
@@ -833,17 +870,10 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           setupMediaSession(videoEl, movie);
           postNative({ type: "video_playing", value: true });
           startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות
+          armStall();
         }
       } catch {
-        if (!destroyed) {
-          vjs.src({ src, type: "application/x-mpegURL" });
-          if (!isLive && startTime > 1) { try { vjs.currentTime(startTime); } catch {} }
-          vjs.play().catch(() => {});
-          setLoading(false);
-          setupMediaSession(videoEl, movie);
-          postNative({ type: "video_playing", value: true });
-          startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות (fallback)
-        }
+        if (!destroyed) await startFallback();
       }
     };
     // loadScripts יכולה להיכשל (רשת/timeout) - בלי catch כאן זה היה משאיר
@@ -860,6 +890,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       destroyed = true;
       if (reportInterval) clearInterval(reportInterval);
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); // ← ניקוי טיימר רענון
+      if (stallTimerRef.current) clearTimeout(stallTimerRef.current);
       const v = videoElRef.current;
       if (!isLive && v) { const dur = getUsableDuration(v); if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur); }
       clearMediaSession();
