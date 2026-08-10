@@ -600,6 +600,12 @@ async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
 
+# שגיאת הזיהוי האחרונה לכל חבר pool — כדי שהפאנל יוכל להציג *למה* הוא לא
+# מחובר, במקום רק "לא מחובר". בלי זה אין דרך לדעת אם הבוט לא חבר בערוץ,
+# ה-session פג, או שזו סתם תקלת רשת רגעית.
+_peer_errors: dict = {}
+
+
 async def _resolve_peer(client, name) -> bool:
     """מוודא שהלקוח מזהה את ערוץ התוכן.
 
@@ -614,8 +620,26 @@ async def _resolve_peer(client, name) -> bool:
         await asyncio.wait_for(client.get_chat(STREAM_CHANNEL_ID), timeout=20)
         return True
     except Exception as e:
-        log.warning("⚠️ %s לא מזהה את ערוץ התוכן (%s) — ינוסה שוב ברקע", name, e)
-        return False
+        first = e
+
+    # מעבר על רשימת הצ'אטים ממלא את המטמון המקומי ב-access_hash של כל ערוץ
+    # שהחשבון חבר בו — וזה מה שחסר כדי לפתור מזהה מספרי. עובד רק לחשבון
+    # משתמש; לבוטים טלגרם לא מאפשר get_dialogs, ולכן הם תלויים בכך שתגיע
+    # הודעה חדשה מהערוץ. הרשאות אדמין לא רלוונטיות לשום כיוון כאן.
+    try:
+        n = 0
+        async for _ in client.get_dialogs(limit=500):
+            n += 1
+        if n:
+            await asyncio.wait_for(client.get_chat(STREAM_CHANNEL_ID), timeout=20)
+            log.info("✅ %s זיהה את הערוץ אחרי סריקת %d צ'אטים", name, n)
+            return True
+    except Exception:
+        pass
+
+    log.warning("⚠️ %s לא מזהה את ערוץ התוכן (%s) — ינוסה שוב ברקע", name, first)
+    _peer_errors[name] = f"{type(first).__name__}: {first}"
+    return False
 
 
 async def peer_retry_loop():
@@ -3149,7 +3173,17 @@ async def pool_reconnect(req: PoolNameReq, request: Request):
         b["peer_ok"] = ok
         if ok:
             b["cooldown_until"] = 0.0          # מזוהה שוב — משחררים מעונשין
-        out.append({"name": b["name"], "peer_ok": ok})
+            _peer_errors.pop(b["name"], None)
+        # מזהה הבוט: בלי זה אי אפשר לדעת *את מי* להוסיף לערוץ. בוט חייב להיות
+        # חבר בערוץ כדי לגשת אליו — אין דרך לעקוף את זה בקוד.
+        who = ""
+        try:
+            me = await asyncio.wait_for(b["client"].get_me(), timeout=10)
+            who = ("@" + me.username) if me.username else (me.first_name or "")
+        except Exception:
+            pass
+        out.append({"name": b["name"], "peer_ok": ok, "who": who,
+                    "error": _peer_errors.get(b["name"], "")})
     return {"ok": True, "results": out}
 
 class PoolRemoveReq(BaseModel):

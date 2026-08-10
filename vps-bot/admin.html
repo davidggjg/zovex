@@ -988,10 +988,18 @@ async function reconnectPool(name){
       body:JSON.stringify({password:PASS, name:name||null})});
     const d=await r.json();
     if(!r.ok) throw new Error(d.detail||("שגיאה "+r.status));
-    const ok=(d.results||[]).filter(x=>x.peer_ok).length, tot=(d.results||[]).length;
-    $("poolMsg").innerHTML = ok===tot
-      ? `<span class="ok">✓ ${ok} מתוך ${tot} מחוברים לערוץ</span>`
-      : `<span class="err">${ok} מתוך ${tot} הצליחו. מי שנכשל — ודא שהוא חבר בערוץ, או שלח הודעה לערוץ ונסה שוב.</span>`;
+    const res=d.results||[], ok=res.filter(x=>x.peer_ok).length;
+    let html = ok===res.length
+      ? `<span class="ok">✓ ${ok} מתוך ${res.length} מחוברים לערוץ</span>`
+      : `<span class="err">${ok} מתוך ${res.length} הצליחו.</span>`;
+    // מציגים למי בדיוק להוסיף לערוץ ומה השגיאה — בוט חייב להיות חבר בערוץ,
+    // ואי אפשר לעקוף את זה בקוד, אז זו המידע היחיד שבאמת עוזר.
+    res.filter(x=>!x.peer_ok).forEach(x=>{
+      html += `<div style="margin-top:6px;font-size:12px;line-height:1.5">
+        <b>${esc(x.name)}</b>${x.who?` (${esc(x.who)})`:""} — צריך להיות חבר בערוץ התוכן.
+        <div class="muted" dir="ltr" style="font-size:11px">${esc(x.error||"")}</div></div>`;
+    });
+    $("poolMsg").innerHTML = html;
     loadPool();
   }catch(e){ $("poolMsg").innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
