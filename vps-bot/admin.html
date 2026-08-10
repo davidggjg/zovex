@@ -770,11 +770,11 @@ async function rmAdmin(id){ try{ renderAdmins((await panelApi("remove",{id})).ad
 async function loadStats(){
   const box=$("statsBox"); box.textContent="טוען…";
   try{
-    const r=await fetch("/stats/summary",{method:"POST",headers:{"Content-Type":"application/json"},
+    const r=await fetch("/api/stats/summary",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({password:PASS})});
-    if(!r.ok) throw new Error("שגיאה");
+    if(!r.ok) throw new Error("השרת החזיר "+r.status+(r.status===405?" — צריך לעדכן את main.py בשרת ולהפעיל מחדש":""));
     renderStats(await r.json());
-  }catch(e){ box.innerHTML='<div class="err">טעינת הסטטיסטיקות נכשלה</div>'; }
+  }catch(e){ box.innerHTML='<div class="err">טעינת הסטטיסטיקות נכשלה: '+esc(e.message||"")+'</div>'; }
 }
 function statCard(label,val,sub){
   return `<div style="flex:1;min-width:130px;background:#101010;border:1px solid #262626;

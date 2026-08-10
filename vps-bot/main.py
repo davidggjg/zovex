@@ -2461,7 +2461,9 @@ def _build_stats() -> dict:
         "generated": int(now),
     }
 
-@api.post("/stats/summary")
+# הנתיב תחת /api בכוונה: nginx מעביר לשרת רק קידומות מסוימות (/api, /app,
+# /panel, /feedback, /pool…). נתיב /stats חדש לא היה מועבר והוחזר 405 מ-nginx.
+@api.post("/api/stats/summary")
 async def stats_summary(req: StatsReq, request: Request):
     check_panel_password(request, req.password)
     try:
