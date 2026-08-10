@@ -2436,7 +2436,86 @@ def load_app_version() -> dict:
 
 @api.get("/app/version")
 async def app_version_get():
-    return load_app_version()
+    """מחזיר את פרטי הגרסה. שדה apk מצביע תמיד על השרת שלנו (/app/apk) כדי
+    שהמשתמש לא ייחשף למקור החיצוני שממנו מגיע הקובץ."""
+    v = dict(load_app_version())
+    v["apk"] = f"{STREAM_PUBLIC_BASE}/app/apk"
+    v["url"] = f"{STREAM_PUBLIC_BASE}/app/apk"
+    return v
+
+# ── הגשת ה-APK מהשרת שלנו ────────────────────────────────────────────────────
+# האפליקציה מורידה את העדכון מ-/app/apk (הדומיין שלנו) ולא ממקור חיצוני. השרת
+# מוריד את הקובץ פעם אחת, שומר אותו במטמון על הדיסק, ומגיש אותו מקומית. כך
+# הכתובת שהמשתמש רואה היא רק זו של ZOVEX, וגם ההורדה מהירה יותר.
+APK_CACHE_FILE = DATA_DIR / "zovex-latest.apk"
+APK_SOURCE_URL = os.environ.get(
+    "APK_SOURCE_URL",
+    "https://github.com/davidggjg/zovex-android/releases/latest/download/zovex.apk")
+_apk_lock = asyncio.Lock()
+
+async def _refresh_apk_cache(force: bool = False) -> bool:
+    """מוריד את ה-APK העדכני למטמון המקומי. מחזיר True אם יש קובץ תקין."""
+    async with _apk_lock:
+        # רענון אם אין קובץ, הוא זעיר (הורדה שנכשלה), או שעברו 6 שעות
+        fresh = (APK_CACHE_FILE.exists()
+                 and APK_CACHE_FILE.stat().st_size > 1_000_000
+                 and (time.time() - APK_CACHE_FILE.stat().st_mtime) < 6 * 3600)
+        if fresh and not force:
+            return True
+        tmp = APK_CACHE_FILE.with_suffix(".part")
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=180) as cli:
+                async with cli.stream("GET", APK_SOURCE_URL) as r:
+                    if r.status_code != 200:
+                        raise RuntimeError(f"HTTP {r.status_code}")
+                    with tmp.open("wb") as f:
+                        async for chunk in r.aiter_bytes(256 * 1024):
+                            f.write(chunk)
+            if tmp.stat().st_size < 1_000_000:
+                raise RuntimeError("קובץ קטן מדי — כנראה לא APK")
+            tmp.replace(APK_CACHE_FILE)
+            log.info("✅ APK עודכן במטמון (%.1f MB)", APK_CACHE_FILE.stat().st_size / 1e6)
+            return True
+        except Exception as e:
+            log.warning("רענון APK נכשל: %s", e)
+            tmp.unlink(missing_ok=True)
+            # אם יש עותק ישן תקין — עדיף להגיש אותו מאשר כלום
+            return APK_CACHE_FILE.exists() and APK_CACHE_FILE.stat().st_size > 1_000_000
+
+@api.get("/app/apk")
+async def app_apk():
+    """מגיש את קובץ ההתקנה מהדומיין שלנו (המשתמש לא רואה מקור חיצוני)."""
+    if not await _refresh_apk_cache():
+        raise HTTPException(status_code=503, detail="קובץ העדכון אינו זמין כרגע")
+    size = APK_CACHE_FILE.stat().st_size
+
+    def _gen():
+        with APK_CACHE_FILE.open("rb") as f:
+            while True:
+                b = f.read(256 * 1024)
+                if not b:
+                    break
+                yield b
+
+    return StreamingResponse(
+        _gen(),
+        media_type="application/vnd.android.package-archive",
+        headers={
+            "Content-Length": str(size),
+            "Content-Disposition": 'attachment; filename="zovex.apk"',
+            "Cache-Control": "no-cache",
+        })
+
+class ApkRefreshReq(BaseModel):
+    password: str
+
+@api.post("/app/apk/refresh")
+async def app_apk_refresh(req: ApkRefreshReq, request: Request):
+    """מושך מחדש את ה-APK למטמון (אחרי שפרסמנו בנייה חדשה)."""
+    check_panel_password(request, req.password)
+    ok = await _refresh_apk_cache(force=True)
+    return {"ok": ok,
+            "size": APK_CACHE_FILE.stat().st_size if APK_CACHE_FILE.exists() else 0}
 
 class AppVersionSetReq(BaseModel):
     password: str
