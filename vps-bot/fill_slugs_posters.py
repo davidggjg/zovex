@@ -24,6 +24,10 @@ DATA = pathlib.Path('/opt/zovex-bot/data/content.json')
 ENV = pathlib.Path('/opt/zovex-bot/.env')
 TMDB_IMG = 'https://image.tmdb.org/t/p/w500'
 APPLY = '--apply' in sys.argv
+# --heavy: מחליף גם פוסטרים כבדים במיוחד. נמדד: תמונות base44 שוקלות ~1.9MB
+# כל אחת (תמונה בגודל מלא בכרטיסייה של 150px), מול ~0.1MB לאותו פוסטר מ-TMDB.
+HEAVY = '--heavy' in sys.argv
+HEAVY_HOSTS = ('base44.app',)
 
 
 def read_env(key: str) -> str:
@@ -96,6 +100,11 @@ def has(e, k):
     return bool(v and str(v).strip())
 
 
+def is_heavy_poster(e) -> bool:
+    u = e.get('thumbnail_url') or ''
+    return any(h in u for h in HEAVY_HOSTS)
+
+
 def main():
     if not API_KEY:
         print('❌ אין TMDB_API_KEY ב-.env — אי אפשר להמשיך')
@@ -125,7 +134,7 @@ def main():
     print('═══ סרטים ═══')
     for e in movies:
         need_slug = not has(e, 'custom_slug')
-        need_post = not has(e, 'thumbnail_url')
+        need_post = not has(e, 'thumbnail_url') or (HEAVY and is_heavy_poster(e))
         if not (need_slug or need_post):
             continue
         title, poster = tmdb(e.get('title', ''), e.get('year', ''), want_tv=False)
@@ -140,15 +149,18 @@ def main():
                 changed += 1
                 print('  slug   %-28s → %s' % ((e.get('title') or '')[:28], s))
         if need_post and poster:
+            was_heavy = is_heavy_poster(e)
             e['thumbnail_url'] = poster
             changed += 1
-            print('  פוסטר  %-28s → TMDB' % (e.get('title') or '')[:28])
+            print('  פוסטר  %-28s → TMDB%s' % ((e.get('title') or '')[:28],
+                                               '  (החליף כבד)' if was_heavy else ''))
         time.sleep(0.3)
 
     print('\n═══ סדרות ═══')
     for name, eps in series.items():
         need_slug = not any(has(x, 'custom_slug') for x in eps)
-        need_post = not any(has(x, 'thumbnail_url') for x in eps)
+        need_post = (not any(has(x, 'thumbnail_url') for x in eps)
+                     or (HEAVY and any(is_heavy_poster(x) for x in eps)))
         if not (need_slug or need_post):
             continue
         yr = next((x.get('year') for x in eps if x.get('year')), '')
@@ -165,11 +177,13 @@ def main():
                 changed += 1
                 print('  slug   %-28s → %-24s (%d פרקים)' % (name[:28], s, len(eps)))
         if need_post and poster:
+            n = 0
             for x in eps:
-                if not has(x, 'thumbnail_url'):
+                if not has(x, 'thumbnail_url') or (HEAVY and is_heavy_poster(x)):
                     x['thumbnail_url'] = poster
+                    n += 1
             changed += 1
-            print('  פוסטר  %-28s → TMDB (%d פרקים)' % (name[:28], len(eps)))
+            print('  פוסטר  %-28s → TMDB (%d פרקים)' % (name[:28], n))
         time.sleep(0.3)
 
     print('\n─────────────────────')

@@ -98,6 +98,17 @@ server {
     location ~ /\.(?!well-known) { return 404; }               # .env .git .htaccess ...
     location ~* \.(php|sql|env|ini|conf|cfg|bak|old|log|sqlite|db)$ { return 404; }
 
+    # ── נכסי build עם hash בשם (index-BPqYAdl8.js) — מטמון לשנה ──
+    # בטוח דווקא כי השם משתנה בכל build, אז אי אפשר להיתקע על גרסה ישנה.
+    # בלי זה הדפדפן שולח בקשת אימות לכל נכס בכל טעינה (304 ריק, אבל עדיין
+    # round-trip מלא — כואב במיוחד בסלולר). לא מחילים על index.html (נקודת
+    # הכניסה, חייבת להתעדכן מיד) ולא על /vendor/ (שמות קבועים בלי גרסה).
+    location /assets/ {
+        alias $SITE_DIR/assets/;
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
     # ── נכסים ישנים עם קידומת /zovex/ (למשל לוגו של שידור חי) ──
     location /zovex/ { alias $SITE_DIR/; }
 
