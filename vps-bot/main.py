@@ -3969,7 +3969,16 @@ async def startup():
     global _hls_relay_client
     restore_from_dataset()
     await bot_client.start()
-    _hls_relay_client = httpx.AsyncClient(timeout=15, follow_redirects=True)
+    # http2=True: tv.embyil.tv (ולפחות ספקים דומים) עונים 200 עם ה-m3u8
+    # האמיתי רק על HTTP/2 - על HTTP/1.1 (ברירת המחדל) הם מפנים (301) לדף
+    # שבסוף מחזיר 404. דורש את חבילת h2 (pip install h2) - ליפול בעדינות
+    # ל-HTTP/1.1 אם היא חסרה, כדי שלא תפיל את כל השרת על תלות אופציונלית.
+    try:
+        _hls_relay_client = httpx.AsyncClient(timeout=15, follow_redirects=True, http2=True)
+    except ImportError:
+        log.warning("חבילת h2 לא מותקנת - רלֵיי HLS ירוץ על HTTP/1.1 בלבד "
+                     "(pip install h2 כדי לתקן; חלק מהמקורות דורשים HTTP/2)")
+        _hls_relay_client = httpx.AsyncClient(timeout=15, follow_redirects=True)
     # הכל עולה בהדרגה ברקע כדי לא להציף את טלגרם בעשרות חיבורים בבת אחת (מה
     # שגרם לחסימת IP: כל הבוטים "לא עלה", Watchdog הרג את התהליך, ולולאת קריסה).
     asyncio.create_task(seed_content_if_empty())
