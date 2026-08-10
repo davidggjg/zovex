@@ -1215,9 +1215,19 @@ _hls_fix: dict = {}            # key -> {"proc","dir","last","ready"}
 _hls_fix_lock = asyncio.Lock()
 
 
+def _hls_fix_dir_of(path: str) -> str:
+    """התיקייה של הערוץ בתוך הנתיב: live/140/chunks.m3u8 → live/140.
+    המפתח נגזר ממנה (ולא מהנתיב המלא) כדי שבקשת ה-playlist ובקשות הסגמנטים
+    שאחריה (s13.m4s / init.mp4) יפלו על אותו תהליך ffmpeg."""
+    last = path.rsplit("/", 1)[-1]
+    if "." in last and "/" in path:
+        return path.rsplit("/", 1)[0]
+    return path.strip("/")
+
+
 def _hls_fix_key(host: str, path: str) -> str:
     import hashlib as _h
-    return _h.sha1(f"{host}/{path}".encode()).hexdigest()[:16]
+    return _h.sha1(f"{host}/{_hls_fix_dir_of(path)}".encode()).hexdigest()[:16]
 
 
 async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
@@ -1294,8 +1304,7 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
     # קבצים שה-ffmpeg כבר מייצר (init.mp4 / s3.m4s) מוגשים ישירות מהדיסק.
     name = path.rsplit("/", 1)[-1]
     if name == "init.mp4" or name.endswith(".m4s"):
-        parent = path.rsplit("/", 1)[0] if "/" in path else ""
-        ent = _hls_fix.get(_hls_fix_key(host, parent))
+        ent = _hls_fix.get(_hls_fix_key(host, path))
         if not ent:
             raise HTTPException(404, "stream not active")
         ent["last"] = time.time()
