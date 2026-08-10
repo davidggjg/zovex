@@ -657,8 +657,11 @@ function editLive(id){ const m=movies.find(x=>x.id===id); if(!m) return;
 async function saveLive(){
   const t=$("l_title").value.trim(), u=$("l_url").value.trim();
   if(!t||!u){ $("liveMsg").innerHTML='<span class="err">חסר שם או קישור</span>'; return; }
+  // is_live חובה: הנגן באתר/אפליקציה מזהה שידור חי לפי הדגל הזה בלבד (לא לפי
+  // הקטגוריה). בלעדיו הערוץ נכנס לרשימת הסרטים הרגילה ומוצג לו סרגל התקדמות
+  // עם "אורך" אינסופי במקום תווית LIVE.
   const data={ title:t, video_url:u, video_id:null, thumbnail_url:$("l_thumb").value.trim(),
-    custom_slug:$("l_slug").value.trim()||null, category:"שידורים חיים", type:null,
+    custom_slug:$("l_slug").value.trim()||null, category:"שידורים חיים", is_live:true, type:null,
     series_name:null, season_number:null, episode_number:null, episode_title:null, year:null, description:"" };
   if(liveEditId){ movies=movies.map(m=>m.id===liveEditId?{...m,...data}:m); }
   else { movies=[{...data,id:crypto.randomUUID(),created_date:new Date().toISOString()}, ...movies]; }

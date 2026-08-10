@@ -2815,7 +2815,20 @@ def _bump_content_version() -> int:
         log.warning("עדכון גרסת content נכשל: %s", e)
     return v
 
+LIVE_CATEGORY = "שידורים חיים"
+
+def _normalize_live_flag(arr: list) -> list:
+    """כל פריט בקטגוריית השידורים החיים מקבל is_live=True.
+    הנגן באתר/אפליקציה מזהה שידור חי לפי הדגל הזה בלבד; בלעדיו הערוץ נופל
+    לרשימת הסרטים הרגילה ומוצג לו סרגל התקדמות עם "אורך" אינסופי במקום LIVE.
+    כאן, ולא רק בפאנל, כדי שזה יהיה נכון לכל לקוח ששומר תוכן."""
+    for e in arr:
+        if e.get("category") == LIVE_CATEGORY and e.get("is_live") is not True:
+            e["is_live"] = True
+    return arr
+
 def save_content(arr: list):
+    arr = _normalize_live_flag(arr)
     # גיבוי בטיחות לפני דריסה — content.json הוא מקור האמת, ורוצים אפשרות לשחזר
     # אם מישהו מחק/דרס בטעות. שומרים עד 30 גיבויים אחרונים.
     try:
