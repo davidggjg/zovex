@@ -935,11 +935,6 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
 # כלומר 4 הוא האופטימום; מעבר לזה טלגרם מגביל ויצירת החיבורים עולה יותר ממה
 # שהיא מחזירה. 0 מכבה לגמרי וחוזר למסלול הבוטים.
 STREAM_MEDIA_CONNS = int(os.environ.get("STREAM_MEDIA_CONNS", "4"))
-# מטמון מיקום הקובץ: בלעדיו כל חלון בסרט היה מבצע get_messages נוסף לטלגרם —
-# עשרות קריאות מיותרות לסרט אחד, שמבטלות חלק מהרווח. ה-file_reference בתוכו
-# פג אחרי כמה שעות, ולכן TTL קצר ולא לצמיתות.
-_media_loc_cache: dict = {}
-MEDIA_LOC_TTL = 600
 
 
 async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
@@ -966,31 +961,36 @@ async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
 
 
 async def _media_bands_fetch(chat_id, message_id, lo, hi):
-    """מושך [lo, hi] דרך כמה חיבורי media במקביל — הטכניקה של FastTelethon.
+    """מושך [lo, hi] דרך כמה חיבורי media של *בוט אחד* מהמאגר, במקביל.
 
-    זה ההבדל המרכזי מול המסלול הישן: שם כל בוט מושך צ'אנק, מחכה לתשובה,
-    ומושך את הבא — רוב הזמן עובר בהמתנה ולא בהורדה. כאן פותחים כמה חיבורים
-    לאותו DC (עם ה-auth_key הקיים, בלי אימות נוסף) וכל אחד מושך חלק אחר
-    בו-זמנית. מחזיר None אם משהו נכשל, ואז הקורא נופל חזרה למסלול הבוטים.
+    ההבדל מהמסלול הישן: שם הבוט מושך צ'אנק, ממתין לתשובה, ומושך את הבא —
+    רוב הזמן עובר בהמתנה. כאן כמה חיבורים של אותו בוט מושכים חלקים שונים
+    בו-זמנית.
+
+    קריטי: הבוט נבחר מהמאגר (round-robin), והחיבורים שייכים לו בלבד. גרסה
+    קודמת השתמשה במאגר גלובלי מהבוט הראשי, וכל הצופים נדחסו דרך אותם 4
+    חיבורים — מהיר לצופה בודד, איטי פי 6 בעומס אמיתי.
+
+    כמו כן ה-file_reference תקף רק בהקשר הבוט ששלף אותו, ולכן שולפים את
+    ההודעה דרך אותו בוט (עם המטמון הקיים) ולא דרך הבוט הראשי.
+
+    מחזיר None על כל כשל — והקורא נופל בשקט למסלול הבוטים הוותיק.
     """
     if STREAM_MEDIA_CONNS <= 0:
         return None
+    bot = await pick_stream_bot()
+    if bot is None:
+        return None
     try:
-        key = (chat_id, message_id)
-        now = time.time()
-        hit = _media_loc_cache.get(key)
-        if hit and hit[0] > now:
-            dc_id, location = hit[1], hit[2]
-        else:
-            msg = await fetch_message(chat_id, message_id)
-            media = msg.video or msg.audio or msg.document or msg.video_note
-            if not media:
-                return None
-            dc_id, location = _file_location(media)
-            if len(_media_loc_cache) > 2000:
-                _media_loc_cache.clear()
-            _media_loc_cache[key] = (now + MEDIA_LOC_TTL, dc_id, location)
-        sessions = await get_media_session_pool(dc_id, STREAM_MEDIA_CONNS)
+        msg = await _get_bot_msg(bot, chat_id, message_id)
+        if msg is None:
+            return None
+        media = msg.video or msg.audio or msg.document or msg.video_note
+        if not media:
+            return None
+        dc_id, location = _file_location(media)
+        sessions = await get_media_session_pool(
+            bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS)
         if not sessions:
             return None
         n = len(sessions)
@@ -1003,18 +1003,20 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             e = min(hi, s + step - 1)
             tasks.append(_band_fetch(sessions[i], location, s, e))
             s = e + 1
-        parts = await asyncio.gather(*tasks, return_exceptions=True)
+        parts = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), timeout=SUBRANGE_TIMEOUT)
         out = bytearray()
         for p in parts:
             if not isinstance(p, (bytes, bytearray)):
                 return None            # שגיאה באחד החלקים — לא מגישים חלקי
             out += p
         return bytes(out[:total]) if len(out) >= total else None
+    except FileReferenceExpired:
+        _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+        return None
     except Exception as e:
-        # file_reference פג → המיקום השמור כבר לא תקף, מפילים אותו מהמטמון
-        # כדי שהניסיון הבא ישלוף מיקום טרי במקום להיכשל שוב ושוב.
-        _media_loc_cache.pop((chat_id, message_id), None)
-        log.warning("media bands נכשל (%s) — נופל למסלול הבוטים", e)
+        log.warning("media bands (%s) נכשל: %s — נופל למסלול הבוטים", bot["name"], e)
+        _mark_choked(bot, 15, e)
         return None
 
 
@@ -4314,40 +4316,47 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
 # כל חיבור מושך חלק אחר של הקובץ ב-upload.GetFile במקביל. פותרים את החיבורים
 # פעם אחת ושומרים ב-pool לפי DC.
 MEDIA_CHUNK = 1024 * 1024
-_media_sessions: dict = {}          # dc_id -> list[Session]
+_media_sessions: dict = {}          # (bot_name, dc_id) -> list[Session]
 _media_sessions_lock = asyncio.Lock()
 
-async def _make_media_session(dc_id: int) -> Session:
-    test_mode = await bot_client.storage.test_mode()
-    home_dc = await bot_client.storage.dc_id()
+async def _make_media_session(client, dc_id: int) -> Session:
+    """חיבור media נוסף *לאותו לקוח* — עם ה-auth_key שכבר יש לו, בלי אימות מחדש."""
+    test_mode = await client.storage.test_mode()
+    home_dc = await client.storage.dc_id()
     if dc_id == home_dc:
-        auth_key = await bot_client.storage.auth_key()
+        auth_key = await client.storage.auth_key()
     else:
-        auth_key = await Auth(bot_client, dc_id, test_mode).create()
-    session = Session(bot_client, dc_id, auth_key, test_mode, is_media=True)
+        auth_key = await Auth(client, dc_id, test_mode).create()
+    session = Session(client, dc_id, auth_key, test_mode, is_media=True)
     await session.start()
     if dc_id != home_dc:
         for _ in range(3):
-            exported = await bot_client.invoke(functions.auth.ExportAuthorization(dc_id=dc_id))
+            exported = await client.invoke(functions.auth.ExportAuthorization(dc_id=dc_id))
             try:
                 await session.invoke(functions.auth.ImportAuthorization(
                     id=exported.id, bytes=exported.bytes))
                 break
             except Exception as e:
                 log.warning("ImportAuthorization ל-DC %d נכשל, מנסה שוב: %s", dc_id, e)
-    log.info("✅ נוצר media session ל-DC %d", dc_id)
     return session
 
-async def get_media_session_pool(dc_id: int, n: int) -> list:
+async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list:
+    """חיבורי media *פר-בוט*. הגרסה הקודמת החזיקה מאגר גלובלי אחד מהבוט
+    הראשי — כלומר כל הצופים נדחסו דרך אותם 4 חיבורים וחיכו בתור. במדידה על
+    צופה בודד זה נראה פי 75 מהיר, ובעומס אמיתי זה היה פי 6 *איטי* יותר.
+    עכשיו לכל בוט במאגר יש חיבורים משלו, כך שהמקביליות גדלה עם מספר הבוטים."""
+    key = (owner, dc_id)
     async with _media_sessions_lock:
-        pool = _media_sessions.get(dc_id, [])
+        pool = _media_sessions.get(key, [])
         while len(pool) < n:
             try:
-                pool.append(await _make_media_session(dc_id))
+                pool.append(await _make_media_session(client, dc_id))
             except Exception as e:
-                log.error("יצירת media session נכשלה: %s", e)
+                log.error("יצירת media session ל-%s נכשלה: %s", owner, e)
                 break
-        _media_sessions[dc_id] = pool
+        _media_sessions[key] = pool
+        if pool:
+            log.info("✅ %s: %d חיבורי media ל-DC %d", owner, len(pool), dc_id)
     return pool[:n]
 
 def _file_location(media):
@@ -4389,7 +4398,7 @@ async def speedtest2(chat_id: int, message_id: int, mb: int = 24, conn: int = 4)
         if not media:
             raise HTTPException(404, "no media")
         dc_id, location = _file_location(media)
-        sessions = await get_media_session_pool(dc_id, conn)
+        sessions = await get_media_session_pool(bot_client, "main", dc_id, conn)
         if not sessions:
             return JSONResponse({"error": "no media sessions could be created", "dc_id": dc_id})
         n = len(sessions)
