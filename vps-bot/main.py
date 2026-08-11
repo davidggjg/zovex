@@ -13,6 +13,7 @@ import time
 import hmac
 import asyncio
 import logging
+import itertools
 import httpx
 from urllib.parse import quote, urljoin, urlparse
 from typing import AsyncGenerator, Optional
@@ -988,7 +989,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
     bot = await pick_stream_bot()
     if bot is None:
         return None
-    dc_id = None
+    dc_id = gen = None
     try:
         msg = await _get_bot_msg(bot, chat_id, message_id)
         if msg is None:
@@ -997,7 +998,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         if not media:
             return None
         dc_id, location = _file_location(media)
-        sessions = await get_media_session_pool(
+        sessions, gen = await get_media_session_pool_gen(
             bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS)
         if not sessions:
             return None
@@ -1021,7 +1022,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         if bad is not None:
             # שגיאה באחד החלקים — לא מגישים חלקי, ומרעננים את החיבורים
             log.warning("media bands (%s) חלק נכשל: %s — מרענן חיבורים", bot["name"], bad)
-            await drop_media_sessions(bot["name"], dc_id)
+            await drop_media_sessions(bot["name"], dc_id, gen)
             return None
         out = bytearray()
         for p in parts:
@@ -1032,8 +1033,10 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         return None
     except Exception as e:
         log.warning("media bands (%s) נכשל: %s — נופל למסלול הבוטים", bot["name"], e)
-        if dc_id is not None:
-            await drop_media_sessions(bot["name"], dc_id)
+        # gen=None פירושו שהכשל קרה עוד לפני שקיבלנו בריכה — אין מה להפיל,
+        # ובוודאי לא את הבריכה של מישהו אחר.
+        if dc_id is not None and gen is not None:
+            await drop_media_sessions(bot["name"], dc_id, gen)
         return None
 
 
@@ -4333,10 +4336,19 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
 # כל חיבור מושך חלק אחר של הקובץ ב-upload.GetFile במקביל. פותרים את החיבורים
 # פעם אחת ושומרים ב-pool לפי DC.
 MEDIA_CHUNK = 1024 * 1024
-_media_sessions: dict = {}          # (bot_name, dc_id) -> {"born", "pool"}
+_media_sessions: dict = {}          # (bot_name, dc_id) -> {"born", "gen", "pool"}
 # טלגרם סוגר חיבורים לא פעילים; מחזירים אותם לפני שהם מתים עלינו.
 MEDIA_SESSION_TTL = int(os.environ.get("MEDIA_SESSION_TTL", "240"))
-_media_sessions_lock = asyncio.Lock()
+# נעילה *פר-בוט* ולא גלובלית: בניית חיבורים לוקחת כמה סבבי רשת, ונעילה אחת
+# לכולם הפכה כל בנייה לתור שכל הצופים תקועים בו.
+_media_sessions_locks: dict = {}
+_media_gen_counter = itertools.count(1)
+
+def _media_lock(key):
+    lk = _media_sessions_locks.get(key)
+    if lk is None:
+        lk = _media_sessions_locks[key] = asyncio.Lock()
+    return lk
 
 async def _make_media_session(client, dc_id: int) -> Session:
     """חיבור media נוסף *לאותו לקוח* — עם ה-auth_key שכבר יש לו, בלי אימות מחדש."""
@@ -4359,27 +4371,36 @@ async def _make_media_session(client, dc_id: int) -> Session:
                 log.warning("ImportAuthorization ל-DC %d נכשל, מנסה שוב: %s", dc_id, e)
     return session
 
-async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list:
-    """חיבורי media *פר-בוט*, עם מחזור לפי גיל.
+async def _stop_pool(pool):
+    for sess in pool:
+        try:
+            await sess.stop()
+        except Exception:
+            pass
+
+
+async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int):
+    """חיבורי media *פר-בוט*, עם מחזור לפי גיל. מחזיר (pool, gen).
 
     טלגרם סוגר חיבורים שלא בשימוש. גרסה קודמת שמרה אותם לנצח, ואז כל בקשה
-    שנחתה על חיבור מת נתלתה עד ה-timeout והצופה קיבל אפס בייטים — בערך
-    שליש עד מחצית מהבקשות. לכן מחזירים אותם אחרי MEDIA_SESSION_TTL, ומנקים
-    מיד בכל כשל (drop_media_sessions).
+    שנחתה על חיבור מת נתלתה עד ה-timeout והצופה קיבל אפס בייטים.
+
+    ה-gen הוא מזהה הדור של הבריכה. הקורא מחזיר אותו ל-drop_media_sessions
+    בזמן כשל, וכך רק *הראשון* שגילה את התקלה מחליף את החיבורים; מי שנכשל
+    אחריו על אותו דור מקבל את הבריכה החדשה במקום להרוג גם אותה. בלי זה
+    ארבעה צופים במקביל נכנסו ללולאת מוות — כל אחד הרג את החיבורים הטריים
+    של האחרים ואף אחד לא סיים למשוך.
     """
     key = (owner, dc_id)
     now = time.time()
-    async with _media_sessions_lock:
+    old = None
+    async with _media_lock(key):
         ent = _media_sessions.get(key)
         if ent and (now - ent["born"]) > MEDIA_SESSION_TTL:
-            for sess in ent["pool"]:
-                try:
-                    await sess.stop()
-                except Exception:
-                    pass
-            ent = None
+            old, ent = ent["pool"], None
+            _media_sessions.pop(key, None)
         if ent is None:
-            ent = {"born": now, "pool": []}
+            ent = {"born": now, "gen": next(_media_gen_counter), "pool": []}
             _media_sessions[key] = ent
         pool = ent["pool"]
         while len(pool) < n:
@@ -4388,19 +4409,30 @@ async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list
             except Exception as e:
                 log.error("יצירת media session ל-%s נכשלה: %s", owner, e)
                 break
-    return pool[:n]
+        result = (pool[:n], ent["gen"])
+    if old:
+        await _stop_pool(old)
+    return result
 
 
-async def drop_media_sessions(owner: str, dc_id: int):
-    """מפיל את חיבורי ה-media של בוט מסוים — הבא בתור ייצור טריים."""
-    async with _media_sessions_lock:
-        ent = _media_sessions.pop((owner, dc_id), None)
-    if ent:
-        for sess in ent["pool"]:
-            try:
-                await sess.stop()
-            except Exception:
-                pass
+async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list:
+    pool, _gen = await get_media_session_pool_gen(client, owner, dc_id, n)
+    return pool
+
+
+async def drop_media_sessions(owner: str, dc_id: int, gen=None):
+    """מפיל את חיבורי ה-media של בוט מסוים — הבא בתור ייצור טריים.
+
+    gen: הדור שהקורא עבד מולו. אם הבריכה כבר הוחלפה בינתיים (דור אחר) לא
+    נוגעים בה — היא של מישהו אחר וכנראה תקינה.
+    """
+    key = (owner, dc_id)
+    async with _media_lock(key):
+        ent = _media_sessions.get(key)
+        if ent is None or (gen is not None and ent["gen"] != gen):
+            return
+        _media_sessions.pop(key, None)
+    await _stop_pool(ent["pool"])
 
 
 def _file_location(media):
