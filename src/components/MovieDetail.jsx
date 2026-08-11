@@ -1,4 +1,6 @@
 import { ArrowRight, Play } from "lucide-react";
+import { useEffect, useState } from "react";
+import { loadDescription } from "@/entities/Movie";
 
 // מזהה "שם בסיס" של סרט כדי לאתר סרטי המשך - מסיר מספר עוקב בסוף השם, כולל
 // כשהוא מגיע אחרי מילת חיבור כמו "חלק"/"פרק"/"Part" (לדוגמה "המדרון 1" ו"המדרון
@@ -9,6 +11,12 @@ function baseTitle(title) {
 
 // מסך הפרטים של סרט בודד — פוסטר, תיאור, כפתור צפייה וסרטי המשך
 export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMovie }) {
+  // התיאור לא מגיע בקטלוג הרזה — מושכים אותו רק כשהמסך הזה נפתח.
+  const [desc, setDesc] = useState(movie.description || "");
+  useEffect(() => {
+    setDesc(movie.description || "");
+    if (!movie.description && movie.id) loadDescription(movie.id).then(setDesc);
+  }, [movie.id, movie.description]);
   const baseName = baseTitle(movie.title);
   // חלק מסרטי ההמשך לא נקראים "שם 2" (למשל "ראלף ההורס" -> "ראלף שובר את
   // האינטרנט") - אז אי אפשר לזהות אותם לפי מספר בסוף השם. במקרים כאלה
@@ -34,7 +42,7 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
           {movie.category && <span style={{ background: "#e50914", color: "#fff", padding: "4px 12px", borderRadius: 20, fontSize: 12, fontWeight: "bold" }}>{movie.category}</span>}
           {movie.year && <span style={{ background: "#222", color: "#888", padding: "4px 12px", borderRadius: 20, fontSize: 12 }}>{movie.year}</span>}
         </div>
-        {movie.description && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסרט 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#bbb", margin: 0 }}>{movie.description}</p></div>}
+        {desc && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסרט 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#bbb", margin: 0 }}>{desc}</p></div>}
         <button onClick={onPlay} style={{ width: "100%", background: "#e50914", color: "#fff", border: "none", padding: 16, fontSize: 17, fontWeight: "bold", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer" }}>
           <Play fill="white" size={20} /> לצפייה עכשיו
         </button>

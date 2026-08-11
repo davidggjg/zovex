@@ -3557,6 +3557,56 @@ def _cached_content_body():
     c.update(ver=ver, built=now, body=body)
     return body, ver
 
+# ── קטלוג רזה לאתר ────────────────────────────────────────────────────────────
+# מדידה: האתר הוריד ופרסר את כל 10,472 הפריטים לפני שצייר פיקסל אחד — 1MB
+# דחוס ברשת ועוד ~4 שניות פרסור על שרת חזק (בטלפון: 10-30 שניות, ובזמן הזה
+# המסך תקוע והנגן לא מצליח למלא באפר). הכל כדי להציג כ-100 כרטיסיות.
+# הפתרון: מסירים את description (32% מהמשקל, מוצג רק כשפותחים פריט) ואת
+# video_id הכפול (זהה ל-video_url ב-6709 פריטים; הפרונט ממילא נופל אחורה
+# ל-video_url). video_url נשאר — בלעדיו אי אפשר לנגן.
+_LITE_DROP = ("description",)
+_lite_cache: dict = {"ver": None, "body": None}
+
+
+def _lite_items():
+    items = []
+    for e in _expand_urls(load_content()):
+        d = {k: v for k, v in e.items() if k not in _LITE_DROP}
+        if d.get("video_id") and d.get("video_id") == d.get("video_url"):
+            d.pop("video_id", None)
+        items.append(d)
+    return items
+
+
+@api.get("/content/lite")
+async def content_lite(request: Request, limit: int = 0):
+    """קטלוג לתצוגה. limit>0 מחזיר רק את ה-N הראשונים (ציור מהיר של מסך הבית),
+    ואז האתר מושך את השאר ברקע."""
+    ver = get_content_version()
+    if _lite_cache["ver"] != ver:
+        _lite_cache.update(ver=ver, body=_lite_items())
+    items = _lite_cache["body"]
+    total = len(items)
+    if limit and limit > 0:
+        items = items[:limit]
+    etag = f'W/"l{ver}-{limit or 0}"'
+    headers = {"X-Content-Version": str(ver), "X-Total": str(total),
+               "ETag": etag, "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=json.dumps(items, ensure_ascii=False),
+                    media_type="application/json", headers=headers)
+
+
+@api.get("/content/item/{item_id}")
+async def content_item(item_id: str):
+    """פריט בודד עם כל השדות — משמש למשיכת התיאור כשפותחים סרט/סדרה."""
+    for e in _expand_urls(load_content()):
+        if str(e.get("id")) == item_id:
+            return JSONResponse(e, headers={"Cache-Control": "public, max-age=300"})
+    raise HTTPException(404, "not found")
+
+
 def _content_response(request: Request) -> Response:
     """מחזיר את התוכן עם ETag לפי מונה הגרסה.
 

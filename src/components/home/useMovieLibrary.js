@@ -27,10 +27,15 @@ export function useMovieLibrary() {
 
   const loadMovies = async () => {
     setLoading(true);
-    try {
-      const all = (await Movie.list("-created_date", 100000)) || [];
+    // apply רץ פעמיים: פעם על המנה הראשונה (ציור מיידי) ופעם על הקטלוג המלא
+    // כשהוא מגיע ברקע. בלי זה המסך היה ממתין ~4 שניות פרסור לפני שהוא מצייר.
+    const apply = (all) => {
       setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
       setMovies(all.filter(m => !m.is_live));
+    };
+    try {
+      const first = (await Movie.list("-created_date", 100000, apply)) || [];
+      apply(first);
     } catch {}
     setLoading(false);
   };

@@ -9,32 +9,49 @@ function getToken() {
 }
 
 let _movies = null;
+let _fullLoaded = false;
 
-async function fetchMovies() {
-  // מקור התוכן החדש: השרת (/content). אם מוגדר — מנסים אותו קודם.
-  if (CONTENT_URL) {
-    try {
-      // בלי ?t=Date.now(): ה-cache-buster הזה אילץ הורדה מלאה של הקטלוג
-      // (~10MB, כמגה אחרי gzip) בכל טעינת עמוד. השרת מחזיר ETag לפי מונה
-      // הגרסה, אז הדפדפן מאמת ומקבל 304 ריק כשאין שינוי — ועדיין רואה
-      // עדכוני תוכן מיד, כי Cache-Control הוא no-cache (אמת תמיד).
-      const r = await fetch(CONTENT_URL);
-      if (r.ok) { _movies = await r.json(); return _movies; }
-    } catch {}
-  }
+// טעינה דו-שלבית. נמדד: הקטלוג המלא הוא ~950KB דחוס ולוקח ~4 שניות לפרסר
+// (בטלפון הרבה יותר) — והכל לפני שמצוירת כרטיסייה אחת. 800 הפריטים
+// הראשונים במצב רזה הם 62KB ומפוענחים כמעט מיידית, אז המסך נצבע מיד
+// והשאר מגיע ברקע. אין כאן cache-buster בכוונה: השרת מחזיר ETag לפי מונת
+// הגרסה, כך שכניסה חוזרת מקבלת 304 ריק במקום להוריד הכל שוב.
+const FIRST_PAGE = 800;
+
+async function _tryJson(url) {
   try {
-    const res = await fetch(`${BASE_PATH}movies.json?t=` + Date.now());
-    if (!res.ok) throw new Error('failed');
-    _movies = await res.json();
+    const r = await fetch(url);
+    if (r.ok) return await r.json();
+  } catch {}
+  return null;
+}
+
+// נטען ברקע אחרי הציור הראשון; onFull נקרא כשהקטלוג המלא זמין (לחיפוש).
+function _loadFullInBackground(onFull) {
+  if (_fullLoaded) return;
+  _fullLoaded = true;
+  (async () => {
+    const all = await _tryJson('/content/lite')
+             || await _tryJson(`${BASE_PATH}movies.json`);
+    if (all && all.length) { _movies = all; onFull && onFull(all); }
+  })();
+}
+
+async function fetchMovies(onFull) {
+  // שלב 1 — מעט פריטים, ציור מיידי.
+  const first = await _tryJson(`/content/lite?limit=${FIRST_PAGE}`);
+  if (first && first.length) {
+    _movies = first;
+    _loadFullInBackground(onFull);
     return _movies;
-  } catch {
-    try {
-      const res2 = await fetch(`https://raw.githubusercontent.com/${GITHUB_REPO}/main/${GITHUB_FILE}?t=` + Date.now());
-      if (!res2.ok) throw new Error('failed');
-      _movies = await res2.json();
-      return _movies;
-    } catch { return []; }
   }
+  // נפילה אחורה: קטלוג מלא ישירות (שרת), ואז גיטהאב.
+  const full = await _tryJson(CONTENT_URL || '/content')
+            || await _tryJson(`${BASE_PATH}movies.json`)
+            || await _tryJson(`https://raw.githubusercontent.com/${GITHUB_REPO}/main/${GITHUB_FILE}`);
+  _movies = full || [];
+  _fullLoaded = true;
+  return _movies;
 }
 
 async function saveToGitHub(movies) {
@@ -61,12 +78,36 @@ async function saveToGitHub(movies) {
   } catch (e) { console.error('GitHub save failed:', e); }
 }
 
+// התיאור לא נשלח בקטלוג הרזה (32% מהמשקל, ומוצג רק כשפותחים פריט), אז מושכים
+// אותו לפי דרישה. הזיכרון המקומי מונע בקשה חוזרת לאותו פריט.
+const _descCache = new Map();
+export async function loadDescription(id) {
+  if (!id) return '';
+  if (_descCache.has(id)) return _descCache.get(id);
+  try {
+    const r = await fetch(`/content/item/${encodeURIComponent(id)}`);
+    if (r.ok) {
+      const d = await r.json();
+      const t = d.description || '';
+      _descCache.set(id, t);
+      return t;
+    }
+  } catch {}
+  _descCache.set(id, '');
+  return '';
+}
+
 export const Movie = {
-  async list(orderBy = '-created_date', limit = 100000) {
-    _movies = await fetchMovies();
-    let sorted = [...(_movies || [])];
-    if (orderBy.startsWith('-')) sorted.reverse();
-    return sorted.slice(0, limit);
+  // onFull (אופציונלי) נקרא כשהקטלוג המלא הגיע ברקע — מאפשר למסך להתעדכן
+  // בלי לחסום את הציור הראשון.
+  async list(orderBy = '-created_date', limit = 100000, onFull = null) {
+    const sortSlice = (arr) => {
+      const s = [...(arr || [])];
+      if (orderBy.startsWith('-')) s.reverse();
+      return s.slice(0, limit);
+    };
+    _movies = await fetchMovies(onFull ? (all) => onFull(sortSlice(all)) : null);
+    return sortSlice(_movies);
   },
   async create(data) {
     const movies = await fetchMovies();
