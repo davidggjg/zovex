@@ -662,8 +662,14 @@ async def peer_retry_loop():
 def _is_bot_token(s: str) -> bool:
     return bool(re.match(r'^\d{5,}:[A-Za-z0-9_-]{20,}$', (s or "").strip()))
 
-async def _start_one_pool_bot(i, tok: str):
+# כמה זמן לתת להתחברות של חבר pool. 40 היה קצר מדי: כשעולים 16 בזה אחר זה
+# טלגרם מאט את ההתחברויות, וחמישה בוטים תקינים לגמרי נפלו על timeout.
+POOL_START_TIMEOUT = float(os.environ.get("POOL_START_TIMEOUT", "75"))
+POOL_START_ATTEMPTS = int(os.environ.get("POOL_START_ATTEMPTS", "3"))
+
+async def _start_one_pool_bot(i, tok: str, timeout: float = None):
     """מעלה חבר pool בודד (טוקן בוט או session string של חשבון) ומוסיף לרשימה."""
+    c = None
     try:
         if _is_bot_token(tok):
             c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
@@ -675,7 +681,7 @@ async def _start_one_pool_bot(i, tok: str):
                        session_string=tok, in_memory=True, no_updates=True)
             kind = "user"
         c.add_handler(MessageHandler(_pool_noop, filters.channel))
-        await asyncio.wait_for(c.start(), timeout=40)
+        await asyncio.wait_for(c.start(), timeout=timeout or POOL_START_TIMEOUT)
         name = f"{kind}_{i}"
         # שומרים את המזהה פעם אחת בעלייה: בלעדיו הפאנל מציג bot_5/user_8 בלבד
         # ואי אפשר לדעת איזה בוט זה בפועל (למשל את מי להוסיף לערוץ).
@@ -693,7 +699,16 @@ async def _start_one_pool_bot(i, tok: str):
         log.info("✅ pool %s %s עלה (%d פעילים)", kind, i, len(_stream_bots))
         return None
     except Exception as e:
-        log.warning("⚠️ pool member %s לא עלה: %s", i, e)
+        # שם הטיפוס חייב להיכנס ללוג: str(asyncio.TimeoutError()) הוא מחרוזת
+        # ריקה, ולכן השורה הזו הודפסה כ"לא עלה: " בלי שום סיבה — והכשל הנפוץ
+        # ביותר היה בדיוק זה.
+        log.warning("⚠️ pool member %s לא עלה: %s: %s", i, type(e).__name__, e)
+        if c is not None:
+            # לשחרר את קובץ ה-session, אחרת הניסיון החוזר ייתקל בו נעול
+            try:
+                await c.stop()
+            except Exception:
+                pass
         # מחזירים את הסיבה האמיתית: הפאנל הציג עד עכשיו ניחוש קבוע על הרשאות
         # אדמין, גם כשהכשל היה session פגום, טוקן שגוי או תקלת רשת.
         return f"{type(e).__name__}: {e}"
@@ -707,11 +722,36 @@ async def start_stream_pool():
     # (מה שקרה עם BATCH=8) גורמת לחסימת IP → כל הבוטים "לא עלה" ולולאת קריסה.
     # לאט ויציב עדיף. POOL_START_DELAY ניתן לכוונון דרך משתנה סביבה.
     delay = float(os.environ.get("POOL_START_DELAY", "4"))
+    failed = []
     for i, tok in enumerate(tokens):
-        await _start_one_pool_bot(i, tok)
+        if await _start_one_pool_bot(i, tok) is not None:
+            failed.append((i, tok))
         await asyncio.sleep(delay)
     log.info("🚀 stream pool: %d/%d בוטים פעילים", len(_stream_bots), len(tokens))
     asyncio.create_task(warm_stream_pool())
+    if failed:
+        # ניסיון חוזר ברקע. כשל בעלייה הוא כמעט תמיד timeout זמני ולא בוט
+        # פגום, אבל עד עכשיו הוא היה סופי: הבוט נעלם מהבריכה עד ה-restart הבא.
+        # ברקע כדי לא לעכב את עליית השרת.
+        asyncio.create_task(_retry_failed_pool_members(failed, len(tokens), delay))
+
+async def _retry_failed_pool_members(failed, total, delay):
+    for attempt in range(2, POOL_START_ATTEMPTS + 1):
+        await asyncio.sleep(30)
+        log.info("🔁 סבב %d: מנסה שוב %d חברי pool שלא עלו", attempt, len(failed))
+        still = []
+        for i, tok in failed:
+            # תקציב זמן גדל בכל סבב — מי שלא הספיק ב-75 שניות בזמן שכל
+            # הבריכה עלתה יחד, בדרך כלל מספיק כשהעומס הזה כבר מאחורינו.
+            if await _start_one_pool_bot(i, tok, timeout=POOL_START_TIMEOUT * attempt) is not None:
+                still.append((i, tok))
+            await asyncio.sleep(delay)
+        log.info("🚀 stream pool: %d/%d בוטים פעילים", len(_stream_bots), total)
+        if not still:
+            return
+        failed = still
+    log.warning("⚠️ %d חברי pool לא עלו גם אחרי %d סבבים — ראה את השגיאות למעלה",
+                len(failed), POOL_START_ATTEMPTS)
 
 async def warm_stream_pool():
     """מחמם מראש את חיבור-המדיה (DC) של כל בוט ב-pool. בלי זה, הפליי הראשון של
