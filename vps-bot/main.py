@@ -935,6 +935,10 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
 # כלומר 4 הוא האופטימום; מעבר לזה טלגרם מגביל ויצירת החיבורים עולה יותר ממה
 # שהיא מחזירה. 0 מכבה לגמרי וחוזר למסלול הבוטים.
 STREAM_MEDIA_CONNS = int(os.environ.get("STREAM_MEDIA_CONNS", "4"))
+# timeout ייעודי ל-media bands, קצר בהרבה מ-SUBRANGE_TIMEOUT. זה מסלול *מהיר*
+# עם נפילה חינם למסלול הבוטים: כשחיבור מת, אין טעם להחזיק את הצופה 25 שניות
+# לפני שנופלים אחורה — עדיף לוותר תוך 8 ולהגיש מהמסלול הוותיק.
+MEDIA_BANDS_TIMEOUT = int(os.environ.get("STREAM_MEDIA_BANDS_TIMEOUT", "8"))
 
 
 async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
@@ -974,13 +978,17 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
     כמו כן ה-file_reference תקף רק בהקשר הבוט ששלף אותו, ולכן שולפים את
     ההודעה דרך אותו בוט (עם המטמון הקיים) ולא דרך הבוט הראשי.
 
-    מחזיר None על כל כשל — והקורא נופל בשקט למסלול הבוטים הוותיק.
+    מחזיר None על כל כשל — והקורא נופל בשקט למסלול הבוטים הוותיק. כשל כאן
+    הוא כמעט תמיד תקלת *חיבור* (טלגרם סגר session לא פעיל), לא תקלת בוט —
+    ולכן מפילים את החיבורים ולא מסמנים את הבוט כחנוק. הגרסה הקודמת ענישה את
+    הבוט על אשמת החיבור, וכך הודחו בזה אחר זה בוטים בריאים לגמרי.
     """
     if STREAM_MEDIA_CONNS <= 0:
         return None
     bot = await pick_stream_bot()
     if bot is None:
         return None
+    dc_id = None
     try:
         msg = await _get_bot_msg(bot, chat_id, message_id)
         if msg is None:
@@ -1003,12 +1011,20 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             e = min(hi, s + step - 1)
             tasks.append(_band_fetch(sessions[i], location, s, e))
             s = e + 1
+        # תקציב זמן לפי גודל החלון, אבל עם רצפה נמוכה: החלון הראשון (1MB) חייב
+        # להיכשל מהר כדי שחיבור מת יתגלה ויוחלף לפני שהצופה מרגיש.
+        budget = min(SUBRANGE_TIMEOUT,
+                     MEDIA_BANDS_TIMEOUT + (total / (1024 * 1024)) * 2)
         parts = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True), timeout=SUBRANGE_TIMEOUT)
+            asyncio.gather(*tasks, return_exceptions=True), timeout=budget)
+        bad = next((p for p in parts if not isinstance(p, (bytes, bytearray))), None)
+        if bad is not None:
+            # שגיאה באחד החלקים — לא מגישים חלקי, ומרעננים את החיבורים
+            log.warning("media bands (%s) חלק נכשל: %s — מרענן חיבורים", bot["name"], bad)
+            await drop_media_sessions(bot["name"], dc_id)
+            return None
         out = bytearray()
         for p in parts:
-            if not isinstance(p, (bytes, bytearray)):
-                return None            # שגיאה באחד החלקים — לא מגישים חלקי
             out += p
         return bytes(out[:total]) if len(out) >= total else None
     except FileReferenceExpired:
@@ -1016,7 +1032,8 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         return None
     except Exception as e:
         log.warning("media bands (%s) נכשל: %s — נופל למסלול הבוטים", bot["name"], e)
-        _mark_choked(bot, 15, e)
+        if dc_id is not None:
+            await drop_media_sessions(bot["name"], dc_id)
         return None
 
 
@@ -4316,7 +4333,9 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
 # כל חיבור מושך חלק אחר של הקובץ ב-upload.GetFile במקביל. פותרים את החיבורים
 # פעם אחת ושומרים ב-pool לפי DC.
 MEDIA_CHUNK = 1024 * 1024
-_media_sessions: dict = {}          # (bot_name, dc_id) -> list[Session]
+_media_sessions: dict = {}          # (bot_name, dc_id) -> {"born", "pool"}
+# טלגרם סוגר חיבורים לא פעילים; מחזירים אותם לפני שהם מתים עלינו.
+MEDIA_SESSION_TTL = int(os.environ.get("MEDIA_SESSION_TTL", "240"))
 _media_sessions_lock = asyncio.Lock()
 
 async def _make_media_session(client, dc_id: int) -> Session:
@@ -4341,23 +4360,48 @@ async def _make_media_session(client, dc_id: int) -> Session:
     return session
 
 async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list:
-    """חיבורי media *פר-בוט*. הגרסה הקודמת החזיקה מאגר גלובלי אחד מהבוט
-    הראשי — כלומר כל הצופים נדחסו דרך אותם 4 חיבורים וחיכו בתור. במדידה על
-    צופה בודד זה נראה פי 75 מהיר, ובעומס אמיתי זה היה פי 6 *איטי* יותר.
-    עכשיו לכל בוט במאגר יש חיבורים משלו, כך שהמקביליות גדלה עם מספר הבוטים."""
+    """חיבורי media *פר-בוט*, עם מחזור לפי גיל.
+
+    טלגרם סוגר חיבורים שלא בשימוש. גרסה קודמת שמרה אותם לנצח, ואז כל בקשה
+    שנחתה על חיבור מת נתלתה עד ה-timeout והצופה קיבל אפס בייטים — בערך
+    שליש עד מחצית מהבקשות. לכן מחזירים אותם אחרי MEDIA_SESSION_TTL, ומנקים
+    מיד בכל כשל (drop_media_sessions).
+    """
     key = (owner, dc_id)
+    now = time.time()
     async with _media_sessions_lock:
-        pool = _media_sessions.get(key, [])
+        ent = _media_sessions.get(key)
+        if ent and (now - ent["born"]) > MEDIA_SESSION_TTL:
+            for sess in ent["pool"]:
+                try:
+                    await sess.stop()
+                except Exception:
+                    pass
+            ent = None
+        if ent is None:
+            ent = {"born": now, "pool": []}
+            _media_sessions[key] = ent
+        pool = ent["pool"]
         while len(pool) < n:
             try:
                 pool.append(await _make_media_session(client, dc_id))
             except Exception as e:
                 log.error("יצירת media session ל-%s נכשלה: %s", owner, e)
                 break
-        _media_sessions[key] = pool
-        if pool:
-            log.info("✅ %s: %d חיבורי media ל-DC %d", owner, len(pool), dc_id)
     return pool[:n]
+
+
+async def drop_media_sessions(owner: str, dc_id: int):
+    """מפיל את חיבורי ה-media של בוט מסוים — הבא בתור ייצור טריים."""
+    async with _media_sessions_lock:
+        ent = _media_sessions.pop((owner, dc_id), None)
+    if ent:
+        for sess in ent["pool"]:
+            try:
+                await sess.stop()
+            except Exception:
+                pass
+
 
 def _file_location(media):
     f = FileId.decode(media.file_id)
