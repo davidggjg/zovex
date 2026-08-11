@@ -930,6 +930,94 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
             _mark_choked(bot, 30, e)
     return b"\x00" * need
 
+# כמה חיבורי media מקבילים לכל משיכה. נמדד על השרת הזה מול DC4:
+#   חיבור אחד → 0.14 MB/s ·  4 חיבורים → 10.5 MB/s ·  8 חיבורים → 0.96 MB/s
+# כלומר 4 הוא האופטימום; מעבר לזה טלגרם מגביל ויצירת החיבורים עולה יותר ממה
+# שהיא מחזירה. 0 מכבה לגמרי וחוזר למסלול הבוטים.
+STREAM_MEDIA_CONNS = int(os.environ.get("STREAM_MEDIA_CONNS", "4"))
+# מטמון מיקום הקובץ: בלעדיו כל חלון בסרט היה מבצע get_messages נוסף לטלגרם —
+# עשרות קריאות מיותרות לסרט אחד, שמבטלות חלק מהרווח. ה-file_reference בתוכו
+# פג אחרי כמה שעות, ולכן TTL קצר ולא לצמיתות.
+_media_loc_cache: dict = {}
+MEDIA_LOC_TTL = 600
+
+
+async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
+    """מושך בדיוק [lo, hi] דרך חיבור media יחיד ומחזיר את הבייטים."""
+    out = bytearray()
+    offset = (lo // MEDIA_CHUNK) * MEDIA_CHUNK
+    produced = offset
+    while produced <= hi:
+        r = await session.invoke(functions.upload.GetFile(
+            location=location, offset=offset, limit=MEDIA_CHUNK, precise=False))
+        chunk = getattr(r, "bytes", b"")
+        if not chunk:
+            break
+        c_start, c_end = produced, produced + len(chunk)
+        a = max(lo, c_start) - c_start
+        b = min(hi + 1, c_end) - c_start
+        if a < b:
+            out += chunk[a:b]
+        produced = c_end
+        offset = produced
+        if len(chunk) < MEDIA_CHUNK:
+            break
+    return bytes(out)
+
+
+async def _media_bands_fetch(chat_id, message_id, lo, hi):
+    """מושך [lo, hi] דרך כמה חיבורי media במקביל — הטכניקה של FastTelethon.
+
+    זה ההבדל המרכזי מול המסלול הישן: שם כל בוט מושך צ'אנק, מחכה לתשובה,
+    ומושך את הבא — רוב הזמן עובר בהמתנה ולא בהורדה. כאן פותחים כמה חיבורים
+    לאותו DC (עם ה-auth_key הקיים, בלי אימות נוסף) וכל אחד מושך חלק אחר
+    בו-זמנית. מחזיר None אם משהו נכשל, ואז הקורא נופל חזרה למסלול הבוטים.
+    """
+    if STREAM_MEDIA_CONNS <= 0:
+        return None
+    try:
+        key = (chat_id, message_id)
+        now = time.time()
+        hit = _media_loc_cache.get(key)
+        if hit and hit[0] > now:
+            dc_id, location = hit[1], hit[2]
+        else:
+            msg = await fetch_message(chat_id, message_id)
+            media = msg.video or msg.audio or msg.document or msg.video_note
+            if not media:
+                return None
+            dc_id, location = _file_location(media)
+            if len(_media_loc_cache) > 2000:
+                _media_loc_cache.clear()
+            _media_loc_cache[key] = (now + MEDIA_LOC_TTL, dc_id, location)
+        sessions = await get_media_session_pool(dc_id, STREAM_MEDIA_CONNS)
+        if not sessions:
+            return None
+        n = len(sessions)
+        total = hi - lo + 1
+        step = -(-total // n)
+        tasks, s = [], lo
+        for i in range(n):
+            if s > hi:
+                break
+            e = min(hi, s + step - 1)
+            tasks.append(_band_fetch(sessions[i], location, s, e))
+            s = e + 1
+        parts = await asyncio.gather(*tasks, return_exceptions=True)
+        out = bytearray()
+        for p in parts:
+            if not isinstance(p, (bytes, bytearray)):
+                return None            # שגיאה באחד החלקים — לא מגישים חלקי
+            out += p
+        return bytes(out[:total]) if len(out) >= total else None
+    except Exception as e:
+        # file_reference פג → המיקום השמור כבר לא תקף, מפילים אותו מהמטמון
+        # כדי שהניסיון הבא ישלוף מיקום טרי במקום להיכשל שוב ושוב.
+        _media_loc_cache.pop((chat_id, message_id), None)
+        log.warning("media bands נכשל (%s) — נופל למסלול הבוטים", e)
+        return None
+
+
 async def channel_stream_range_parallel(chat_id, message_id, start, end):
     """גרסה מקבילה עם *התחלה מהירה*: מעבדת חלון-אחר-חלון, וכל חלון נמשך בכמה
     תת-טווחים במקביל. קריטי לזמן-התחלה: הגשה מתבצעת רק אחרי שכל תת-הטווחים של
@@ -956,11 +1044,18 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
             e2 = min(s + step - 1, wend)
             ranges.append((s, e2))
             s = e2 + 1
-        # מושכים את כל תת-הטווחים של החלון במקביל, ומגישים לפי הסדר
-        results = await asyncio.gather(
-            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in ranges])
-        for r in results:
-            yield r
+        # קודם מנסים את מסלול ה-media bands (חיבורים מקבילים לאותו DC) —
+        # נמדד פי ~70 מהר יותר ממשיכה דרך בוט בחיבור יחיד. אם הוא לא זמין
+        # או נכשל, נופלים בשקט למסלול הבוטים הוותיק.
+        fast = await _media_bands_fetch(chat_id, message_id, pos, wend)
+        if fast is not None:
+            yield fast
+        else:
+            # מושכים את כל תת-הטווחים של החלון במקביל, ומגישים לפי הסדר
+            results = await asyncio.gather(
+                *[_fetch_subrange(chat_id, message_id, a, b) for a, b in ranges])
+            for r in results:
+                yield r
         pos = wend + 1
 
 def _channel_range_gen(chat_id, message_id, start, end):
