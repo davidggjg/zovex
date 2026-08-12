@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { NetflixRow, buildCardHref } from "./NetflixCard";
+import { NetflixRow, NetflixGrid, buildCardHref } from "./NetflixCard";
 import LiveBanner from "../LiveBanner";
 
 function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user }) {
@@ -91,16 +91,22 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
       {/* שורת "המשך צפייה" מוצגת אך ורק בתוך קטגוריית "היסטוריה" (למעלה) —
           לא במסך הראשי/"הכל" ולא בשום קטגוריה אחרת */}
       {hasLiveRow && <LiveBanner liveChannels={liveItems} onPlay={handleItemClick} isDesktop={isDesktop} />}
-      {rowsToShow.map(row => (
-        <NetflixRow
-          key={row.title}
-          title={row.title}
-          items={row.items}
-          isDesktop={isDesktop}
-          handleItemClick={handleItemClick}
-          isLiveRow={row.isLive}
-        />
-      ))}
+      {rowsToShow.map(row => {
+        // אותו כלל כמו באפליקציה (isNetflixMode ב-HomeScreen): "הכל" בלי חיפוש
+        // מוצג כגלגלות, וכל קטגוריה ספציפית או חיפוש מוצגים כרשת. גלגלת אחת
+        // עם מאות פריטים מראה ארבעה בכל רגע ומחייבת גרירה — רשת מראה את הכל.
+        const Layout = (selectedCategory === "הכל" && !searchTerm) ? NetflixRow : NetflixGrid;
+        return (
+          <Layout
+            key={row.title}
+            title={row.title}
+            items={row.items}
+            isDesktop={isDesktop}
+            handleItemClick={handleItemClick}
+            isLiveRow={row.isLive}
+          />
+        );
+      })}
     </div>
   );
 }

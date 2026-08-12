@@ -126,4 +126,68 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
 }
 
 
-export { NetflixCard, NetflixRow, buildCardHref };
+
+// ── רשת (grid) ──────────────────────────────────────────────────────────────
+// כשבוחרים קטגוריה ספציפית או מחפשים, גלגלת אופקית אחת עם מאות פריטים היא
+// תצוגה גרועה: רואים ארבעה פריטים וצריך לגרור. האפליקציה מציגה במצב הזה רשת,
+// וזה מה שנעשה כאן — אותו כלל בדיוק (ראה isNetflixMode ב-HomeScreen).
+const GRID_PAGE_SIZE = 60;
+
+function NetflixGrid({ title, items, isDesktop, handleItemClick, isLiveRow }) {
+  const [visibleCount, setVisibleCount] = React.useState(GRID_PAGE_SIZE);
+  const sentinelRef = React.useRef(null);
+
+  React.useEffect(() => { setVisibleCount(GRID_PAGE_SIZE); }, [items]);
+
+  // גלילה אינסופית: טוענים עוד כשמגיעים לתחתית, כדי לא לרנדר מאות כרטיסים בבת אחת
+  React.useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || visibleCount >= items.length) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) {
+        setVisibleCount(v => Math.min(v + GRID_PAGE_SIZE, items.length));
+      }
+    }, { rootMargin: "600px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [visibleCount, items.length]);
+
+  if (!items || items.length === 0) return null;
+  const cardW = isDesktop ? 170 : 130;
+  const cardH = isDesktop ? 240 : 185;
+
+  return (
+    <div style={{ marginBottom: isDesktop ? 36 : 28, direction: "rtl" }}>
+      <div style={{ padding: "0 16px", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+        {isLiveRow && <Eye size={16} color="#e50914" />}
+        <h2 style={{ fontSize: isDesktop ? 18 : 16, fontWeight: 900, color: "#fff", margin: 0 }}>{title}</h2>
+        <span style={{ fontSize: 12, color: "#888" }}>({items.length})</span>
+      </div>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(auto-fill, minmax(${cardW}px, 1fr))`,
+        gap: 10,
+        padding: "4px 16px 8px",
+        justifyItems: "center",
+      }}>
+        {items.slice(0, visibleCount).map((item) => {
+          const isSer = !!item.episodes;
+          return (
+            <NetflixCard
+              key={isSer ? "s-" + item.name : item.id}
+              item={item}
+              isSer={isSer}
+              isLive={!!item.is_live}
+              onClick={handleItemClick}
+              cardW={cardW}
+              cardH={cardH}
+            />
+          );
+        })}
+      </div>
+      <div ref={sentinelRef} style={{ height: 1 }} />
+    </div>
+  );
+}
+
+export { NetflixCard, NetflixRow, NetflixGrid, buildCardHref };
