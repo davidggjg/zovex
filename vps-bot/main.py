@@ -776,6 +776,15 @@ async def warm_stream_pool():
                 continue
             async for _chunk in b["client"].stream_media(msg, offset=0):
                 break  # חתיכה אחת — רק כדי לפתוח את חיבור ה-DC
+            # גם בריכת החיבורים המקבילים של הבוט. בלי זה היא נבנית אצל הצופה
+            # הראשון שנוחת עליו, וכיוון שהבחירה היא round-robin על כל הבריכה,
+            # כמעט כל בקשה בדקות הראשונות שילמה בניית 4 חיבורים מאפס.
+            if STREAM_MEDIA_CONNS > 0:
+                media = msg.video or msg.audio or msg.document or msg.video_note
+                if media:
+                    dc_id, _loc = _file_location(media)
+                    await get_media_session_pool_gen(
+                        b["client"], b["name"], dc_id, STREAM_MEDIA_CONNS)
             log.info("🔥 חוממה מדיה: %s", b["name"])
         except Exception as e:
             log.warning("⚠️ חימום %s נכשל: %s", b.get("name"), e)
@@ -976,10 +985,13 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
 # כלומר 4 הוא האופטימום; מעבר לזה טלגרם מגביל ויצירת החיבורים עולה יותר ממה
 # שהיא מחזירה. 0 מכבה לגמרי וחוזר למסלול הבוטים.
 STREAM_MEDIA_CONNS = int(os.environ.get("STREAM_MEDIA_CONNS", "4"))
-# timeout ייעודי ל-media bands, קצר בהרבה מ-SUBRANGE_TIMEOUT. זה מסלול *מהיר*
-# עם נפילה חינם למסלול הבוטים: כשחיבור מת, אין טעם להחזיק את הצופה 25 שניות
-# לפני שנופלים אחורה — עדיף לוותר תוך 8 ולהגיש מהמסלול הוותיק.
-MEDIA_BANDS_TIMEOUT = int(os.environ.get("STREAM_MEDIA_BANDS_TIMEOUT", "8"))
+# תקציב הזמן למשיכה במסלול המהיר. הערך הראשון (8 + 2 לכל MB) היה ניחוש בלי
+# מדידה, והתברר כקצר מדי: נמדדו 20 חיתוכים מול נפילה אחת בלבד למסלול האיטי,
+# כלומר כמעט כל בקשה נחתכה באמצע משיכה תקינה, זרקה את מה שכבר נמשך והתחילה
+# מאפס במסלול איטי יותר. הנפילה אחורה יקרה, ולכן עדיף להמתין למשיכה שמתקדמת.
+MEDIA_BANDS_TIMEOUT = int(os.environ.get("STREAM_MEDIA_BANDS_TIMEOUT", "14"))
+MEDIA_BANDS_PER_MB = float(os.environ.get("STREAM_MEDIA_BANDS_PER_MB", "4"))
+MEDIA_BANDS_MAX = int(os.environ.get("STREAM_MEDIA_BANDS_MAX", "35"))
 
 
 async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
@@ -1052,10 +1064,8 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             e = min(hi, s + step - 1)
             tasks.append(_band_fetch(sessions[i], location, s, e))
             s = e + 1
-        # תקציב זמן לפי גודל החלון, אבל עם רצפה נמוכה: החלון הראשון (1MB) חייב
-        # להיכשל מהר כדי שחיבור מת יתגלה ויוחלף לפני שהצופה מרגיש.
-        budget = min(SUBRANGE_TIMEOUT,
-                     MEDIA_BANDS_TIMEOUT + (total / (1024 * 1024)) * 2)
+        budget = min(MEDIA_BANDS_MAX,
+                     MEDIA_BANDS_TIMEOUT + (total / (1024 * 1024)) * MEDIA_BANDS_PER_MB)
         parts = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=budget)
         bad = next((p for p in parts if not isinstance(p, (bytes, bytearray))), None)
@@ -1072,7 +1082,10 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
         return None
     except Exception as e:
-        log.warning("media bands (%s) נכשל: %s — נופל למסלול הבוטים", bot["name"], e)
+        # שם הטיפוס חובה: str(asyncio.TimeoutError()) ריק, והשורה הזו הודפסה
+        # כ"נכשל: " בלי סיבה — מה שהסתיר בדיוק את הכשל הנפוץ ביותר כאן.
+        log.warning("media bands (%s) נכשל: %s: %s — נופל למסלול הבוטים",
+                    bot["name"], type(e).__name__, e)
         # gen=None פירושו שהכשל קרה עוד לפני שקיבלנו בריכה — אין מה להפיל,
         # ובוודאי לא את הבריכה של מישהו אחר.
         if dc_id is not None and gen is not None:
@@ -4377,8 +4390,14 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
 # פעם אחת ושומרים ב-pool לפי DC.
 MEDIA_CHUNK = 1024 * 1024
 _media_sessions: dict = {}          # (bot_name, dc_id) -> {"born", "gen", "pool"}
-# טלגרם סוגר חיבורים לא פעילים; מחזירים אותם לפני שהם מתים עלינו.
-MEDIA_SESSION_TTL = int(os.environ.get("MEDIA_SESSION_TTL", "240"))
+# טלגרם סוגר חיבורים לא פעילים; מחזירים אותם לפני שהם מתים עלינו. זו רשת
+# ביטחון בלבד — חיבור מת מתגלה ומוחלף דרך הכשל עצמו — ולכן הערך גבוה: מחזור
+# תכוף מדי (240 שניות) ביטל את החימום, וכל צופה שנחת אחרי מחזור שילם בנייה
+# מחדש של 4 חיבורים.
+MEDIA_SESSION_TTL = int(os.environ.get("MEDIA_SESSION_TTL", "1800"))
+# כמה זמן להשאיר בריכה שהוחלפה בחיים לפני סגירה, כדי לא לנתק משיכות שרצות
+# עליה ברגע ההחלפה.
+MEDIA_SESSION_GRACE = int(os.environ.get("MEDIA_SESSION_GRACE", "30"))
 # נעילה *פר-בוט* ולא גלובלית: בניית חיבורים לוקחת כמה סבבי רשת, ונעילה אחת
 # לכולם הפכה כל בנייה לתור שכל הצופים תקועים בו.
 _media_sessions_locks: dict = {}
@@ -4419,6 +4438,13 @@ async def _stop_pool(pool):
             pass
 
 
+async def _retire_pool(pool):
+    """סוגר בריכה שהוחלפה, אבל רק אחרי שהות. סגירה מיידית מנתקת משיכות שרצות
+    עליה בדיוק ברגע ההחלפה — ואז הצופה מקבל כשל בגלל פעולת תחזוקה."""
+    await asyncio.sleep(MEDIA_SESSION_GRACE)
+    await _stop_pool(pool)
+
+
 async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int):
     """חיבורי media *פר-בוט*, עם מחזור לפי גיל. מחזיר (pool, gen).
 
@@ -4451,7 +4477,7 @@ async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int):
                 break
         result = (pool[:n], ent["gen"])
     if old:
-        await _stop_pool(old)
+        asyncio.create_task(_retire_pool(old))
     return result
 
 
@@ -4472,7 +4498,7 @@ async def drop_media_sessions(owner: str, dc_id: int, gen=None):
         if ent is None or (gen is not None and ent["gen"] != gen):
             return
         _media_sessions.pop(key, None)
-    await _stop_pool(ent["pool"])
+    asyncio.create_task(_retire_pool(ent["pool"]))
 
 
 def _file_location(media):
