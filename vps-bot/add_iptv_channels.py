@@ -15,7 +15,7 @@ BASE = 'https://zovex.duckdns.org/hls-relay/'
 # (מזהה ערוץ אצל הספק, שם, slug, לוגו)
 NEW = [
     ('2369', 'ערוץ 98', 'channel-98', 'https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/israel/channel-98-il.png'),
-    ('2339', 'הום פלוס', 'home-plus', ''),
+    ('2339', 'בית+', 'bait-plus', 'https://raw.githubusercontent.com/davidggjg/zovex/claude/vps-bot-deploy/vps-bot/logos/bait-plus.png'),
     ('2342', 'yes ישראלי', 'yes-israeli', 'https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/israel/yes-israel-il.png'),
     ('2343', 'yes דרמה', 'yes-drama', 'https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/israel/yes-tv-drama-il.png'),
     ('2345', 'yes קומדיה', 'yes-comedy', 'https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/israel/yes-tv-comedy-il.png'),
