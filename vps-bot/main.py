@@ -1452,7 +1452,30 @@ def _is_hls_manifest(path: str) -> bool:
     return path.endswith(".m3u8")
 
 
+# ספקים רבים מפזרים את המקטעים על שרתי-קצה בכתובות IP שמתחלפות: המניפסט
+# מגיע מדומיין אחד, אבל כל מקטע מצביע ל-IP אחר, והרשימה משתנה מיום ליום.
+# רשימה לבנה קבועה לא יכולה לעמוד בזה. לכן: מארח שהופיע בתוך מניפסט שאנחנו
+# עצמנו משכנו ממארח מאושר — נרשם אוטומטית לזמן קצוב. זה נשאר סגור (רק
+# כתובות שהמקור המהימן נתן לנו) בלי לדרוש תחזוקה ידנית.
+_relay_learned_hosts: dict = {}          # host -> {"scheme","port","exp"}
+RELAY_LEARNED_TTL = int(os.environ.get("RELAY_LEARNED_TTL", "7200"))
+
+def _relay_origin_for(host: str) -> Optional[dict]:
+    """מחזיר את מוצא ההעברה למארח — מהרשימה הקבועה או מזו שנלמדה."""
+    origin = HLS_RELAY_ALLOWED_HOSTS.get(host)
+    if origin is not None:
+        return origin
+    learned = _relay_learned_hosts.get(host)
+    if learned and learned["exp"] > time.time():
+        return learned
+    if learned:
+        _relay_learned_hosts.pop(host, None)
+    return None
+
+
 def _rewrite_hls_manifest(text: str, base_url: str) -> str:
+    # לומדים מארחים חדשים רק ממניפסט שהגיע ממארח מאושר
+    parent_ok = urlparse(base_url).hostname in HLS_RELAY_ALLOWED_HOSTS
     out_lines = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -1461,9 +1484,17 @@ def _rewrite_hls_manifest(text: str, base_url: str) -> str:
             continue
         absolute = urljoin(base_url, stripped)
         parsed = urlparse(absolute)
-        if parsed.hostname not in HLS_RELAY_ALLOWED_HOSTS:
-            out_lines.append(line)  # לא ידוע לנו - עדיף להשאיר כמו שהוא מלשבור לגמרי
-            continue
+        if parsed.hostname and _relay_origin_for(parsed.hostname) is None:
+            if not parent_ok or parsed.scheme not in ("http", "https"):
+                out_lines.append(line)  # לא ידוע לנו - עדיף להשאיר כמו שהוא מלשבור לגמרי
+                continue
+            _relay_learned_hosts[parsed.hostname] = {
+                "scheme": parsed.scheme,
+                "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+                "exp": time.time() + RELAY_LEARNED_TTL,
+            }
+            log.info("relay: נלמד מארח מקטעים %s (מתוך %s)",
+                     parsed.hostname, urlparse(base_url).hostname)
         relayed = f"/hls-relay/{parsed.hostname}/{parsed.path.lstrip('/')}"
         if parsed.query:
             relayed += f"?{parsed.query}"
@@ -1624,7 +1655,7 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
 @api.get("/hls-relay/{host}/{path:path}")
 async def hls_relay(host: str, path: str, request: Request):
     check_hotlink(request)
-    origin = HLS_RELAY_ALLOWED_HOSTS.get(host)
+    origin = _relay_origin_for(host)
     if origin is None:
         raise HTTPException(403, "host not allowed")
     scheme, port = origin["scheme"], origin["port"]
