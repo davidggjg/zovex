@@ -10,7 +10,8 @@
     "postbuild": "node scripts/prerender-routes.js",
     "preview": "vite preview",
     "scan": "node scripts/scan.js",
-    "scan:fix": "node scripts/scan.js --fix"
+    "scan:fix": "node scripts/scan.js --fix",
+    "build:vps": "node scripts/generate-sitemap.js && vite build --base=/ && node scripts/prerender-routes.js"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",
