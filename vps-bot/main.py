@@ -822,13 +822,33 @@ async def pick_stream_bot():
         _stream_rr += 1
         return b
 
-def _mark_choked(bot, seconds, err=None):
-    bot["cooldown_until"] = time.time() + seconds
+# כמה כשלים *רצופים* לפני שמדיחים בוט. כשל בודד הוא בדרך כלל רעש רגעי של
+# טלגרם, לא בוט חולה. הדחה על כשל ראשון יצרה מפל: בוט נחנק ← נשארים פחות ←
+# העומס על הנותרים גדל ← גם הם נחנקים. וזה גם מה שגרם למספר הבוטים ה"בריאים"
+# לקפוץ בין 4 ל-16 כל כמה דקות.
+CHOKE_AFTER_FAILS = int(os.environ.get("STREAM_CHOKE_AFTER_FAILS", "3"))
+
+def _mark_ok(bot):
+    """משיכה הצליחה — מאפסים את מונה הכשלים הרצופים."""
+    if bot.get("fails"):
+        bot["fails"] = 0
+
+def _mark_choked(bot, seconds, err=None, hard=False):
     # "Peer id invalid" הוא לא חניקה אלא בוט ששכח את הערוץ: cooldown לבדו לא
     # יעזור לו, הוא פשוט ייכשל שוב בעוד 30 שניות. מסמנים אותו כדי ש-
     # peer_retry_loop ינסה לזהות עבורו את הערוץ מחדש.
-    if err is not None and "peer id invalid" in str(err).lower():
+    peer_bad = err is not None and "peer id invalid" in str(err).lower()
+    if peer_bad:
         bot["peer_ok"] = False
+    # FloodWait ו-peer פגום הם ודאיים — מדיחים מיד. כל השאר צריך לחזור על עצמו.
+    if not (hard or peer_bad):
+        bot["fails"] = bot.get("fails", 0) + 1
+        if bot["fails"] < CHOKE_AFTER_FAILS:
+            log.info("בוט %s נכשל (%d/%d) — עדיין בשירות",
+                     bot["name"], bot["fails"], CHOKE_AFTER_FAILS)
+            return
+        bot["fails"] = 0
+    bot["cooldown_until"] = time.time() + seconds
     log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
 
 # cache של אובייקט ההודעה — *per-bot*. קריטי: ה-file_reference בתוך ההודעה
@@ -878,7 +898,7 @@ async def channel_get_media(chat_id, message_id):
             if msg:
                 return msg.video or msg.audio or msg.document or msg.video_note
         except FloodWait as e:
-            _mark_choked(bot, e.value)
+            _mark_choked(bot, e.value, hard=True)
         except Exception as e:
             log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
             _mark_choked(bot, 30, e)
@@ -918,7 +938,7 @@ async def channel_stream_range(chat_id, message_id, start, end):
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להתחיל מחדש
         except FloodWait as e:
-            _mark_choked(bot, e.value)
+            _mark_choked(bot, e.value, hard=True)
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להחליף בוט באמצע
         except Exception as e:
@@ -978,6 +998,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
             # אחד הקפיא את כל הבקשה גם כששאר ה-pool בריא — הצופה קיבל 0 בייטים.
             out = await asyncio.wait_for(_pull(), timeout=SUBRANGE_TIMEOUT)
             if len(out) >= need:
+                _mark_ok(bot)
                 return bytes(out[:need])
             raise StreamGap(f"subrange short: {len(out)}/{need}")
         except asyncio.TimeoutError:
@@ -987,7 +1008,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
         except FileReferenceExpired:
             _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
         except FloodWait as e:
-            _mark_choked(bot, e.value)
+            _mark_choked(bot, e.value, hard=True)
         except Exception as e:
             log.warning("subrange שגיאה: %s", e)
             _mark_choked(bot, 30, e)
@@ -1104,7 +1125,10 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         out = bytearray()
         for p in parts:
             out += p
-        return bytes(out[:total]) if len(out) >= total else None
+        if len(out) < total:
+            return None
+        _mark_ok(bot)
+        return bytes(out[:total])
     except FileReferenceExpired:
         _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
         return None
