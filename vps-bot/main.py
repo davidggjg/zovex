@@ -1054,9 +1054,9 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             return None
         dc_id, location = _file_location(media)
         sessions, gen = await get_media_session_pool_gen(
-            bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS)
+            bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS, block=False)
         if not sessions:
-            return None
+            return None            # עוד נבנית ברקע — מגישים במסלול הבוטים
         total = hi - lo + 1
         # החלוקה חייבת ליפול על גבולות של MEDIA_CHUNK. טלגרם מגיש רק חתיכות
         # של 1MB, ו-_band_fetch מיישר כל רצועה למטה לגבול הקרוב — כך שחלוקה
@@ -4491,7 +4491,29 @@ async def _retire_pool(pool):
     await _stop_pool(pool)
 
 
-async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int):
+_media_building: set = set()
+
+async def _fill_pool_bg(client, owner: str, dc_id: int, n: int):
+    """משלים בריכה ברקע. הצופה לא ממתין לזה."""
+    key = (owner, dc_id)
+    try:
+        async with _media_lock(key):
+            ent = _media_sessions.get(key)
+            if ent is None:
+                ent = {"born": time.time(), "gen": next(_media_gen_counter), "pool": []}
+                _media_sessions[key] = ent
+            while len(ent["pool"]) < n:
+                try:
+                    ent["pool"].append(await _make_media_session(client, dc_id))
+                except Exception as e:
+                    log.error("יצירת media session ל-%s נכשלה: %s", owner, e)
+                    break
+    finally:
+        _media_building.discard(key)
+
+
+async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int,
+                                     block: bool = True):
     """חיבורי media *פר-בוט*, עם מחזור לפי גיל. מחזיר (pool, gen).
 
     טלגרם סוגר חיבורים שלא בשימוש. גרסה קודמת שמרה אותם לנצח, ואז כל בקשה
@@ -4506,6 +4528,19 @@ async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int):
     key = (owner, dc_id)
     now = time.time()
     old = None
+    # block=False: לא בונים מול הצופה. בנייה של 4 חיבורים לוקחת שניות ארוכות,
+    # והיא קרתה *לפני* הבייט הראשון — נמדד זמן-התחלה של 21 שניות ברגע שהבריכה
+    # גדלה ל-16 בוטים והבקשות נחתו על בוטים שעוד לא נבנו. הבנייה עוברת לרקע
+    # והבקשה הנוכחית נופלת למסלול הבוטים, שמגיש תוך שניות בודדות.
+    if not block:
+        ent = _media_sessions.get(key)
+        if ent is not None and (now - ent["born"]) <= MEDIA_SESSION_TTL \
+                and len(ent["pool"]) >= n:
+            return ent["pool"][:n], ent["gen"]
+        if key not in _media_building:
+            _media_building.add(key)
+            asyncio.create_task(_fill_pool_bg(client, owner, dc_id, n))
+        return [], None
     async with _media_lock(key):
         ent = _media_sessions.get(key)
         if ent and (now - ent["born"]) > MEDIA_SESSION_TTL:
