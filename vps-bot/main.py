@@ -3316,6 +3316,30 @@ async def pool_add(req: PoolAddReq, request: Request):
 class PoolPwReq(BaseModel):
     password: str
 
+@api.get("/stream/tune")
+async def stream_tune(request: Request, media_conns: Optional[int] = None,
+                      parallel_parts: Optional[int] = None):
+    """קורא/משנה את פרמטרי ההזרמה *בזמן ריצה*, בלי הפעלה מחדש.
+
+    למה זה קיים: כל השוואה בין תצורות דרשה restart, וכל restart מאפס את בריכת
+    הבוטים ואת חיבורי המדיה — כך שההשוואה מדדה גם את החימום ולא רק את התצורה.
+    בלי זה אי אפשר להשוות שני מסלולים באותם תנאים.
+
+    localhost בלבד. השינוי לא נשמר — .env נשאר מקור האמת אחרי restart.
+    """
+    global STREAM_MEDIA_CONNS, STREAM_PARALLEL_PARTS
+    if not is_local_request(request):
+        raise HTTPException(status_code=403, detail="localhost only")
+    if media_conns is not None:
+        STREAM_MEDIA_CONNS = max(0, media_conns)
+    if parallel_parts is not None:
+        STREAM_PARALLEL_PARTS = max(1, parallel_parts)
+    return {"media_conns": STREAM_MEDIA_CONNS,
+            "parallel_parts": STREAM_PARALLEL_PARTS,
+            "bands_timeout": MEDIA_BANDS_TIMEOUT,
+            "bots": len(_stream_bots),
+            "note": "זמני — .env גובר אחרי restart"}
+
 @api.post("/pool/list")
 async def pool_list(req: PoolPwReq, request: Request):
     check_panel_password(request, req.password)
