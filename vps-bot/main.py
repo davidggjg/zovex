@@ -1147,6 +1147,87 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
                 yield r
         pos = wend + 1
 
+# ── מטמון קצוות הקובץ ────────────────────────────────────────────────────────
+# ב-MP4 שלא עבר faststart טבלת האינדקס (moov) יושבת ב*סוף* הקובץ. לכן כל נגן,
+# בכל פתיחה, חייב למשוך כמה מגה-בייטים מהקצה לפני שהוא יודע איפה נמצא ולו
+# פריים אחד — ורק אז הוא מתחיל. נמדד על ספיידרמן: moov שוקל 7.7MB, ומשיכתו
+# ארכה 4.9 שניות ברגע טוב ו-71 ברגע רע.
+#
+# הבייטים האלה זהים לכל הצופים ולעולם לא משתנים, ולכן מספיק למשוך אותם פעם
+# אחת ולהגיש מהדיסק. אותו דבר לראש הקובץ. זה חוסך את ההמתנה הזו בכל פתיחה
+# חוזרת של אותו סרט, בלי לגעת באפליקציה.
+EDGE_CACHE_DIR = DATA_DIR / "edge_cache"
+EDGE_TAIL = int(os.environ.get("STREAM_EDGE_TAIL", str(12 * 1024 * 1024)))
+EDGE_HEAD = int(os.environ.get("STREAM_EDGE_HEAD", str(2 * 1024 * 1024)))
+EDGE_CACHE_MAX = int(os.environ.get("STREAM_EDGE_CACHE_MAX", str(3 * 1024 ** 3)))
+_edge_locks: dict = {}
+
+def _edge_path(chat_id, message_id, which) -> Path:
+    return EDGE_CACHE_DIR / f"{chat_id}_{message_id}.{which}"
+
+def _edge_region(start, end, file_size):
+    """מחזיר ('head'|'tail', תחילת_האזור) אם הטווח נמצא כולו באחד הקצוות."""
+    if file_size <= EDGE_HEAD + EDGE_TAIL:
+        return None
+    if end < EDGE_HEAD:
+        return "head", 0
+    tail_start = file_size - EDGE_TAIL
+    if start >= tail_start:
+        return "tail", tail_start
+    return None
+
+def _edge_evict():
+    """שומר על תקרת הגודל — מוחק את הקבצים שלא נגענו בהם הכי מזמן."""
+    try:
+        files = [(p.stat().st_atime, p.stat().st_size, p)
+                 for p in EDGE_CACHE_DIR.glob("*.*")]
+    except OSError:
+        return
+    total = sum(s for _, s, _ in files)
+    for _atime, size, p in sorted(files):
+        if total <= EDGE_CACHE_MAX:
+            break
+        try:
+            p.unlink()
+            total -= size
+        except OSError:
+            pass
+
+async def _edge_bytes(chat_id, message_id, which, region_start, region_len):
+    """מחזיר את אזור הקצה, מהדיסק אם קיים ואחרת מושך פעם אחת ושומר."""
+    path = _edge_path(chat_id, message_id, which)
+    try:
+        if path.exists() and path.stat().st_size == region_len:
+            os.utime(path, None)                      # לצורך ה-LRU
+            return path.read_bytes()
+    except OSError:
+        pass
+    lock = _edge_locks.setdefault((chat_id, message_id, which), asyncio.Lock())
+    async with lock:
+        try:                                          # אולי מישהו אחר הספיק
+            if path.exists() and path.stat().st_size == region_len:
+                return path.read_bytes()
+        except OSError:
+            pass
+        buf = bytearray()
+        async for chunk in _channel_range_gen(chat_id, message_id, region_start,
+                                              region_start + region_len - 1):
+            buf += chunk
+        if len(buf) < region_len:
+            return None                               # משיכה חלקית — לא שומרים
+        try:
+            EDGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_bytes(bytes(buf))
+            tmp.replace(path)
+            _edge_evict()
+            log.info("מטמון קצה: נשמר %s של %s/%s (%.1fMB)",
+                     which, chat_id, message_id, region_len / 1024 / 1024)
+        except OSError as e:
+            log.warning("מטמון קצה: שמירה נכשלה — %s", e)
+        return bytes(buf)
+
+
 def _channel_range_gen(chat_id, message_id, start, end):
     """בורר בין הזרמה מקבילה (אם הופעלה) לרגילה."""
     if STREAM_PARALLEL_PARTS > 1 and len(_stream_bots) >= 2:
@@ -1171,6 +1252,19 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
             "Content-Length": str(end - start + 1),
             "Content-Disposition": disposition,
         }
+        # קצוות הקובץ מוגשים מהדיסק: שם יושבת טבלת האינדקס שכל נגן חייב
+        # לקרוא לפני הפריים הראשון, והיא זהה לכל הצופים.
+        region = _edge_region(start, end, file_size)
+        if region is not None:
+            which, region_start = region
+            region_len = EDGE_HEAD if which == "head" else EDGE_TAIL
+            data = await _edge_bytes(chat_id, message_id, which,
+                                     region_start, region_len)
+            if data is not None:
+                off = start - region_start
+                return Response(content=data[off:off + (end - start + 1)],
+                                status_code=206, media_type=mime_type,
+                                headers=headers)
         return StreamingResponse(
             _channel_range_gen(chat_id, message_id, start, end),
             status_code=206, media_type=mime_type, headers=headers)
