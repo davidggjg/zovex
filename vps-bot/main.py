@@ -513,9 +513,20 @@ async def stream_session_range(sess: "StreamSession", start: int, end: int) -> A
     # חייבים לשלוח את מספר הבייטים המובטח, אחרת uvicorn קורס עם
     # RuntimeError: Response content shorter than Content-Length.
     if pos <= end:
-        remaining = end - pos + 1
-        log.error("stream_session_range: ממלא %d בייטים ריקים (טלגרם לא הצליח לספק)", remaining)
-        yield b"\x00" * remaining
+        log.error("stream_session_range: חסרים %d בייטים — מנתק כדי שהנגן יבקש שוב",
+                  end - pos + 1)
+        raise StreamGap(f"missing {end - pos + 1} bytes")
+
+class StreamGap(Exception):
+    """משיכה מטלגרם נכשלה ואי אפשר להשלים את הטווח שהובטח.
+
+    זורקים במקום למלא אפסים. מילוי אפסים סיפק ללקוח בדיוק את מספר הבייטים
+    שב-Content-Length, ולכן הנגן כלל לא נכנס למצב טעינה — הוא קיבל "הכל",
+    ניסה לפענח זבל, והתמונה קפאה על הפריים האחרון בלי ספינר ובלי התאוששות.
+    ניתוק באמצע התשובה, לעומת זאת, נראה ללקוח כשגיאת רשת על הטווח הזה — וכל
+    נגן יודע לבקש אותו מחדש.
+    """
+
 
 # ── Stream bot pool: ריבוי בוטים לתוכן בערוץ (רוטציה + זיהוי חניקה) ──────────
 # תובנה מהבדיקות: בוט *טרי* מושך מהערוץ ב-~4.2 MB/s, אבל בוט שנחנק (FLOOD_WAIT
@@ -916,7 +927,9 @@ async def channel_stream_range(chat_id, message_id, start, end):
             if pos > start:
                 break
     if pos <= end:
-        yield b"\x00" * (end - pos + 1)
+        log.error("channel stream: חסרים %d בייטים — מנתק כדי שהנגן יבקש שוב",
+                  end - pos + 1)
+        raise StreamGap(f"missing {end - pos + 1} bytes")
 
 # ── הזרמה מקבילה (FastTelethon-style, בטוח) ─────────────────────────────────
 # במקום צינור אחד ל-~4MB/s, מפצלים כל "חלון" של הסרט לכמה תת-טווחים שנמשכים
@@ -966,7 +979,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
             out = await asyncio.wait_for(_pull(), timeout=SUBRANGE_TIMEOUT)
             if len(out) >= need:
                 return bytes(out[:need])
-            return bytes(out) + b"\x00" * (need - len(out))
+            raise StreamGap(f"subrange short: {len(out)}/{need}")
         except asyncio.TimeoutError:
             log.warning("subrange: %s לא סיפק בייטים תוך %ds — עובר לבוט אחר",
                         bot["name"], SUBRANGE_TIMEOUT)
@@ -978,7 +991,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
         except Exception as e:
             log.warning("subrange שגיאה: %s", e)
             _mark_choked(bot, 30, e)
-    return b"\x00" * need
+    raise StreamGap(f"no bot could serve {need} bytes")
 
 # כמה חיבורי media מקבילים לכל משיכה. נמדד על השרת הזה מול DC4:
 #   חיבור אחד → 0.14 MB/s ·  4 חיבורים → 10.5 MB/s ·  8 חיבורים → 0.96 MB/s
@@ -1210,9 +1223,12 @@ async def _edge_bytes(chat_id, message_id, which, region_start, region_len):
         except OSError:
             pass
         buf = bytearray()
-        async for chunk in _channel_range_gen(chat_id, message_id, region_start,
-                                              region_start + region_len - 1):
-            buf += chunk
+        try:
+            async for chunk in _channel_range_gen(chat_id, message_id, region_start,
+                                                  region_start + region_len - 1):
+                buf += chunk
+        except StreamGap:
+            return None            # לא הצלחנו למלא את הקצה — מגישים כרגיל
         if len(buf) < region_len:
             return None                               # משיכה חלקית — לא שומרים
         try:
