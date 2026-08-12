@@ -1054,14 +1054,20 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS)
         if not sessions:
             return None
-        n = len(sessions)
         total = hi - lo + 1
-        step = -(-total // n)
+        # החלוקה חייבת ליפול על גבולות של MEDIA_CHUNK. טלגרם מגיש רק חתיכות
+        # של 1MB, ו-_band_fetch מיישר כל רצועה למטה לגבול הקרוב — כך שחלוקה
+        # של חלון 1MB לארבע רצועות של 256KB גרמה לארבעתן ליישר חזרה לאפס
+        # ולהוריד *את אותו המגהבייט* ארבע פעמים: פי 4 תעבורה, אפס מקביליות.
+        chunk_lo = (lo // MEDIA_CHUNK) * MEDIA_CHUNK
+        n_chunks = (hi - chunk_lo) // MEDIA_CHUNK + 1
+        n = max(1, min(len(sessions), n_chunks))
+        per_band = -(-n_chunks // n)          # חתיכות שלמות לכל רצועה
         tasks, s = [], lo
         for i in range(n):
             if s > hi:
                 break
-            e = min(hi, s + step - 1)
+            e = min(hi, chunk_lo + (i + 1) * per_band * MEDIA_CHUNK - 1)
             tasks.append(_band_fetch(sessions[i], location, s, e))
             s = e + 1
         budget = min(MEDIA_BANDS_MAX,
