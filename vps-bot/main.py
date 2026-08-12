@@ -989,8 +989,11 @@ STREAM_MEDIA_CONNS = int(os.environ.get("STREAM_MEDIA_CONNS", "4"))
 # מדידה, והתברר כקצר מדי: נמדדו 20 חיתוכים מול נפילה אחת בלבד למסלול האיטי,
 # כלומר כמעט כל בקשה נחתכה באמצע משיכה תקינה, זרקה את מה שכבר נמשך והתחילה
 # מאפס במסלול איטי יותר. הנפילה אחורה יקרה, ולכן עדיף להמתין למשיכה שמתקדמת.
-MEDIA_BANDS_TIMEOUT = int(os.environ.get("STREAM_MEDIA_BANDS_TIMEOUT", "14"))
-MEDIA_BANDS_PER_MB = float(os.environ.get("STREAM_MEDIA_BANDS_PER_MB", "4"))
+# 14 + 4/MB נקבע *לפני* שתוקן באג הרצועות, כשכל משיכה הורידה פי 3-4 מהנדרש
+# ולכן באמת הייתה איטית. אחרי התיקון המשיכות מהירות בהרבה והתקציב הפך רחב
+# מדי: הוא הפך לזמן ההמתנה הקבוע שכל חיבור מת גובה לפני הנפילה אחורה.
+MEDIA_BANDS_TIMEOUT = int(os.environ.get("STREAM_MEDIA_BANDS_TIMEOUT", "6"))
+MEDIA_BANDS_PER_MB = float(os.environ.get("STREAM_MEDIA_BANDS_PER_MB", "3"))
 MEDIA_BANDS_MAX = int(os.environ.get("STREAM_MEDIA_BANDS_MAX", "35"))
 
 
@@ -1070,8 +1073,13 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             e = min(hi, chunk_lo + (i + 1) * per_band * MEDIA_CHUNK - 1)
             tasks.append(_band_fetch(sessions[i], location, s, e))
             s = e + 1
+        # התקציב נגזר מגודל *הרצועה* ולא מגודל החלון: הרצועות רצות במקביל,
+        # ולכן מה שקובע הוא האיטית שבהן, לא הסכום. הגרסה הקודמת חישבה לפי
+        # הסכום ונתנה 18 שניות לחלון של מגהבייט אחד — וכל חיבור מת גבה בדיוק
+        # 18.2 שניות של המתנה לפני הנפילה למסלול הגיבוי.
+        band_mb = (per_band * MEDIA_CHUNK) / (1024 * 1024)
         budget = min(MEDIA_BANDS_MAX,
-                     MEDIA_BANDS_TIMEOUT + (total / (1024 * 1024)) * MEDIA_BANDS_PER_MB)
+                     MEDIA_BANDS_TIMEOUT + band_mb * MEDIA_BANDS_PER_MB)
         parts = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=budget)
         bad = next((p for p in parts if not isinstance(p, (bytes, bytearray))), None)
@@ -3318,7 +3326,9 @@ class PoolPwReq(BaseModel):
 
 @api.get("/stream/tune")
 async def stream_tune(request: Request, media_conns: Optional[int] = None,
-                      parallel_parts: Optional[int] = None):
+                      parallel_parts: Optional[int] = None,
+                      bands_timeout: Optional[int] = None,
+                      bands_per_mb: Optional[float] = None):
     """קורא/משנה את פרמטרי ההזרמה *בזמן ריצה*, בלי הפעלה מחדש.
 
     למה זה קיים: כל השוואה בין תצורות דרשה restart, וכל restart מאפס את בריכת
@@ -3328,15 +3338,21 @@ async def stream_tune(request: Request, media_conns: Optional[int] = None,
     localhost בלבד. השינוי לא נשמר — .env נשאר מקור האמת אחרי restart.
     """
     global STREAM_MEDIA_CONNS, STREAM_PARALLEL_PARTS
+    global MEDIA_BANDS_TIMEOUT, MEDIA_BANDS_PER_MB
     if not is_local_request(request):
         raise HTTPException(status_code=403, detail="localhost only")
     if media_conns is not None:
         STREAM_MEDIA_CONNS = max(0, media_conns)
     if parallel_parts is not None:
         STREAM_PARALLEL_PARTS = max(1, parallel_parts)
+    if bands_timeout is not None:
+        MEDIA_BANDS_TIMEOUT = max(1, bands_timeout)
+    if bands_per_mb is not None:
+        MEDIA_BANDS_PER_MB = max(0.0, bands_per_mb)
     return {"media_conns": STREAM_MEDIA_CONNS,
             "parallel_parts": STREAM_PARALLEL_PARTS,
             "bands_timeout": MEDIA_BANDS_TIMEOUT,
+            "bands_per_mb": MEDIA_BANDS_PER_MB,
             "bots": len(_stream_bots),
             "note": "זמני — .env גובר אחרי restart"}
 
