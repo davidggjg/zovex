@@ -138,7 +138,9 @@ export default function HomePage({
             return (
               <div
                 key={cat}
-                onClick={(e) => { e.stopPropagation(); setSelectedCategory(cat); if (cat === "היסטוריה") refreshHistory(); setShowCatModal(false); }}
+                // מנקים את החיפוש כמו באפליקציה: בלי זה מונח חיפוש קודם נשאר
+                // פעיל ומסנן את הקטגוריה החדשה, והיא נראית ריקה או "לא נפתחת"
+                onClick={(e) => { e.stopPropagation(); setSelectedCategory(cat); setSearchTerm(""); if (cat === "היסטוריה") refreshHistory(); setShowCatModal(false); }}
                 style={{ padding: "14px 20px", width: "100%", maxWidth: 480, textAlign: "center", cursor: "pointer", fontSize: isActive ? 26 : 21, fontWeight: isActive ? 900 : 400, color: isActive ? "#fff" : (isLiveCat ? "#e50914" : "rgba(255,255,255,0.45)"), display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
               >
                 {isLiveCat && <Eye size={isActive ? 22 : 18} />}
