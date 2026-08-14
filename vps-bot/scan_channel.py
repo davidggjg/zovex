@@ -30,13 +30,27 @@ args = ap.parse_args()
 # main.py דורש משתני סביבה שמוגדרים ב-.env, ואותו קובץ נטען רק ע"י systemd.
 # בהרצה ידנית מהטרמינל הם חסרים ו-main נופל בייבוא, ולכן טוענים אותם כאן.
 ENV_FILE = pathlib.Path("/opt/zovex-bot/.env")
+_loaded = 0
 if ENV_FILE.exists():
-    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for line in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip().lstrip("﻿")
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k:
+            os.environ[k] = v
+            _loaded += 1
+    print(f"נטענו {_loaded} משתנים מ-{ENV_FILE}")
+else:
+    print(f"⚠️  {ENV_FILE} לא נמצא")
+for _k in ("API_ID", "API_HASH", "BOT_TOKEN"):
+    if not os.environ.get(_k):
+        print(f"⚠️  {_k} עדיין חסר אחרי הטעינה")
 
 from pyrogram import Client
 from main import (API_ID, API_HASH, STREAM_CHANNEL_ID, parse_episode_info,
