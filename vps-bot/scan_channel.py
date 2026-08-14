@@ -115,6 +115,25 @@ async def main():
                  session_string=sess, in_memory=True, no_updates=True)
     await app.start()
 
+    # סשן טרי לא מכיר את הערוץ: טלגרם דורש access_hash לכל peer, והוא נלמד רק
+    # מרשימת הצ'אטים. בלי זה כל פנייה נכשלת ב-"Peer id invalid" גם כשהחשבון
+    # חבר בערוץ. מעבר על הדיאלוגים ממלא את המטמון.
+    peer = None
+    try:
+        peer = await app.get_chat(STREAM_CHANNEL_ID)
+    except Exception:
+        print("מזהה את הערוץ דרך רשימת הצ'אטים...")
+        async for _d in app.get_dialogs():
+            pass
+        try:
+            peer = await app.get_chat(STREAM_CHANNEL_ID)
+        except Exception as e:
+            print(f"❌ החשבון לא מצליח לגשת לערוץ {STREAM_CHANNEL_ID}: {e}")
+            print("   ודא שהחשבון הזה חבר בערוץ התוכן.")
+            await app.stop()
+            return 1
+    print(f"ערוץ: {getattr(peer, 'title', STREAM_CHANNEL_ID)}")
+
     found, seen = [], 0
     try:
         async for m in app.get_chat_history(STREAM_CHANNEL_ID):
