@@ -17,7 +17,6 @@ from datetime import datetime
 sys.path.insert(0, "/opt/zovex-bot")
 DATA = pathlib.Path("/opt/zovex-bot/data")
 CONTENT = DATA / "content.json"
-BOTS_FILE = DATA / "stream_bots.txt"
 BASE_TOKEN = "%BASE%"
 
 ap = argparse.ArgumentParser()
@@ -53,8 +52,12 @@ for _k in ("API_ID", "API_HASH", "BOT_TOKEN"):
         print(f"⚠️  {_k} עדיין חסר אחרי הטעינה")
 
 from pyrogram import Client
-from main import (API_ID, API_HASH, STREAM_CHANNEL_ID, parse_episode_info,
-                  clean_name, _slug_base)
+from main import (API_ID, API_HASH, STREAM_CHANNEL_ID, STREAM_BOTS_FILE,
+                  parse_episode_info, clean_name, _slug_base)
+
+# הנתיב מגיע מ-main ולא מניחוש: הקובץ יושב ב-/opt/zovex-bot/ ולא בתוך data/,
+# וניחוש שגוי כאן נראה בדיוק כמו "אין חשבון משתמש בבריכה".
+BOTS_FILE = STREAM_BOTS_FILE
 
 
 def load_json(p, default):
@@ -81,11 +84,19 @@ def pick_user_session():
     """בוטים לא יכולים לקרוא היסטוריה — צריך session string של חשבון."""
     if not BOTS_FILE.exists():
         return None
+    bots = users = 0
+    found = None
     for line in BOTS_FILE.read_text(encoding="utf-8").splitlines():
         t = line.strip()
-        if t and not re.match(r"^\d{5,}:[A-Za-z0-9_-]{20,}$", t) and len(t) >= 80:
-            return t
-    return None
+        if not t:
+            continue
+        if re.match(r"^\d{5,}:[A-Za-z0-9_-]{20,}$", t):
+            bots += 1
+        elif len(t) >= 80:
+            users += 1
+            found = found or t
+    print(f"ב-{BOTS_FILE.name}: {bots} בוטים, {users} חשבונות משתמש")
+    return found
 
 
 async def main():
