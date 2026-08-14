@@ -1,0 +1,147 @@
+"""סורק את ערוץ התוכן ומוצא קבצים שקיימים בטלגרם אבל חסרים בקטלוג.
+
+למה זה קיים: תוכן נעלם מהאתר, והקבצים עצמם עדיין יושבים בערוץ. הכלי הזה
+משווה בין מה שיש בערוץ למה שרשום ב-content.json לפי מזהה ההודעה, ומדווח מה
+חסר — ובאישור מפורש גם מוסיף אותו בחזרה.
+
+חשוב: בוטים לא יכולים לקרוא היסטוריה של ערוץ (BOT_METHOD_INVALID), ולכן
+הכלי משתמש ב-session string של חשבון משתמש מתוך stream_bots.txt.
+
+    python3 scan_channel.py --query "דרגון בול"     # מה חסר (בלי לשנות כלום)
+    python3 scan_channel.py                          # כל מה שחסר בערוץ
+    python3 scan_channel.py --query "דרגון בול" --add  # מוסיף בפועל
+"""
+import argparse, asyncio, json, os, pathlib, re, sys, uuid
+from datetime import datetime
+
+sys.path.insert(0, "/opt/zovex-bot")
+DATA = pathlib.Path("/opt/zovex-bot/data")
+CONTENT = DATA / "content.json"
+BOTS_FILE = DATA / "stream_bots.txt"
+BASE_TOKEN = "%BASE%"
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--query", default="", help="סינון לפי טקסט בשם/כיתוב")
+ap.add_argument("--add", action="store_true", help="להוסיף בפועל לקטלוג")
+ap.add_argument("--category", default="אנימה", help="קטגוריה לפריטים חדשים")
+ap.add_argument("--limit", type=int, default=0, help="לעצור אחרי N הודעות (0=הכל)")
+args = ap.parse_args()
+
+from pyrogram import Client
+from main import (API_ID, API_HASH, STREAM_CHANNEL_ID, parse_episode_info,
+                  clean_name, _slug_base)
+
+
+def load_json(p, default):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def known_message_ids(content):
+    """מזהי ההודעות שכבר רשומים בקטלוג."""
+    ids = set()
+    for e in content:
+        for k in ("video_url", "video_id"):
+            v = e.get(k)
+            if isinstance(v, str):
+                m = re.search(r"/stream/(-?\d+)/(\d+)", v)
+                if m:
+                    ids.add(int(m.group(2)))
+    return ids
+
+
+def pick_user_session():
+    """בוטים לא יכולים לקרוא היסטוריה — צריך session string של חשבון."""
+    if not BOTS_FILE.exists():
+        return None
+    for line in BOTS_FILE.read_text(encoding="utf-8").splitlines():
+        t = line.strip()
+        if t and not re.match(r"^\d{5,}:[A-Za-z0-9_-]{20,}$", t) and len(t) >= 80:
+            return t
+    return None
+
+
+async def main():
+    content = load_json(CONTENT, [])
+    known = known_message_ids(content)
+    print(f"בקטלוג: {len(content)} פריטים, {len(known)} מהם מקושרים להודעה בערוץ")
+
+    sess = pick_user_session()
+    if not sess:
+        print("❌ אין session string של חשבון משתמש ב-stream_bots.txt.")
+        print("   בוטים לא יכולים לקרוא היסטוריית ערוץ, אז אי אפשר לסרוק בלי אחד.")
+        return 1
+
+    q = args.query.strip().lower()
+    app = Client("scan_channel_tmp", api_id=API_ID, api_hash=API_HASH,
+                 session_string=sess, in_memory=True, no_updates=True)
+    await app.start()
+
+    found, seen = [], 0
+    try:
+        async for m in app.get_chat_history(STREAM_CHANNEL_ID):
+            seen += 1
+            if args.limit and seen > args.limit:
+                break
+            if seen % 2000 == 0:
+                print(f"  נסרקו {seen} הודעות, נמצאו {len(found)} חסרים...")
+            media = m.video or m.document or m.audio
+            if not media:
+                continue
+            name = getattr(media, "file_name", "") or ""
+            text = f"{name} {m.caption or ''}".strip()
+            if q and q not in text.lower():
+                continue
+            if m.id in known:
+                continue
+            found.append({"msg_id": m.id, "name": name, "caption": (m.caption or "")[:120],
+                          "size": getattr(media, "file_size", 0)})
+    finally:
+        await app.stop()
+
+    print(f"\nנסרקו {seen} הודעות. חסרים בקטלוג: {len(found)}\n")
+    if not found:
+        print("אין מה להוסיף.")
+        return 0
+
+    for f in found[:40]:
+        print(f"  msg {f['msg_id']:>7}  {(f['name'] or f['caption'])[:70]}")
+    if len(found) > 40:
+        print(f"  ... ועוד {len(found) - 40}")
+
+    if not args.add:
+        print("\nהרצה יבשה — לא שונה כלום. להוספה בפועל הוסף --add")
+        return 0
+
+    added = 0
+    for f in found:
+        label = f["name"] or f["caption"]
+        ep = parse_episode_info(label)
+        url = f"{BASE_TOKEN}/stream/{STREAM_CHANNEL_ID}/{f['msg_id']}"
+        base = {
+            "video_url": url, "video_id": None, "thumbnail_url": "",
+            "category": args.category, "is_live": False, "type": None,
+            "episode_title": None, "year": None, "description": "",
+            "id": str(uuid.uuid4()),
+            "created_date": datetime.utcnow().isoformat() + "Z",
+        }
+        if ep:
+            base.update(title=ep["series"], series_name=ep["series"],
+                        season_number=ep["season"], episode_number=ep["episode"],
+                        custom_slug=_slug_base(ep["series"]) or None)
+        else:
+            t = clean_name(label) or label
+            base.update(title=t, series_name=None, season_number=None,
+                        episode_number=None, custom_slug=_slug_base(t) or None)
+        content.append(base)
+        added += 1
+
+    CONTENT.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n✅ נוספו {added} פריטים. סה\"כ בקטלוג: {len(content)}")
+    print("   הפעל מחדש:  sudo systemctl restart zovex-bot")
+    return 0
+
+
+sys.exit(asyncio.run(main()))
