@@ -135,7 +135,7 @@ async def main():
             return 1
     print(f"ערוץ: {getattr(peer, 'title', STREAM_CHANNEL_ID)}")
 
-    found, seen = [], 0
+    found, seen, bad = [], 0, 0
     try:
         async for m in app.get_chat_history(STREAM_CHANNEL_ID):
             seen += 1
@@ -143,21 +143,32 @@ async def main():
                 break
             if seen % 2000 == 0:
                 print(f"  נסרקו {seen} הודעות, נמצאו {len(found)} חסרים...")
-            media = m.video or m.document or m.audio
-            if not media:
-                continue
-            name = getattr(media, "file_name", "") or ""
-            text = f"{name} {m.caption or ''}".strip()
-            if q and q not in text.lower():
-                continue
-            if m.id in known:
-                continue
-            found.append({"msg_id": m.id, "name": name, "caption": (m.caption or "")[:120],
-                          "size": getattr(media, "file_size", 0)})
+            try:
+                media = m.video or m.document or m.audio
+                if not media:
+                    continue
+                # str() חובה: ב-Pyrogram caption/file_name הם מחרוזת מיוחדת
+                # שחיתוך שלה באמצע זוג surrogate (אמוג'י) זורק UnicodeDecodeError
+                # ומפיל את כל הסריקה בגלל הודעה אחת.
+                name = str(getattr(media, "file_name", "") or "")
+                caption = str(m.caption or "")
+                text = f"{name} {caption}".strip()
+                if q and q not in text.lower():
+                    continue
+                if m.id in known:
+                    continue
+                found.append({"msg_id": m.id, "name": name, "caption": caption[:120],
+                              "size": getattr(media, "file_size", 0)})
+            except Exception as e:
+                # הודעה בודדת פגומה לא אמורה להפיל סריקה של אלפים
+                bad += 1
+                if bad <= 5:
+                    print(f"  דילוג על הודעה {m.id}: {type(e).__name__}")
     finally:
         await app.stop()
 
-    print(f"\nנסרקו {seen} הודעות. חסרים בקטלוג: {len(found)}\n")
+    print(f"\nנסרקו {seen} הודעות. חסרים בקטלוג: {len(found)}"
+          + (f"  (דולגו {bad} פגומות)" if bad else "") + "\n")
     if not found:
         print("אין מה להוסיף.")
         return 0
