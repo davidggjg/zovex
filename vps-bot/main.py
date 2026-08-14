@@ -3416,18 +3416,47 @@ def _normalize_live_flag(arr: list) -> list:
             e["is_live"] = True
     return arr
 
+# כמה ימים אחורה לשמור גיבוי יומי. "30 הגיבויים האחרונים" נשמע סביר אבל
+# בפועל, עם עשרות שמירות בשעה, הוא כיסה שעתיים בלבד — וכל מחיקה מאתמול כבר
+# נדחקה החוצה. שומרים גם את האחרונים (לשחזור מיידי) וגם אחד ליום (לחקירה).
+CONTENT_BAK_KEEP_RECENT = int(os.environ.get("CONTENT_BAK_KEEP_RECENT", "30"))
+CONTENT_BAK_KEEP_DAYS = int(os.environ.get("CONTENT_BAK_KEEP_DAYS", "45"))
+
+def _prune_content_backups():
+    """משאיר את N האחרונים, ובנוסף את הגיבוי הראשון של כל יום ל-45 ימים."""
+    baks = sorted(CONTENT_BAK_DIR.glob("content_*.json"))
+    if len(baks) <= CONTENT_BAK_KEEP_RECENT:
+        return
+    keep = set(baks[-CONTENT_BAK_KEEP_RECENT:])
+    cutoff = time.time() - CONTENT_BAK_KEEP_DAYS * 86400
+    first_of_day = {}
+    for p in baks:
+        try:
+            ts = int(p.stem.split("_")[1])
+        except (IndexError, ValueError):
+            keep.add(p)          # שם לא צפוי — לא נוגעים
+            continue
+        if ts < cutoff:
+            continue             # ישן מדי — יימחק
+        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        if day not in first_of_day:
+            first_of_day[day] = p
+            keep.add(p)
+    for p in baks:
+        if p not in keep:
+            p.unlink(missing_ok=True)
+
+
 def save_content(arr: list):
     arr = _normalize_live_flag(arr)
     # גיבוי בטיחות לפני דריסה — content.json הוא מקור האמת, ורוצים אפשרות לשחזר
-    # אם מישהו מחק/דרס בטעות. שומרים עד 30 גיבויים אחרונים.
+    # אם מישהו מחק/דרס בטעות.
     try:
         if CONTENT_FILE.exists():
             CONTENT_BAK_DIR.mkdir(parents=True, exist_ok=True)
             bak = CONTENT_BAK_DIR / f"content_{int(time.time())}.json"
             bak.write_text(CONTENT_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-            baks = sorted(CONTENT_BAK_DIR.glob("content_*.json"))
-            for old in baks[:-30]:
-                old.unlink(missing_ok=True)
+            _prune_content_backups()
     except Exception as e:
         log.warning("גיבוי content נכשל (ממשיכים בשמירה): %s", e)
     CONTENT_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -4022,6 +4051,14 @@ class ContentSaveReq(BaseModel):
     password: str
     movies: list
     base_version: Optional[int] = None
+    confirm_delete: bool = False     # אישור מפורש למחיקה המונית
+
+
+# כמה פריטים מותר שיעלמו בשמירה אחת בלי אישור מפורש. שמירה מהפאנל שולחת את
+# *כל* המערך, ולכן טעינה חלקית, טאב ישן או לחיצה לפני שהכל נטען מוחקים את כל
+# מה שלא היה ברשימה — וזה בדיוק "כל יום נמחק תוכן". גרסה קודמת רק גיבתה את
+# התוצאה; כאן עוצרים אותה מראש.
+CONTENT_DELETE_GUARD = int(os.environ.get("CONTENT_DELETE_GUARD", "50"))
 
 @api.post("/content/save")
 async def content_save(req: ContentSaveReq, request: Request):
@@ -4038,6 +4075,21 @@ async def content_save(req: ContentSaveReq, request: Request):
             f"⚠️ התוכן עודכן על ידי מישהו אחר בזמן שערכת (גרסה בשרת {cur_ver}, "
             f"אצלך {req.base_version}). התוכן נטען מחדש — אנא בצע את השינוי שוב "
             "כדי לא לדרוס עבודה של אחרים."))
+    # ── הגנת מחיקה המונית ────────────────────────────────────────────────────
+    # השמירה דורסת את כל הקטלוג. אם פתאום חסרים עשרות פריטים, כמעט תמיד מדובר
+    # בתקלה (רשימה שנטענה חלקית) ולא בכוונה — עוצרים ומבקשים אישור מפורש.
+    before = len(load_content())
+    gone = before - len(req.movies)
+    if gone > CONTENT_DELETE_GUARD and not req.confirm_delete:
+        raise HTTPException(status_code=409, detail=(
+            f"⛔ השמירה הזו מוחקת {gone} פריטים ({before} → {len(req.movies)}) ולכן נעצרה.\n\n"
+            "זה קורה כשהרשימה נטענה חלקית — למשל טאב ישן, או שמירה לפני שהתוכן "
+            "סיים להיטען. רענן את הפאנל, ודא שכל התוכן מוצג, ובצע את השינוי שוב.\n\n"
+            "אם המחיקה מכוונת — שלח שוב עם confirm_delete."))
+    if gone > 0:
+        log.warning("שמירת תוכן מסירה %d פריטים (%d → %d)%s",
+                    gone, before, len(req.movies),
+                    " — באישור מפורש" if req.confirm_delete else "")
     # מכווצים את הכתובת שלנו חזרה ל-%BASE% כדי שהקישורים יישארו ניידים
     save_content(_collapse_urls(req.movies))
     return {"ok": True, "count": len(req.movies), "version": get_content_version()}
