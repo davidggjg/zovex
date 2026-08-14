@@ -24,6 +24,7 @@ ap.add_argument("--query", default="", help="סינון לפי טקסט בשם/�
 ap.add_argument("--add", action="store_true", help="להוסיף בפועל לקטלוג")
 ap.add_argument("--category", default="אנימה", help="קטגוריה לפריטים חדשים")
 ap.add_argument("--limit", type=int, default=0, help="לעצור אחרי N הודעות (0=הכל)")
+ap.add_argument("--series", default="", help="לכפות שם סדרה (עוקף את הזיהוי מהשם)")
 args = ap.parse_args()
 
 # main.py דורש משתני סביבה שמוגדרים ב-.env, ואותו קובץ נטען רק ע"י systemd.
@@ -166,6 +167,22 @@ async def main():
     if len(found) > 40:
         print(f"  ... ועוד {len(found) - 40}")
 
+    # תצוגה מקדימה של הזיהוי: איך זה ייכנס לקטלוג בפועל
+    preview = {}
+    for f in found:
+        ep = parse_episode_info(f["name"] or f["caption"])
+        if ep:
+            nm = args.series.strip() or ep["series"]
+            preview.setdefault(nm, []).append(ep["episode"])
+    if preview:
+        print("\nכך זה ייכנס לקטלוג:")
+        for nm, eps in preview.items():
+            eps = sorted(e for e in eps if e)
+            print(f"  \"{nm}\"  {len(eps)} פרקים  ({min(eps)}–{max(eps)})")
+    loose = len(found) - sum(len(v) for v in preview.values())
+    if loose:
+        print(f"  {loose} קבצים לא זוהו כפרקים — ייכנסו כפריטים בודדים")
+
     if not args.add:
         print("\nהרצה יבשה — לא שונה כלום. להוספה בפועל הוסף --add")
         return 0
@@ -183,9 +200,10 @@ async def main():
             "created_date": datetime.utcnow().isoformat() + "Z",
         }
         if ep:
-            base.update(title=ep["series"], series_name=ep["series"],
+            name = args.series.strip() or ep["series"]
+            base.update(title=name, series_name=name,
                         season_number=ep["season"], episode_number=ep["episode"],
-                        custom_slug=_slug_base(ep["series"]) or None)
+                        custom_slug=_slug_base(name) or None)
         else:
             t = clean_name(label) or label
             base.update(title=t, series_name=None, season_number=None,
