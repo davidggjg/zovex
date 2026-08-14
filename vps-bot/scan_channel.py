@@ -27,6 +27,17 @@ ap.add_argument("--category", default="אנימה", help="קטגוריה לפר�
 ap.add_argument("--limit", type=int, default=0, help="לעצור אחרי N הודעות (0=הכל)")
 args = ap.parse_args()
 
+# main.py דורש משתני סביבה שמוגדרים ב-.env, ואותו קובץ נטען רק ע"י systemd.
+# בהרצה ידנית מהטרמינל הם חסרים ו-main נופל בייבוא, ולכן טוענים אותם כאן.
+ENV_FILE = pathlib.Path("/opt/zovex-bot/.env")
+if ENV_FILE.exists():
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
 from pyrogram import Client
 from main import (API_ID, API_HASH, STREAM_CHANNEL_ID, parse_episode_info,
                   clean_name, _slug_base)
