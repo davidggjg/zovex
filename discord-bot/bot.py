@@ -607,6 +607,7 @@ DM_HELP = (
     "<מזהה משתמש> <רמה>       העלאה\n"
     "הורד <מזהה> <רמה>        הורדה\n"
     "מי <מזהה>                 אילו רמות יש לו\n"
+    "בדוק <מזהה>               מה הוא רואה בפועל ולמה\n"
     "רמות                      רשימת הרמות\n"
     "```\n"
     "רמות: `1` מאומת · `2` תמיכה · `3` צוות · `4` מנהל\n"
@@ -648,6 +649,36 @@ async def _handle_owner_dm(message: discord.Message):
     remove = parts[0] in ("הורד", "remove", "-")
     if remove:
         parts = parts[1:]
+
+    if parts and parts[0] in ("בדוק", "check", "debug") and len(parts) >= 2:
+        uid = re.sub(r"\D", "", parts[1])
+        member = guild.get_member(int(uid)) if uid.isdigit() else None
+        if member is None:
+            await message.channel.send("לא נמצא משתמש עם המזהה הזה בשרת.")
+            return
+        lines = [f"**{member}**",
+                 "תפקידים: " + (", ".join(r.name for r in member.roles
+                                          if r.name != "@everyone") or "אין"),
+                 ""]
+        # מה הוא רואה בפועל, לפי חישוב ההרשאות של דיסקורד עצמו
+        for cat in guild.categories:
+            can = cat.permissions_for(member).view_channel
+            kids = [c for c in cat.channels
+                    if c.permissions_for(member).view_channel]
+            lines.append(f"{'✅' if can else '⛔'} {cat.name} — {len(kids)}/"
+                         f"{len(cat.channels)} ערוצים")
+        # מי מוגדר במפורש על קטגוריית טיקטים אחת, לאימות ההרשאות
+        sample = next((c for c in guild.categories
+                       if c.name.startswith("טיקטים")), None)
+        if sample:
+            lines += ["", f"**הרשאות מוגדרות על '{sample.name}':**"]
+            for target, ov in sample.overwrites.items():
+                v = ov.pair()[0].view_channel or (
+                    None if not ov.pair()[1].view_channel else False)
+                lines.append(f"· {getattr(target, 'name', target)}: "
+                             f"{'רואה' if v else 'חסום'}")
+        await message.channel.send("\n".join(lines)[:1900])
+        return
 
     if parts and parts[0] in ("מי", "who") and len(parts) >= 2:
         uid = re.sub(r"\D", "", parts[1])
