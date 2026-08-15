@@ -170,6 +170,22 @@ class ReasonModal(discord.ui.Modal):
             style=discord.TextStyle.paragraph, max_length=1500, required=True)
         self.add_item(self.reason)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        """בלי זה כשל בפתיחת טיקט מופיע למשתמש כ'משהו השתבש' ונעלם בלוג."""
+        log.exception("פתיחת טיקט נכשלה: %s", error)
+        msg = f"פתיחת הטיקט נכשלה: {type(error).__name__}: {error}"[:1900]
+        if isinstance(error, discord.Forbidden):
+            msg = ("אין לבוט הרשאה ליצור את ערוץ הטיקט.\n"
+                   "הגדרות שרת → תפקידים → הבוט: Administrator, "
+                   "וגרור אותו לראש הרשימה.")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
@@ -236,7 +252,16 @@ class TicketTypeSelect(discord.ui.Select):
                          custom_id="zovex:ticket_type")
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ReasonModal(self.values[0]))
+        try:
+            await interaction.response.send_modal(ReasonModal(self.values[0]))
+        except Exception as e:
+            log.exception("פתיחת חלון הטיקט נכשלה: %s", e)
+            try:
+                await interaction.response.send_message(
+                    f"לא הצלחתי לפתוח את החלון: {type(e).__name__}: {e}"[:300],
+                    ephemeral=True)
+            except discord.HTTPException:
+                pass
 
 
 class TicketPanelView(discord.ui.View):
