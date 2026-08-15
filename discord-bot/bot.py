@@ -411,15 +411,22 @@ async def setup_cmd(interaction: discord.Interaction):
     support, staff, admin = roles[ROLE_SUPPORT], roles[ROLE_STAFF], roles[ROLE_ADMIN]
 
     # שינוי שם לערוצים/קטגוריות שהשם שלהם השתנה — במקום ליצור כפילות
+    # שינוי שם מודע-סוג: קטגוריה מול ערוץ נבדקות בנפרד, אחרת שינוי שם של
+    # ערוץ "תופס" את השם ומדלג על הקטגוריה — וזה יוצר קטגוריה כפולה וריקה.
     for old_name, new_name in RENAMES:
-        for obj in list(guild.channels) + list(guild.categories):
-            if obj.name == old_name and not discord.utils.get(
-                    guild.channels, name=new_name):
-                try:
-                    await obj.edit(name=new_name)
-                    created.append(f"שונה שם: {old_name} → {new_name}")
-                except discord.Forbidden:
-                    pass
+        for obj in list(guild.categories) + list(guild.channels):
+            if obj.name != old_name:
+                continue
+            pool = guild.categories if isinstance(obj, discord.CategoryChannel) \
+                else [c for c in guild.channels
+                      if not isinstance(c, discord.CategoryChannel)]
+            if any(o.name == new_name for o in pool):
+                continue
+            try:
+                await obj.edit(name=new_name)
+                created.append(f"שונה שם: {old_name} → {new_name}")
+            except discord.Forbidden:
+                pass
 
     def overwrites_for(vis):
         deny = discord.PermissionOverwrite(view_channel=False)
@@ -481,6 +488,18 @@ async def setup_cmd(interaction: discord.Interaction):
                 else:
                     existing = await guild.create_text_channel(ch_name, category=cat, overwrites=ow)
                 created.append(f"ערוץ {ch_name}")
+            else:
+                # ערוץ קיים מחזיק הרשאות משלו ולא יורש מהקטגוריה, ולכן תפקיד
+                # שנוסף מאוחר לא מגיע אליו — הקטגוריה נראית אבל היא ריקה.
+                # בנוסף מעבירים אותו לקטגוריה שהמבנה קובע, כדי לאחד שאריות.
+                try:
+                    if existing.category_id != cat.id:
+                        await existing.edit(category=cat, overwrites=ow)
+                        created.append(f"הועבר: {ch_name} → {cat_name}")
+                    else:
+                        await existing.edit(overwrites=ow)
+                except discord.Forbidden:
+                    pass
             if ch_name == "חוקים":
                 rules_ch = existing
             elif ch_name == "אימות":
@@ -510,6 +529,17 @@ async def setup_cmd(interaction: discord.Interaction):
                 await ch.set_permissions(
                     support_r, view_channel=True, send_messages=True,
                     manage_messages=True, read_message_history=True)
+            except discord.Forbidden:
+                pass
+
+    # קטגוריות ישנות שהתרוקנו אחרי שהערוצים עברו — מוסרות. רק שמות שמופיעים
+    # ברשימת שינויי-השם, כדי לא לגעת בקטגוריות שנוצרו ידנית.
+    legacy = {old for old, _ in RENAMES}
+    for cat in list(guild.categories):
+        if cat.name in legacy and not cat.channels:
+            try:
+                await cat.delete(reason="קטגוריה ישנה שהתרוקנה")
+                created.append(f"הוסרה קטגוריה ריקה: {cat.name}")
             except discord.Forbidden:
                 pass
 
