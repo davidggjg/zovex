@@ -48,6 +48,9 @@ if ENV_FILE.exists():
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 TOKEN = os.environ.get("DISCORD_TOKEN", "")
+# רק המזהה הזה יכול לנהל רמות בהודעה פרטית לבוט. כל אחד אחר מקבל תשובה
+# כללית ולא רואה שהפקודות קיימות בכלל.
+OWNER_ID = int(os.environ.get("DISCORD_OWNER_ID", "1532515146751017030"))
 
 ROLE_VERIFIED = "מאומת"
 ROLE_SUPPORT = "תמיכה"     # עונה לטיקטים
@@ -565,6 +568,140 @@ async def close_cmd(interaction: discord.Interaction):
         return
     await interaction.response.send_message("סוגר ושולח תמליל...")
     await close_ticket(ch, interaction.user)
+
+
+# ── ניהול רמות בהודעה פרטית (הבעלים בלבד) ───────────────────────────────────
+# שולחים לבוט בפרטי:  <מזהה משתמש> <רמה>     למשל:  123456789 תמיכה
+# להורדה:             הורד <מזהה> <רמה>
+# רשימת רמות:         רמות
+
+LEVELS = {
+    "1": ROLE_VERIFIED, "מאומת": ROLE_VERIFIED, "verified": ROLE_VERIFIED,
+    "2": ROLE_SUPPORT,  "תמיכה": ROLE_SUPPORT,  "support": ROLE_SUPPORT,
+    "3": ROLE_STAFF,    "צוות": ROLE_STAFF,     "staff": ROLE_STAFF,
+    "4": ROLE_ADMIN,    "מנהל": ROLE_ADMIN,     "admin": ROLE_ADMIN,
+}
+
+DM_HELP = (
+    "**ניהול רמות**\n"
+    "```\n"
+    "<מזהה משתמש> <רמה>       העלאה\n"
+    "הורד <מזהה> <רמה>        הורדה\n"
+    "מי <מזהה>                 אילו רמות יש לו\n"
+    "רמות                      רשימת הרמות\n"
+    "```\n"
+    "רמות: `1` מאומת · `2` תמיכה · `3` צוות · `4` מנהל\n"
+    "אפשר גם בשם: `123456789 תמיכה`"
+)
+
+
+def _guild_for_owner():
+    """השרת שבו מנהלים. אם הבוט בכמה — DISCORD_GUILD_ID קובע."""
+    gid = os.environ.get("DISCORD_GUILD_ID")
+    if gid and gid.isdigit():
+        return bot.get_guild(int(gid))
+    return bot.guilds[0] if bot.guilds else None
+
+
+async def _handle_owner_dm(message: discord.Message):
+    text = (message.content or "").strip()
+    if not text:
+        return
+    low = text.lower()
+
+    if low in ("עזרה", "help", "?"):
+        await message.channel.send(DM_HELP)
+        return
+    if low in ("רמות", "levels"):
+        await message.channel.send(
+            "‎1 · מאומת — גישה רגילה\n"
+            "‎2 · תמיכה — עונה לטיקטים\n"
+            "‎3 · צוות — צוות בכיר\n"
+            "‎4 · מנהל — הכל, כולל קטגוריית ההנהלה")
+        return
+
+    guild = _guild_for_owner()
+    if guild is None:
+        await message.channel.send("הבוט לא נמצא באף שרת.")
+        return
+
+    parts = text.split()
+    remove = parts[0] in ("הורד", "remove", "-")
+    if remove:
+        parts = parts[1:]
+
+    if parts and parts[0] in ("מי", "who") and len(parts) >= 2:
+        uid = re.sub(r"\D", "", parts[1])
+        member = guild.get_member(int(uid)) if uid.isdigit() else None
+        if member is None:
+            await message.channel.send("לא נמצא משתמש עם המזהה הזה בשרת.")
+            return
+        names = [r.name for r in member.roles if r.name != "@everyone"]
+        await message.channel.send(
+            f"**{member}**\nרמות: {', '.join(names) if names else 'אין'}")
+        return
+
+    if len(parts) < 2:
+        await message.channel.send(DM_HELP)
+        return
+
+    uid = re.sub(r"\D", "", parts[0])          # מקבל גם <@123> וגם 123
+    level_key = " ".join(parts[1:]).strip().lower()
+    role_name = LEVELS.get(level_key)
+    if not uid.isdigit() or role_name is None:
+        await message.channel.send(
+            f"לא הבנתי. הרמה '{' '.join(parts[1:])}' לא מוכרת.\n\n" + DM_HELP)
+        return
+
+    member = guild.get_member(int(uid))
+    if member is None:
+        try:                                    # אולי פשוט לא במטמון
+            member = await guild.fetch_member(int(uid))
+        except discord.NotFound:
+            await message.channel.send(f"אין בשרת משתמש עם המזהה `{uid}`.")
+            return
+        except discord.Forbidden:
+            await message.channel.send("אין לי הרשאה לקרוא את רשימת החברים.")
+            return
+
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role is None:
+        await message.channel.send(
+            f"התפקיד '{role_name}' לא קיים בשרת. הרץ /setup קודם.")
+        return
+
+    try:
+        if remove:
+            await member.remove_roles(role, reason=f"הורדת רמה ע\"י הבעלים")
+            await message.channel.send(f"✅ הורדה: **{member}** כבר לא **{role_name}**")
+        else:
+            # רמה כלשהי מחייבת גם אימות, אחרת הוא לא רואה את הערוצים
+            verified = discord.utils.get(guild.roles, name=ROLE_VERIFIED)
+            to_add = [role] + ([verified] if verified and verified not in member.roles
+                               and role_name != ROLE_VERIFIED else [])
+            await member.add_roles(*to_add, reason="העלאת רמה ע\"י הבעלים")
+            extra = " (וגם מאומת)" if len(to_add) > 1 else ""
+            await message.channel.send(f"✅ **{member}** קיבל **{role_name}**{extra}")
+        log.info("רמה: %s %s ל-%s", "הורדה" if remove else "העלאה", role_name, member)
+    except discord.Forbidden:
+        await message.channel.send(
+            f"אין לי הרשאה לתת את '{role_name}'. גרור את תפקיד הבוט לראש "
+            "רשימת התפקידים — דיסקורד חוסם מתן תפקיד שנמצא מעליו.")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if isinstance(message.channel, discord.DMChannel):
+        if message.author.id == OWNER_ID:
+            await _handle_owner_dm(message)
+        else:
+            await message.channel.send(
+                "היי. לתמיכה פתח טיקט בערוץ **פתיחת-טיקט** בשרת — "
+                "שם הצוות רואה ועונה.")
+        return
+    await bot.process_commands(message)
 
 
 @bot.event
