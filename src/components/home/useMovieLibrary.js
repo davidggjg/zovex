@@ -40,16 +40,23 @@ export function useMovieLibrary() {
     setLoading(false);
   };
 
-  // רענון שידורים חיים. בשרת — מ-/content (אותו origin); אחרת מ-GitHub.
-  const LIVE_SRC = import.meta.env.VITE_CONTENT_URL
-    || "https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json";
-  const loadLiveFromGitHub = async () => {
-    try {
-      const res = await fetch(`${LIVE_SRC}?t=` + Date.now());
-      if (!res.ok) return;
-      const all = await res.json();
-      setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
-    } catch {}
+  // רענון שידורים חיים. /content/live מחזיר רק את הערוצים (עשרות KB) במקום
+  // את כל הקטלוג. הגרסה הקודמת משכה את movies.json המלא מגיטהאב עם
+  // cache-buster — כלומר הורדה שלמה בכל טעינה ועוד אחת כל 5 דקות, וגם זה
+  // כבר החזיר 404 כי הקובץ לא קיים שם יותר. בלי `?t=`: ה-ETag של השרת נותן
+  // 304 ריק כשאין שינוי, וזה מהיר יותר מכל cache-buster.
+  const LIVE_FALLBACK = import.meta.env.VITE_CONTENT_URL || "";
+  const loadLiveChannels = async () => {
+    for (const url of ["/content/live", LIVE_FALLBACK].filter(Boolean)) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const all = await res.json();
+        if (!Array.isArray(all)) continue;
+        setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
+        return;
+      } catch {}
+    }
   };
 
   useEffect(() => { loadMovies(); }, []);
@@ -72,7 +79,7 @@ export function useMovieLibrary() {
     };
   }, []);
   useEffect(() => {
-    loadLiveFromGitHub();
+    loadLiveChannels();
     // אם אין שידורים חיים כרגע — בדוק פעם אחת בטעינה ועצור (אין טעם לפולינג מתמשך)
     if (liveChannels.length === 0) return;
     // יש שידור חי פעיל — בדוק כל כמה דקות אם יש שינויים.
@@ -82,7 +89,7 @@ export function useMovieLibrary() {
     // ברקע שהאט הכל, כולל נגינת וידאו לא קשורה בכלל (כמו שידור חי
     // מ-CDN חיצוני). 5 דקות מספיק מהיר בשביל לתפוס עדכון שידור חי בזמן
     // סביר, בלי להוריד את אותו קובץ ענק שוב ושוב כל חצי דקה.
-    const interval = setInterval(loadLiveFromGitHub, 5 * 60 * 1000);
+    const interval = setInterval(loadLiveChannels, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [liveChannels.length]);
 

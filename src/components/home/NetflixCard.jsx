@@ -17,9 +17,20 @@ function buildCardHref(item, isSer, isLive) {
   return `/${slug}`;
 }
 
+// TMDB מגיש את אותה תמונה בכמה רוחבים, והקטלוג שמור כולו ב-w500 — 127KB
+// לפוסטר. כרטיס הוא 130-170 פיקסלים, כלומר גם ב-DPR 2 מספיק w342, ובנייד
+// w185 (~30KB). מסך מלא של 60 כרטיסים ירד מ-7.6MB ל-1.8MB, וזה בדיוק הזמן
+// שבו רואים ריבועים ריקים. רק כתובות TMDB נוגעות — לכל השאר לא נוגעים.
+function posterUrl(url, cardW) {
+  if (!url || url.indexOf("image.tmdb.org") < 0) return url;
+  const want = cardW <= 150 ? "w185" : "w342";
+  return url.replace(/\/t\/p\/w\d+\//, `/t/p/${want}/`);
+}
+
 function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
   const title = isSer ? item.name : item.title;
   const href = buildCardHref(item, isSer, isLive);
+  const poster = posterUrl(item.thumbnail_url, cardW);
   return (
     <a
       href={href}
@@ -29,15 +40,15 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
       <div style={{ width: cardW, height: cardH, borderRadius: 12, overflow: "hidden", background: isLive ? "#1a1a1a" : "#1c1c1e", position: "relative", border: isLive ? "2px solid #e50914" : "none", transition: "transform .18s", boxShadow: "0 2px 8px rgba(0,0,0,.4)" }}
         onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,.18)"; }}
         onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,.10)"; }}>
-        {isLive && item.thumbnail_url ? (
-          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", padding: 10, boxSizing: "border-box", display: "block" }} onError={e => e.target.style.display = "none"} />
+        {isLive && poster ? (
+          <img src={poster} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", padding: 10, boxSizing: "border-box", display: "block" }} onError={e => e.target.style.display = "none"} />
         ) : isLive ? (
           <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "linear-gradient(135deg,#1a1a1a,#2a0a0c)" }}>
             <Eye size={30} color="#e50914" strokeWidth={2} />
             <span style={{ fontSize: 10, color: "#fff", fontWeight: 700, textAlign: "center", padding: "0 8px" }}>שידור חי</span>
           </div>
-        ) : item.thumbnail_url ? (
-          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
+        ) : poster ? (
+          <img src={poster} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
         ) : (
           <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, background: "#1c1c1e", color: "#666" }}>🎬</div>
         )}

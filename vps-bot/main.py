@@ -9,6 +9,7 @@ import os
 import random
 import re
 import sys
+import gzip
 import json
 import time
 import hmac
@@ -4096,18 +4097,46 @@ async def channels_list(req: PoolPwReq, request: Request):
 # מה שהאט כל טעינת דף באתר. מוחזק כאן גוף JSON מוכן, שנבנה מחדש רק כשהתוכן משתנה
 # (לפי הגרסה) או כל CONTENT_CACHE_TTL שניות (כדי לרענן את חתימות הקישורים — הן
 # תקפות 6 שעות, אז רענון כל כמה דקות בטוח). כך כמעט כל בקשה מוגשת מיידית.
-_content_resp_cache = {"ver": None, "built": 0.0, "body": None}
 CONTENT_CACHE_TTL = 180
 
-def _cached_content_body():
-    ver = get_content_version()
+# מטמון גופי JSON מוכנים — מקודדים ל-bytes וגם דחוסים מראש.
+# הגרסה הקודמת שמרה מחרוזת בלבד, כך שכל בקשה עדיין עשתה encode של ~12MB
+# ו-nginx דחס אותם מחדש. זה ~1 שנייה של CPU לכל טעינת דף, על אותו תהליך
+# שמזרים את הווידאו — ולכן גם הנגן נתקע כשמישהו נכנס לאתר. כאן הכל נבנה
+# פעם אחת לגרסה, וכל בקשה היא העתקת בייטים.
+_JSON_CACHE: dict = {}
+_JSON_CACHE_MAX = 8          # מגן מפני ?limit= שרירותי שינפח את הזיכרון
+
+
+def _cached_payload(key: str, ver: int, build, ttl: float = CONTENT_CACHE_TTL):
+    """גוף מוכן למפתח נתון. build() נקרא רק כשהמטמון פג או שהתוכן השתנה."""
     now = time.time()
-    c = _content_resp_cache
-    if c["body"] is not None and c["ver"] == ver and (now - c["built"]) < CONTENT_CACHE_TTL:
-        return c["body"], ver
-    body = json.dumps(_expand_urls(load_content()), ensure_ascii=False)
-    c.update(ver=ver, built=now, body=body)
-    return body, ver
+    c = _JSON_CACHE.get(key)
+    if c and c["ver"] == ver and (now - c["built"]) < ttl:
+        return c
+    raw = json.dumps(build(), ensure_ascii=False).encode("utf-8")
+    c = {"ver": ver, "built": now, "raw": raw,
+         # רמה 5: כמעט אותו יחס דחיסה כמו 6 בכשליש מהזמן, וזה רץ פעם אחת
+         "gz": gzip.compress(raw, 5) if len(raw) > 4096 else None}
+    if len(_JSON_CACHE) >= _JSON_CACHE_MAX:
+        _JSON_CACHE.pop(next(iter(_JSON_CACHE)), None)
+    _JSON_CACHE[key] = c
+    return c
+
+
+def _serve_cached(request: Request, c: dict, etag: str, extra: dict = None) -> Response:
+    """מגיש גוף מהמטמון, דחוס אם הלקוח תומך, עם ETag ל-304."""
+    headers = {"ETag": etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if extra:
+        headers.update(extra)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    body = c["raw"]
+    if c["gz"] and "gzip" in (request.headers.get("accept-encoding") or ""):
+        body, headers["Content-Encoding"] = c["gz"], "gzip"
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
 
 # ── קטלוג רזה לאתר ────────────────────────────────────────────────────────────
 # מדידה: האתר הוריד ופרסר את כל 10,472 הפריטים לפני שצייר פיקסל אחד — 1MB
@@ -4117,7 +4146,9 @@ def _cached_content_body():
 # video_id הכפול (זהה ל-video_url ב-6709 פריטים; הפרונט ממילא נופל אחורה
 # ל-video_url). video_url נשאר — בלעדיו אי אפשר לנגן.
 _LITE_DROP = ("description",)
-_lite_cache: dict = {"ver": None, "body": None}
+# ה-limit-ים שנשמרים במטמון. כל ערך אחר מוגש מהרשימה בלי גוף שמור, כדי
+# ש-?limit=123 מכל מיני מקורות לא ימלא את הזיכרון בגרסאות של אותו קטלוג.
+_LITE_LIMITS = (0, 800)
 
 
 def _lite_items():
@@ -4133,30 +4164,61 @@ def _lite_items():
 @api.get("/content/lite")
 async def content_lite(request: Request, limit: int = 0):
     """קטלוג לתצוגה. limit>0 מחזיר רק את ה-N הראשונים (ציור מהיר של מסך הבית),
-    ואז האתר מושך את השאר ברקע."""
+    ואז האתר מושך את השאר ברקע.
+
+    ה-TTL כאן חיוני ולא רק לביצועים: הקישורים חתומים ותקפים 6 שעות, וגרסה
+    קודמת רעננה רק כשהתוכן השתנה — כך שיממה בלי עריכה הגישה חתימות פגות.
+    """
     ver = get_content_version()
-    if _lite_cache["ver"] != ver:
-        _lite_cache.update(ver=ver, body=_lite_items())
-    items = _lite_cache["body"]
-    total = len(items)
-    if limit and limit > 0:
-        items = items[:limit]
-    etag = f'W/"l{ver}-{limit or 0}"'
-    headers = {"X-Content-Version": str(ver), "X-Total": str(total),
-               "ETag": etag, "Cache-Control": "no-cache"}
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=headers)
+    limit = max(0, limit)
+    key = f"lite:{limit}" if limit in _LITE_LIMITS else None
+    if key:
+        c = _cached_payload(key, ver,
+                            lambda: _lite_items()[:limit] if limit else _lite_items())
+        etag = f'W/"l{ver}-{limit}"'
+        return _serve_cached(request, c, etag, {"X-Content-Version": str(ver)})
+    # limit חריג — נבנה בלי לשמור
+    items = _lite_items()[:limit]
     return Response(content=json.dumps(items, ensure_ascii=False),
-                    media_type="application/json", headers=headers)
+                    media_type="application/json",
+                    headers={"X-Content-Version": str(ver), "Cache-Control": "no-cache"})
+
+
+@api.get("/content/live")
+async def content_live(request: Request):
+    """רק השידורים החיים (~230 פריטים, עשרות KB).
+
+    האתר מרענן שידורים חיים כל 5 דקות, וקודם הוריד לשם כך את כל הקטלוג —
+    כלומר מגה-בייטים כל רבע שעה לכל לשונית פתוחה, רק כדי לבדוק אם ערוץ אחד
+    השתנה.
+    """
+    ver = get_content_version()
+    c = _cached_payload("live", ver,
+                        lambda: [e for e in _lite_items() if e.get("is_live")])
+    return _serve_cached(request, c, f'W/"v{ver}"', {"X-Content-Version": str(ver)})
+
+
+# אינדקס לפי מזהה. קודם כל בקשה לתיאור סרקה את כל 11,747 הפריטים ובנתה
+# מחדש את כל הקישורים החתומים — כלומר פתיחת כרטיסייה עלתה כמו טעינת קטלוג.
+_item_index: dict = {"ver": None, "built": 0.0, "by_id": {}}
+
+
+def _items_by_id(ver: int) -> dict:
+    now = time.time()
+    if _item_index["ver"] != ver or (now - _item_index["built"]) >= CONTENT_CACHE_TTL:
+        _item_index.update(ver=ver, built=now,
+                           by_id={str(e.get("id")): e
+                                  for e in _expand_urls(load_content())})
+    return _item_index["by_id"]
 
 
 @api.get("/content/item/{item_id}")
 async def content_item(item_id: str):
     """פריט בודד עם כל השדות — משמש למשיכת התיאור כשפותחים סרט/סדרה."""
-    for e in _expand_urls(load_content()):
-        if str(e.get("id")) == item_id:
-            return JSONResponse(e, headers={"Cache-Control": "public, max-age=300"})
-    raise HTTPException(404, "not found")
+    e = _items_by_id(get_content_version()).get(item_id)
+    if e is None:
+        raise HTTPException(404, "not found")
+    return JSONResponse(e, headers={"Cache-Control": "public, max-age=300"})
 
 
 def _content_response(request: Request) -> Response:
@@ -4167,16 +4229,9 @@ def _content_response(request: Request) -> Response:
     שינוי — במקום מגה שלם. Cache-Control: no-cache פירושו "שמור אבל תמיד אמת",
     כך שעדכון תוכן מגיע מיד ואין סכנה שמישהו יראה קטלוג ישן.
     """
-    body, ver = _cached_content_body()
-    etag = f'W/"c{ver}"'
-    headers = {
-        "X-Content-Version": str(ver),
-        "ETag": etag,
-        "Cache-Control": "no-cache",
-    }
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=headers)
-    return Response(content=body, media_type="application/json", headers=headers)
+    ver = get_content_version()
+    c = _cached_payload("full", ver, lambda: _expand_urls(load_content()))
+    return _serve_cached(request, c, f'W/"c{ver}"', {"X-Content-Version": str(ver)})
 
 @api.get("/content")
 async def content_get(request: Request):
