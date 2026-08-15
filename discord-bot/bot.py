@@ -8,6 +8,9 @@
 · לחיצה על "פתח טיקט" פותחת בחירת סוג, ואז חלון שבו כותבים את הסיבה.
 · הטיקט נפתח כערוץ פרטי בקטגוריה של אותו סוג, עם כפתורי "אני מטפל" ו"סגור".
 · בסגירה נשלח תמליל מלא בפרטי — גם לפותח וגם למי שלקח את הטיקט.
+· ארבע דרגות: מאומת → תמיכה → צוות → בעלים. לכל דרגה אזור משלה עם חדר
+  קול פרטי, וכל דרגה רואה את האזורים שמתחתיה בלבד.
+· בקשות להוספת תוכן אינן טיקט — יש להן ערוץ ייעודי, "בקשות-תוכן".
 
 הרצה
 ----
@@ -32,7 +35,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from rules import (RULES, RULES_TITLE, RULES_INTRO, RULES_FOOTER, SERVER_NAME,
-                   WELCOME_AFTER_VERIFY, TICKET_TYPES, TICKET_PROMPTS)
+                   WELCOME_AFTER_VERIFY, TICKET_TYPES, TICKET_PROMPTS,
+                   CONTENT_REQUEST_TITLE, CONTENT_REQUEST_BODY)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)s | %(message)s")
@@ -53,9 +57,13 @@ TOKEN = os.environ.get("DISCORD_TOKEN", "")
 OWNER_ID = int(os.environ.get("DISCORD_OWNER_ID", "1532515146751017030"))
 
 ROLE_VERIFIED = "מאומת"
-ROLE_SUPPORT = "תמיכה"     # עונה לטיקטים
-ROLE_STAFF = "צוות"        # צוות בכיר
-ROLE_ADMIN = "מנהל"
+ROLE_SUPPORT = "תמיכה"     # עונה לטיקטים, מוחק הודעות
+ROLE_STAFF = "צוות"        # גם פאנל הניהול והעלאת תוכן
+ROLE_ADMIN = "בעלים"       # הדרגה הגבוהה ביותר
+
+# תפקידים ששמם השתנה — /setup ישנה במקום ליצור חדש, אחרת כל מי שהיה
+# ב"מנהל" מאבד את ההרשאות שלו ברגע שהמבנה מדבר על "בעלים".
+ROLE_RENAMES = [("מנהל", ROLE_ADMIN)]
 
 COLOR = 0xE50914
 
@@ -63,27 +71,40 @@ COLOR = 0xE50914
 # (שם קטגוריה, [(שם ערוץ, סוג)], מי רואה)
 #   visibility: "public"   — כולם, גם לפני אימות
 #               "verified" — רק אחרי אימות
-#               "staff"    — צוות ומנהלים בלבד
+#               "support"  — תמיכה ומעלה
+#               "staff"    — צוות ובעלים בלבד (תמיכה לא רואה)
+#               "admin"    — בעלים בלבד
+# לכל דרגה יש אזור משלה עם חדר קול פרטי, וכל דרגה רואה גם את האזורים
+# שמתחתיה. כך "חדר-תמיכה" פתוח לתמיכה/צוות/בעלים, ו"חדר-בעלים" לבעלים בלבד.
 SERVER_LAYOUT = [
     ("ברוכים הבאים", [("חוקים", "text"), ("אימות", "text")], "public"),
     ("מידע", [("הודעות", "text"), ("עדכוני-גרסה", "text")], "verified"),
     ("צאט-ראשי", [("צאט-ראשי", "text"), ("מדיה", "text"),
                   ("המלצות", "text"), ("אוף-טופיק", "text")], "verified"),
+    ("בקשות", [("בקשות-תוכן", "text")], "verified"),
     ("צפייה משותפת", [("על-מה-צופים", "text"), ("צפייה-1", "voice"),
                       ("צפייה-2", "voice"), ("צפייה-3", "voice")], "verified"),
     ("דיבורים", [("דיבורים-כללי", "voice"), ("מוזיקה", "voice"),
                  ("שקט", "voice")], "verified"),
     ("תמיכה", [("פתיחת-טיקט", "text")], "verified"),
+    ("אזור תמיכה", [("תמיכה-צאט", "text"), ("חדר-תמיכה", "voice")], "support"),
     ("צוות", [("צוות-כללי", "text"), ("לוג-טיקטים", "text"),
               ("חדר-צוות", "voice")], "staff"),
-    ("הנהלה", [("הנהלה-כללי", "text"), ("חדר-הנהלה", "voice")], "admin"),
+    ("בעלים", [("בעלים-כללי", "text"), ("חדר-בעלים", "voice")], "admin"),
 ]
 
 # שמות שהשתנו — /setup ישנה אותם במקום ליצור כפילות
 RENAMES = [
     ("צאט-כללי", "צאט-ראשי"),
     ("כללי", "צאט-ראשי"),          # שם הקטגוריה הישן
+    ("הנהלה", "בעלים"),
+    ("הנהלה-כללי", "בעלים-כללי"),
+    ("חדר-הנהלה", "חדר-בעלים"),
 ]
+
+# קטגוריות שכבר לא במבנה. מוסרות ב-/setup רק אם הן ריקות, כדי לא למחוק
+# טיקטים פתוחים שעדיין יושבים שם.
+OBSOLETE_CATEGORIES = ["טיקטים · בקשות תוכן"]
 
 
 def ticket_type(tid):
@@ -384,10 +405,15 @@ def _is_staff(member: discord.Member) -> bool:
 
 def _staff_only_overwrites(guild):
     ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+    verified = discord.utils.get(guild.roles, name=ROLE_VERIFIED)
+    if verified:
+        ow[verified] = discord.PermissionOverwrite(view_channel=False)
     for name in (ROLE_SUPPORT, ROLE_STAFF, ROLE_ADMIN):
         r = discord.utils.get(guild.roles, name=name)
         if r:
-            ow[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            ow[r] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_messages=True,
+                read_message_history=True, attach_files=True, embed_links=True)
     return ow
 
 
@@ -419,6 +445,17 @@ async def setup_cmd(interaction: discord.Interaction):
             PERM_HELP + f"\n\nחסר כרגע: {', '.join(missing)}", ephemeral=True)
         return
     created = []
+
+    # שינוי שם לתפקידים לפני היצירה — אחרת ייווצר תפקיד חדש וריק לצד הישן
+    # וכל מי שהיה בו יאבד את ההרשאות.
+    for old_name, new_name in ROLE_RENAMES:
+        old = discord.utils.get(guild.roles, name=old_name)
+        if old and not discord.utils.get(guild.roles, name=new_name):
+            try:
+                await old.edit(name=new_name, reason="שינוי שם דרגה")
+                created.append(f"תפקיד שונה: {old_name} → {new_name}")
+            except discord.Forbidden:
+                pass
 
     # תפקידים
     roles = {}
@@ -457,50 +494,51 @@ async def setup_cmd(interaction: discord.Interaction):
             except discord.Forbidden:
                 pass
 
+    # סולם הדרגות. אזור בדרגה X נפתח לכל מי שנמצא ב-X ומעלה, ונחסם במפורש
+    # לכל מי שמתחת — חסימה מפורשת ולא היעדר הרשאה, כדי שתפקיד נוסף שמישהו
+    # מחזיק לא "יפתח" לו בטעות אזור גבוה יותר.
+    TIERS = [(ROLE_SUPPORT, support), (ROLE_STAFF, staff), (ROLE_ADMIN, admin)]
+
     def overwrites_for(vis):
         deny = discord.PermissionOverwrite(view_channel=False)
-        # מי שיכול לכתוב בערוצי הצוות בכל רמה
-        team = {}
-        for r, level in ((support, "support"), (staff, "staff"), (admin, "admin")):
-            if r:
-                team[r] = level
+        talk = lambda **kw: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True,
+            attach_files=True, embed_links=True, add_reactions=True,
+            connect=True, speak=True, **kw)
+
         if vis == "public":
             # חוקים ואימות — כולם רואים, אף אחד לא כותב חוץ מהצוות
             ow = {guild.default_role: discord.PermissionOverwrite(
                       view_channel=True, send_messages=False, add_reactions=False)}
-            for r in team:
-                ow[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            for _, r in TIERS:
+                if r:
+                    ow[r] = discord.PermissionOverwrite(view_channel=True,
+                                                        send_messages=True)
             return ow
+
         if vis == "verified":
-            # כל מי שאומת רואה, כותב, ומדבר בקול
-            ow = {guild.default_role: deny,
-                  verified: discord.PermissionOverwrite(
-                      view_channel=True, send_messages=True, add_reactions=True,
-                      attach_files=True, embed_links=True, read_message_history=True,
-                      connect=True, speak=True)}
-            for r in team:
-                ow[r] = discord.PermissionOverwrite(
-                    view_channel=True, send_messages=True, connect=True, speak=True,
-                    manage_messages=True)
-            return ow
-        if vis == "staff":
+            # כל מי שאומת רואה, כותב ומדבר. תמיכה ומעלה גם מוחקים הודעות.
             ow = {guild.default_role: deny}
-            for r in team:
-                ow[r] = discord.PermissionOverwrite(
-                    view_channel=True, send_messages=True, connect=True, speak=True)
+            if verified:
+                ow[verified] = talk()
+            for _, r in TIERS:
+                if r:
+                    ow[r] = talk(manage_messages=True)
             return ow
-        # admin — הנהלה בלבד
+
+        # אזור דרגה: פתוח מהדרגה הזו ומעלה, חסום במפורש מתחתיה
+        order = ["support", "staff", "admin"]      # מקביל ל-TIERS, באותו סדר
+        floor = order.index(vis) if vis in order else 0
         ow = {guild.default_role: deny}
-        if staff:
-            ow[staff] = deny
-        if support:
-            ow[support] = deny
-        if admin:
-            ow[admin] = discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, connect=True, speak=True)
+        if verified:
+            ow[verified] = deny
+        for i, (_, r) in enumerate(TIERS):
+            if not r:
+                continue
+            ow[r] = talk(manage_messages=True) if i >= floor else deny
         return ow
 
-    rules_ch = verify_ch = panel_ch = None
+    rules_ch = verify_ch = panel_ch = content_ch = None
     for cat_name, channels, vis in SERVER_LAYOUT:
         ow = overwrites_for(vis)
         cat = discord.utils.get(guild.categories, name=cat_name)
@@ -535,12 +573,13 @@ async def setup_cmd(interaction: discord.Interaction):
                 verify_ch = existing
             elif ch_name == "פתיחת-טיקט":
                 panel_ch = existing
+            elif ch_name == "בקשות-תוכן":
+                content_ch = existing
 
     # קטגוריות הטיקטים — אחת לכל סוג, גלויות לצוות בלבד.
     # מרעננים הרשאות גם לקיימות: תפקיד שנוסף אחרי היצירה (למשל "תמיכה")
     # לא נכנס להרשאות שנקבעו בזמנו, והמשתמש מקבל את התפקיד אבל לא רואה כלום.
     ticket_ow = _staff_only_overwrites(guild)
-    ticket_cats = set()
     for t in TICKET_TYPES:
         cat = discord.utils.get(guild.categories, name=t[4])
         if cat is None:
@@ -548,22 +587,25 @@ async def setup_cmd(interaction: discord.Interaction):
             created.append(f"קטגוריה {t[4]}")
         else:
             await cat.edit(overwrites=ticket_ow)
-        ticket_cats.add(cat.id)
 
-    # וגם טיקטים פתוחים כרגע — שם ההרשאות נקבעו לכל ערוץ בנפרד
-    support_r = roles[ROLE_SUPPORT]
+    # וגם טיקטים פתוחים כרגע — שם ההרשאות נקבעו לכל ערוץ בנפרד ברגע היצירה,
+    # ולכן תפקיד שנוצר או שונה אחר כך פשוט לא קיים שם. מזוהים לפי ה-topic
+    # ולא לפי הקטגוריה, כדי לתפוס גם טיקטים שהוזזו ידנית.
     for ch in guild.text_channels:
-        if ch.category_id in ticket_cats and (ch.topic or "").startswith("zovex|"):
+        if not (ch.topic or "").startswith("zovex|"):
+            continue
+        for r in (roles[ROLE_SUPPORT], roles[ROLE_STAFF], roles[ROLE_ADMIN]):
             try:
                 await ch.set_permissions(
-                    support_r, view_channel=True, send_messages=True,
+                    r, view_channel=True, send_messages=True,
                     manage_messages=True, read_message_history=True)
             except discord.Forbidden:
                 pass
+        created.append(f"רועננו הרשאות בטיקט {ch.name}")
 
     # קטגוריות ישנות שהתרוקנו אחרי שהערוצים עברו — מוסרות. רק שמות שמופיעים
-    # ברשימת שינויי-השם, כדי לא לגעת בקטגוריות שנוצרו ידנית.
-    legacy = {old for old, _ in RENAMES}
+    # ברשימת שינויי-השם או ברשימת המיושנות, כדי לא לגעת בקטגוריות ידניות.
+    legacy = {old for old, _ in RENAMES} | set(OBSOLETE_CATEGORIES)
     for cat in list(guild.categories):
         if cat.name in legacy and not cat.channels:
             try:
@@ -599,16 +641,30 @@ async def setup_cmd(interaction: discord.Interaction):
             color=COLOR)
         for t in TICKET_TYPES:
             emb.add_field(name=f"{t[2]} {t[1]}", value=t[3], inline=True)
+        emb.add_field(name="🎬 בקשה להוסיף תוכן",
+                      value="לא נפתחת כטיקט — כותבים בערוץ **בקשות-תוכן**.",
+                      inline=False)
         await panel_ch.send(embed=emb, view=TicketPanelView())
+    if content_ch:
+        await content_ch.purge(limit=20, check=lambda m: m.author == guild.me)
+        emb = discord.Embed(title=CONTENT_REQUEST_TITLE,
+                            description=CONTENT_REQUEST_BODY, color=COLOR)
+        msg_pin = await content_ch.send(embed=emb)
+        try:
+            await msg_pin.pin(reason="הסבר קבוע בערוץ הבקשות")
+        except discord.HTTPException:
+            pass
 
     msg = (f"השרת נבנה. נוצרו {len(created)} פריטים.\n\n"
            "**חשוב:** גררו את תפקיד הבוט לראש רשימת התפקידים, אחרת הוא לא "
            "יוכל להעניק אותם.\n\n"
            "**התפקידים, מהגבוה לנמוך:**\n"
-           f"· **{ROLE_ADMIN}** — הכל, כולל קטגוריית ההנהלה\n"
-           f"· **{ROLE_STAFF}** — צוות בכיר, רואה את ערוצי הצוות והטיקטים\n"
-           f"· **{ROLE_SUPPORT}** — עונה לטיקטים בלבד\n"
-           f"· **{ROLE_VERIFIED}** — ניתן אוטומטית בלחיצה על כפתור האימות")
+           f"· **{ROLE_ADMIN}** — הכל, כולל 'בעלים' ו'חדר-בעלים'\n"
+           f"· **{ROLE_STAFF}** — פאנל הניהול והעלאת תוכן. רואה 'צוות' + 'חדר-צוות'\n"
+           f"· **{ROLE_SUPPORT}** — טיקטים ומחיקת הודעות. רואה 'אזור תמיכה' + "
+           "'חדר-תמיכה'\n"
+           f"· **{ROLE_VERIFIED}** — ניתן אוטומטית בלחיצה על כפתור האימות\n\n"
+           "כל דרגה רואה גם את האזורים שמתחתיה, ולא את אלה שמעליה.")
     await interaction.followup.send(msg[:1900], ephemeral=True)
     log.info("setup הושלם: %d פריטים", len(created))
 
@@ -657,7 +713,9 @@ LEVELS = {
     "1": ROLE_VERIFIED, "מאומת": ROLE_VERIFIED, "verified": ROLE_VERIFIED,
     "2": ROLE_SUPPORT,  "תמיכה": ROLE_SUPPORT,  "support": ROLE_SUPPORT,
     "3": ROLE_STAFF,    "צוות": ROLE_STAFF,     "staff": ROLE_STAFF,
-    "4": ROLE_ADMIN,    "מנהל": ROLE_ADMIN,     "admin": ROLE_ADMIN,
+    "4": ROLE_ADMIN,    "בעלים": ROLE_ADMIN,    "admin": ROLE_ADMIN,
+    "מנהל": ROLE_ADMIN,   # השם הישן, כדי שהרגל ישן לא ייכשל
+    "owner": ROLE_ADMIN,
 }
 
 DM_HELP = (
@@ -669,7 +727,7 @@ DM_HELP = (
     "בדוק <מזהה>               מה הוא רואה בפועל ולמה\n"
     "רמות                      רשימת הרמות\n"
     "```\n"
-    "רמות: `1` מאומת · `2` תמיכה · `3` צוות · `4` מנהל\n"
+    "רמות: `1` מאומת · `2` תמיכה · `3` צוות · `4` בעלים\n"
     "אפשר גם בשם: `123456789 תמיכה`"
 )
 
@@ -693,10 +751,10 @@ async def _handle_owner_dm(message: discord.Message):
         return
     if low in ("רמות", "levels"):
         await message.channel.send(
-            "‎1 · מאומת — גישה רגילה\n"
-            "‎2 · תמיכה — עונה לטיקטים\n"
-            "‎3 · צוות — צוות בכיר\n"
-            "‎4 · מנהל — הכל, כולל קטגוריית ההנהלה")
+            "‎1 · מאומת — גישה רגילה לכל הערוצים הפתוחים\n"
+            "‎2 · תמיכה — טיקטים, מחיקת הודעות, 'אזור תמיכה' ו'חדר-תמיכה'\n"
+            "‎3 · צוות — פאנל הניהול והעלאת תוכן, 'צוות' ו'חדר-צוות'\n"
+            "‎4 · בעלים — הכל, כולל 'בעלים' ו'חדר-בעלים'")
         return
 
     guild = _guild_for_owner()
@@ -726,6 +784,17 @@ async def _handle_owner_dm(message: discord.Message):
                     if c.permissions_for(member).view_channel]
             lines.append(f"{'✅' if can else '⛔'} {cat.name} — {len(kids)}/"
                          f"{len(cat.channels)} ערוצים")
+        # טיקטים פתוחים בפועל. קטגוריה ריקה לא מוכיחה כלום — אם אין אף טיקט
+        # פתוח, "לא רואה טיקטים" הוא פשוט המצב הנכון.
+        open_tickets = [c for c in guild.text_channels
+                        if (c.topic or "").startswith("zovex|")]
+        lines += ["", f"**טיקטים פתוחים: {len(open_tickets)}**"]
+        for c in open_tickets[:10]:
+            ok = c.permissions_for(member).view_channel
+            lines.append(f"{'✅' if ok else '⛔'} {c.name}")
+        if not open_tickets:
+            lines.append("אין אף טיקט פתוח כרגע — אין מה לראות.")
+
         # מי מוגדר במפורש על קטגוריית טיקטים אחת, לאימות ההרשאות
         sample = next((c for c in guild.categories
                        if c.name.startswith("טיקטים")), None)
