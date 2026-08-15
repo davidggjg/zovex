@@ -7,3 +7,9 @@ __pycache__/
 
 dist-vps/
 .env.vps
+
+# גיבויי תוכן — לא אמורים להיות במאגר ציבורי (חושפים את הקטלוג וקישורים חתומים)
+backups/
+vps-bot/data/
+*.sign_secret.txt
+sign_secret.txt

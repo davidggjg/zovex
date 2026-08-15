@@ -90,10 +90,19 @@ bot_client = Client(
 
 api = FastAPI(title="Telegram Stream Server")
 
-# ── CORS — חיוני כדי שהאתר (GitHub Pages) יוכל לשלוח קריאות לשרת ──────────
+# ── CORS ─────────────────────────────────────────────────────────────────
+# היה allow_origins=["*"] עם allow_credentials=True — צירוף ש-FastAPI מממש
+# ע"י החזרת ה-Origin שנשלח + Access-Control-Allow-Credentials:true, כלומר
+# *כל* אתר זר יכול לקרוא תשובות מה-API בשם המבקר. עכשיו רשימה סגורה: האתר
+# עצמו (same-origin ממילא לא צריך CORS) ו-GitHub Pages הישן. האפליקציה
+# היא native — היא לא שולחת Origin ולכן לא מושפעת מכאן כלל.
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get(
+    "CORS_ALLOWED_ORIGINS",
+    "https://zovex.duckdns.org,https://davidggjg.github.io"
+).split(",") if o.strip()]
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2052,10 +2061,18 @@ AUTH_WINDOW = 300              # בחלון של 5 דקות
 AUTH_LOCK = 900               # ואז חסימה של 15 דקות
 
 def _client_ip(request: Request) -> str:
-    # מאחורי nginx/פרוקסי — קח את ה-IP האמיתי אם יש
+    # קריטי לאבטחה: מאחורי nginx (פרוקסי יחיד) יש לקחת את ה-hop *האחרון*
+    # ב-X-Forwarded-For — זה שה-nginx הוסיף ($proxy_add_x_forwarded_for),
+    # והוא ה-IP האמיתי של הלקוח. הגרסה הקודמת לקחה את ה-hop הראשון, שאותו
+    # הלקוח שולט בו לגמרי — כך שאפשר היה לזייף אותו בכל בקשה ולעקוף את חסימת
+    # ה-brute-force על סיסמת הפאנל. X-Real-IP (אם nginx מגדיר) עדיף כי הוא
+    # תמיד ה-IP האמיתי; נופלים אחורה ל-hop האחרון, ואז ל-socket.
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        return xff.split(",")[0].strip()
+        return xff.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 # ── שתי רמות גישה ────────────────────────────────────────────────────────────
@@ -3184,7 +3201,14 @@ async def feedback_mine(user_id: str):
     if th.get("unread_user"):
         th["unread_user"] = False
         save_feedback(d)   # סימון כנקרא כשהמשתמש פותח את הצ'אט
-    return th
+    # מחזירים רק את מה שה-UID של המשתמש עצמו צריך. הנקודה הזו לא מאומתת
+    # (הזהות היא user_id שהלקוח שולח), ולכן אסור להחזיר ממנה שם/אימייל/טוקן
+    # התראות — אלה נשמרים לצד השרת בלבד, לשימוש המנהל והדחיפות.
+    return {
+        "user_id": user_id,
+        "messages": th.get("messages", []),
+        "unread_user": False,
+    }
 
 class FeedbackReplyReq(BaseModel):
     password: str
