@@ -1642,7 +1642,13 @@ def _rewrite_hls_manifest(text: str, base_url: str) -> str:
             }
             log.info("relay: נלמד מארח מקטעים %s (מתוך %s)",
                      parsed.hostname, urlparse(base_url).hostname)
-        relayed = f"/hls-relay/{parsed.hostname}/{parsed.path.lstrip('/')}"
+        # שומרים את הפורט בנתיב המשוכתב: בלעדיו מקטע שיושב על פורט לא-רגיל
+        # היה נמשך מהפורט הרשום למארח, ומחזיר 404.
+        seg_default = 443 if parsed.scheme == "https" else 80
+        seg_host = parsed.hostname
+        if parsed.port and parsed.port != seg_default:
+            seg_host = f"{seg_host}:{parsed.port}"
+        relayed = f"/hls-relay/{seg_host}/{parsed.path.lstrip('/')}"
         if parsed.query:
             relayed += f"?{parsed.query}"
         out_lines.append(relayed)
@@ -1802,10 +1808,18 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
 @api.get("/hls-relay/{host}/{path:path}")
 async def hls_relay(host: str, path: str, request: Request):
     check_hotlink(request)
-    origin = _relay_origin_for(host)
+    # ה-host יכול לכלול פורט מפורש: /hls-relay/tv.embyil.tv:7070/...
+    # ספק אחד יכול לפזר ערוצים על כמה פורטים באותו דומיין (ספורט 6 יושב על
+    # 7070 בעוד השאר על 86), ורשומה אחת למארח לא יכולה לתאר את זה. ההרשאה
+    # עדיין נבדקת מול שם המארח בלבד, כך שזה לא פותח שום מארח חדש.
+    base_host, _, explicit_port = host.partition(":")
+    origin = _relay_origin_for(base_host)
     if origin is None:
         raise HTTPException(403, "host not allowed")
     scheme, port = origin["scheme"], origin["port"]
+    if explicit_port.isdigit():
+        port = int(explicit_port)
+    host = base_host
     default_port = 443 if scheme == "https" else 80
     netloc = host if port == default_port else f"{host}:{port}"
     upstream_url = f"{scheme}://{netloc}/{path}"
