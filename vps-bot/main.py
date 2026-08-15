@@ -4205,42 +4205,50 @@ CONTENT_DELETE_GUARD = int(os.environ.get("CONTENT_DELETE_GUARD", "50"))
 def _content_key(e) -> str:
     return str(e.get("id") or f"{e.get('title')}|{e.get('video_url')}")
 
-def _enforce_editor_limits(before: list, after: list):
-    """מה שעורך מוגבל רשאי לעשות: להוסיף, לערוך, ולמחוק מעט — ולא לגעת
-    בשידורים חיים. נבדק כאן ולא בממשק, כי ממשק אפשר לעקוף."""
-    old_map = {_content_key(e): e for e in before}
-    new_keys = {_content_key(e) for e in after}
-    removed = [e for k, e in old_map.items() if k not in new_keys]
+def _is_live_item(e) -> bool:
+    return e.get("category") == LIVE_CATEGORY or bool(e.get("is_live"))
 
-    live_removed = [e for e in removed if e.get("category") == LIVE_CATEGORY
-                    or e.get("is_live")]
-    if live_removed:
-        raise HTTPException(status_code=403, detail=(
-            f"⛔ אין הרשאה למחוק שידורים חיים ({len(live_removed)} פריטים). "
-            "הפעולה בוטלה — פנה למנהל הראשי."))
 
+def _apply_editor_policy(before: list, after: list) -> list:
+    """מחזיר את המערך שיישמר בפועל עבור עורך מוגבל.
+
+    שידורים חיים נלקחים תמיד מהמאגר, ומה שהעורך שלח עבורם מתעלמים ממנו.
+    זה עדיף על בדיקה שמשווה ערכים: הפאנל נטען פעם אחת ונשאר פתוח, ואם משהו
+    השתנה בינתיים העותק שלו מיושן — אז השוואה הייתה חוסמת אותו על פריטים
+    שהוא לא נגע בהם. כך הוא לא יכול לשנות שידור חי, וגם לא נחסם בטעות.
+
+    מחיקות מוגבלות למכסה, ורק בתוכן שאינו שידור חי.
+    """
+    stored_live = {_content_key(e): e for e in before if _is_live_item(e)}
+    stored_rest = {_content_key(e): e for e in before if not _is_live_item(e)}
+
+    result, seen_live = [], set()
+    for e in after:
+        k = _content_key(e)
+        if k in stored_live:                 # שידור חי קיים — הגרסה מהמאגר
+            result.append(stored_live[k])
+            seen_live.add(k)
+        elif _is_live_item(e):               # ניסיון להוסיף שידור חי — לא מורשה
+            continue
+        else:
+            result.append(e)
+    # שידורים חיים שהעורך השמיט — מוחזרים למקומם
+    for k, e in stored_live.items():
+        if k not in seen_live:
+            result.append(e)
+
+    kept = {_content_key(e) for e in result}
+    removed = [e for k, e in stored_rest.items() if k not in kept]
     if len(removed) > EDITOR_MAX_DELETE:
         raise HTTPException(status_code=403, detail=(
             f"⛔ השמירה מוחקת {len(removed)} פריטים, והמותר הוא "
             f"{EDITOR_MAX_DELETE} בכל שמירה. הפעולה בוטלה.\n\n"
             "אם התכוונת למחוק פריט אחד — כנראה הרשימה נטענה חלקית. "
             "רענן את הפאנל ונסה שוב."))
-
-    # שינוי של שידור חי קיים (כתובת/שם) גם הוא מחוץ לתחום
-    for e in after:
-        k = _content_key(e)
-        old = old_map.get(k)
-        if old is None:
-            continue
-        if (old.get("category") == LIVE_CATEGORY or old.get("is_live")):
-            for f in ("video_url", "video_id", "title", "category"):
-                if (old.get(f) or "") != (e.get(f) or ""):
-                    raise HTTPException(status_code=403, detail=(
-                        f"⛔ אין הרשאה לשנות שידורים חיים ({old.get('title')}). "
-                        "הפעולה בוטלה."))
     if removed:
         log.info("עורך מוגבל מחק %d פריטים: %s", len(removed),
                  ", ".join(str(e.get("title"))[:30] for e in removed[:5]))
+    return result
 
 
 class PanelRoleReq(BaseModel):
@@ -4272,23 +4280,26 @@ async def content_save(req: ContentSaveReq, request: Request):
     # השמירה דורסת את כל הקטלוג. אם פתאום חסרים עשרות פריטים, כמעט תמיד מדובר
     # בתקלה (רשימה שנטענה חלקית) ולא בכוונה — עוצרים ומבקשים אישור מפורש.
     prev = load_content()
+    # מכווצים *לפני* ההשוואה. הקטלוג נשמר עם %BASE% בעוד הפאנל מקבל ושולח
+    # כתובת מלאה, ולכן השוואה על הצורה הגולמית הציגה כל שידור חי כאילו
+    # השתנה — ועורך נחסם על פריטים שלא נגע בהם בכלל.
+    incoming = _collapse_urls(req.movies)
     if role == "editor":
-        _enforce_editor_limits(prev, req.movies)
+        incoming = _apply_editor_policy(prev, incoming)
     before = len(prev)
-    gone = before - len(req.movies)
+    gone = before - len(incoming)
     if gone > CONTENT_DELETE_GUARD and not req.confirm_delete:
         raise HTTPException(status_code=409, detail=(
-            f"⛔ השמירה הזו מוחקת {gone} פריטים ({before} → {len(req.movies)}) ולכן נעצרה.\n\n"
+            f"⛔ השמירה הזו מוחקת {gone} פריטים ({before} → {len(incoming)}) ולכן נעצרה.\n\n"
             "זה קורה כשהרשימה נטענה חלקית — למשל טאב ישן, או שמירה לפני שהתוכן "
             "סיים להיטען. רענן את הפאנל, ודא שכל התוכן מוצג, ובצע את השינוי שוב.\n\n"
             "אם המחיקה מכוונת — שלח שוב עם confirm_delete."))
     if gone > 0:
         log.warning("שמירת תוכן מסירה %d פריטים (%d → %d)%s",
-                    gone, before, len(req.movies),
+                    gone, before, len(incoming),
                     " — באישור מפורש" if req.confirm_delete else "")
-    # מכווצים את הכתובת שלנו חזרה ל-%BASE% כדי שהקישורים יישארו ניידים
-    save_content(_collapse_urls(req.movies))
-    return {"ok": True, "count": len(req.movies), "version": get_content_version()}
+    save_content(incoming)
+    return {"ok": True, "count": len(incoming), "version": get_content_version()}
 
 @api.get("/content/relink")
 async def content_relink(request: Request, dry: int = 1):
