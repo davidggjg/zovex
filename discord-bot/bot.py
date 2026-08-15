@@ -349,11 +349,32 @@ def _staff_only_overwrites(guild):
 
 
 # ── בניית השרת ───────────────────────────────────────────────────────────────
+PERM_HELP = (
+    "**חסרות לבוט הרשאות.**\n\n"
+    "הגדרות שרת → תפקידים → התפקיד של הבוט:\n"
+    "1. הדלק **Administrator**\n"
+    "2. **גרור את התפקיד שלו לראש הרשימה**, מעל כל השאר\n\n"
+    "דיסקורד לא מרשה לבוט ליצור או להעניק תפקיד שנמצא מעליו, ולכן שני "
+    "השלבים נחוצים — הרשאה לבד לא מספיקה.\n\n"
+    "אחר כך הרץ `/setup` שוב."
+)
+
+
 @bot.tree.command(name="setup", description="בונה את כל השרת: תפקידים, ערוצים והרשאות")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
     guild = interaction.guild
+    # בדיקה מראש: עדיף להגיד מה חסר מאשר להיכשל באמצע הבנייה
+    me = guild.me
+    missing = [n for n, has in (
+        ("Manage Roles", me.guild_permissions.manage_roles),
+        ("Manage Channels", me.guild_permissions.manage_channels),
+    ) if not has]
+    if missing:
+        await interaction.followup.send(
+            PERM_HELP + f"\n\nחסר כרגע: {', '.join(missing)}", ephemeral=True)
+        return
     created = []
 
     # תפקידים
@@ -458,6 +479,25 @@ async def setup_cmd(interaction: discord.Interaction):
            f"אחר כך תנו לעצמכם ולצוות את התפקיד '{ROLE_STAFF}' או '{ROLE_ADMIN}'.")
     await interaction.followup.send(msg[:1900], ephemeral=True)
     log.info("setup הושלם: %d פריטים", len(created))
+
+
+@setup_cmd.error
+async def setup_error(interaction: discord.Interaction, error):
+    """Forbidden באמצע הבנייה = הרשאה חסרה או שהתפקיד של הבוט נמוך מדי."""
+    orig = getattr(error, "original", error)
+    if isinstance(orig, discord.Forbidden):
+        send = (interaction.followup.send if interaction.response.is_done()
+                else interaction.response.send_message)
+        await send(PERM_HELP, ephemeral=True)
+        return
+    if isinstance(error, app_commands.MissingPermissions):
+        send = (interaction.followup.send if interaction.response.is_done()
+                else interaction.response.send_message)
+        await send("הפקודה הזו למנהלי השרת בלבד.", ephemeral=True)
+        return
+    log.exception("setup נכשל: %s", error)
+    if interaction.response.is_done():
+        await interaction.followup.send(f"השרת לא נבנה: {orig}", ephemeral=True)
 
 
 @bot.tree.command(name="close", description="סוגר את הטיקט הנוכחי ושולח תמליל")
