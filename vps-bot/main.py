@@ -2057,8 +2057,15 @@ def _client_ip(request: Request) -> str:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
-def check_panel_password(request: Request, password: str):
-    """מאמת את סיסמת הפאנל עם הגנת brute-force. זורק HTTPException אם נכשל/חסום."""
+# ── שתי רמות גישה ────────────────────────────────────────────────────────────
+# הסיסמה הראשית = אדמין, גישה מלאה. סיסמת העורך פותחת פאנל מוגבל: מוסיף תוכן
+# ומוחק מעט, ולא יכול לגעת בשידורים חיים ולא למחוק בכמות. האכיפה כאן בשרת
+# ולא בממשק — הסתרת כפתורים לא שווה כלום מול בקשה ישירה.
+EDITOR_PASSWORD = os.environ.get("EDITOR_PASSWORD", "")
+EDITOR_MAX_DELETE = int(os.environ.get("EDITOR_MAX_DELETE", "5"))
+
+def panel_role(request: Request, password: str) -> str:
+    """מאמת סיסמה ומחזיר 'admin' או 'editor'. זורק HTTPException אם נכשל/חסום."""
     ip = _client_ip(request)
     now = time.time()
     fails = [t for t in _auth_fails.get(ip, []) if now - t < AUTH_LOCK]
@@ -2067,13 +2074,26 @@ def check_panel_password(request: Request, password: str):
     if len(recent) >= AUTH_MAX_FAILS:
         _auth_fails[ip] = fails
         raise HTTPException(status_code=429, detail="יותר מדי ניסיונות — נסה שוב בעוד כמה דקות")
-    ok = bool(PANEL_PASSWORD) and hmac.compare_digest(password or "", PANEL_PASSWORD)
-    if not ok:
+    pw = password or ""
+    role = None
+    if PANEL_PASSWORD and hmac.compare_digest(pw, PANEL_PASSWORD):
+        role = "admin"
+    elif EDITOR_PASSWORD and hmac.compare_digest(pw, EDITOR_PASSWORD):
+        role = "editor"
+    if role is None:
         fails.append(now)
         _auth_fails[ip] = fails
         raise HTTPException(status_code=401, detail="סיסמה שגויה")
     # הצלחה — נקה כישלונות קודמים מאותו IP
     _auth_fails.pop(ip, None)
+    return role
+
+
+def check_panel_password(request: Request, password: str):
+    """גישת אדמין בלבד. כל מסך ניהול קיים ממשיך לדרוש את הסיסמה הראשית —
+    עורך שינסה להגיע לשם יקבל 403, גם אם הסיסמה שלו תקפה."""
+    if panel_role(request, password) != "admin":
+        raise HTTPException(status_code=403, detail="הפעולה הזו מותרת למנהל הראשי בלבד")
 
 def load_admins() -> list:
     if ADMINS_FILE.exists():
@@ -4182,10 +4202,61 @@ class ContentSaveReq(BaseModel):
 # התוצאה; כאן עוצרים אותה מראש.
 CONTENT_DELETE_GUARD = int(os.environ.get("CONTENT_DELETE_GUARD", "50"))
 
+def _content_key(e) -> str:
+    return str(e.get("id") or f"{e.get('title')}|{e.get('video_url')}")
+
+def _enforce_editor_limits(before: list, after: list):
+    """מה שעורך מוגבל רשאי לעשות: להוסיף, לערוך, ולמחוק מעט — ולא לגעת
+    בשידורים חיים. נבדק כאן ולא בממשק, כי ממשק אפשר לעקוף."""
+    old_map = {_content_key(e): e for e in before}
+    new_keys = {_content_key(e) for e in after}
+    removed = [e for k, e in old_map.items() if k not in new_keys]
+
+    live_removed = [e for e in removed if e.get("category") == LIVE_CATEGORY
+                    or e.get("is_live")]
+    if live_removed:
+        raise HTTPException(status_code=403, detail=(
+            f"⛔ אין הרשאה למחוק שידורים חיים ({len(live_removed)} פריטים). "
+            "הפעולה בוטלה — פנה למנהל הראשי."))
+
+    if len(removed) > EDITOR_MAX_DELETE:
+        raise HTTPException(status_code=403, detail=(
+            f"⛔ השמירה מוחקת {len(removed)} פריטים, והמותר הוא "
+            f"{EDITOR_MAX_DELETE} בכל שמירה. הפעולה בוטלה.\n\n"
+            "אם התכוונת למחוק פריט אחד — כנראה הרשימה נטענה חלקית. "
+            "רענן את הפאנל ונסה שוב."))
+
+    # שינוי של שידור חי קיים (כתובת/שם) גם הוא מחוץ לתחום
+    for e in after:
+        k = _content_key(e)
+        old = old_map.get(k)
+        if old is None:
+            continue
+        if (old.get("category") == LIVE_CATEGORY or old.get("is_live")):
+            for f in ("video_url", "video_id", "title", "category"):
+                if (old.get(f) or "") != (e.get(f) or ""):
+                    raise HTTPException(status_code=403, detail=(
+                        f"⛔ אין הרשאה לשנות שידורים חיים ({old.get('title')}). "
+                        "הפעולה בוטלה."))
+    if removed:
+        log.info("עורך מוגבל מחק %d פריטים: %s", len(removed),
+                 ", ".join(str(e.get("title"))[:30] for e in removed[:5]))
+
+
+class PanelRoleReq(BaseModel):
+    password: str
+
+@api.post("/panel/role")
+async def panel_role_get(req: PanelRoleReq, request: Request):
+    """מזהה את רמת הגישה של הסיסמה. הפאנל קורא לזה בכניסה כדי לדעת מה להציג.
+    ההגבלות עצמן נאכפות בשרת בכל פעולה — זה רק כדי לא להציג מסכים חסומים."""
+    role = panel_role(request, req.password)
+    return {"role": role, "max_delete": EDITOR_MAX_DELETE if role == "editor" else None}
+
 @api.post("/content/save")
 async def content_save(req: ContentSaveReq, request: Request):
     """שמירת המערך המלא (list/create/update/delete/saveAll כולם עוברים דרך זה)."""
-    check_panel_password(request, req.password)
+    role = panel_role(request, req.password)
     if not isinstance(req.movies, list):
         raise HTTPException(status_code=400, detail="movies חייב להיות מערך")
     # ── הגנת עריכה במקביל (optimistic lock) ──────────────────────────────────
@@ -4200,7 +4271,10 @@ async def content_save(req: ContentSaveReq, request: Request):
     # ── הגנת מחיקה המונית ────────────────────────────────────────────────────
     # השמירה דורסת את כל הקטלוג. אם פתאום חסרים עשרות פריטים, כמעט תמיד מדובר
     # בתקלה (רשימה שנטענה חלקית) ולא בכוונה — עוצרים ומבקשים אישור מפורש.
-    before = len(load_content())
+    prev = load_content()
+    if role == "editor":
+        _enforce_editor_limits(prev, req.movies)
+    before = len(prev)
     gone = before - len(req.movies)
     if gone > CONTENT_DELETE_GUARD and not req.confirm_delete:
         raise HTTPException(status_code=409, detail=(

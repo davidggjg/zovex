@@ -305,7 +305,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let PASS="", movies=[], editingId=null, liveEditId=null, _fromUploadCmid=null;
+let PASS="", ROLE="admin", movies=[], editingId=null, liveEditId=null, _fromUploadCmid=null;
 let contentVersion=null;   // גרסת התוכן שנטענה (להגנת עריכה במקביל — optimistic lock)
 function toast(on){ $("saveToast").classList.toggle("hidden", !on); }
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -338,14 +338,37 @@ function detectType(){
 async function doLogin(){
   const p=$("pass").value;
   try{
-    const r=await fetch("/panel/api",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({password:p,action:"list"})});
+    // /panel/role מזהה גם סיסמת מנהל וגם סיסמת עורך מוגבל
+    const r=await fetch("/panel/role",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:p})});
     if(r.status===401){ $("loginErr").textContent="סיסמה שגויה"; return; }
+    if(r.status===429){ $("loginErr").textContent="יותר מדי ניסיונות — נסה בעוד כמה דקות"; return; }
     if(!r.ok){ $("loginErr").textContent="שגיאת שרת"; return; }
-    PASS=p; $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+    const d=await r.json();
+    PASS=p; ROLE=d.role||"admin";
+    $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+    applyRole(d);
     await loadContent();
-    loadSupport();   // מעדכן את מונה ההודעות שלא נקראו על הטאב
+    if(ROLE==="admin") loadSupport();   // מונה ההודעות — מסך של מנהל בלבד
   }catch(e){ $("loginErr").textContent="אין חיבור לשרת"; }
+}
+
+// ── רמת גישה ──
+// עורך מוגבל רואה רק הוספה וניהול תוכן. זו הסתרה בלבד — האכיפה האמיתית
+// בשרת, שדוחה כל פעולה חורגת גם אם נשלחה ישירות בלי הממשק.
+const EDITOR_TABS=["add","manage"];
+function applyRole(d){
+  if(ROLE!=="editor") return;
+  document.querySelectorAll(".tabs button").forEach(b=>{
+    const n=(b.id||"").replace("tab-","");
+    if(!EDITOR_TABS.includes(n)) b.remove();
+  });
+  showTab("add");
+  const note=document.createElement("div");
+  note.style.cssText="background:#fff4e5;border:1px solid #ffb84d;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px";
+  note.textContent="גישת עורך: אפשר להוסיף ולערוך תוכן, ולמחוק עד "+(d.max_delete||5)+
+    " פריטים בכל שמירה. שידורים חיים חסומים למחיקה ולעריכה.";
+  const app=$("app"); app.insertBefore(note, app.firstChild);
 }
 
 // ── טאבים ──
