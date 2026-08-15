@@ -3577,6 +3577,72 @@ async def stream_tune(request: Request, media_conns: Optional[int] = None,
             "bots": len(_stream_bots),
             "note": "זמני — .env גובר אחרי restart"}
 
+@api.get("/speedtest/bots")
+async def speedtest_bots(request: Request, mb: int = 4, n: int = 0):
+    """מודד את התפוקה של כל בוט *בנפרד*, באותו רגע, על אותו קובץ.
+
+    זו הבדיקה שמכריעה מאיפה מגיעה התנודתיות: אם כל הבוטים איטיים יחד —
+    המגבלה על השרת/ה-IP ואין מה לתקן בקוד. אם חלקם מהירים וחלקם איטיים —
+    המגבלה היא לכל חשבון בנפרד, ואז פיזור חכם יותר בין הבוטים כן יעזור.
+
+    localhost בלבד.  /speedtest/bots?mb=4&n=8
+    """
+    if not is_local_request(request):
+        raise HTTPException(status_code=403, detail="localhost only")
+    if not STREAM_CHANNEL_ID:
+        raise HTTPException(400, "אין ערוץ תוכן מוגדר")
+    msg_id = None
+    for e in load_content():
+        m = re.search(r"/stream/-?\d+/(\d+)", str(e.get("video_url") or ""))
+        if m:
+            msg_id = int(m.group(1))
+            break
+    if msg_id is None:
+        raise HTTPException(400, "לא נמצא פריט עם קישור לערוץ")
+
+    want = mb * 1024 * 1024
+    bots = _stream_bots[:n] if n > 0 else list(_stream_bots)
+    out = []
+    for bot in bots:
+        row = {"bot": bot["name"], "who": bot.get("who", "")}
+        t0 = time.time()
+        try:
+            msg = await _get_bot_msg(bot, STREAM_CHANNEL_ID, msg_id)
+            media = msg and (msg.video or msg.document or msg.audio)
+            if not media:
+                row["error"] = "אין מדיה"
+                out.append(row)
+                continue
+            dc_id, location = _file_location(media)
+            sessions, _gen = await get_media_session_pool_gen(
+                bot["client"], bot["name"], dc_id, max(1, STREAM_MEDIA_CONNS))
+            if not sessions:
+                row["error"] = "אין חיבורים"
+                out.append(row)
+                continue
+            per = -(-want // len(sessions))
+            tasks = [_band_fetch(sessions[i], location, i * per,
+                                 min(want, (i + 1) * per) - 1)
+                     for i in range(len(sessions)) if i * per < want]
+            t0 = time.time()
+            parts = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=60)
+            got = sum(len(p) for p in parts if isinstance(p, (bytes, bytearray)))
+            el = time.time() - t0
+            row.update(mb=round(got / 1024 / 1024, 2), seconds=round(el, 2),
+                       mb_per_sec=round(got / 1024 / 1024 / el, 2) if el else 0)
+        except Exception as e:
+            row["error"] = f"{type(e).__name__}: {e}"[:120]
+            row["seconds"] = round(time.time() - t0, 2)
+        out.append(row)
+    good = [r["mb_per_sec"] for r in out if r.get("mb_per_sec")]
+    return {"message_id": msg_id, "conns_per_bot": STREAM_MEDIA_CONNS,
+            "bots": out,
+            "summary": {"נבדקו": len(out), "הצליחו": len(good),
+                        "הכי מהיר": max(good) if good else 0,
+                        "הכי איטי": min(good) if good else 0,
+                        "חציון": sorted(good)[len(good) // 2] if good else 0}}
+
 @api.post("/pool/list")
 async def pool_list(req: PoolPwReq, request: Request):
     check_panel_password(request, req.password)
