@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Search, Send, Eye, ChevronDown, X, Download } from "lucide-react";
 import { SPIN, ls, lsSet } from "./helpers";
+import { TELEGRAM_URL, DISCORD_URL } from "@/config/links";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
 import SupportChat from "./SupportChat";
 
@@ -172,6 +174,25 @@ export default function HomePage({
           user={user}
         />
       </main>
+
+      {/* פוטר — קישורי המידע והערוצים. paddingBottom גדול כדי שלא ייבלע
+          מתחת לבאנר הפרסומת הקבוע בתחתית. */}
+      <footer style={{ borderTop: "1px solid #1c1c1c", marginTop: 26, padding: "18px 16px 74px", direction: "rtl" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, justifyContent: "center", fontSize: 12 }}>
+          <Link to="/legal/about" style={{ color: "#888", textDecoration: "none" }}>אודות</Link>
+          <Link to="/legal/terms" style={{ color: "#888", textDecoration: "none" }}>תנאי שימוש</Link>
+          <Link to="/legal/privacy" style={{ color: "#888", textDecoration: "none" }}>פרטיות</Link>
+          <Link to="/legal/copyright" style={{ color: "#888", textDecoration: "none" }}>זכויות יוצרים</Link>
+          <a href={TELEGRAM_URL} target="_blank" rel="noreferrer" style={{ color: "#5b9bd5", textDecoration: "none" }}>טלגרם</a>
+          {DISCORD_URL && (
+            <a href={DISCORD_URL} target="_blank" rel="noreferrer" style={{ color: "#7c85f5", textDecoration: "none", fontWeight: 700 }}>דיסקורד</a>
+          )}
+        </div>
+        <div style={{ textAlign: "center", color: "#555", fontSize: 11, marginTop: 10 }}>
+          ZOVEX · שירות חינמי, ללא מטרות רווח
+        </div>
+      </footer>
+
       {/* כפתור תמיכה — bottom:62 כדי לרחף מעל באנר הפרסומת (bottom:0, גובה 50)
           ו-zIndex גבוה ממנו, אחרת הבאנר בולע את הלחיצה והכפתור "לא מגיב".
           מוסתר כשנגן פתוח: ה-zIndex הזה גבוה גם מהנגן (9999), אז בשידור חי —

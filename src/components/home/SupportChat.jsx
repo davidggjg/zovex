@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { X, Send } from "lucide-react";
 import { apiCall, ls, lsSet } from "./helpers";
+import { TELEGRAM_URL, DISCORD_URL } from "@/config/links";
 
 // ─── תמיכה / צ'אט עם המנהלים (אתר) ────────────────────────────────────────────
 // המשתמש כותב (תמיכה / חוות דעת / טיפ), המנהל רואה בפאנל ומגיב, והתשובה מופיעה
@@ -147,8 +148,18 @@ export default function SupportChat({ open, onClose, user }) {
           </button>
         </div>
 
-        {/* טלגרם כאופציה */}
-        <a href="https://t.me/ZOVE8" target="_blank" rel="noreferrer" style={{ display: "block", textAlign: "center", color: "#5b9bd5", fontSize: 13, fontWeight: 600, textDecoration: "none", paddingTop: 12 }}>
+        {/* ערוצים חיצוניים */}
+        {DISCORD_URL && (
+          <a href={DISCORD_URL} target="_blank" rel="noreferrer"
+             style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#5865F2", borderRadius: 14, padding: "11px 14px", color: "#fff", fontSize: 14, fontWeight: 800, textDecoration: "none", marginTop: 14 }}>
+            {/* לוגו דיסקורד — inline כדי לא להוסיף תלות בקובץ חיצוני */}
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M20.3 4.5A18 18 0 0 0 15.9 3l-.2.4c1.5.4 2.7 1 3.9 1.8a13.7 13.7 0 0 0-11.2 0c1.2-.8 2.5-1.5 3.9-1.8L12 3a18 18 0 0 0-4.4 1.5C4.8 8.7 4 12.8 4.4 16.8A18 18 0 0 0 9.8 19l.9-1.5c-.9-.3-1.8-.7-2.6-1.3l.5-.4a12.9 12.9 0 0 0 10.8 0l.5.4c-.8.6-1.7 1-2.6 1.3l.9 1.5a18 18 0 0 0 5.4-2.2c.5-4.6-.8-8.7-3.3-12.3ZM9.7 14.5c-1 0-1.9-1-1.9-2.1 0-1.2.9-2.1 1.9-2.1s1.9 1 1.9 2.1c0 1.2-.9 2.1-1.9 2.1Zm4.6 0c-1 0-1.9-1-1.9-2.1 0-1.2.9-2.1 1.9-2.1s1.9 1 1.9 2.1c0 1.2-.9 2.1-1.9 2.1Z"/>
+            </svg>
+            הצטרפו לשרת הדיסקורד
+          </a>
+        )}
+        <a href={TELEGRAM_URL} target="_blank" rel="noreferrer" style={{ display: "block", textAlign: "center", color: "#5b9bd5", fontSize: 13, fontWeight: 600, textDecoration: "none", paddingTop: 12 }}>
           או פנו אלינו בטלגרם ➤
         </a>
       </div>

@@ -57,6 +57,18 @@ function collectRoutes(movies) {
     });
   }
 
+  // דפי המידע — קבועים, לא נגזרים מהקטלוג. בלעדיהם הם מקבלים את כותרת
+  // ברירת המחדל של האתר בתוצאות החיפוש ובשיתוף בוואטסאפ/טלגרם.
+  const LEGAL = [
+    ["legal/about", "אודות ZOVEX", "מי אנחנו, ואיך פונים אלינו."],
+    ["legal/terms", "תנאי שימוש", "התנאים לשימוש בשירות ZOVEX."],
+    ["legal/privacy", "מדיניות פרטיות", "איזה מידע נשמר, איפה, ואיך מוחקים אותו."],
+    ["legal/copyright", "זכויות יוצרים והסרת תוכן", "איך מגישים בקשת הסרה ומה קורה אחריה."],
+  ];
+  for (const [route, title, description] of LEGAL) {
+    routes.set(route, { title, description, type: "page" });
+  }
+
   return routes;
 }
 

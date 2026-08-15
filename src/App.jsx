@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import Home from './pages/Home';
+import Legal from './pages/Legal';
 import ZovexIntro from './components/ZovexIntro';
 
 // נתיב הבסיס נגזר מ-BASE_URL של הבנייה: '/zovex/' ל-GitHub Pages, '/' לשרת.
@@ -22,6 +23,11 @@ export default function App() {
       <Router basename={BASENAME}>
         <Routes>
           <Route path="/" element={<Home />} />
+          {/* לפני הנתיב הדינמי: '/legal/...' הוא דף מידע, לא slug של סרט.
+              react-router מדרג ממילא מקטע קבוע מעל דינמי, אבל הסדר כאן
+              משאיר את זה ברור לקריאה. */}
+          <Route path="/legal" element={<Legal />} />
+          <Route path="/legal/:doc" element={<Legal />} />
           <Route path="/:slug" element={<Home />} />
           <Route path="/:slug/:episode" element={<Home />} />
         </Routes>
