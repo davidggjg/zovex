@@ -488,11 +488,30 @@ async def setup_cmd(interaction: discord.Interaction):
             elif ch_name == "פתיחת-טיקט":
                 panel_ch = existing
 
-    # קטגוריות הטיקטים — אחת לכל סוג, גלויות לצוות בלבד
+    # קטגוריות הטיקטים — אחת לכל סוג, גלויות לצוות בלבד.
+    # מרעננים הרשאות גם לקיימות: תפקיד שנוסף אחרי היצירה (למשל "תמיכה")
+    # לא נכנס להרשאות שנקבעו בזמנו, והמשתמש מקבל את התפקיד אבל לא רואה כלום.
+    ticket_ow = _staff_only_overwrites(guild)
+    ticket_cats = set()
     for t in TICKET_TYPES:
-        if discord.utils.get(guild.categories, name=t[4]) is None:
-            await guild.create_category(t[4], overwrites=_staff_only_overwrites(guild))
+        cat = discord.utils.get(guild.categories, name=t[4])
+        if cat is None:
+            cat = await guild.create_category(t[4], overwrites=ticket_ow)
             created.append(f"קטגוריה {t[4]}")
+        else:
+            await cat.edit(overwrites=ticket_ow)
+        ticket_cats.add(cat.id)
+
+    # וגם טיקטים פתוחים כרגע — שם ההרשאות נקבעו לכל ערוץ בנפרד
+    support_r = roles[ROLE_SUPPORT]
+    for ch in guild.text_channels:
+        if ch.category_id in ticket_cats and (ch.topic or "").startswith("zovex|"):
+            try:
+                await ch.set_permissions(
+                    support_r, view_channel=True, send_messages=True,
+                    manage_messages=True, read_message_history=True)
+            except discord.Forbidden:
+                pass
 
     # לוחות: חוקים, אימות, פתיחת טיקט
     if rules_ch:
