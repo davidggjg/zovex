@@ -6,6 +6,7 @@ SESSION_STRING, אין copy/forward ל-Saved Messages.
 """
 
 import os
+import random
 import re
 import sys
 import json
@@ -810,6 +811,26 @@ async def stop_stream_pool():
             pass
     _stream_bots.clear()
 
+# ── בחירת בוט לפי ביצועים ────────────────────────────────────────────────────
+# נמדד על השרת, אותו קובץ ואותו רגע: bot_7 נתן 6.79 MB/s, bot_3 נתן 0.36,
+# וארבעה מתוך שמונה נכשלו לגמרי. כלומר המגבלה היא לכל חשבון בנפרד ולא על
+# השרת. בחירה round-robin עיוורת ניתבה צופים לבוטים התקועים באותה תדירות
+# כמו לתקינים — ומכאן שאותה בקשה בדיוק לקחה פעם 3 שניות ופעם 59.
+#
+# לכל בוט נשמר ממוצע נע של הקצב שהוא סיפק. הבחירה היא "הטוב מבין שניים
+# אקראיים": מטה את התנועה לבוטים המהירים בלי לרכז את כולם על אחד, ובלי
+# לדרוש דירוג גלובלי שמתיישן.
+BOT_SPEED_ALPHA = 0.3          # משקל המדידה האחרונה בממוצע הנע
+
+def note_bot_speed(bot, mb_per_sec: float):
+    prev = bot.get("speed")
+    bot["speed"] = (mb_per_sec if prev is None
+                    else prev * (1 - BOT_SPEED_ALPHA) + mb_per_sec * BOT_SPEED_ALPHA)
+
+def _bot_score(bot) -> float:
+    # בוט שטרם נמדד מקבל ציון ביניים כדי שייבחר וייבדק, אבל לא יגבר על מוכח
+    return bot["speed"] if bot.get("speed") is not None else 1.0
+
 async def pick_stream_bot():
     now = time.time()
     async with _stream_rr_lock:
@@ -818,9 +839,12 @@ async def pick_stream_bot():
         pool = healthy or _stream_bots
         if not pool:
             return None
-        b = pool[_stream_rr % len(pool)]
+        if len(pool) == 1:
+            return pool[0]
+        a = pool[_stream_rr % len(pool)]
         _stream_rr += 1
-        return b
+        b = pool[random.randrange(len(pool))]
+        return a if _bot_score(a) >= _bot_score(b) else b
 
 # כמה כשלים *רצופים* לפני שמדיחים בוט. כשל בודד הוא בדרך כלל רעש רגעי של
 # טלגרם, לא בוט חולה. הדחה על כשל ראשון יצרה מפל: בוט נחנק ← נשארים פחות ←
@@ -1114,8 +1138,10 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         band_mb = (per_band * MEDIA_CHUNK) / (1024 * 1024)
         budget = min(MEDIA_BANDS_MAX,
                      MEDIA_BANDS_TIMEOUT + band_mb * MEDIA_BANDS_PER_MB)
+        t_start = time.time()
         parts = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout=budget)
+        elapsed = time.time() - t_start
         bad = next((p for p in parts if not isinstance(p, (bytes, bytearray))), None)
         if bad is not None:
             # שגיאה באחד החלקים — לא מגישים חלקי, ומרעננים את החיבורים
@@ -1128,6 +1154,8 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         if len(out) < total:
             return None
         _mark_ok(bot)
+        if elapsed > 0:
+            note_bot_speed(bot, (total / 1024 / 1024) / elapsed)
         return bytes(out[:total])
     except FileReferenceExpired:
         _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
@@ -1137,6 +1165,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         # כ"נכשל: " בלי סיבה — מה שהסתיר בדיוק את הכשל הנפוץ ביותר כאן.
         log.warning("media bands (%s) נכשל: %s: %s — נופל למסלול הבוטים",
                     bot["name"], type(e).__name__, e)
+        note_bot_speed(bot, 0.0)      # כשל מוריד את הציון מיד
         # gen=None פירושו שהכשל קרה עוד לפני שקיבלנו בריכה — אין מה להפיל,
         # ובוודאי לא את הבריכה של מישהו אחר.
         if dc_id is not None and gen is not None:
