@@ -50,7 +50,8 @@ if ENV_FILE.exists():
 TOKEN = os.environ.get("DISCORD_TOKEN", "")
 
 ROLE_VERIFIED = "מאומת"
-ROLE_STAFF = "צוות"
+ROLE_SUPPORT = "תמיכה"     # עונה לטיקטים
+ROLE_STAFF = "צוות"        # צוות בכיר
 ROLE_ADMIN = "מנהל"
 
 COLOR = 0xE50914
@@ -63,8 +64,8 @@ COLOR = 0xE50914
 SERVER_LAYOUT = [
     ("ברוכים הבאים", [("חוקים", "text"), ("אימות", "text")], "public"),
     ("מידע", [("הודעות", "text"), ("עדכוני-גרסה", "text")], "verified"),
-    ("כללי", [("צאט-כללי", "text"), ("מדיה", "text"),
-              ("המלצות", "text"), ("אוף-טופיק", "text")], "verified"),
+    ("צאט-ראשי", [("צאט-ראשי", "text"), ("מדיה", "text"),
+                  ("המלצות", "text"), ("אוף-טופיק", "text")], "verified"),
     ("צפייה משותפת", [("על-מה-צופים", "text"), ("צפייה-1", "voice"),
                       ("צפייה-2", "voice"), ("צפייה-3", "voice")], "verified"),
     ("דיבורים", [("דיבורים-כללי", "voice"), ("מוזיקה", "voice"),
@@ -72,6 +73,13 @@ SERVER_LAYOUT = [
     ("תמיכה", [("פתיחת-טיקט", "text")], "verified"),
     ("צוות", [("צוות-כללי", "text"), ("לוג-טיקטים", "text"),
               ("חדר-צוות", "voice")], "staff"),
+    ("הנהלה", [("הנהלה-כללי", "text"), ("חדר-הנהלה", "voice")], "admin"),
+]
+
+# שמות שהשתנו — /setup ישנה אותם במקום ליצור כפילות
+RENAMES = [
+    ("צאט-כללי", "צאט-ראשי"),
+    ("כללי", "צאט-ראשי"),          # שם הקטגוריה הישן
 ]
 
 
@@ -180,6 +188,7 @@ class ReasonModal(discord.ui.Modal):
             category = await guild.create_category(
                 cat_name, overwrites=_staff_only_overwrites(guild))
 
+        support = discord.utils.get(guild.roles, name=ROLE_SUPPORT)
         staff = discord.utils.get(guild.roles, name=ROLE_STAFF)
         admin = discord.utils.get(guild.roles, name=ROLE_ADMIN)
         ow = {
@@ -190,7 +199,7 @@ class ReasonModal(discord.ui.Modal):
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
                                                   manage_channels=True),
         }
-        for r in (staff, admin):
+        for r in (support, staff, admin):
             if r:
                 ow[r] = discord.PermissionOverwrite(
                     view_channel=True, send_messages=True, manage_messages=True,
@@ -208,7 +217,7 @@ class ReasonModal(discord.ui.Modal):
         emb.add_field(name="סטטוס", value="ממתין לצוות", inline=True)
         emb.set_footer(text="חבר צוות ילחץ 'אני מטפל'. בסגירה יישלח תמליל לשני הצדדים.")
 
-        mention = staff.mention if staff else ""
+        mention = (support or staff).mention if (support or staff) else ""
         await ch.send(content=f"{interaction.user.mention} {mention}".strip(),
                       embed=emb, view=TicketControlView())
         await interaction.followup.send(f"הטיקט נפתח: {ch.mention}", ephemeral=True)
@@ -335,13 +344,15 @@ async def close_ticket(channel: discord.TextChannel, closed_by: discord.Member):
 
 # ── עזר ──────────────────────────────────────────────────────────────────────
 def _is_staff(member: discord.Member) -> bool:
+    """מי רשאי לקחת ולסגור טיקטים — תמיכה, צוות ומנהלים."""
     names = {r.name for r in getattr(member, "roles", [])}
-    return bool({ROLE_STAFF, ROLE_ADMIN} & names) or member.guild_permissions.manage_guild
+    return (bool({ROLE_SUPPORT, ROLE_STAFF, ROLE_ADMIN} & names)
+            or member.guild_permissions.manage_guild)
 
 
 def _staff_only_overwrites(guild):
     ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
-    for name in (ROLE_STAFF, ROLE_ADMIN):
+    for name in (ROLE_SUPPORT, ROLE_STAFF, ROLE_ADMIN):
         r = discord.utils.get(guild.roles, name=name)
         if r:
             ow[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
@@ -379,7 +390,8 @@ async def setup_cmd(interaction: discord.Interaction):
 
     # תפקידים
     roles = {}
-    for name, color in ((ROLE_VERIFIED, 0x2ECC71), (ROLE_STAFF, 0x3498DB), (ROLE_ADMIN, COLOR)):
+    for name, color in ((ROLE_VERIFIED, 0x2ECC71), (ROLE_SUPPORT, 0xF1C40F),
+                        (ROLE_STAFF, 0x3498DB), (ROLE_ADMIN, COLOR)):
         r = discord.utils.get(guild.roles, name=name)
         if r is None:
             r = await guild.create_role(name=name, colour=discord.Colour(color),
@@ -392,26 +404,62 @@ async def setup_cmd(interaction: discord.Interaction):
     await guild.default_role.edit(permissions=discord.Permissions(
         read_message_history=True, change_nickname=True))
 
-    verified, staff, admin = roles[ROLE_VERIFIED], roles[ROLE_STAFF], roles[ROLE_ADMIN]
+    verified = roles[ROLE_VERIFIED]
+    support, staff, admin = roles[ROLE_SUPPORT], roles[ROLE_STAFF], roles[ROLE_ADMIN]
+
+    # שינוי שם לערוצים/קטגוריות שהשם שלהם השתנה — במקום ליצור כפילות
+    for old_name, new_name in RENAMES:
+        for obj in list(guild.channels) + list(guild.categories):
+            if obj.name == old_name and not discord.utils.get(
+                    guild.channels, name=new_name):
+                try:
+                    await obj.edit(name=new_name)
+                    created.append(f"שונה שם: {old_name} → {new_name}")
+                except discord.Forbidden:
+                    pass
 
     def overwrites_for(vis):
-        deny_all = discord.PermissionOverwrite(view_channel=False)
+        deny = discord.PermissionOverwrite(view_channel=False)
+        # מי שיכול לכתוב בערוצי הצוות בכל רמה
+        team = {}
+        for r, level in ((support, "support"), (staff, "staff"), (admin, "admin")):
+            if r:
+                team[r] = level
         if vis == "public":
-            return {guild.default_role: discord.PermissionOverwrite(
-                        view_channel=True, send_messages=False, add_reactions=False),
-                    staff: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                    admin: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+            # חוקים ואימות — כולם רואים, אף אחד לא כותב חוץ מהצוות
+            ow = {guild.default_role: discord.PermissionOverwrite(
+                      view_channel=True, send_messages=False, add_reactions=False)}
+            for r in team:
+                ow[r] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            return ow
         if vis == "verified":
-            return {guild.default_role: deny_all,
-                    verified: discord.PermissionOverwrite(
-                        view_channel=True, send_messages=True, connect=True, speak=True),
-                    staff: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-                    admin: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
-        return {guild.default_role: deny_all,
-                staff: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                   connect=True, speak=True),
-                admin: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                   connect=True, speak=True)}
+            # כל מי שאומת רואה, כותב, ומדבר בקול
+            ow = {guild.default_role: deny,
+                  verified: discord.PermissionOverwrite(
+                      view_channel=True, send_messages=True, add_reactions=True,
+                      attach_files=True, embed_links=True, read_message_history=True,
+                      connect=True, speak=True)}
+            for r in team:
+                ow[r] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, connect=True, speak=True,
+                    manage_messages=True)
+            return ow
+        if vis == "staff":
+            ow = {guild.default_role: deny}
+            for r in team:
+                ow[r] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, connect=True, speak=True)
+            return ow
+        # admin — הנהלה בלבד
+        ow = {guild.default_role: deny}
+        if staff:
+            ow[staff] = deny
+        if support:
+            ow[support] = deny
+        if admin:
+            ow[admin] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, connect=True, speak=True)
+        return ow
 
     rules_ch = verify_ch = panel_ch = None
     for cat_name, channels, vis in SERVER_LAYOUT:
@@ -473,10 +521,13 @@ async def setup_cmd(interaction: discord.Interaction):
         await panel_ch.send(embed=emb, view=TicketPanelView())
 
     msg = (f"השרת נבנה. נוצרו {len(created)} פריטים.\n\n"
-           "**חשוב:** גררו את תפקיד הבוט מעל התפקידים "
-           f"'{ROLE_VERIFIED}', '{ROLE_STAFF}' ו-'{ROLE_ADMIN}' בהגדרות → תפקידים, "
-           "אחרת הוא לא יוכל לתת אותם.\n"
-           f"אחר כך תנו לעצמכם ולצוות את התפקיד '{ROLE_STAFF}' או '{ROLE_ADMIN}'.")
+           "**חשוב:** גררו את תפקיד הבוט לראש רשימת התפקידים, אחרת הוא לא "
+           "יוכל להעניק אותם.\n\n"
+           "**התפקידים, מהגבוה לנמוך:**\n"
+           f"· **{ROLE_ADMIN}** — הכל, כולל קטגוריית ההנהלה\n"
+           f"· **{ROLE_STAFF}** — צוות בכיר, רואה את ערוצי הצוות והטיקטים\n"
+           f"· **{ROLE_SUPPORT}** — עונה לטיקטים בלבד\n"
+           f"· **{ROLE_VERIFIED}** — ניתן אוטומטית בלחיצה על כפתור האימות")
     await interaction.followup.send(msg[:1900], ephemeral=True)
     log.info("setup הושלם: %d פריטים", len(created))
 
