@@ -1197,7 +1197,7 @@ EDGE_CACHE_DIR = DATA_DIR / "edge_cache"
 EDGE_TAIL = int(os.environ.get("STREAM_EDGE_TAIL", str(12 * 1024 * 1024)))
 EDGE_HEAD = int(os.environ.get("STREAM_EDGE_HEAD", str(2 * 1024 * 1024)))
 EDGE_CACHE_MAX = int(os.environ.get("STREAM_EDGE_CACHE_MAX", str(3 * 1024 ** 3)))
-_edge_locks: dict = {}
+_edge_filling: set = set()
 
 def _edge_path(chat_id, message_id, which) -> Path:
     return EDGE_CACHE_DIR / f"{chat_id}_{message_id}.{which}"
@@ -1230,8 +1230,8 @@ def _edge_evict():
         except OSError:
             pass
 
-async def _edge_bytes(chat_id, message_id, which, region_start, region_len):
-    """מחזיר את אזור הקצה, מהדיסק אם קיים ואחרת מושך פעם אחת ושומר."""
+def _edge_read(chat_id, message_id, which, region_len):
+    """קורא אזור קצה מהדיסק. מחזיר None אם אינו שם או אינו שלם."""
     path = _edge_path(chat_id, message_id, which)
     try:
         if path.exists() and path.stat().st_size == region_len:
@@ -1239,22 +1239,32 @@ async def _edge_bytes(chat_id, message_id, which, region_start, region_len):
             return path.read_bytes()
     except OSError:
         pass
-    lock = _edge_locks.setdefault((chat_id, message_id, which), asyncio.Lock())
-    async with lock:
-        try:                                          # אולי מישהו אחר הספיק
-            if path.exists() and path.stat().st_size == region_len:
-                return path.read_bytes()
-        except OSError:
-            pass
+    return None
+
+
+async def _edge_fill(chat_id, message_id, which, region_start, region_len):
+    """ממלא אזור קצה *ברקע*. אסור לקרוא לזה בתוך מסלול הבקשה.
+
+    האזור הוא 12MB, והמשיכה שלו מטלגרם לוקחת שניות ולעיתים נתקעת. גרסה
+    קודמת עשתה את זה מול הצופה: הבקשה לא החזירה בייט אחד עד שכל האזור
+    נמשך, וכשהמשיכה נתקעה הצופה קיבל אפס — גרוע יותר מלא לטמון בכלל, ודווקא
+    באזור שכל נגן קורא לפני הפריים הראשון.
+    """
+    key = (chat_id, message_id, which)
+    if key in _edge_filling:
+        return
+    _edge_filling.add(key)
+    try:
         buf = bytearray()
         try:
             async for chunk in _channel_range_gen(chat_id, message_id, region_start,
                                                   region_start + region_len - 1):
                 buf += chunk
         except StreamGap:
-            return None            # לא הצלחנו למלא את הקצה — מגישים כרגיל
+            return                                    # ננסה שוב בבקשה הבאה
         if len(buf) < region_len:
-            return None                               # משיכה חלקית — לא שומרים
+            return
+        path = _edge_path(chat_id, message_id, which)
         try:
             EDGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
@@ -1265,7 +1275,8 @@ async def _edge_bytes(chat_id, message_id, which, region_start, region_len):
                      which, chat_id, message_id, region_len / 1024 / 1024)
         except OSError as e:
             log.warning("מטמון קצה: שמירה נכשלה — %s", e)
-        return bytes(buf)
+    finally:
+        _edge_filling.discard(key)
 
 
 def _channel_range_gen(chat_id, message_id, start, end):
@@ -1298,13 +1309,15 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
         if region is not None:
             which, region_start = region
             region_len = EDGE_HEAD if which == "head" else EDGE_TAIL
-            data = await _edge_bytes(chat_id, message_id, which,
-                                     region_start, region_len)
+            data = _edge_read(chat_id, message_id, which, region_len)
             if data is not None:
                 off = start - region_start
                 return Response(content=data[off:off + (end - start + 1)],
                                 status_code=206, media_type=mime_type,
                                 headers=headers)
+            # אין במטמון — ממלאים ברקע ומגישים עכשיו כרגיל, בלי להשהות
+            asyncio.create_task(_edge_fill(chat_id, message_id, which,
+                                           region_start, region_len))
         return StreamingResponse(
             _channel_range_gen(chat_id, message_id, start, end),
             status_code=206, media_type=mime_type, headers=headers)
