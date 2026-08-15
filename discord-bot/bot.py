@@ -187,6 +187,7 @@ class ReasonModal(discord.ui.Modal):
             pass
 
     async def on_submit(self, interaction: discord.Interaction):
+        log.info("שליחת טופס טיקט %s על ידי %s", self.tid, interaction.user)
         await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         t = ticket_type(self.tid)
@@ -252,6 +253,9 @@ class TicketTypeSelect(discord.ui.Select):
                          custom_id="zovex:ticket_type")
 
     async def callback(self, interaction: discord.Interaction):
+        # נשאר ב-INFO בכוונה: בלי זה אי אפשר להבדיל בין "הלחיצה לא הגיעה לבוט"
+        # לבין "הגיעה ונכשלה", ושתי התקלות נראות למשתמש בדיוק אותו דבר.
+        log.info("בחירת סוג טיקט: %s על ידי %s", self.values, interaction.user)
         try:
             await interaction.response.send_modal(ReasonModal(self.values[0]))
         except Exception as e:
