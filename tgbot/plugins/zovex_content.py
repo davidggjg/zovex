@@ -102,14 +102,25 @@ def _ref(item) -> Optional[tuple]:
     return None
 
 
-def _store_pick(item) -> str:
-    token = f"{int(time.time()*1000)%1000000:06d}"
-    _picks[token] = (item, time.time())
-    # ניקוי אסימונים ישנים כדי שהמילון לא יגדל בלי סוף
+_pick_seq = 0
+
+
+def _store_pick(value) -> str:
+    """שומר ערך (שם סדרה) ומחזיר אסימון קצר ל-callback_data (מוגבל ל-64 בתים)."""
+    global _pick_seq
+    _pick_seq = (_pick_seq + 1) % 1000000
+    token = f"{_pick_seq:06d}"
+    _picks[token] = (value, time.time())
     cutoff = time.time() - _PICK_TTL
     for k in [k for k, (_, ts) in _picks.items() if ts < cutoff]:
         _picks.pop(k, None)
     return token
+
+
+def _file_cb(item) -> Optional[str]:
+    """callback_data חסר-מצב לשליחת קובץ: zx:f:<chat>:<msg>. שורד ריסטארט."""
+    ref = _ref(item)
+    return f"zx:f:{ref[0]}:{ref[1]}" if ref else None
 
 
 def _title_of(item) -> str:
@@ -138,6 +149,38 @@ def _episodes(catalog, series_name) -> list:
     eps = [e for e in catalog if e.get("series_name") == series_name and _ref(e)]
     eps.sort(key=lambda e: ((e.get("season_number") or 0), (e.get("episode_number") or 0)))
     return eps
+
+
+EPS_PER_PAGE = 8
+
+
+async def _series_view(series_name: str, token: str, page: int):
+    """(טקסט, מקלדת) לעמוד פרקים אחד של סדרה, עם ניווט קודם/הבא.
+
+    סדרה גדולה (עשרות/מאות פרקים) לא נדחסת לכפתורים — מציגים עמוד בכל פעם.
+    """
+    catalog = await _get_catalog()
+    eps = _episodes(catalog, series_name)
+    if not eps:
+        return "לא נמצאו פרקים עם קובץ 😕", None
+    pages = (len(eps) + EPS_PER_PAGE - 1) // EPS_PER_PAGE
+    page = max(0, min(page, pages - 1))
+    rows = []
+    for e in eps[page * EPS_PER_PAGE:(page + 1) * EPS_PER_PAGE]:
+        s, n = e.get("season_number"), e.get("episode_number")
+        label = (f"עונה {s} · פרק {n}" if s else f"פרק {n}") if n else _title_of(e)
+        cb = _file_cb(e)
+        if cb:
+            rows.append([InlineKeyboardButton(label, callback_data=cb)])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ הקודם", callback_data=f"zx:sp:{token}:{page-1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("הבא ▶", callback_data=f"zx:sp:{token}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    text = f"📺 **{series_name}** — עמוד {page+1}/{pages} ({len(eps)} פרקים)"
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def _search(query: str) -> tuple:
@@ -197,10 +240,12 @@ async def _handle_query(client, message: Message, query: str):
 
     results = []
     for m in movies[:MAX_RESULTS]:
-        yr = f" ({m.get('year')})" if m.get("year") else ""
-        results.append(("🎬 " + _title_of(m) + yr, "zx:m:" + _store_pick(m)))
+        cb = _file_cb(m)
+        if cb:
+            yr = f" ({m.get('year')})" if m.get("year") else ""
+            results.append(("🎬 " + _title_of(m) + yr, cb))
     for s in series[:MAX_RESULTS]:
-        results.append(("📺 " + _title_of(s), "zx:s:" + _store_pick(s)))
+        results.append(("📺 " + _title_of(s), "zx:s:" + _store_pick(s.get("series_name"))))
 
     if not results:
         return await status.edit(f"לא מצאתי כלום עבור **{query}** 😕\nנסה שם אחר או פחות מילים.")
@@ -226,39 +271,47 @@ async def zx_private_text(client, message: Message):
     await _handle_query(client, message, message.text)
 
 
-@bot.on_callback_query(filters.regex(r"^zx:m:(\d+)$"), group=1)
+# שליחת קובץ ישירות — chat+msg מקודדים ב-callback (חסר-מצב, שורד ריסטארט)
+@bot.on_callback_query(filters.regex(r"^zx:f:(-?\d+):(\d+)$"), group=1)
 @safe_handler
-async def zx_pick_movie(client, callback: CallbackQuery):
-    token = callback.matches[0].group(1)
-    entry = _picks.get(token)
-    if not entry:
-        return await callback.answer("הבחירה פגה, חפש שוב 🙂", show_alert=True)
+async def zx_send_file(client, callback: CallbackQuery):
+    from_chat = int(callback.matches[0].group(1))
+    msg_id = int(callback.matches[0].group(2))
     await callback.answer("שולח…")
-    await _send_file(client, callback.from_user.id, entry[0])
+    try:
+        await client.copy_message(chat_id=callback.from_user.id,
+                                  from_chat_id=from_chat, message_id=msg_id)
+    except Exception as e:
+        logger.error(f"ZOVEX: copy_message נכשל ({from_chat}/{msg_id}): {e}")
+        await client.send_message(
+            callback.from_user.id,
+            "😕 לא הצלחתי לשלוח את הקובץ. ייתכן שהבוט אינו חבר בערוץ האחסון.")
 
 
+# פתיחת סדרה — עמוד ראשון
 @bot.on_callback_query(filters.regex(r"^zx:s:(\d+)$"), group=1)
 @safe_handler
-async def zx_pick_series(client, callback: CallbackQuery):
+async def zx_open_series(client, callback: CallbackQuery):
     token = callback.matches[0].group(1)
     entry = _picks.get(token)
     if not entry:
         return await callback.answer("הבחירה פגה, חפש שוב 🙂", show_alert=True)
-    series_name = entry[0].get("series_name")
-    catalog = await _get_catalog()
-    eps = _episodes(catalog, series_name)
-    if not eps:
-        return await callback.answer("לא נמצאו פרקים עם קובץ 😕", show_alert=True)
     await callback.answer()
-    rows = []
-    for e in eps[:40]:                    # עד 40 כפתורים; אם יותר — ראשונים
-        s, n = e.get("season_number"), e.get("episode_number")
-        label = (f"עונה {s} · פרק {n}" if s else f"פרק {n}") if n else _title_of(e)
-        rows.append([InlineKeyboardButton(label, callback_data="zx:m:" + _store_pick(e))])
-    more = f"\n\n(מוצגים {min(len(eps),40)} מתוך {len(eps)} פרקים)" if len(eps) > 40 else ""
-    await callback.message.edit(
-        f"📺 **{series_name}** — בחר פרק:{more}",
-        reply_markup=InlineKeyboardMarkup(rows))
+    text, kb = await _series_view(entry[0], token, 0)
+    await callback.message.edit(text, reply_markup=kb)
+
+
+# ניווט בין עמודי הפרקים
+@bot.on_callback_query(filters.regex(r"^zx:sp:(\d+):(\d+)$"), group=1)
+@safe_handler
+async def zx_series_page(client, callback: CallbackQuery):
+    token, page = callback.matches[0].group(1), int(callback.matches[0].group(2))
+    entry = _picks.get(token)
+    if not entry:
+        return await callback.answer("הבחירה פגה, חפש שוב 🙂", show_alert=True)
+    await callback.answer()
+    text, kb = await _series_view(entry[0], token, page)
+    await callback.message.edit(text, reply_markup=kb)
 
 
 register(ZovexContentPlugin())
