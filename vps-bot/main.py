@@ -1001,8 +1001,12 @@ async def channel_stream_range(chat_id, message_id, start, end):
 # במקום צינור אחד ל-~4MB/s, מפצלים כל "חלון" של הסרט לכמה תת-טווחים שנמשכים
 # בו-זמנית דרך כמה בוטים שונים מה-pool (כל בוט = חיבור נפרד לטלגרם), ומגישים
 # לפי הסדר. זה עוקף את תקרת החיבור הבודד בלי לשמור שום דבר לדיסק (pass-through).
-# נשלט ע"י STREAM_PARALLEL_PARTS (ברירת מחדל 1 = ההתנהגות הישנה, בלי סיכון).
-STREAM_PARALLEL_PARTS  = int(os.environ.get("STREAM_PARALLEL_PARTS", "1"))
+# נשלט ע"י STREAM_PARALLEL_PARTS. ברירת המחדל היא 4 (הזרמה מקבילה פעילה):
+# חיבור טלגרם בודד חסום ל-~1.25MB/s, ולכן צינור יחיד לא עומד בקצב של סרט
+# 1080p בזמן-אמת → הבאפר מתרוקן והנגן "נתקע" באמצע. המסלול המקביל (media-bands,
+# ~70x) כבר קיים, מוקשח, ועם נפילה בטוחה חזרה למסלול הבוט הבודד — לכן הוא מופעל
+# כברירת מחדל. אפשר לכבות עם STREAM_PARALLEL_PARTS=1.
+STREAM_PARALLEL_PARTS  = int(os.environ.get("STREAM_PARALLEL_PARTS", "4"))
 STREAM_PARALLEL_WINDOW = int(os.environ.get("STREAM_PARALLEL_WINDOW", str(16 * 1024 * 1024)))
 # כמה זמן מחכים לבוט בודד לפני שמוותרים עליו ועוברים לבא. ניתן לכוונון מ-.env.
 SUBRANGE_TIMEOUT = int(os.environ.get("STREAM_SUBRANGE_TIMEOUT", "25"))
