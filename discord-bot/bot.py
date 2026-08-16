@@ -457,7 +457,10 @@ async def setup_cmd(interaction: discord.Interaction):
             except discord.Forbidden:
                 pass
 
-    # תפקידים
+    # תפקידים. permissions=none() בכוונה: הגישה לערוצים מגיעה *רק* מ-overwrites
+    # לכל ערוץ, אף פעם לא מהרשאות ברמת השרת. כך אף תפקיד — כולל "בעלים" —
+    # לא יכול למחוק ערוצים, לגרש, או "לפוצץ" את השרת. גם ב-/setup חוזר
+    # מאפסים את ההרשאות, כדי לנקות כל הרשאה מסוכנת שנוספה ידנית בטעות.
     roles = {}
     for name, color in ((ROLE_VERIFIED, 0x2ECC71), (ROLE_SUPPORT, 0xF1C40F),
                         (ROLE_STAFF, 0x3498DB), (ROLE_ADMIN, COLOR)):
@@ -465,13 +468,38 @@ async def setup_cmd(interaction: discord.Interaction):
         if r is None:
             r = await guild.create_role(name=name, colour=discord.Colour(color),
                                         hoist=(name != ROLE_VERIFIED),
+                                        permissions=discord.Permissions.none(),
                                         reason="setup של בוט התמיכה")
             created.append(f"תפקיד {name}")
+        else:
+            # תפקיד קיים — מוודאים שאין לו הרשאות שרת מסוכנות
+            try:
+                if r.permissions.value != 0:
+                    await r.edit(permissions=discord.Permissions.none(),
+                                 reason="הקשחה: אין הרשאות שרת לתפקידי הבוט")
+                    created.append(f"אופסו הרשאות: {name}")
+            except discord.Forbidden:
+                pass
         roles[name] = r
 
-    # ‎@everyone לא רואה כלום. זו הנקודה שגורמת לערוצים "להיעלם" עד האימות.
+    # ‎@everyone לא רואה כלום, וגם אין לו שום הרשאה שרת מסוכנת. זו הנקודה
+    # שגורמת לערוצים "להיעלם" עד האימות — וגם מה שמונע מכל משתמש רגיל
+    # למחוק/לגרש/לפוצץ. הרשאות מסוכנות (Manage Channels/Server/Roles, Kick,
+    # Ban, Administrator, Webhooks, Mention @everyone) פשוט לא קיימות פה.
     await guild.default_role.edit(permissions=discord.Permissions(
         read_message_history=True, change_nickname=True))
+
+    # הקשחת השרת: רמת אימות גבוהה (חשבון חייב טלפון מאומת/ותק) וסינון תוכן —
+    # מקטין דרמטית ניסיונות "רייד"/הצפה מחשבונות חד-פעמיים. עוטפים ב-try כי
+    # דורש הרשאת Manage Server, ולא רוצים להפיל את כל ה-setup אם חסרה.
+    try:
+        await guild.edit(
+            verification_level=discord.VerificationLevel.high,
+            explicit_content_filter=discord.ContentFilter.all_members,
+            reason="הקשחת אבטחה")
+        created.append("הוקשחה רמת האימות והסינון")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
     verified = roles[ROLE_VERIFIED]
     support, staff, admin = roles[ROLE_SUPPORT], roles[ROLE_STAFF], roles[ROLE_ADMIN]
