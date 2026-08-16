@@ -576,7 +576,12 @@ async def setup_cmd(interaction: discord.Interaction):
         else:
             await cat.edit(overwrites=ow)
         for ch_name, kind in channels:
-            existing = discord.utils.get(guild.channels, name=ch_name)
+            # מחפשים רק בערוצים מהסוג הנכון, ולא ב-guild.channels שכולל גם
+            # קטגוריות: יש קטגוריה וערוץ באותו שם ("צאט-ראשי"), וחיפוש כללי
+            # היה מוצא את הקטגוריה ומנסה להכניס אותה לקטגוריה — דיסקורד דוחה
+            # ("Categories cannot have subcategories") וכל ה-setup נכשל.
+            pool = guild.voice_channels if kind == "voice" else guild.text_channels
+            existing = discord.utils.get(pool, name=ch_name)
             if existing is None:
                 if kind == "voice":
                     existing = await guild.create_voice_channel(ch_name, category=cat, overwrites=ow)
