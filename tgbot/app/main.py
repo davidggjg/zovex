@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 from pyrogram import Client
 
-from . import bot, config, db, shabbat
+from . import bot, config, db, moderation, shabbat
 
 
 async def _run():
@@ -26,6 +26,7 @@ async def _run():
         workdir="/app/data",
     )
     bot.register(app)
+    moderation.register(app)
 
     await app.start()
     me = await app.get_me()

@@ -49,7 +49,143 @@ CREATE TABLE IF NOT EXISTS requests (
     found       INTEGER,
     at          REAL
 );
+-- ── מודרציה (Rose-style) ──
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id     INTEGER PRIMARY KEY,
+    welcome     TEXT,
+    rules       TEXT,
+    warn_limit  INTEGER DEFAULT 3,
+    warn_action TEXT DEFAULT 'mute'         -- mute | ban | kick
+);
+CREATE TABLE IF NOT EXISTS warns (
+    chat_id     INTEGER,
+    user_id     INTEGER,
+    count       INTEGER DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS warn_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     INTEGER, user_id INTEGER, reason TEXT, by_id INTEGER, at REAL
+);
+CREATE TABLE IF NOT EXISTS notes (
+    chat_id     INTEGER, name TEXT, content TEXT, file_id TEXT, file_type TEXT,
+    PRIMARY KEY (chat_id, name)
+);
+CREATE TABLE IF NOT EXISTS filters (
+    chat_id     INTEGER, trigger TEXT, reply TEXT,
+    PRIMARY KEY (chat_id, trigger)
+);
 """
+
+
+# ── הגדרות צ'אט ────────────────────────────────────────────────────────────────
+async def get_settings(chat_id) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM chat_settings WHERE chat_id=?", (chat_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else {"chat_id": chat_id, "welcome": None, "rules": None,
+                                      "warn_limit": 3, "warn_action": "mute"}
+
+
+async def set_setting(chat_id, field, value):
+    if field not in ("welcome", "rules", "warn_limit", "warn_action"):
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"""INSERT INTO chat_settings (chat_id, {field}) VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET {field}=excluded.{field}""",
+            (chat_id, value))
+        await db.commit()
+
+
+# ── אזהרות ────────────────────────────────────────────────────────────────────
+async def add_warn(chat_id, user_id, reason, by_id) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO warns (chat_id, user_id, count) VALUES (?,?,1)
+               ON CONFLICT(chat_id, user_id) DO UPDATE SET count=count+1""",
+            (chat_id, user_id))
+        await db.execute("INSERT INTO warn_log (chat_id,user_id,reason,by_id,at) VALUES (?,?,?,?,?)",
+                         (chat_id, user_id, reason, by_id, time.time()))
+        cur = await db.execute("SELECT count FROM warns WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        await db.commit()
+        return (await cur.fetchone())[0]
+
+
+async def reset_warns(chat_id, user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM warns WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        await db.commit()
+
+
+async def get_warns(chat_id, user_id) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT count FROM warns WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+        row = await cur.fetchone()
+        return row[0] if row else 0
+
+
+# ── הערות ─────────────────────────────────────────────────────────────────────
+async def save_note(chat_id, name, content, file_id=None, file_type=None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO notes (chat_id,name,content,file_id,file_type) VALUES (?,?,?,?,?)
+               ON CONFLICT(chat_id,name) DO UPDATE SET content=excluded.content,
+                   file_id=excluded.file_id, file_type=excluded.file_type""",
+            (chat_id, name.lower(), content, file_id, file_type))
+        await db.commit()
+
+
+async def get_note(chat_id, name):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM notes WHERE chat_id=? AND name=?", (chat_id, name.lower()))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def del_note(chat_id, name):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM notes WHERE chat_id=? AND name=?", (chat_id, name.lower()))
+        await db.commit()
+
+
+async def list_notes(chat_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT name FROM notes WHERE chat_id=? ORDER BY name", (chat_id,))
+        return [r[0] for r in await cur.fetchall()]
+
+
+# ── פילטרים (תגובה אוטומטית למילת-מפתח) ──────────────────────────────────────
+async def add_filter(chat_id, trigger, reply):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO filters (chat_id, trigger, reply) VALUES (?,?,?)
+               ON CONFLICT(chat_id, trigger) DO UPDATE SET reply=excluded.reply""",
+            (chat_id, trigger.lower(), reply))
+        await db.commit()
+
+
+async def del_filter(chat_id, trigger):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM filters WHERE chat_id=? AND trigger=?",
+                               (chat_id, trigger.lower()))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def list_filters(chat_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT trigger FROM filters WHERE chat_id=? ORDER BY trigger", (chat_id,))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def get_filters(chat_id):
+    """כל הפילטרים של הצ'אט → [(trigger, reply), ...]."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT trigger, reply FROM filters WHERE chat_id=?", (chat_id,))
+        return await cur.fetchall()
 
 
 async def init():
