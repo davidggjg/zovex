@@ -12,3 +12,21 @@ services:
     deploy:
       resources:
         limits: { memory: 256M }
+
+  # דשבורד הניהול — קורא את אותו SQLite, מוגש ל-127.0.0.1:8090 ומאחוריו nginx.
+  dashboard:
+    build: .
+    container_name: zovex-tg-panel
+    restart: unless-stopped
+    env_file: [.env]
+    command: uvicorn app.dashboard:app --host 0.0.0.0 --port 8090
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8090:8090"
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { memory: 256M }

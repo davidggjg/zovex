@@ -5,3 +5,5 @@ apscheduler>=3.10
 hebcal-api>=0.2.0
 uvloop>=0.19; sys_platform != 'win32'
 loguru>=0.7
+fastapi>=0.110
+uvicorn[standard]>=0.29
