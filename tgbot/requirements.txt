@@ -1,0 +1,8 @@
+kurigram>=2.2.0
+tgcrypto>=1.2.5
+aiosqlite>=0.20.0
+httpx>=0.28.0
+apscheduler>=3.10
+hebcal-api>=0.2.0
+uvloop>=0.19; sys_platform != 'win32'
+loguru>=0.7
