@@ -108,6 +108,18 @@ api.add_middleware(
     allow_headers=["*"],
 )
 
+# נקודות המדיה (relay/stream) מוגשות מכל מקום, גם מ-origin "null" — זה ה-origin
+# של ה-WebView באפליקציה, שבו נגן ה-HLS (Shaka) מושך את ה-m3u8 והמקטעים דרך
+# fetch. נעילת ה-CORS ל-API היא נכונה (נתוני משתמשים), אבל היא שברה שידורים
+# חיים באפליקציה. מדיה היא תוכן ציבורי בלי הרשאות — לכן ACAO:* לה בטוח. מוסיפים
+# ישירות לתגובות (לא ב-middleware) כדי לא לגעת ב-streaming הרגיש.
+CORS_MEDIA = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Range",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+}
+
 # ── גיבוי קבוע ל-HF Dataset ────────────────────────────────────────────────
 # /tmp נמחק בכל הפעלה-מחדש/התעוררות של ה-Space (זה מה שגרם ל"היסטוריה
 # ו'המשך צפייה' לא עובדים" — הכל נמחק ברקע בלי שגיאה גלויה). כדי לשמור
@@ -1341,6 +1353,7 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
             "Accept-Ranges": "bytes",
             "Content-Length": str(end - start + 1),
             "Content-Disposition": disposition,
+            **CORS_MEDIA,
         }
         # קצוות הקובץ מוגשים מהדיסק: שם יושבת טבלת האינדקס שכל נגן חייב
         # לקרוא לפני הפריים הראשון, והיא זהה לכל הצופים.
@@ -1364,6 +1377,7 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
         "Accept-Ranges": "bytes",
         "Content-Length": str(file_size),
         "Content-Disposition": disposition,
+        **CORS_MEDIA,
     }
     return StreamingResponse(
         _channel_range_gen(chat_id, message_id, 0, file_size - 1),
@@ -1464,7 +1478,7 @@ async def cast_remux(chat_id: int, message_id: int, request: Request,
                 pass
 
     return StreamingResponse(gen(), media_type="video/mp4",
-                             headers={"Content-Disposition": "inline"})
+                             headers={"Content-Disposition": "inline", **CORS_MEDIA})
 
 # ── HLS Relay (עוקף "http משודרג אוטומטית ל-https ושבור" בדפדפן) ────────────
 # חלק מספקי שידור חי (למשל stream.mcquack.net) מגישים רק http:// תקין -
@@ -1811,7 +1825,7 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
         return Response(
             content=f.read_bytes(),
             media_type="video/mp4" if name == "init.mp4" else "video/iso.segment",
-            headers={"Cache-Control": "public, max-age=60"},
+            headers={"Cache-Control": "public, max-age=60", **CORS_MEDIA},
         )
 
     # בקשה ל-playlist: מוודאים שה-ffmpeg רץ, מחכים שייווצר, ומשכתבים נתיבים.
@@ -1841,7 +1855,7 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
             out.append(line)
     return Response(content="\n".join(out),
                     media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-cache"})
+                    headers={"Cache-Control": "no-cache", **CORS_MEDIA})
 
 
 @api.get("/hls-relay/{host}/{path:path}")
@@ -1890,7 +1904,7 @@ async def hls_relay(host: str, path: str, request: Request):
         return Response(
             content=rewritten,
             media_type="application/vnd.apple.mpegurl",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "no-cache", **CORS_MEDIA},
         )
 
     # מקטעי וידאו (.ts) - מוזרם (streaming) לצופה שביקש ראשון, כדי שיתחיל
@@ -1931,7 +1945,7 @@ async def hls_relay(host: str, path: str, request: Request):
     return StreamingResponse(
         _proxy_segment(),
         media_type="video/mp2t",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=86400", **CORS_MEDIA},
     )
 
 # ── Ping & Dashboard ──────────────────────────────────────────────────────────
