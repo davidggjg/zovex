@@ -1,5 +1,4 @@
 kurigram>=2.2.0
-tgcrypto>=1.2.5
 aiosqlite>=0.20.0
 httpx>=0.28.0
 apscheduler>=3.10
