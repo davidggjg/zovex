@@ -349,9 +349,13 @@ async def close_ticket(channel: discord.TextChannel, closed_by: discord.Member):
             body += f"\n[קובץ מצורף] {a.filename} — {a.url}"
         lines.append(f"[{stamp}] {m.author}: {body}".rstrip())
         count += 1
-    lines += ["", "─" * 60, f"סה\"כ {count} הודעות"]
+    lines += ["", "-" * 60, f"סה\"כ {count} הודעות"]
 
-    data = "\n".join(lines).encode("utf-8")
+    # utf-8-sig מוסיף BOM בתחילת הקובץ. בלעדיו צופי טקסט בטלפון/מחשב מנחשים
+    # קידוד (לרוב Windows-1252) ומציגים את העברית כג'יבריש. ה-BOM מסמן במפורש
+    # "זה UTF-8" וכל צופה מציג נכון. גם החלפתי את קו ההפרדה מ-─ ל-'-' כדי
+    # שגם צופה פרימיטיבי במיוחד לא ייכשל על תו יוניקוד.
+    data = "\n".join(lines).encode("utf-8-sig")
     fname = f"ticket-{channel.name}-{datetime.now(timezone.utc):%Y%m%d-%H%M}.txt"
 
     guild = channel.guild
