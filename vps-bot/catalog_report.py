@@ -37,60 +37,8 @@ if ENV_FILE.exists():
                 v = v[1:-1]
             os.environ[k.strip()] = v
 
-from main import load_content, clean_name           # noqa: E402
-
-MARVEL_CATEGORY = "מארוול"
-
-# רשימת כותרות מוכרות (אנגלית, מנורמלת) — MCU + ספיידרמן + אקס-מן + דדפול + וונום.
-_MARVEL_TITLES = {
-    "iron man", "iron man 2", "iron man 3", "the incredible hulk", "thor",
-    "thor the dark world", "thor ragnarok", "thor love and thunder",
-    "captain america the first avenger", "captain america the winter soldier",
-    "captain america civil war", "captain america brave new world",
-    "the avengers", "avengers age of ultron", "avengers infinity war",
-    "avengers endgame", "guardians of the galaxy", "guardians of the galaxy vol 2",
-    "guardians of the galaxy vol 3", "ant man", "ant man and the wasp",
-    "ant man and the wasp quantumania", "doctor strange",
-    "doctor strange in the multiverse of madness", "black panther",
-    "black panther wakanda forever", "captain marvel", "the marvels",
-    "spider man homecoming", "spider man far from home", "spider man no way home",
-    "black widow", "shang chi and the legend of the ten rings", "eternals",
-    "deadpool", "deadpool 2", "deadpool and wolverine", "deadpool wolverine",
-    "venom", "venom let there be carnage", "venom the last dance", "morbius",
-    "madame web", "kraven the hunter", "spider man", "spider man 2", "spider man 3",
-    "the amazing spider man", "the amazing spider man 2", "x men", "x2",
-    "x men the last stand", "x men first class", "x men days of future past",
-    "x men apocalypse", "x men dark phoenix", "the wolverine", "logan",
-    "x men origins wolverine", "fantastic four", "the fantastic four first steps",
-    "blade", "wandavision", "the falcon and the winter soldier", "loki",
-    "hawkeye", "moon knight", "ms marvel", "she hulk attorney at law",
-    "secret invasion", "echo", "agatha all along", "daredevil",
-    "daredevil born again", "the punisher", "jessica jones", "luke cage",
-    "iron fist", "the defenders", "agents of shield",
-}
-# מילות-מפתח של זכיינות — לתפוס גם וריאציות שלא ברשימה המדויקת.
-_MARVEL_KEYWORDS = ("avengers", "x men", "deadpool", "spider man", "iron man",
-                    "captain america", "guardians of the galaxy", "ant man",
-                    "black panther", "doctor strange", "thor", "wolverine",
-                    "venom", "loki", "wandavision", "moon knight")
-
-
-def _norm(s):
-    s = clean_name(str(s or "")).lower()
-    s = re.sub(r"[^\w֐-׿]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def looks_marvel(en, he):
-    for cand in (en, he):
-        n = _norm(cand)
-        if not n:
-            continue
-        if n in _MARVEL_TITLES:
-            return True
-        if any(kw in n for kw in _MARVEL_KEYWORDS):
-            return True
-    return False
+from main import load_content                        # noqa: E402
+from marvel import MARVEL_CATEGORY, looks_marvel       # noqa: E402
 
 
 def main():
