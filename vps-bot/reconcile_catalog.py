@@ -64,7 +64,7 @@ if ENV_FILE.exists():
 
 from pyrogram import Client                                    # noqa: E402
 from main import (API_ID, API_HASH, STREAM_CHANNEL_ID,          # noqa: E402
-                  STREAM_BOTS_FILE, clean_name)
+                  STREAM_BOTS_FILE, clean_name, parse_episode_info)
 
 _STREAM_RE = re.compile(r"/stream/(-?\d+)/(\d+)")
 
@@ -173,6 +173,7 @@ async def main():
 
         by_id = {}
         by_norm = defaultdict(list)
+        ep_of = {}          # msg_id → מספר פרק (לפירוק סדרות מעורפלות)
         seen = 0
         async for m in app.get_chat_history(STREAM_CHANNEL_ID):
             seen += 1
@@ -187,6 +188,12 @@ async def main():
             caption = str(m.caption or "")
             by_id[m.id] = {"name": name, "caption": caption,
                            "size": getattr(media, "file_size", 0)}
+            try:
+                info = parse_episode_info(name or caption)
+                if info and info.get("episode") is not None:
+                    ep_of[m.id] = info["episode"]
+            except Exception:
+                pass
             nm = _norm(name or caption)
             if nm:
                 by_norm[nm].append(m.id)
@@ -229,6 +236,17 @@ async def main():
                 unresolved.append((title or f"פריט #{idx}", msg_id))
                 continue
             if len(set(cand)) > 1:
+                # פירוק לפי מספר פרק: אם לפריט יש מספר פרק, ובערוץ יש בדיוק
+                # הודעה אחת מאותה סדרה עם אותו מספר פרק — זו ההתאמה הנכונה.
+                want_ep = item.get("episode_number")
+                if want_ep is None:
+                    want_ep = item.get("episode")
+                if want_ep is not None:
+                    exact = [mm for mm in set(cand) if ep_of.get(mm) == want_ep]
+                    if len(exact) == 1:
+                        fixes.append((idx, key, path, msg_id, exact[0], title, chat_id, raw))
+                        fixed += 1
+                        continue
                 ambiguous += 1
                 unresolved.append((f"{title} (⚠️ {len(set(cand))} התאמות)", msg_id))
                 continue
