@@ -77,6 +77,31 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _as_int(x):
+    try:
+        return int(str(x).strip())
+    except Exception:
+        return None
+
+
+def entry_episode(item):
+    """מספר הפרק של פריט בקטלוג — משדה, מה-id ('...-s1e5-...'), או מהכותרת."""
+    for k in ("episode_number", "episode", "ep"):
+        iv = _as_int(item.get(k))
+        if iv is not None:
+            return iv
+    m = re.search(r"[sS]\d+[eE](\d+)", str(item.get("id") or ""))
+    if m:
+        return int(m.group(1))
+    try:
+        info = parse_episode_info(str(item.get("title") or item.get("name") or ""))
+        if info and info.get("episode") is not None:
+            return int(info["episode"])
+    except Exception:
+        pass
+    return None
+
+
 def load_json(p, default):
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -238,11 +263,10 @@ async def main():
             if len(set(cand)) > 1:
                 # פירוק לפי מספר פרק: אם לפריט יש מספר פרק, ובערוץ יש בדיוק
                 # הודעה אחת מאותה סדרה עם אותו מספר פרק — זו ההתאמה הנכונה.
-                want_ep = item.get("episode_number")
-                if want_ep is None:
-                    want_ep = item.get("episode")
+                want_ep = entry_episode(item)
                 if want_ep is not None:
-                    exact = [mm for mm in set(cand) if ep_of.get(mm) == want_ep]
+                    exact = [mm for mm in set(cand)
+                             if _as_int(ep_of.get(mm)) == want_ep]
                     if len(exact) == 1:
                         fixes.append((idx, key, path, msg_id, exact[0], title, chat_id, raw))
                         fixed += 1
