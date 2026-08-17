@@ -287,64 +287,55 @@ async def main():
             print(f"  ... ועוד {len(unresolved) - 25}  (הכל בקובץ למעלה)")
         print()
 
-    # ── הסרת רשומות מתות ──
+    # ── רשומות מתות (להסרה עם --remove-dead) ──
+    to_remove = []
     if args.remove_dead:
-        # מסירים רק פריטים שכל קישורי ה-/stream שלהם מתים-ולא-נמצאו (dead_idx),
-        # וגם אין להם אף קישור תקין — כדי לא למחוק בטעות פריט שחלקו עובד.
-        to_remove = []
+        # רק פריטים שכל קישורי ה-/stream שלהם מתים-ולא-נמצאו, ואין להם אף
+        # קישור תקין — כדי לא למחוק בטעות פריט שחלקו עובד.
         for i in sorted(dead_idx):
-            item = content[i]
-            refs = walk_stream_refs(item)
+            refs = walk_stream_refs(content[i])
             if refs and all(mid not in by_id for _, _, _, mid, _ in refs):
                 to_remove.append(i)
         print(f"── הסרת מתים ── מועמדים להסרה: {len(to_remove)} רשומות")
         for i in to_remove[:25]:
             print(f"  ✕ {(item_title(content[i]) or '?')[:55]}")
-        if not args.apply:
-            print("\nהרצה יבשה — לא הוסר כלום. לביצוע: --remove-dead --apply\n")
-        elif to_remove:
-            backup = CONTENT.with_suffix(f".json.bak.{int(time.time())}")
-            backup.write_text(CONTENT.read_text(encoding="utf-8"), encoding="utf-8")
-            content = [e for j, e in enumerate(content) if j not in set(to_remove)]
-            CONTENT.write_text(json.dumps(content, ensure_ascii=False, indent=0),
-                               encoding="utf-8")
-            print(f"✅ הוסרו {len(to_remove)} רשומות מתות. גיבוי: {backup.name}")
-            print("   הפעל מחדש לניקוי מטמון: systemctl restart zovex-bot")
-            return 0
+        print()
 
     if not args.apply:
         print("הרצה יבשה — לא שונה כלום. לתיקון בפועל הוסף --apply "
-              "(ולהסרת המתים: --remove-dead --apply)")
+              "(ולהסרת המתים גם: --remove-dead --apply)")
         return 0
 
-    if not fixes:
-        print("אין מה לתקן.")
+    if not fixes and not to_remove:
+        print("אין מה לשנות.")
         return 0
 
-    # גיבוי לפני שינוי
+    # גיבוי אחד לפני כל השינויים
     backup = CONTENT.with_suffix(f".json.bak.{int(time.time())}")
     backup.write_text(CONTENT.read_text(encoding="utf-8"), encoding="utf-8")
     print(f"גיבוי נשמר: {backup.name}")
 
+    # 1) תיקון קישורים (במקום — לא משנה אינדקסים)
     for idx, key, _path, _oldm, newm, _title, chat_id, raw in fixes:
         item = content[idx]
-        # מאתרים מחדש את המחרוזת ומחליפים רק את החלק /stream/
         new_chat = STREAM_CHANNEL_ID if chat_id != STREAM_CHANNEL_ID else chat_id
         newval = repoint(raw, new_chat, newm)
-        # key הוא מפתח־מילון או אינדקס־רשימה — מתקנים במקום הנכון
-        node = item
-        # רוב הפריטים שטוחים: המפתח ישירות על הפריט
-        if isinstance(node, dict) and key in node and isinstance(node[key], str):
-            node[key] = newval
+        if isinstance(item, dict) and key in item and isinstance(item[key], str):
+            item[key] = newval
         else:
-            # מבנה מקונן — מאתרים לפי הערך הישן ומחליפים
             _replace_deep(item, raw, newval)
+
+    # 2) הסרת מתים (אחרי התיקון — האינדקסים עדיין תקפים)
+    if to_remove:
+        rm = set(to_remove)
+        content = [e for j, e in enumerate(content) if j not in rm]
 
     CONTENT.write_text(json.dumps(content, ensure_ascii=False, indent=0),
                        encoding="utf-8")
-    print(f"✅ תוקנו {len(fixes)} קישורים ב-content.json")
-    print("   (הפעל מחדש לא נדרש — האתר קורא את הקובץ, אבל אם יש מטמון: "
-          "systemctl restart zovex-bot)")
+    print(f"✅ תוקנו {len(fixes)} קישורים"
+          + (f", הוסרו {len(to_remove)} רשומות מתות" if to_remove else "")
+          + " ב-content.json")
+    print("   לניקוי מטמון: systemctl restart zovex-bot")
     return 0
 
 
