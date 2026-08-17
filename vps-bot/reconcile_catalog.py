@@ -39,6 +39,8 @@ CONTENT = DATA / "content.json"
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--apply", action="store_true", help="לתקן בפועל (אחרת רק דו\"ח)")
+ap.add_argument("--remove-dead", action="store_true", dest="remove_dead",
+                help="להסיר רשומות שהקישור שלהן מת ואין קובץ מתאים בערוץ")
 ap.add_argument("--query", default="", help="לצמצם לפריטים שהשם/כיתוב מכיל את הטקסט")
 ap.add_argument("--schema", action="store_true", help="להדפיס את מבנה הפריטים ולצאת")
 ap.add_argument("--limit", type=int, default=0, help="לעצור אחרי N הודעות בערוץ (0=הכל)")
@@ -197,6 +199,7 @@ async def main():
     total_refs = ok = broken = fixed = unmatched = ambiguous = 0
     fixes = []          # (item_idx, key, old, new_msg, title)
     unresolved = []     # (title, old_msg)
+    dead_idx = set()    # אינדקסים של פריטים עם קישור מת שלא נמצאה לו התאמה
 
     for idx, item in enumerate(content):
         if not isinstance(item, dict):
@@ -210,18 +213,19 @@ async def main():
                 ok += 1
                 continue
             broken += 1
-            # מנסים למצוא את אותו קובץ לפי השם
-            cand = by_norm.get(_norm(title))
-            # אם אין התאמה לפי כותרת הפריט, ננסה גם לפי כל טקסט בפריט
-            if not cand:
-                for k2 in ("file_name", "filename", "original_name"):
-                    v = item.get(k2)
-                    if isinstance(v, str):
-                        cand = by_norm.get(_norm(v))
-                        if cand:
-                            break
+            # מנסים למצוא את אותו קובץ לפי השם — כותרת עברית, שם אנגלי, שם סדרה,
+            # ושם-קובץ אם קיים. השמות בערוץ לרוב אנגליים, ולכן en_title קריטי.
+            cand = None
+            for nm_try in (title, item.get("en_title"), item.get("series_name"),
+                           item.get("file_name"), item.get("filename"),
+                           item.get("original_name")):
+                if isinstance(nm_try, str) and nm_try.strip():
+                    cand = by_norm.get(_norm(nm_try))
+                    if cand:
+                        break
             if not cand:
                 unmatched += 1
+                dead_idx.add(idx)
                 unresolved.append((title or f"פריט #{idx}", msg_id))
                 continue
             if len(set(cand)) > 1:
@@ -250,15 +254,49 @@ async def main():
         print()
 
     if unresolved:
-        print("שבורים שלא נמצאה להם התאמה (צריך בדיקה ידנית):")
+        # דו"ח מלא לקובץ — כדי לראות את *כל* השבורים, לא רק 25 הראשונים.
+        dump = pathlib.Path("/opt/zovex-bot/data/reconcile_broken.txt")
+        try:
+            dump.write_text(
+                "\n".join(f"{t}\tmsg {m}" for t, m in unresolved), encoding="utf-8")
+            where = f"  (הרשימה המלאה: {dump})"
+        except Exception:
+            where = ""
+        print(f"שבורים שלא נמצאה להם התאמה (קבצים שנמחקו מהערוץ){where}:")
         for title, oldm in unresolved[:25]:
             print(f"  {(title or '?')[:50]:<50}  msg {oldm}")
         if len(unresolved) > 25:
-            print(f"  ... ועוד {len(unresolved) - 25}")
+            print(f"  ... ועוד {len(unresolved) - 25}  (הכל בקובץ למעלה)")
         print()
 
+    # ── הסרת רשומות מתות ──
+    if args.remove_dead:
+        # מסירים רק פריטים שכל קישורי ה-/stream שלהם מתים-ולא-נמצאו (dead_idx),
+        # וגם אין להם אף קישור תקין — כדי לא למחוק בטעות פריט שחלקו עובד.
+        to_remove = []
+        for i in sorted(dead_idx):
+            item = content[i]
+            refs = walk_stream_refs(item)
+            if refs and all(mid not in by_id for _, _, _, mid, _ in refs):
+                to_remove.append(i)
+        print(f"── הסרת מתים ── מועמדים להסרה: {len(to_remove)} רשומות")
+        for i in to_remove[:25]:
+            print(f"  ✕ {(item_title(content[i]) or '?')[:55]}")
+        if not args.apply:
+            print("\nהרצה יבשה — לא הוסר כלום. לביצוע: --remove-dead --apply\n")
+        elif to_remove:
+            backup = CONTENT.with_suffix(f".json.bak.{int(time.time())}")
+            backup.write_text(CONTENT.read_text(encoding="utf-8"), encoding="utf-8")
+            content = [e for j, e in enumerate(content) if j not in set(to_remove)]
+            CONTENT.write_text(json.dumps(content, ensure_ascii=False, indent=0),
+                               encoding="utf-8")
+            print(f"✅ הוסרו {len(to_remove)} רשומות מתות. גיבוי: {backup.name}")
+            print("   הפעל מחדש לניקוי מטמון: systemctl restart zovex-bot")
+            return 0
+
     if not args.apply:
-        print("הרצה יבשה — לא שונה כלום. לתיקון בפועל הוסף --apply")
+        print("הרצה יבשה — לא שונה כלום. לתיקון בפועל הוסף --apply "
+              "(ולהסרת המתים: --remove-dead --apply)")
         return 0
 
     if not fixes:
