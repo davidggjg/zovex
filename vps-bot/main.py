@@ -5033,6 +5033,31 @@ async def _fill_pool_bg(client, owner: str, dc_id: int, n: int):
         _media_building.discard(key)
 
 
+async def _refresh_pool_bg(client, owner: str, dc_id: int, n: int, old_ent: dict):
+    """בונה *דור חדש* של חיבורים ברקע ומחליף את הישן בבת אחת, ואז מוציא את
+    הישן לגמלאות (עם גרייס). קריטי: בלי זה, בריכה שפג תוקפה (מעל 30 דק') לא
+    התחדשה אף פעם ב-block=False, וכל הזרמה נפלה למסלול הבוט האיטי לצמיתות —
+    זה מה שגרם לסרט "להיתקע ולהיטען" אחרי חצי שעה."""
+    key = (owner, dc_id)
+    try:
+        fresh = []
+        for _ in range(n):
+            try:
+                fresh.append(await _make_media_session(client, dc_id))
+            except Exception as e:
+                log.error("רענון media session ל-%s נכשל: %s", owner, e)
+                break
+        if fresh:
+            async with _media_lock(key):
+                _media_sessions[key] = {"born": time.time(),
+                                        "gen": next(_media_gen_counter),
+                                        "pool": fresh}
+            asyncio.create_task(_retire_pool(old_ent["pool"]))
+            log.info("media pool ל-%s רוענן (%d חיבורים טריים)", owner, len(fresh))
+    finally:
+        _media_building.discard(key)
+
+
 async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int,
                                      block: bool = True):
     """חיבורי media *פר-בוט*, עם מחזור לפי גיל. מחזיר (pool, gen).
@@ -5055,8 +5080,15 @@ async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int,
     # והבקשה הנוכחית נופלת למסלול הבוטים, שמגיש תוך שניות בודדות.
     if not block:
         ent = _media_sessions.get(key)
-        if ent is not None and (now - ent["born"]) <= MEDIA_SESSION_TTL \
-                and len(ent["pool"]) >= n:
+        if ent is not None and len(ent["pool"]) >= n:
+            if (now - ent["born"]) <= MEDIA_SESSION_TTL:
+                return ent["pool"][:n], ent["gen"]
+            # פג תוקף (מעל 30 דק') — בונים דור חדש ברקע, אבל *עדיין מגישים את
+            # הישן* (חי בגרייס) כדי לא ליצור תקיעה באמצע צפייה. הבקשה הבאה כבר
+            # תקבל את החדש. בלי זה הזרמה של סרט ארוך נתקעה בדיוק אחרי חצי שעה.
+            if key not in _media_building:
+                _media_building.add(key)
+                asyncio.create_task(_refresh_pool_bg(client, owner, dc_id, n, ent))
             return ent["pool"][:n], ent["gen"]
         if key not in _media_building:
             _media_building.add(key)
