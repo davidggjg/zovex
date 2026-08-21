@@ -7,6 +7,7 @@ import { useGoogleAuth, LandingScreen } from "@/components/home/Auth.jsx";
 import HomePage from "@/components/home/HomePage.jsx";
 import AdBanner from "@/components/home/AdBanner.jsx";
 import DonationModalView from "@/components/home/DonationModalView.jsx";
+import DonationAd from "@/components/home/DonationAd.jsx";
 import { useWatchHistory } from "@/components/home/useWatchHistory";
 import { useApiKeyEndpoint } from "@/components/home/useApiKeyEndpoint";
 import { useSlugRouting } from "@/components/home/useSlugRouting";
@@ -54,6 +55,14 @@ function HomeMain({ user, onLogout, isGuest }) {
   const [selectedSeries, setSelectedSeries] = useState(() => ls("zovex_series"));
   const [showDonation, setShowDonation] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
+  // פרסומת תרומה במסך הבית — פעם אחת לכל כניסה (session).
+  const [showDonAd, setShowDonAd] = useState(() => {
+    try { return !sessionStorage.getItem("zx_don_ad_seen"); } catch { return true; }
+  });
+  const dismissDonAd = () => {
+    setShowDonAd(false);
+    try { sessionStorage.setItem("zx_don_ad_seen", "1"); } catch {}
+  };
 
 
   // live streams — מערך של כמה שידורים חיים במקביל, כל אחד עם שם וקישור
@@ -243,6 +252,7 @@ function HomeMain({ user, onLogout, isGuest }) {
   // ── Home grid ──
   return (
     <>
+      {showDonAd && <DonationAd onSkip={dismissDonAd} />}
       {donationModal}
       <AdBanner />
 
