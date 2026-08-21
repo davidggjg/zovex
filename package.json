@@ -8,11 +8,10 @@
     "prebuild": "node scripts/generate-sitemap.js",
     "build": "vite build",
     "postbuild": "node scripts/prerender-routes.js",
-    "build:vps": "node scripts/generate-sitemap.js && vite build --base=/ && node scripts/prerender-routes.js",
+    "build:vps": "SITE_URL=https://zovex.duckdns.org node scripts/generate-sitemap.js && vite build --base=/ && SITE_URL=https://zovex.duckdns.org node scripts/prerender-routes.js && sed -i 's#https://davidggjg.github.io/zovex#https://zovex.duckdns.org#g' dist/robots.txt",
     "preview": "vite preview",
     "scan": "node scripts/scan.js",
-    "scan:fix": "node scripts/scan.js --fix",
-    "build:vps": "node scripts/generate-sitemap.js && vite build --base=/ && node scripts/prerender-routes.js"
+    "scan:fix": "node scripts/scan.js --fix"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",

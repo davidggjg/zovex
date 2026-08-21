@@ -15,7 +15,7 @@ const ROOT = path.resolve(__dirname, "..");
 const DIST_DIR = path.join(ROOT, "dist");
 const MOVIES_PATH = path.join(ROOT, "public", "movies.json");
 const INDEX_HTML = path.join(DIST_DIR, "index.html");
-const SITE_URL = "https://davidggjg.github.io/zovex";
+const SITE_URL = process.env.SITE_URL || "https://davidggjg.github.io/zovex";
 
 function slugifyMovie(movie) {
   if (movie.custom_slug) return movie.custom_slug;
