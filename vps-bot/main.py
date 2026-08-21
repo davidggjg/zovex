@@ -933,6 +933,15 @@ async def _get_bot_msg(bot, chat_id, message_id, force=False):
         return msg
     return None
 
+
+def _purge_msg_cache(chat_id, message_id):
+    """מנקה את הודעת ה-cache של *כל* הבוטים עבור פריט מסוים. כשה-file_reference
+    פג הוא פג גלובלית (לכל הבוטים), ולכן ניקוי של בוט אחד לא הספיק — הבקשה
+    הבאה נחתה על בוט אחר עם reference ישן וכשלה שוב, והסרט נשאר "תקוע" עד
+    כניסה מחדש. ניקוי כולל מאלץ שליפת הודעה טרייה בבקשה הבאה → התאוששות מיידית."""
+    for k in [k for k in _bot_msg_cache if k[1] == chat_id and k[2] == message_id]:
+        _bot_msg_cache.pop(k, None)
+
 async def channel_get_media(chat_id, message_id):
     """מחזיר את ה-media של ההודעה מהערוץ (metadata בלבד — אין בעיית reference)."""
     for _ in range(min(max(1, len(_stream_bots)), 5)):
@@ -979,8 +988,8 @@ async def channel_stream_range(chat_id, message_id, start, end):
                     break
             break  # הצלחה
         except FileReferenceExpired:
-            # ה-reference פג — נזרוק את ה-cache של הבוט ונתן לו סיבוב נוסף
-            _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+            # ה-reference פג (גלובלית) — מנקים לכל הבוטים ונותנים סיבוב נוסף
+            _purge_msg_cache(chat_id, message_id)
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להתחיל מחדש
         except FloodWait as e:
@@ -1056,7 +1065,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
                         bot["name"], SUBRANGE_TIMEOUT)
             _mark_choked(bot, 30)
         except FileReferenceExpired:
-            _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+            _purge_msg_cache(chat_id, message_id)
         except FloodWait as e:
             _mark_choked(bot, e.value, hard=True)
         except Exception as e:
@@ -1173,6 +1182,12 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             # שגיאה באחד החלקים — לא מגישים חלקי, ומרעננים את החיבורים
             log.warning("media bands (%s) חלק נכשל: %s — מרענן חיבורים", bot["name"], bad)
             await drop_media_sessions(bot["name"], dc_id, gen)
+            # קריטי: כאן ה-FileReferenceExpired מגיע *בתוך* תוצאות ה-gather
+            # (return_exceptions=True), ולכן ה-except למטה לא תופס אותו. בלי
+            # הניקוי הזה ה-reference הפג נשאר במטמון וכל חלון נכשל שוב → הסרט
+            # נתקע אחרי ~37 דק' עד כניסה מחדש. הניקוי מאלץ הודעה טרייה.
+            if isinstance(bad, FileReferenceExpired):
+                _purge_msg_cache(chat_id, message_id)
             return None
         out = bytearray()
         for p in parts:
@@ -1184,7 +1199,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
             note_bot_speed(bot, (total / 1024 / 1024) / elapsed)
         return bytes(out[:total])
     except FileReferenceExpired:
-        _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+        _purge_msg_cache(chat_id, message_id)
         return None
     except Exception as e:
         # שם הטיפוס חובה: str(asyncio.TimeoutError()) ריק, והשורה הזו הודפסה
