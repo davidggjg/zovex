@@ -4174,20 +4174,59 @@ _JSON_CACHE: dict = {}
 _JSON_CACHE_MAX = 8          # מגן מפני ?limit= שרירותי שינפח את הזיכרון
 
 
-def _cached_payload(key: str, ver: int, build, ttl: float = CONTENT_CACHE_TTL):
-    """גוף מוכן למפתח נתון. build() נקרא רק כשהמטמון פג או שהתוכן השתנה."""
-    now = time.time()
-    c = _JSON_CACHE.get(key)
-    if c and c["ver"] == ver and (now - c["built"]) < ttl:
-        return c
+def _fresh(c, ver, ttl, now=None):
+    return c and c["ver"] == ver and ((now or time.time()) - c["built"]) < ttl
+
+
+def _build_payload_entry(ver: int, build) -> dict:
+    """בונה גוף מוכן (טעינה+חתימה+json+gzip). כבד — נועד לרוץ ב-thread."""
     raw = json.dumps(build(), ensure_ascii=False).encode("utf-8")
-    c = {"ver": ver, "built": now, "raw": raw,
-         # רמה 5: כמעט אותו יחס דחיסה כמו 6 בכשליש מהזמן, וזה רץ פעם אחת
-         "gz": gzip.compress(raw, 5) if len(raw) > 4096 else None}
+    return {"ver": ver, "built": time.time(), "raw": raw,
+            # רמה 5: כמעט אותו יחס דחיסה כמו 6 בכשליש מהזמן, וזה רץ פעם אחת
+            "gz": gzip.compress(raw, 5) if len(raw) > 4096 else None}
+
+
+def _store_payload(key: str, c: dict) -> dict:
     if len(_JSON_CACHE) >= _JSON_CACHE_MAX:
         _JSON_CACHE.pop(next(iter(_JSON_CACHE)), None)
     _JSON_CACHE[key] = c
     return c
+
+
+def _cached_payload(key: str, ver: int, build, ttl: float = CONTENT_CACHE_TTL):
+    """גוף מוכן למפתח נתון. build() נקרא רק כשהמטמון פג או שהתוכן השתנה.
+    גרסה סינכרונית — נשמרת לקוראים שאינם על ה-event loop."""
+    c = _JSON_CACHE.get(key)
+    if _fresh(c, ver, ttl):
+        return c
+    return _store_payload(key, _build_payload_entry(ver, build))
+
+
+# נעילה לכל מפתח: כשכמה משתמשים נכנסים יחד ל-cache קר, רק אחד בונה והשאר
+# ממתינים לתוצאה — במקום שכל אחד יריץ בנייה מלאה במקביל וכולם ייתקעו.
+_payload_locks: dict = {}
+
+
+def _payload_lock(key: str) -> asyncio.Lock:
+    lk = _payload_locks.get(key)
+    if lk is None:
+        lk = _payload_locks[key] = asyncio.Lock()
+    return lk
+
+
+async def _cached_payload_async(key: str, ver: int, build, ttl: float = CONTENT_CACHE_TTL):
+    """כמו _cached_payload, אבל הבנייה הכבדה רצה ב-thread (asyncio.to_thread)
+    כדי לא לחסום את ה-event loop — עליו רצה גם הזרמת הווידאו. בלי זה כל בקשת
+    /content ראשונה-לגרסה הקפיאה את השרת ל~1-2ש והנגן נתקע."""
+    c = _JSON_CACHE.get(key)
+    if _fresh(c, ver, ttl):
+        return c
+    async with _payload_lock(key):
+        c = _JSON_CACHE.get(key)              # אולי כבר נבנה בזמן ההמתנה
+        if _fresh(c, ver, ttl):
+            return c
+        entry = await asyncio.to_thread(_build_payload_entry, ver, build)
+        return _store_payload(key, entry)
 
 
 def _serve_cached(request: Request, c: dict, etag: str, extra: dict = None) -> Response:
@@ -4239,12 +4278,12 @@ async def content_lite(request: Request, limit: int = 0):
     limit = max(0, limit)
     key = f"lite:{limit}" if limit in _LITE_LIMITS else None
     if key:
-        c = _cached_payload(key, ver,
+        c = await _cached_payload_async(key, ver,
                             lambda: _lite_items()[:limit] if limit else _lite_items())
         etag = f'W/"l{ver}-{limit}"'
         return _serve_cached(request, c, etag, {"X-Content-Version": str(ver)})
-    # limit חריג — נבנה בלי לשמור
-    items = _lite_items()[:limit]
+    # limit חריג — נבנה בלי לשמור (עדיין ב-thread כדי לא לחסום את ה-loop)
+    items = await asyncio.to_thread(lambda: _lite_items()[:limit])
     return Response(content=json.dumps(items, ensure_ascii=False),
                     media_type="application/json",
                     headers={"X-Content-Version": str(ver), "Cache-Control": "no-cache"})
@@ -4259,7 +4298,7 @@ async def content_live(request: Request):
     השתנה.
     """
     ver = get_content_version()
-    c = _cached_payload("live", ver,
+    c = await _cached_payload_async("live", ver,
                         lambda: [e for e in _lite_items() if e.get("is_live")])
     return _serve_cached(request, c, f'W/"v{ver}"', {"X-Content-Version": str(ver)})
 
@@ -4269,25 +4308,43 @@ async def content_live(request: Request):
 _item_index: dict = {"ver": None, "built": 0.0, "by_id": {}}
 
 
-def _items_by_id(ver: int) -> dict:
-    now = time.time()
-    if _item_index["ver"] != ver or (now - _item_index["built"]) >= CONTENT_CACHE_TTL:
-        _item_index.update(ver=ver, built=now,
-                           by_id={str(e.get("id")): e
-                                  for e in _expand_urls(load_content())})
-    return _item_index["by_id"]
+def _item_index_fresh(ver: int) -> bool:
+    return (_item_index["ver"] == ver
+            and (time.time() - _item_index["built"]) < CONTENT_CACHE_TTL)
+
+
+def _build_item_index(ver: int) -> dict:
+    """בונה אינדקס id→פריט (חתימת ~11k קישורים). כבד — רץ ב-thread."""
+    by_id = {str(e.get("id")): e for e in _expand_urls(load_content())}
+    _item_index.update(ver=ver, built=time.time(), by_id=by_id)
+    return by_id
+
+
+_item_index_lock = None
+
+
+async def _items_by_id_async(ver: int) -> dict:
+    if _item_index_fresh(ver):
+        return _item_index["by_id"]
+    global _item_index_lock
+    if _item_index_lock is None:
+        _item_index_lock = asyncio.Lock()
+    async with _item_index_lock:
+        if _item_index_fresh(ver):        # אולי נבנה בזמן ההמתנה
+            return _item_index["by_id"]
+        return await asyncio.to_thread(_build_item_index, ver)
 
 
 @api.get("/content/item/{item_id}")
 async def content_item(item_id: str):
     """פריט בודד עם כל השדות — משמש למשיכת התיאור כשפותחים סרט/סדרה."""
-    e = _items_by_id(get_content_version()).get(item_id)
+    e = (await _items_by_id_async(get_content_version())).get(item_id)
     if e is None:
         raise HTTPException(404, "not found")
     return JSONResponse(e, headers={"Cache-Control": "public, max-age=300"})
 
 
-def _content_response(request: Request) -> Response:
+async def _content_response(request: Request) -> Response:
     """מחזיר את התוכן עם ETag לפי מונה הגרסה.
 
     התוכן הוא ~10MB (כמגה אחרי gzip) ונשלח בכל טעינת עמוד מחדש, כי לא היו לו
@@ -4296,19 +4353,19 @@ def _content_response(request: Request) -> Response:
     כך שעדכון תוכן מגיע מיד ואין סכנה שמישהו יראה קטלוג ישן.
     """
     ver = get_content_version()
-    c = _cached_payload("full", ver, lambda: _expand_urls(load_content()))
+    c = await _cached_payload_async("full", ver, lambda: _expand_urls(load_content()))
     return _serve_cached(request, c, f'W/"c{ver}"', {"X-Content-Version": str(ver)})
 
 @api.get("/content")
 async def content_get(request: Request):
     """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית).
     כותרת X-Content-Version מאפשרת לפאנל לדעת על איזו גרסה הוא עורך (optimistic lock)."""
-    return _content_response(request)
+    return await _content_response(request)
 
 @api.get("/movies.json")
 async def content_movies_alias(request: Request):
     """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
-    return _content_response(request)
+    return await _content_response(request)
 
 class ContentSaveReq(BaseModel):
     password: str
