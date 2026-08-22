@@ -57,9 +57,11 @@ def slugify(s: str) -> str:
 
 
 def tmdb(query: str, year: str = '', want_tv=None):
-    """מחזיר (שם_אנגלי, פוסטר) או (None, None). מדרג לפי התאמת שנה וסוג."""
+    """מחזיר (שם_אנגלי, פוסטר, תיאור) או (None, None, None). מדרג לפי שנה+סוג.
+    התיאור נמשך בעברית (language=he) כדי שיוצג יפה באתר; אם אין תיאור עברי
+    ב-TMDB — נופלים לאנגלית, כדי שלא יישאר ריק."""
     if not API_KEY or not query:
-        return None, None
+        return None, None, None
     url = 'https://api.themoviedb.org/3/search/multi?' + urllib.parse.urlencode({
         'api_key': API_KEY, 'query': query, 'language': 'en-US', 'include_adult': 'false'})
     try:
@@ -67,7 +69,7 @@ def tmdb(query: str, year: str = '', want_tv=None):
             res = json.load(r).get('results', [])
     except Exception as e:
         print('   ! TMDB נכשל: %s' % e)
-        return None, None
+        return None, None, None
 
     best, best_score = None, -1
     for it in res:
@@ -89,10 +91,23 @@ def tmdb(query: str, year: str = '', want_tv=None):
         if score > best_score:
             best, best_score = it, score
     if not best:
-        return None, None
+        return None, None, None
     title = best.get('title') or best.get('name') or ''
     poster = (TMDB_IMG + best['poster_path']) if best.get('poster_path') else None
-    return title, poster
+    # תיאור: מנסים עברית קודם (עמוד ה-details בשפה he), אחרת האנגלי מהחיפוש.
+    overview = (best.get('overview') or '').strip()
+    tid, mt = best.get('id'), best.get('media_type')
+    if tid and mt in ('movie', 'tv'):
+        try:
+            durl = 'https://api.themoviedb.org/3/%s/%s?%s' % (
+                mt, tid, urllib.parse.urlencode({'api_key': API_KEY, 'language': 'he'}))
+            with urllib.request.urlopen(durl, timeout=15) as r:
+                he = (json.load(r).get('overview') or '').strip()
+            if he:
+                overview = he
+        except Exception:
+            pass
+    return title, poster, (overview or None)
 
 
 def has(e, k):
@@ -135,9 +150,11 @@ def main():
     for e in movies:
         need_slug = not has(e, 'custom_slug')
         need_post = not has(e, 'thumbnail_url') or (HEAVY and is_heavy_poster(e))
-        if not (need_slug or need_post):
+        need_desc = not has(e, 'description')
+        need_en = not has(e, 'en_title')
+        if not (need_slug or need_post or need_desc or need_en):
             continue
-        title, poster = tmdb(e.get('title', ''), e.get('year', ''), want_tv=False)
+        title, poster, overview = tmdb(e.get('title', ''), e.get('year', ''), want_tv=False)
         if not title:
             print('  ? %-30s — לא נמצא ב-TMDB' % (e.get('title') or '')[:30])
             continue
@@ -148,12 +165,19 @@ def main():
                 slugs_taken.add(s)
                 changed += 1
                 print('  slug   %-28s → %s' % ((e.get('title') or '')[:28], s))
+        if need_en and title:
+            e['en_title'] = title
+            changed += 1
         if need_post and poster:
             was_heavy = is_heavy_poster(e)
             e['thumbnail_url'] = poster
             changed += 1
             print('  פוסטר  %-28s → TMDB%s' % ((e.get('title') or '')[:28],
                                                '  (החליף כבד)' if was_heavy else ''))
+        if need_desc and overview:
+            e['description'] = overview
+            changed += 1
+            print('  תיאור  %-28s → TMDB' % (e.get('title') or '')[:28])
         time.sleep(0.3)
 
     print('\n═══ סדרות ═══')
@@ -161,10 +185,12 @@ def main():
         need_slug = not any(has(x, 'custom_slug') for x in eps)
         need_post = (not any(has(x, 'thumbnail_url') for x in eps)
                      or (HEAVY and any(is_heavy_poster(x) for x in eps)))
-        if not (need_slug or need_post):
+        need_desc = not any(has(x, 'description') for x in eps)
+        need_en = not any(has(x, 'en_title') for x in eps)
+        if not (need_slug or need_post or need_desc or need_en):
             continue
         yr = next((x.get('year') for x in eps if x.get('year')), '')
-        title, poster = tmdb(name, yr, want_tv=True)
+        title, poster, overview = tmdb(name, yr, want_tv=True)
         if not title:
             print('  ? %-30s — לא נמצא ב-TMDB' % name[:30])
             continue
@@ -176,6 +202,10 @@ def main():
                 slugs_taken.add(s)
                 changed += 1
                 print('  slug   %-28s → %-24s (%d פרקים)' % (name[:28], s, len(eps)))
+        if need_en and title:
+            for x in eps:
+                x['en_title'] = title
+            changed += 1
         if need_post and poster:
             n = 0
             for x in eps:
@@ -184,6 +214,12 @@ def main():
                     n += 1
             changed += 1
             print('  פוסטר  %-28s → TMDB (%d פרקים)' % (name[:28], n))
+        if need_desc and overview:
+            for x in eps:
+                if not has(x, 'description'):
+                    x['description'] = overview
+            changed += 1
+            print('  תיאור  %-28s → TMDB (%d פרקים)' % (name[:28], len(eps)))
         time.sleep(0.3)
 
     print('\n─────────────────────')
