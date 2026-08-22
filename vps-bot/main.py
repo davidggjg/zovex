@@ -1149,7 +1149,16 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         sessions, gen = await get_media_session_pool_gen(
             bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS, block=False)
         if not sessions:
-            return None            # עוד נבנית ברקע — מגישים במסלול הבוטים
+            # קר: הבריכה עוד לא מוכנה. הגרסה הקודמת נפלה כאן למסלול הבוטים —
+            # אבל למשיכת *זנב* (moov בסוף קובץ ענק) המסלול הזה נמדד ב-105 שניות
+            # (4 בוטים × 25ש' timeout, כי stream_media לא קופץ ביעילות לאופסט
+            # גבוה). לכן במקום זה בונים את החיבורים המהירים כאן ועכשיו (~5ש')
+            # ומשתמשים במסלול המהיר, שכן יודע לקפוץ ישר לאופסט. הבנייה קורית
+            # פעם אחת לכל DC; שאר הבקשות כבר מקבלות בריכה חמה מיידית.
+            sessions, gen = await get_media_session_pool_gen(
+                bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS, block=True)
+        if not sessions:
+            return None            # גם הבנייה נכשלה — נופלים למסלול הבוטים
         total = hi - lo + 1
         # החלוקה חייבת ליפול על גבולות של MEDIA_CHUNK. טלגרם מגיש רק חתיכות
         # של 1MB, ו-_band_fetch מיישר כל רצועה למטה לגבול הקרוב — כך שחלוקה
