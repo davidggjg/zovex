@@ -1404,10 +1404,42 @@ def _channel_range_gen(chat_id, message_id, start, end):
         return channel_stream_range_parallel(chat_id, message_id, start, end)
     return channel_stream_range(chat_id, message_id, start, end)
 
+# חימום-מקדים של בריכות ה-media. "המשך צפייה" קופץ לאמצע הקובץ (לא במטמון
+# הקצה) והמסלול המקבילי מסובב בוט אחר לכל חלון — כל בוט קר בונה בריכה מחדש
+# (~5ש) בזה אחר זה, ולכן resume חיכה פי-2. כאן, ברגע שפותחים סרט, מדליקים את
+# הבנייה של כמה בוטים *במקביל* (block=False רק מדליק את המילוי ברקע ולא ממתין),
+# כך שכשהחלונות מסתובבים בין הבוטים הם כבר חמים. ה-cooldown מונע הצפה: אותו DC
+# לא מחומם שוב בתוך כמה שניות, גם אם הנגן שולח עשרות בקשות range.
+PREWARM_BOTS = int(os.environ.get("STREAM_PREWARM_BOTS", "8"))
+PREWARM_COOLDOWN = int(os.environ.get("STREAM_PREWARM_COOLDOWN", "20"))
+_prewarm_seen: dict = {}
+
+def _prewarm_dc(dc_id: int):
+    now = time.time()
+    if now - _prewarm_seen.get(dc_id, 0) < PREWARM_COOLDOWN:
+        return
+    _prewarm_seen[dc_id] = now
+    healthy = [b for b in _stream_bots
+               if b["cooldown_until"] < now and b.get("peer_ok", True)]
+
+    async def _run():
+        await asyncio.gather(*[
+            get_media_session_pool_gen(b["client"], b["name"], dc_id,
+                                       STREAM_MEDIA_CONNS, block=False)
+            for b in healthy[:PREWARM_BOTS]], return_exceptions=True)
+    if healthy:
+        asyncio.create_task(_run())
+
+
 async def stream_from_channel(chat_id: int, message_id: int, request: Request):
     media = await channel_get_media(chat_id, message_id)
     if not media:
         raise HTTPException(status_code=503, detail="No media / no healthy bot")
+    # מחממים את בריכות הבוטים ל-DC של הקובץ ברקע, כדי ש'המשך צפייה' יתחיל מהר
+    try:
+        _prewarm_dc(_file_location(media)[0])
+    except Exception:
+        pass
     file_size = media.file_size
     mime_type = getattr(media, "mime_type", "application/octet-stream")
     file_name = getattr(media, "file_name", None) or f"file_{message_id}"
