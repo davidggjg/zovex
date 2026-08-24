@@ -1747,6 +1747,65 @@ _hls_manifest_cache: dict = {}
 MANIFEST_CACHE_TTL = 1.5
 _hls_segment_inflight: dict = {}
 
+# ── משיכה מקדימה של מקטעי שידור חי ───────────────────────────────────────────
+# נמדד מול הספק: משיכת manifest לוקחת 0.7–3.0ש ומקטע של 6 שניות עוד 1.6–3.7ש,
+# כך שסבב שלם כמעט משתווה לאורך המקטע עצמו. אין מרווח, וכל עיכוב מרוקן את
+# הבאפר של הנגן — זה מה שנראה למשתמש כ"נתקע ומסתובב".
+#
+# הרעיון: ברגע שנגן מבקש את ה-manifest אנחנו כבר יודעים מה המקטעים הבאים.
+# מושכים אותם ברקע מיד, כך שכשהנגן יבקש אותם הם כבר אצלנו וההמתנה לספק
+# יורדת מהנתיב הקריטי. בלי זה כל מקטע נמשך רק כשמבקשים אותו.
+_hls_seg_cache: dict = {}          # upstream_url -> (expires_at, bytes)
+_hls_prefetching: set = set()
+HLS_PREFETCH_COUNT = int(os.environ.get("HLS_PREFETCH_COUNT", "3"))
+HLS_SEG_TTL = float(os.environ.get("HLS_SEG_TTL", "45"))
+HLS_SEG_CACHE_MAX = int(os.environ.get("HLS_SEG_CACHE_MAX", str(250 * 1024 * 1024)))
+
+
+def _seg_cache_bytes() -> int:
+    return sum(len(v[1]) for v in _hls_seg_cache.values())
+
+
+def _seg_cache_evict():
+    """מפנה מקטעים שפגו, ואם עדיין חורגים — את הישנים ביותר."""
+    now = time.time()
+    for k in [k for k, v in _hls_seg_cache.items() if v[0] <= now]:
+        _hls_seg_cache.pop(k, None)
+    if _seg_cache_bytes() <= HLS_SEG_CACHE_MAX:
+        return
+    for k, _ in sorted(_hls_seg_cache.items(), key=lambda kv: kv[1][0]):
+        _hls_seg_cache.pop(k, None)
+        if _seg_cache_bytes() <= HLS_SEG_CACHE_MAX:
+            break
+
+
+async def _prefetch_one(url: str):
+    if url in _hls_prefetching or url in _hls_seg_cache:
+        return
+    _hls_prefetching.add(url)
+    try:
+        r = await _hls_relay_client.get(url, headers=HLS_RELAY_UPSTREAM_HEADERS)
+        if r.status_code == 200 and r.content:
+            _hls_seg_cache[url] = (time.time() + HLS_SEG_TTL, r.content)
+            _seg_cache_evict()
+    except Exception:
+        pass                      # משיכה מקדימה היא בונוס; כשל בה לא מעניין
+    finally:
+        _hls_prefetching.discard(url)
+
+
+def _prefetch_from_manifest(manifest_text: str, base_url: str):
+    """מדליק ברקע משיכה של המקטעים האחרונים ב-playlist (החדשים ביותר)."""
+    if HLS_PREFETCH_COUNT <= 0 or _hls_relay_client is None:
+        return
+    segs = [ln.strip() for ln in manifest_text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    for rel in segs[-HLS_PREFETCH_COUNT:]:
+        try:
+            asyncio.create_task(_prefetch_one(urljoin(base_url, rel)))
+        except Exception:
+            pass
+
 
 def _is_hls_manifest(path: str) -> bool:
     return path.endswith(".m3u8")
@@ -2001,6 +2060,8 @@ async def hls_relay(host: str, path: str, request: Request):
                          f"(status {resp.status_code})")
             rewritten = _rewrite_hls_manifest(resp.text, upstream_url)
             _hls_manifest_cache[upstream_url] = (now + MANIFEST_CACHE_TTL, rewritten)
+            # מדליקים משיכה מקדימה של המקטעים החדשים בעוד הנגן מעכל את ה-manifest
+            _prefetch_from_manifest(resp.text, upstream_url)
         return Response(
             content=rewritten,
             media_type="application/vnd.apple.mpegurl",
@@ -2012,6 +2073,13 @@ async def hls_relay(host: str, path: str, request: Request):
     # בקשה מקבילה לאותו מקטע בדיוק (כמה צופים על אותו ערוץ) - היא "מצטרפת"
     # לזרימה הקיימת במקום לפתוח עוד בקשה זהה למקור.
     async def _proxy_segment():
+        # אם המשיכה המקדימה כבר הביאה את המקטע — מגישים אותו מיד, בלי לגעת
+        # בספק בכלל. זה מה שמוציא את ההמתנה לספק מהנתיב הקריטי.
+        hit = _hls_seg_cache.get(upstream_url)
+        if hit and hit[0] > time.time():
+            yield hit[1]
+            return
+
         existing = _hls_segment_inflight.get(upstream_url)
         if existing is not None:
             chunks, done_event = existing
@@ -2036,6 +2104,12 @@ async def hls_relay(host: str, path: str, request: Request):
                 async for chunk in resp.aiter_bytes():
                     chunks.append(chunk)
                     yield chunk
+            # שומרים גם מקטע שנמשך רגיל: צופה נוסף שיגיע רגע אחריו (וכל
+            # ניסיון חוזר של אותו נגן) יקבל אותו מיידית במקום למשוך שוב.
+            if chunks:
+                _hls_seg_cache[upstream_url] = (
+                    time.time() + HLS_SEG_TTL, b"".join(chunks))
+                _seg_cache_evict()
         except httpx.HTTPError as e:
             log.error("hls_relay: segment stream failed - %s", e)
         finally:
