@@ -926,6 +926,37 @@ async def pick_stream_bot():
         b = pool[random.randrange(len(pool))]
         return a if _bot_score(a) >= _bot_score(b) else b
 
+
+# באיזו הסתברות להעדיף בוט שההודעה כבר במטמון שלו. לא 100%: בהעדפה מוחלטת
+# הצופה הראשון היה "נועל" את הסרט על בוט אחד למשך 15 דקות, וכל שאר הצופים
+# באותו סרט היו נדחסים לאותו חשבון. הדליפה של ~15% מחממת בוטים נוספים ברקע,
+# כך שקבוצת החמים גדלה מעצמה ככל שהסרט נצפה יותר.
+WARM_BIAS = float(os.environ.get("STREAM_WARM_BIAS", "0.85"))
+
+
+async def pick_stream_bot_for(chat_id, message_id):
+    """כמו pick_stream_bot, אבל מעדיף בוט שכבר משך את ההודעה הזו.
+
+    נמדד על השרת אחרי הדחת הבוטים התקועים: חלק מהבקשות חזרו ב-0.56 שניות
+    (5.4 MB/s) ואחרות ב-8.7 — וההפרש היה בדיוק 8 שניות, כלומר מלוא תקציב
+    שליפת ההודעה שנשרף על בוט תקוע לפני המעבר לבא. בוט "חם" מחזיר את ההודעה
+    מהמטמון בלי קריאת רשת כלל, ולכן הוא לא יכול להיתקע שם — מה שמסלק את
+    מקור השונות האחרון במקום לקצר את העונש עליו.
+    """
+    now = time.time()
+    if random.random() < WARM_BIAS:
+        warm = [b for b in _stream_bots
+                if b["cooldown_until"] < now
+                and (_bot_msg_cache.get((b["name"], chat_id, message_id))
+                     or (None, 0.0))[1] > now]
+        if warm:
+            if len(warm) == 1:
+                return warm[0]
+            a = warm[random.randrange(len(warm))]
+            b = warm[random.randrange(len(warm))]
+            return a if _bot_score(a) >= _bot_score(b) else b
+    return await pick_stream_bot()
+
 # כמה כשלים *רצופים* לפני שמדיחים בוט. כשל בודד הוא בדרך כלל רעש רגעי של
 # טלגרם, לא בוט חולה. הדחה על כשל ראשון יצרה מפל: בוט נחנק ← נשארים פחות ←
 # העומס על הנותרים גדל ← גם הם נחנקים. וזה גם מה שגרם למספר הבוטים ה"בריאים"
@@ -1047,7 +1078,7 @@ def _purge_msg_cache(chat_id, message_id):
 async def channel_get_media(chat_id, message_id):
     """מחזיר את ה-media של ההודעה מהערוץ (metadata בלבד — אין בעיית reference)."""
     for _ in range(min(max(1, len(_stream_bots)), 5)):
-        bot = await pick_stream_bot()
+        bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             return None
         try:
@@ -1067,7 +1098,7 @@ async def channel_stream_range(chat_id, message_id, start, end):
     CHUNK = PYROGRAM_CHUNK_SIZE
     pos = start
     for _ in range(min(max(1, len(_stream_bots)), 4)):
-        bot = await pick_stream_bot()
+        bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             break
         try:
@@ -1130,7 +1161,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
     CHUNK = PYROGRAM_CHUNK_SIZE
     need = hi - lo + 1
     for _ in range(min(max(1, len(_stream_bots)), 4)):
-        bot = await pick_stream_bot()
+        bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             break
         try:
@@ -1266,7 +1297,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
     """
     if STREAM_MEDIA_CONNS <= 0:
         return None
-    bot = await pick_stream_bot()
+    bot = await pick_stream_bot_for(chat_id, message_id)
     if bot is None:
         return None
     dc_id = gen = None
