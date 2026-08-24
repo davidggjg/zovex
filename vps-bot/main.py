@@ -1484,6 +1484,11 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
         # הצופה עזב באמצע — לא משאירים הורדה מיותרת רצה ברקע.
         if ahead is not None:
             ahead[0].cancel()
+            # אם המשימה כבר הספיקה להיכשל, cancel() לא עושה כלום והחריגה נשארת
+            # "לא נאספה" — asyncio מדפיס אז אזהרה מלאה עם traceback, לכל צופה
+            # שעוזב באמצע. הקולבק אוסף אותה ומשתיק את הרעש.
+            ahead[0].add_done_callback(
+                lambda t: t.cancelled() or t.exception())
 
 # ── מטמון קצוות הקובץ ────────────────────────────────────────────────────────
 # ב-MP4 שלא עבר faststart טבלת האינדקס (moov) יושבת ב*סוף* הקובץ. לכן כל נגן,
