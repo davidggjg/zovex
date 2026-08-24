@@ -1099,6 +1099,12 @@ MEDIA_BANDS_MAX = int(os.environ.get("STREAM_MEDIA_BANDS_MAX", "35"))
 MEDIA_BAND_FLOOD_CAP = int(os.environ.get("STREAM_BAND_FLOOD_CAP", "8"))
 
 
+# מונה timeouts רצופים לכל (בוט, DC). מתאפס בכל הצלחה, כך שרק *רצף* אמיתי
+# נחשב לבריכה מתה — חלון איטי מזדמן לא מפיל כלום.
+_band_timeouts: dict = {}
+BAND_TIMEOUT_LIMIT = int(os.environ.get("STREAM_BAND_TIMEOUT_LIMIT", "2"))
+
+
 def _is_dead_conn(err) -> bool:
     """האם השגיאה מעידה על *חיבור מת* (ואז כדאי להפיל ולבנות בריכה טרייה),
     להבדיל מהאטה רגעית (FloodWait/timeout) שבה הבריכה בריאה. הפלת בריכה על
@@ -1237,6 +1243,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         if len(out) < total:
             return None
         _mark_ok(bot)
+        _band_timeouts.pop((bot["name"], dc_id), None)   # חלון שהצליח מאפס את הרצף
         if elapsed > 0:
             note_bot_speed(bot, (total / 1024 / 1024) / elapsed)
         return bytes(out[:total])
@@ -1244,11 +1251,28 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         _purge_msg_cache(chat_id, message_id)
         return None
     except asyncio.TimeoutError:
-        # החלון חרג מה-budget. איטי ≠ מת: הפלת הבריכה על כל timeout היא בדיוק
-        # ה-thrash שהקפיץ תקיעות כל כמה דקות. לא מפילים — נופלים לחלון הזה, ואם
-        # החיבור באמת מת החלון הבא ייכשל בשגיאת-חיבור וזו תפיל אותו נכון.
-        log.info("media bands (%s) חלון איטי (timeout) — fallback בלי הפלה", bot["name"])
+        # החלון חרג מה-budget. timeout בודד הוא איטיות ולא מוות, והפלת הבריכה
+        # על כל אחד כזה היא ה-thrash שהקפיץ תקיעות כל כמה דקות.
+        #
+        # אבל ההנחה הקודמת — "אם החיבור באמת מת, החלון הבא ייכשל בשגיאת חיבור
+        # וזו תפיל אותו" — פשוט אינה נכונה: חיבור MTProto מת *נתקע*, כלומר
+        # מתבטא כ-timeout ולא כשגיאה. לכן בריכה מתה לא התרפאתה לעולם, כל חלון
+        # עשה timeout, והכל נפל למסלול האיטי (נמדד 3.12MB/s → 0.14MB/s).
+        #
+        # הפשרה: סופרים timeouts רצופים לאותו (בוט, DC). בודד — מתעלמים; רצף
+        # קצר — זו כבר לא איטיות אלא בריכה מתה, ומפילים אותה כדי שתיבנה טרייה.
+        key = (bot["name"], dc_id)
+        n = _band_timeouts.get(key, 0) + 1
+        _band_timeouts[key] = n
         note_bot_speed(bot, 0.0)
+        if n >= BAND_TIMEOUT_LIMIT and dc_id is not None and gen is not None:
+            log.warning("media bands (%s) %d timeouts רצופים — מרענן חיבורים",
+                        bot["name"], n)
+            _band_timeouts.pop(key, None)
+            await drop_media_sessions(bot["name"], dc_id, gen)
+        else:
+            log.info("media bands (%s) חלון איטי (timeout %d/%d)",
+                     bot["name"], n, BAND_TIMEOUT_LIMIT)
         return None
     except FloodWait as e:
         log.info("media bands (%s) FloodWait %ss — fallback בלי הפלה", bot["name"], e.value)
