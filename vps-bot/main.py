@@ -2423,7 +2423,10 @@ def _load_or_create_sign_secret() -> str:
         pass
     return secret
 SIGN_SECRET = _load_or_create_sign_secret()
-SIGN_TTL = int(os.environ.get("STREAM_SIGN_TTL", "21600"))  # 6 שעות — מספיק לסרט ארוך
+# 24 שעות. 6 שעות הספיקו לסרט בודד, אבל לא לטאב/אפליקציה שנשארים פתוחים
+# ליום שלם — ואז החתימה פגה מתחת לידיים והנגן קיבל 403. יחד עם רענון הקטלוג
+# לפי SIG_EPOCH_WINDOW, לקוח מקבל קישורים טריים הרבה לפני שהישנים פגים.
+SIGN_TTL = int(os.environ.get("STREAM_SIGN_TTL", "86400"))
 _STREAM_PATH_RE = re.compile(r"/stream/(-?\d+)/(\d+)")
 
 def _stream_sig(chat: str, msg: str, exp: int) -> str:
@@ -4254,6 +4257,22 @@ def _fresh(c, ver, ttl, now=None):
     return c and c["ver"] == ver and ((now or time.time()) - c["built"]) < ttl
 
 
+# ── רענון כפוי של הקטלוג אצל הלקוח ───────────────────────────────────────────
+# הקישורים בקטלוג חתומים ותקפים SIGN_TTL שניות. ה-ETag היה מבוסס על גרסת
+# התוכן בלבד, ולכן לקוח שלא ראה שינוי תוכן קיבל 304 לנצח והמשיך להחזיק את
+# הקטלוג הישן שלו — עד שהחתימות שבו פגו וכל לחיצה על "נגן" החזירה 403
+# ("הקישור פג תוקף"). זה מה שאילץ מחיקה והתקנה מחדש של האפליקציה.
+#
+# הפתרון: משלבים ב-ETag גם "חלון זמן". כשהחלון מתחלף ה-ETag משתנה, הלקוח
+# מוריד קטלוג טרי עם חתימות חדשות, וזה קורה הרבה לפני שהישנות פגות. החלון
+# הוא שליש מתוקף החתימה — כלומר שני רענונים לפחות בתוך כל חיים של חתימה.
+SIG_EPOCH_WINDOW = max(600, SIGN_TTL // 3)
+
+
+def _sig_epoch() -> int:
+    return int(time.time()) // SIG_EPOCH_WINDOW
+
+
 def _build_payload_entry(ver: int, build) -> dict:
     """בונה גוף מוכן (טעינה+חתימה+json+gzip). כבד — נועד לרוץ ב-thread."""
     raw = json.dumps(build(), ensure_ascii=False).encode("utf-8")
@@ -4356,7 +4375,7 @@ async def content_lite(request: Request, limit: int = 0):
     if key:
         c = await _cached_payload_async(key, ver,
                             lambda: _lite_items()[:limit] if limit else _lite_items())
-        etag = f'W/"l{ver}-{limit}"'
+        etag = f'W/"l{ver}-{limit}-{_sig_epoch()}"'
         return _serve_cached(request, c, etag, {"X-Content-Version": str(ver)})
     # limit חריג — נבנה בלי לשמור (עדיין ב-thread כדי לא לחסום את ה-loop)
     items = await asyncio.to_thread(lambda: _lite_items()[:limit])
@@ -4376,7 +4395,7 @@ async def content_live(request: Request):
     ver = get_content_version()
     c = await _cached_payload_async("live", ver,
                         lambda: [e for e in _lite_items() if e.get("is_live")])
-    return _serve_cached(request, c, f'W/"v{ver}"', {"X-Content-Version": str(ver)})
+    return _serve_cached(request, c, f'W/"v{ver}-{_sig_epoch()}"', {"X-Content-Version": str(ver)})
 
 
 # אינדקס לפי מזהה. קודם כל בקשה לתיאור סרקה את כל 11,747 הפריטים ובנתה
@@ -4430,7 +4449,7 @@ async def _content_response(request: Request) -> Response:
     """
     ver = get_content_version()
     c = await _cached_payload_async("full", ver, lambda: _expand_urls(load_content()))
-    return _serve_cached(request, c, f'W/"c{ver}"', {"X-Content-Version": str(ver)})
+    return _serve_cached(request, c, f'W/"c{ver}-{_sig_epoch()}"', {"X-Content-Version": str(ver)})
 
 @api.get("/content")
 async def content_get(request: Request):
