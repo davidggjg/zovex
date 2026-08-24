@@ -933,6 +933,15 @@ async def pick_stream_bot():
 # כך שקבוצת החמים גדלה מעצמה ככל שהסרט נצפה יותר.
 WARM_BIAS = float(os.environ.get("STREAM_WARM_BIAS", "0.85"))
 
+# מי מושך *כרגע* חלון עבור איזה פריט. קריטי: בריכת חיבורי המדיה מוחזרת כאותם
+# אובייקטים בדיוק לכל מי שמבקש את אותו (בוט, DC) — כלומר שתי משיכות בו-זמנית
+# של אותו בוט חולקות את אותם 4 חיבורים. נמדד על השרת הזה: 4 חיבורים נותנים
+# 10.5 MB/s ו-8 בקשות מקבילות עליהם נותנות 0.96 — פי 10 פחות. מרגע שנוספה
+# קריאה-מראש רצו שני חלונות במקביל, והעדפת הבוט החם שלחה את שניהם לאותו בוט:
+# החלונות חרגו מהתקציב, שני timeouts רצופים הפילו את הבריכה, ושני החלונות
+# נפלו יחד — תקיעה של 30–60 שניות כל כמה דקות בצפייה רצופה.
+_inflight_bots: dict = {}      # (chat_id, message_id) -> set(שמות בוטים)
+
 
 async def pick_stream_bot_for(chat_id, message_id):
     """כמו pick_stream_bot, אבל מעדיף בוט שכבר משך את ההודעה הזו.
@@ -944,18 +953,28 @@ async def pick_stream_bot_for(chat_id, message_id):
     מקור השונות האחרון במקום לקצר את העונש עליו.
     """
     now = time.time()
+    busy = _inflight_bots.get((chat_id, message_id)) or set()
+    free = [b for b in _stream_bots
+            if b["cooldown_until"] < now and b["name"] not in busy]
+    # אם *כל* הבריכה עסוקה בפריט הזה, עדיף להצטרף לבוט תפוס מאשר לא להגיש
+    # כלום — אבל אז שווה גם לוותר על העדפת החם, כדי לא לרכז שוב על אותו אחד.
+    if not free:
+        return await pick_stream_bot()
     if random.random() < WARM_BIAS:
-        warm = [b for b in _stream_bots
-                if b["cooldown_until"] < now
-                and (_bot_msg_cache.get((b["name"], chat_id, message_id))
-                     or (None, 0.0))[1] > now]
+        warm = [b for b in free
+                if (_bot_msg_cache.get((b["name"], chat_id, message_id))
+                    or (None, 0.0))[1] > now]
         if warm:
             if len(warm) == 1:
                 return warm[0]
             a = warm[random.randrange(len(warm))]
             b = warm[random.randrange(len(warm))]
             return a if _bot_score(a) >= _bot_score(b) else b
-    return await pick_stream_bot()
+    if len(free) == 1:
+        return free[0]
+    a = free[random.randrange(len(free))]
+    b = free[random.randrange(len(free))]
+    return a if _bot_score(a) >= _bot_score(b) else b
 
 # כמה כשלים *רצופים* לפני שמדיחים בוט. כשל בודד הוא בדרך כלל רעש רגעי של
 # טלגרם, לא בוט חולה. הדחה על כשל ראשון יצרה מפל: בוט נחנק ← נשארים פחות ←
@@ -1301,6 +1320,10 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
     if bot is None:
         return None
     dc_id = gen = None
+    # מסמנים את הבוט כתפוס לפריט הזה *מיד* אחרי הבחירה ובלי await ביניהם, כדי
+    # שהחלון הבא (קריאה-מראש) לא יבחר בו ויתחרה איתו על אותם ארבעה חיבורים.
+    busy_key = (chat_id, message_id)
+    _inflight_bots.setdefault(busy_key, set()).add(bot["name"])
     try:
         msg = await _get_bot_msg_fast(bot, chat_id, message_id)
         if msg is None:
@@ -1419,6 +1442,12 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         if dc_id is not None and gen is not None and _is_dead_conn(e):
             await drop_media_sessions(bot["name"], dc_id, gen)
         return None
+    finally:
+        s = _inflight_bots.get(busy_key)
+        if s is not None:
+            s.discard(bot["name"])
+            if not s:
+                _inflight_bots.pop(busy_key, None)
 
 
 async def channel_stream_range_parallel(chat_id, message_id, start, end):
