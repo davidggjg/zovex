@@ -1017,6 +1017,9 @@ async def channel_stream_range(chat_id, message_id, start, end):
 # כברירת מחדל. אפשר לכבות עם STREAM_PARALLEL_PARTS=1.
 STREAM_PARALLEL_PARTS  = int(os.environ.get("STREAM_PARALLEL_PARTS", "4"))
 STREAM_PARALLEL_WINDOW = int(os.environ.get("STREAM_PARALLEL_WINDOW", str(16 * 1024 * 1024)))
+# קריאה-מראש של חלון אחד קדימה. עלות: עוד חלון אחד בזיכרון לכל צופה פעיל
+# (ברירת מחדל 16MB). אפשר לכבות ב-STREAM_READAHEAD=0 אם הזיכרון נהיה צר.
+STREAM_READAHEAD = os.environ.get("STREAM_READAHEAD", "1") not in ("0", "false", "no")
 # כמה זמן מחכים לבוט בודד לפני שמוותרים עליו ועוברים לבא. ניתן לכוונון מ-.env.
 SUBRANGE_TIMEOUT = int(os.environ.get("STREAM_SUBRANGE_TIMEOUT", "25"))
 
@@ -1274,34 +1277,58 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
     MIN_PART = 512 * 1024   # לא לפצל לחתיכות קטנות מדי
     # רמפה: 1MB → 4MB → מלא. חלון ראשון קטן = TTFB נמוך; אחר כך מהירות מלאה.
     ramp = [1 * 1024 * 1024, 4 * 1024 * 1024]
-    pos = start
-    idx = 0
-    while pos <= end:
-        window = min(ramp[idx] if idx < len(ramp) else full_window, full_window)
-        idx += 1
-        wend = min(pos + window - 1, end)
-        total = wend - pos + 1
-        n = max(1, min(parts, total // MIN_PART))
-        step = -(-total // n)   # ceil
-        ranges = []
-        s = pos
+    async def _fetch_window(wstart, wend):
+        """מחזיר את כל בייטי החלון. קודם מסלול ה-media bands (חיבורים מקבילים
+        לאותו DC — נמדד פי ~70 ממשיכה בחיבור יחיד), ואם הוא נכשל נופלים בשקט
+        למסלול הבוטים הוותיק."""
+        fast = await _media_bands_fetch(chat_id, message_id, wstart, wend)
+        if fast is not None:
+            return fast
+        total_w = wend - wstart + 1
+        n = max(1, min(parts, total_w // MIN_PART))
+        step = -(-total_w // n)
+        rngs, s = [], wstart
         while s <= wend:
             e2 = min(s + step - 1, wend)
-            ranges.append((s, e2))
+            rngs.append((s, e2))
             s = e2 + 1
-        # קודם מנסים את מסלול ה-media bands (חיבורים מקבילים לאותו DC) —
-        # נמדד פי ~70 מהר יותר ממשיכה דרך בוט בחיבור יחיד. אם הוא לא זמין
-        # או נכשל, נופלים בשקט למסלול הבוטים הוותיק.
-        fast = await _media_bands_fetch(chat_id, message_id, pos, wend)
-        if fast is not None:
-            yield fast
-        else:
-            # מושכים את כל תת-הטווחים של החלון במקביל, ומגישים לפי הסדר
-            results = await asyncio.gather(
-                *[_fetch_subrange(chat_id, message_id, a, b) for a, b in ranges])
-            for r in results:
-                yield r
-        pos = wend + 1
+        results = await asyncio.gather(
+            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in rngs])
+        return b"".join(results)
+
+    def _window_end(p, i):
+        w = min(ramp[i] if i < len(ramp) else full_window, full_window)
+        return min(p + w - 1, end)
+
+    # קריאה-מראש: עד עכשיו הלולאה הייתה סדרתית לחלוטין — מורידה חלון, מגישה
+    # אותו, ורק *אחרי* שהצופה סיים לצרוך אותו מתחילה להוריד את הבא. כלומר כל
+    # זמן הצפייה הרשת עמדה בטלה, וכשהבאפר של הנגן נגמר הוא נאלץ להמתין להורדה
+    # שלמה — זה בדיוק ה"נתקע באמצע". כאן מתחילים להוריד את החלון הבא *לפני*
+    # שמגישים את הנוכחי, כך שברוב המקרים הוא כבר מוכן כשהנגן מגיע אליו.
+    pos, idx = start, 0
+    ahead = None            # (task, next_pos, next_end)
+    try:
+        while pos <= end:
+            wend = _window_end(pos, idx)
+            idx += 1
+            if ahead is not None and ahead[1] == pos:
+                data = await ahead[0]
+                ahead = None
+            else:
+                data = await _fetch_window(pos, wend)
+
+            # מדליקים את החלון הבא לפני ההגשה — ההורדה רצה בזמן הצפייה.
+            npos = wend + 1
+            if npos <= end and STREAM_READAHEAD:
+                nend = _window_end(npos, idx)
+                ahead = (asyncio.create_task(_fetch_window(npos, nend)), npos, nend)
+
+            yield data
+            pos = npos
+    finally:
+        # הצופה עזב באמצע — לא משאירים הורדה מיותרת רצה ברקע.
+        if ahead is not None:
+            ahead[0].cancel()
 
 # ── מטמון קצוות הקובץ ────────────────────────────────────────────────────────
 # ב-MP4 שלא עבר faststart טבלת האינדקס (moov) יושבת ב*סוף* הקובץ. לכן כל נגן,
