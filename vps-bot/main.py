@@ -990,8 +990,15 @@ CHOKE_AFTER_FAILS = int(os.environ.get("STREAM_CHOKE_AFTER_FAILS", "3"))
 # מהרוטציה תוך כדקתיים, בעוד בוט שנתקל ברעש רגעי חוזר מיד אחרי 30 שניות.
 CHOKE_BACKOFF_MAX = int(os.environ.get("STREAM_CHOKE_BACKOFF_MAX", "1800"))
 
+# מתי בפעם האחרונה בוט כלשהו מהבריכה סיפק בייטים בהצלחה. ה-Watchdog משתמש
+# בזה כעדות חיה לכך שטלגרם מגיב — ראה telegram_watchdog.
+_last_pool_success = 0.0
+
+
 def _mark_ok(bot):
     """משיכה הצליחה — מאפסים את מונה הכשלים הרצופים ואת דרגת העונש."""
+    global _last_pool_success
+    _last_pool_success = time.time()
     if bot.get("fails"):
         bot["fails"] = 0
     if bot.get("chokes"):
@@ -5218,8 +5225,53 @@ WATCHDOG_TIMEOUT_SECS = 25
 WATCHDOG_MAX_CONSECUTIVE_FAILURES = 3
 # המתנה ארוכה לפני הבדיקה הראשונה — נותנת לכל הבוטים לעלות בהדרגה קודם
 WATCHDOG_INITIAL_DELAY_SECS = 120
+# תוך כמה שניות אחורה משיכה מוצלחת של בוט מהבריכה נחשבת עדות שטלגרם מגיב.
+WATCHDOG_POOL_GRACE = int(os.environ.get("WATCHDOG_POOL_GRACE", "120"))
+
+
+async def _restart_main_client() -> bool:
+    """מרים את הלקוח הראשי מחדש. מחזיר True אם הוא עונה אחרי זה.
+
+    זו הפעולה שה-Watchdog צריך לעשות *לפני* שהוא שוקל להפיל את השירות: אם רק
+    ה-session של הבוט הראשי תקוע, בניית אחד חדשה לוקחת שניות ולא נוגעת ב-21
+    בוטי הבריכה ולא בצופים שמנגנים באותו רגע.
+    """
+    try:
+        await asyncio.wait_for(bot_client.stop(), timeout=20)
+    except Exception:
+        pass          # לקוח תקוע עלול להיתקע גם ב-stop; ממשיכים ל-start
+    try:
+        await asyncio.wait_for(bot_client.start(), timeout=60)
+        await asyncio.wait_for(bot_client.get_me(), timeout=WATCHDOG_TIMEOUT_SECS)
+        log.info("✅ Watchdog: הלקוח הראשי הורם מחדש ועונה — השירות ממשיך לרוץ")
+        return True
+    except Exception as e:
+        log.error("⚠️ Watchdog: הרמת הלקוח הראשי נכשלה: %s: %s", type(e).__name__, e)
+        return False
+
 
 async def telegram_watchdog():
+    """שומר על החיבור לטלגרם — אבל בלי להרוג את השירות על סמך בדיקה אחת.
+
+    הגרסה הקודמת בדקה רק את `bot_client.get_me()`, ואחרי שלושה פספוסים הריצה
+    `os._exit(1)`. היא נכתבה ל-Hugging Face Spaces, שם restart של הקונטיינר
+    היה הדרך היחידה להתאושש. על ה-VPS, עם `Restart=always`, התוצאה היא שכל
+    השירות נהרג — וכל 21 הבוטים צריכים לעלות מחדש, ~90 שניות שבהן הצופה מקבל
+    אפס בייטים.
+
+    נמדד בשרת ב-24/08 בשעה 21:25: שלושה פספוסים ב-25 שניות, `os._exit(1)`,
+    `Scheduled restart job` — ובדיוק אז הצופה דיווח על תקיעה של חצי דקה עד
+    דקה. כלומר "נתקע כל כמה דקות, צריך לצאת ולהיכנס" היה השירות שמפיל את
+    עצמו, לא טלגרם ולא הבוטים.
+
+    שני תיקונים:
+
+    1. משיכה מוצלחת של *כל* בוט מהבריכה היא הוכחה שטלגרם מגיב. אם היא קרתה
+       בדקותיים האחרונות, ה-ping של הבוט הראשי נתקע מסיבה מקומית (ה-session
+       שלו, או event loop עמוס תחת הזרמה) — ואין שום סיבה להפיל את השירות.
+    2. גם כשאין הוכחה כזו, קודם מרימים מחדש רק את הלקוח הראשי. הפלת התהליך
+       נשארת המוצא האחרון, אחרי שגם זה נכשל.
+    """
     consecutive_failures = 0
     await asyncio.sleep(WATCHDOG_INITIAL_DELAY_SECS)
     while True:
@@ -5235,8 +5287,20 @@ async def telegram_watchdog():
                 WATCHDOG_TIMEOUT_SECS, consecutive_failures, WATCHDOG_MAX_CONSECUTIVE_FAILURES, e,
             )
             if consecutive_failures >= WATCHDOG_MAX_CONSECUTIVE_FAILURES:
-                log.critical("💥 Watchdog: החיבור לטלגרם תקוע - מפעיל restart אוטומטי לתהליך")
-                os._exit(1)
+                idle = time.time() - _last_pool_success
+                if idle < WATCHDOG_POOL_GRACE:
+                    log.warning(
+                        "⚠️ Watchdog: הבוט הראשי לא עונה, אבל הבריכה סיפקה "
+                        "בייטים לפני %.0f שניות — טלגרם מגיב, לא מפילים את "
+                        "השירות. מרים רק את הלקוח הראשי.", idle)
+                    await _restart_main_client()
+                    consecutive_failures = 0
+                elif await _restart_main_client():
+                    consecutive_failures = 0
+                else:
+                    log.critical("💥 Watchdog: החיבור לטלגרם תקוע וגם הרמת הלקוח "
+                                 "הראשי נכשלה - מפעיל restart אוטומטי לתהליך")
+                    os._exit(1)
         await asyncio.sleep(WATCHDOG_CHECK_INTERVAL_SECS)
 
 # ── Parallel download workers ────────────────────────────────────────────────
