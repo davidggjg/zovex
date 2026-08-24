@@ -825,6 +825,64 @@ async def warm_stream_pool():
         await asyncio.sleep(0.4)
     log.info("🔥 pool מחומם — פליי ראשון יהיה מהיר")
 
+# כל כמה זמן לנסות להחיות בוטים מודחים. הבדיקה רצה *מחוץ* למסלול הצפייה,
+# כך שהצופה לעולם לא משלם על ניסיון החייאה.
+REVIVE_EVERY = int(os.environ.get("STREAM_REVIVE_EVERY", "120"))
+REVIVE_AFTER_CHOKES = int(os.environ.get("STREAM_REVIVE_AFTER_CHOKES", "2"))
+
+
+async def revive_stream_pool():
+    """מחזיר לחיים בוטים שה-session שלהם תקוע.
+
+    למה זה נדרש: cooldown (גם מתגבר) רק *מסתיר* בוט מת — הוא לא מתקן אותו.
+    בלי החייאה הבריכה שוחקת מ-21 בוטים ל-12 עד ה-restart הבא, וכל בוט שנשחק
+    מגדיל את העומס על הנותרים. חיבור MTProto תקוע לא מחזיר שגיאה שאפשר לתפוס
+    (הוא פשוט לא חוזר), ולכן אין ל-Pyrogram סיכוי לזהות אותו לבד — הדרך היחידה
+    היא stop()+start() שבונים session טרי.
+    """
+    if not STREAM_CHANNEL_ID:
+        return
+    while True:
+        await asyncio.sleep(REVIVE_EVERY)
+        for b in list(_stream_bots):
+            if b.get("chokes", 0) < REVIVE_AFTER_CHOKES:
+                continue
+            name = b["name"]
+            try:
+                # קודם בדיקה זולה: אולי הוא כבר התאושש מעצמו וחבל להפיל session.
+                await asyncio.wait_for(b["client"].get_me(), timeout=10)
+                b["chokes"] = 0
+                b["fails"] = 0
+                b["cooldown_until"] = 0.0
+                log.info("✅ %s התאושש — חזר לרוטציה", name)
+                continue
+            except Exception:
+                pass
+            log.warning("♻️ %s תקוע — מרים session מחדש", name)
+            try:
+                # stop() על לקוח תקוע עלול להיתקע בעצמו — עוטפים בתקציב.
+                await asyncio.wait_for(b["client"].stop(), timeout=20)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(b["client"].start(), timeout=POOL_START_TIMEOUT)
+                # ה-session החדש לא מכיר את הערוץ, וה-file_reference הישן שייך
+                # ל-session שמת — שניהם חייבים להיבנות מחדש, אחרת הבוט "עלה"
+                # אבל ייכשל בכל משיכה.
+                b["peer_ok"] = await _resolve_peer(b["client"], name)
+                for k in [k for k in _bot_msg_cache if k[0] == name]:
+                    _bot_msg_cache.pop(k, None)
+                b["chokes"] = 0
+                b["fails"] = 0
+                b["speed"] = None
+                b["cooldown_until"] = 0.0
+                log.info("✅ %s הורם מחדש וחזר לרוטציה", name)
+            except Exception as e:
+                # נשאר מודח; הסבב הבא ינסה שוב.
+                log.warning("⚠️ הרמת %s נכשלה: %s: %s", name, type(e).__name__, e)
+            await asyncio.sleep(2)   # לא מציפים את טלגרם בהתחברויות
+
+
 async def stop_stream_pool():
     for b in _stream_bots:
         try:
@@ -874,12 +932,22 @@ async def pick_stream_bot():
 # לקפוץ בין 4 ל-16 כל כמה דקות.
 CHOKE_AFTER_FAILS = int(os.environ.get("STREAM_CHOKE_AFTER_FAILS", "3"))
 
+# עונש מתגבר. cooldown קבוע של 30 שניות נראה הגיוני, אבל מול בוט שה-session
+# שלו *תקוע* הוא אסון: הבוט חוזר לתור כל חצי דקה, כל בחירה בו שורפת את מלוא
+# תקציב שליפת ההודעה, והוא לעולם לא יוצא מהמשחק. נמדד בשרת: 9 מתוך 21 בוטים
+# תקועים ← ~43% מהחלונות שילמו 20 שניות ← 6 MB/s צנחו מתחת ל-0.03.
+# עם הכפלה פי 4 בכל חניקה רצופה (30ש' → 2ד' → 8ד' → 30ד') בוט מת יוצא
+# מהרוטציה תוך כדקתיים, בעוד בוט שנתקל ברעש רגעי חוזר מיד אחרי 30 שניות.
+CHOKE_BACKOFF_MAX = int(os.environ.get("STREAM_CHOKE_BACKOFF_MAX", "1800"))
+
 def _mark_ok(bot):
-    """משיכה הצליחה — מאפסים את מונה הכשלים הרצופים."""
+    """משיכה הצליחה — מאפסים את מונה הכשלים הרצופים ואת דרגת העונש."""
     if bot.get("fails"):
         bot["fails"] = 0
+    if bot.get("chokes"):
+        bot["chokes"] = 0
 
-def _mark_choked(bot, seconds, err=None, hard=False):
+def _mark_choked(bot, seconds, err=None, hard=False, escalate=True):
     # "Peer id invalid" הוא לא חניקה אלא בוט ששכח את הערוץ: cooldown לבדו לא
     # יעזור לו, הוא פשוט ייכשל שוב בעוד 30 שניות. מסמנים אותו כדי ש-
     # peer_retry_loop ינסה לזהות עבורו את הערוץ מחדש.
@@ -894,8 +962,14 @@ def _mark_choked(bot, seconds, err=None, hard=False):
                      bot["name"], bot["fails"], CHOKE_AFTER_FAILS)
             return
         bot["fails"] = 0
+    # FloodWait מגיע עם זמן ההמתנה שטלגרם עצמו ביקש — אותו לא מכפילים.
+    n = bot.get("chokes", 0)
+    if escalate:
+        bot["chokes"] = n + 1
+        seconds = min(CHOKE_BACKOFF_MAX, int(seconds * (4 ** min(n, 5))))
     bot["cooldown_until"] = time.time() + seconds
-    log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
+    log.warning("🥵 בוט %s נחנק (חניקה %d) — cooldown %ds",
+                bot["name"], n + 1 if escalate else n, seconds)
 
 # cache של אובייקט ההודעה — *per-bot*. קריטי: ה-file_reference בתוך ההודעה
 # תקף רק בהקשר של הסשן שששלף אותו. שיתוף בין בוטים גרם ל-FILE_REFERENCE_EXPIRED
@@ -934,6 +1008,34 @@ async def _get_bot_msg(bot, chat_id, message_id, force=False):
     return None
 
 
+# תקציב שליפת ההודעה בכל מסלול הזרמה. ל-_get_bot_msg יש timeout של 20 שניות,
+# והוא נספר *מחוץ* לתקציב החלון — כלומר בוט עם session תקוע גבה 20 שניות מלאות
+# לפני שהחלון בכלל התחיל, ובמסלולי הגיבוי (לולאה על 4 בוטים) עד 80 שניות
+# לבקשה אחת. ההודעה שמורה במטמון 15 דקות ובוט בריא מחזיר אותה ממנו מיידית
+# (וגם קר — פחות משתי שניות), ולכן 8 שניות הן מרווח נדיב לכל בוט חי.
+MSG_FETCH_BUDGET = float(os.environ.get("STREAM_MSG_FETCH_BUDGET", "8"))
+
+
+async def _get_bot_msg_fast(bot, chat_id, message_id):
+    """כמו _get_bot_msg אבל עם תקציב קצר, וחניקה מיידית של בוט שנתקע.
+
+    session תקוע לא מחזיר שגיאה — הוא פשוט לא חוזר, ולכן הוא מתחזה ל"בוט איטי"
+    ולא מודח לעולם. נמדד בשרת: 9 מתוך 21 בוטים במצב הזה ניתבו אליהם ~43%
+    מהחלונות, וכל אחד שילם את מלוא ה-timeout. מחזיר None אם הבוט נתקע.
+    """
+    try:
+        return await asyncio.wait_for(
+            _get_bot_msg(bot, chat_id, message_id), timeout=MSG_FETCH_BUDGET)
+    except asyncio.TimeoutError:
+        # חניקה מיידית (hard) בלי לחכות לשלושה כשלים: עם העונש המתגבר, טעות
+        # על בוט בריא עולה 30 שניות בלבד, בעוד ההמתנה לשלוש מכות עלתה יותר
+        # מדקה של צפייה תקועה בכל סיבוב.
+        log.warning("שליפת ההודעה מ-%s נתקעה (%.0fs) — חונק", bot["name"], MSG_FETCH_BUDGET)
+        note_bot_speed(bot, 0.0)
+        _mark_choked(bot, 30, hard=True)
+        return None
+
+
 def _purge_msg_cache(chat_id, message_id):
     """מנקה את הודעת ה-cache של *כל* הבוטים עבור פריט מסוים. כשה-file_reference
     פג הוא פג גלובלית (לכל הבוטים), ולכן ניקוי של בוט אחד לא הספיק — הבקשה
@@ -949,11 +1051,11 @@ async def channel_get_media(chat_id, message_id):
         if bot is None:
             return None
         try:
-            msg = await _get_bot_msg(bot, chat_id, message_id)
+            msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg:
                 return msg.video or msg.audio or msg.document or msg.video_note
         except FloodWait as e:
-            _mark_choked(bot, e.value, hard=True)
+            _mark_choked(bot, e.value, hard=True, escalate=False)
         except Exception as e:
             log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
             _mark_choked(bot, 30, e)
@@ -969,10 +1071,9 @@ async def channel_stream_range(chat_id, message_id, start, end):
         if bot is None:
             break
         try:
-            msg = await _get_bot_msg(bot, chat_id, message_id)
+            msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg is None:
-                _mark_choked(bot, 15)
-                continue
+                continue          # כבר נחנק בתוך _get_bot_msg_fast אם נתקע
             off_chunks = pos // CHUNK
             produced = off_chunks * CHUNK
             async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
@@ -993,7 +1094,7 @@ async def channel_stream_range(chat_id, message_id, start, end):
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להתחיל מחדש
         except FloodWait as e:
-            _mark_choked(bot, e.value, hard=True)
+            _mark_choked(bot, e.value, hard=True, escalate=False)
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להחליף בוט באמצע
         except Exception as e:
@@ -1033,10 +1134,9 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
         if bot is None:
             break
         try:
-            msg = await _get_bot_msg(bot, chat_id, message_id)
+            msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg is None:
-                _mark_choked(bot, 15)
-                continue
+                continue          # כבר נחנק בתוך _get_bot_msg_fast אם נתקע
 
             async def _pull():
                 out = bytearray()
@@ -1070,7 +1170,7 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
         except FileReferenceExpired:
             _purge_msg_cache(chat_id, message_id)
         except FloodWait as e:
-            _mark_choked(bot, e.value, hard=True)
+            _mark_choked(bot, e.value, hard=True, escalate=False)
         except Exception as e:
             log.warning("subrange שגיאה: %s", e)
             _mark_choked(bot, 30, e)
@@ -1171,7 +1271,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
         return None
     dc_id = gen = None
     try:
-        msg = await _get_bot_msg(bot, chat_id, message_id)
+        msg = await _get_bot_msg_fast(bot, chat_id, message_id)
         if msg is None:
             return None
         media = msg.video or msg.audio or msg.document or msg.video_note
@@ -5529,6 +5629,7 @@ async def startup():
     asyncio.create_task(keep_alive())
     asyncio.create_task(_hls_fix_reaper())   # סוגר ffmpeg של ערוצים ללא צופים
     asyncio.create_task(peer_retry_loop())   # מחזיר לפעולה בוטים ששכחו את הערוץ
+    asyncio.create_task(revive_stream_pool())  # מרים מחדש בוטים עם session תקוע
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
     asyncio.create_task(staged_bot_startup())
