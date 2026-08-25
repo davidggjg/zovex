@@ -943,7 +943,7 @@ WARM_BIAS = float(os.environ.get("STREAM_WARM_BIAS", "0.85"))
 _inflight_bots: dict = {}      # (chat_id, message_id) -> set(שמות בוטים)
 
 
-async def pick_stream_bot_for(chat_id, message_id):
+async def pick_stream_bot_for(chat_id, message_id, exclude=None):
     """כמו pick_stream_bot, אבל מעדיף בוט שכבר משך את ההודעה הזו.
 
     נמדד על השרת אחרי הדחת הבוטים התקועים: חלק מהבקשות חזרו ב-0.56 שניות
@@ -953,7 +953,9 @@ async def pick_stream_bot_for(chat_id, message_id):
     מקור השונות האחרון במקום לקצר את העונש עליו.
     """
     now = time.time()
-    busy = _inflight_bots.get((chat_id, message_id)) or set()
+    busy = set(_inflight_bots.get((chat_id, message_id)) or ())
+    if exclude:
+        busy |= set(exclude)          # בוטים שכבר נכשלו על החלון הזה
     free = [b for b in _stream_bots
             if b["cooldown_until"] < now and b["name"] not in busy]
     # אם *כל* הבריכה עסוקה בפריט הזה, עדיף להצטרף לבוט תפוס מאשר לא להגיש
@@ -1181,6 +1183,22 @@ STREAM_READAHEAD = os.environ.get("STREAM_READAHEAD", "1") not in ("0", "false",
 # כמה זמן מחכים לבוט בודד לפני שמוותרים עליו ועוברים לבא. ניתן לכוונון מ-.env.
 SUBRANGE_TIMEOUT = int(os.environ.get("STREAM_SUBRANGE_TIMEOUT", "25"))
 
+# תקרה קשיחה על מספר לחיצות-היד הבו-זמניות במסלול הוותיק. הניסיונות החוזרים
+# במסלול המהיר מונעים מהסופה להתחיל, אבל אינם מצילים אותה אחרי שהתחילה: כשכל
+# החלונות נכשלים, קצב לחיצות היד יורד רק פי 1.2. התקרה הזו חוסמת את זה מלמעלה
+# בלי קשר לשיעור הכשלים. מכוילת גבוה בכוונה — בעומס תקין היא לא נוגעת בכלום,
+# והיא נכנסת לפעולה רק במצב החריג.
+LEGACY_FETCH_LIMIT = int(os.environ.get("STREAM_LEGACY_LIMIT", "8"))
+_legacy_sem = None
+
+
+def _legacy_semaphore():
+    """נוצר בעצלתיים: ברמת המודול עוד אין event loop רץ."""
+    global _legacy_sem
+    if _legacy_sem is None:
+        _legacy_sem = asyncio.Semaphore(LEGACY_FETCH_LIMIT)
+    return _legacy_sem
+
 async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
     """מושך את הבייטים [lo, hi] (כולל) דרך בוט מה-pool, עם ניסיונות על כמה בוטים.
     מחזיר תמיד בדיוק (hi-lo+1) בייטים (משלים באפסים אם נכשל — לשמירת Content-Length)."""
@@ -1215,7 +1233,11 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
             # ל-DC של טלגרם נופל בלולאה (Retrying upload.GetFile) הלולאה תלויה
             # לנצח. החלון המקבילי מוגש רק כשכל תת-הטווחים הסתיימו, ולכן בוט תקוע
             # אחד הקפיא את כל הבקשה גם כששאר ה-pool בריא — הצופה קיבל 0 בייטים.
-            out = await asyncio.wait_for(_pull(), timeout=SUBRANGE_TIMEOUT)
+            # התור מחוץ ל-wait_for בכוונה: זמן ההמתנה בתור לא ייחשב כאיטיות של
+            # הבוט ולא יחניק אותו בטעות. כל מחזיק חסום ל-SUBRANGE_TIMEOUT, ולכן
+            # התור מתקדם תמיד ואי אפשר להיתקע בו לנצח.
+            async with _legacy_semaphore():
+                out = await asyncio.wait_for(_pull(), timeout=SUBRANGE_TIMEOUT)
             if len(out) >= need:
                 _mark_ok(bot)
                 return bytes(out[:need])
@@ -1254,6 +1276,11 @@ MEDIA_BANDS_MAX = int(os.environ.get("STREAM_MEDIA_BANDS_MAX", "35"))
 # (טלגרם מבקש להאט לרגע) עדיף לספוג מאשר להפיל את כל החלון; FloodWait ארוך
 # עדיף לזרוק — החלון ייפול אחורה למסלול אחר ולא יחזיק את הצופה תקוע.
 MEDIA_BAND_FLOOD_CAP = int(os.environ.get("STREAM_BAND_FLOOD_CAP", "8"))
+
+# כמה בוטים לנסות במסלול המהיר לפני שנופלים למסלול הוותיק. המהיר משתמש
+# בבריכת חיבורים קיימת ולא פותח כלום; הוותיק פותח session שלם לכל תת-טווח.
+# כל ניסיון נוסף כאן חוסך עד 16 לחיצות יד — ראה ההסבר ב-_fetch_window.
+MEDIA_BANDS_TRIES = int(os.environ.get("STREAM_BANDS_TRIES", "3"))
 
 
 # מונה timeouts רצופים לכל (בוט, DC). מתאפס בכל הצלחה, כך שרק *רצף* אמיתי
@@ -1302,7 +1329,7 @@ async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
     return bytes(out)
 
 
-async def _media_bands_fetch(chat_id, message_id, lo, hi):
+async def _media_bands_fetch(chat_id, message_id, lo, hi, tried=None):
     """מושך [lo, hi] דרך כמה חיבורי media של *בוט אחד* מהמאגר, במקביל.
 
     ההבדל מהמסלול הישן: שם הבוט מושך צ'אנק, ממתין לתשובה, ומושך את הבא —
@@ -1323,9 +1350,11 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi):
     """
     if STREAM_MEDIA_CONNS <= 0:
         return None
-    bot = await pick_stream_bot_for(chat_id, message_id)
+    bot = await pick_stream_bot_for(chat_id, message_id, exclude=tried)
     if bot is None:
         return None
+    if tried is not None:
+        tried.add(bot["name"])        # שהניסיון הבא על אותו חלון יבחר בוט אחר
     dc_id = gen = None
     # מסמנים את הבוט כתפוס לפריט הזה *מיד* אחרי הבחירה ובלי await ביניהם, כדי
     # שהחלון הבא (קריאה-מראש) לא יבחר בו ויתחרה איתו על אותם ארבעה חיבורים.
@@ -1471,10 +1500,25 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
     async def _fetch_window(wstart, wend):
         """מחזיר את כל בייטי החלון. קודם מסלול ה-media bands (חיבורים מקבילים
         לאותו DC — נמדד פי ~70 ממשיכה בחיבור יחיד), ואם הוא נכשל נופלים בשקט
-        למסלול הבוטים הוותיק."""
-        fast = await _media_bands_fetch(chat_id, message_id, wstart, wend)
-        if fast is not None:
-            return fast
+        למסלול הבוטים הוותיק.
+
+        קריטי: המסלול הוותיק בנוי על stream_media, ו-Client.get_file של
+        Pyrogram *יוצר session שלם מאפס לכל קריאה* — חיבור, לחיצת יד
+        קריפטוגרפית, ExportAuthorization+ImportAuthorization — ומשמיד אותו
+        ב-finally. עם 4 תת-טווחים במקביל על עד 4 בוטים זה עד 16 לחיצות יד
+        מלאות לכל חלון. נמדד בשרת: 6874 ניסיונות התחברות בחמש דקות (23
+        בשנייה) בזמן שהקוד שלנו לא כתב ולו שורת אזהרה אחת.
+
+        וזו לולאה שמזינה את עצמה: כשל במסלול המהיר → גיבוי → הצפת טלגרם
+        וה-event loop בלחיצות יד → עוד כשלים במסלול המהיר. לכן מנסים קודם
+        כמה בוטים *במסלול המהיר*, שמשתמש בבריכה קיימת ולא פותח כלום, ורק
+        אם כולם נכשלו יורדים למסלול היקר.
+        """
+        tried = set()
+        for _ in range(max(1, MEDIA_BANDS_TRIES)):
+            fast = await _media_bands_fetch(chat_id, message_id, wstart, wend, tried)
+            if fast is not None:
+                return fast
         total_w = wend - wstart + 1
         n = max(1, min(parts, total_w // MIN_PART))
         step = -(-total_w // n)
