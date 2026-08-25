@@ -831,6 +831,54 @@ REVIVE_EVERY = int(os.environ.get("STREAM_REVIVE_EVERY", "120"))
 REVIVE_AFTER_CHOKES = int(os.environ.get("STREAM_REVIVE_AFTER_CHOKES", "2"))
 
 
+_probe_msg_id_cache: list = []
+
+
+def _probe_msg_id():
+    """מזהה הודעה כלשהי מהערוץ, לבדיקת משיכה אמיתית. נשלף פעם אחת."""
+    if _probe_msg_id_cache:
+        return _probe_msg_id_cache[0]
+    for e in load_content():
+        m = re.search(r"/stream/-?\d+/(\d+)", str(e.get("video_url") or ""))
+        if m:
+            _probe_msg_id_cache.append(int(m.group(1)))
+            return _probe_msg_id_cache[0]
+    return None
+
+
+async def _bot_can_download(bot) -> bool:
+    """האם הבוט באמת מסוגל למשוך בייטים מטלגרם.
+
+    קריטי: `get_me()` אינו בדיקה מספקת. חשבון שטלגרם חנק *להורדות* עונה
+    ל-get_me מצוין — הוא לא חסום, רק מוגבל. לכן הבדיקה הזולה הכריזה על 12
+    חשבונות חנוקים כ"בריאים" כל שתי דקות, איפסה להם את דרגת העונש והחזירה
+    אותם לרוטציה — והעונש המתגבר (30ש' → 2ד' → 8ד' → 30ד') לא הספיק להתכנס
+    לפני שאופס שוב. התוצאה: רוב הבחירות המשיכו לנחות על בוטים מתים.
+
+    כאן מושכים 64KB אמיתיים. זו בדיוק היכולת שאכפת לנו ממנה.
+    """
+    msg_id = _probe_msg_id()
+    if not STREAM_CHANNEL_ID or msg_id is None:
+        return False
+    try:
+        msg = await asyncio.wait_for(
+            _get_bot_msg(bot, STREAM_CHANNEL_ID, msg_id), timeout=15)
+        media = msg and (msg.video or msg.audio or msg.document or msg.video_note)
+        if not media:
+            return False
+        dc_id, location = _file_location(media)
+        sessions, _gen = await get_media_session_pool_gen(
+            bot["client"], bot["name"], dc_id, 1, block=True)
+        if not sessions:
+            return False
+        want = 64 * 1024
+        data = await asyncio.wait_for(
+            _band_fetch(sessions[0], location, 0, want - 1), timeout=20)
+        return len(data) >= want
+    except Exception:
+        return False
+
+
 async def revive_stream_pool():
     """מחזיר לחיים בוטים שה-session שלהם תקוע.
 
@@ -848,17 +896,14 @@ async def revive_stream_pool():
             if b.get("chokes", 0) < REVIVE_AFTER_CHOKES:
                 continue
             name = b["name"]
-            try:
-                # קודם בדיקה זולה: אולי הוא כבר התאושש מעצמו וחבל להפיל session.
-                await asyncio.wait_for(b["client"].get_me(), timeout=10)
+            # קודם: האם הוא כבר מסוגל למשוך? אם כן, חבל להפיל לו session.
+            if await _bot_can_download(b):
                 b["chokes"] = 0
                 b["fails"] = 0
                 b["cooldown_until"] = 0.0
-                log.info("✅ %s התאושש — חזר לרוטציה", name)
+                log.info("✅ %s מושך בייטים שוב — חזר לרוטציה", name)
                 continue
-            except Exception:
-                pass
-            log.warning("♻️ %s תקוע — מרים session מחדש", name)
+            log.warning("♻️ %s לא מושך בייטים — מרים session מחדש", name)
             try:
                 # stop() על לקוח תקוע עלול להיתקע בעצמו — עוטפים בתקציב.
                 await asyncio.wait_for(b["client"].stop(), timeout=20)
@@ -872,11 +917,17 @@ async def revive_stream_pool():
                 b["peer_ok"] = await _resolve_peer(b["client"], name)
                 for k in [k for k in _bot_msg_cache if k[0] == name]:
                     _bot_msg_cache.pop(k, None)
-                b["chokes"] = 0
-                b["fails"] = 0
-                b["speed"] = None
-                b["cooldown_until"] = 0.0
-                log.info("✅ %s הורם מחדש וחזר לרוטציה", name)
+                # session טרי אינו ערובה למשיכה: חשבון חנוק מתחבר בשמחה
+                # ורק ההורדה שלו חסומה. בלי האימות הזה הוא היה חוזר לרוטציה
+                # וגובה timeout מלא מכל חלון שנוחת עליו, שוב ושוב.
+                if not await _bot_can_download(b):
+                    log.warning("⚠️ %s עלה אבל עדיין לא מושך — נשאר מודח", name)
+                else:
+                    b["chokes"] = 0
+                    b["fails"] = 0
+                    b["speed"] = None
+                    b["cooldown_until"] = 0.0
+                    log.info("✅ %s הורם מחדש ומושך — חזר לרוטציה", name)
             except Exception as e:
                 # נשאר מודח; הסבב הבא ינסה שוב.
                 log.warning("⚠️ הרמת %s נכשלה: %s: %s", name, type(e).__name__, e)
