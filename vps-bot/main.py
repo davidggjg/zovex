@@ -1297,24 +1297,58 @@ def _is_dead_conn(err) -> bool:
     return isinstance(err, (ConnectionError, OSError, EOFError, RuntimeError))
 
 
-async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
-    """מושך בדיוק [lo, hi] דרך חיבור media יחיד ומחזיר את הבייטים."""
-    out = bytearray()
-    offset = (lo // MEDIA_CHUNK) * MEDIA_CHUNK
-    produced = offset
-    while produced <= hi:
+# ניסיונות חוזרים ברמת הבלוק הבודד. עד היום בלוק שנכשל הפיל את כל הרצועה,
+# ואיתה את החלון, ואיתו את בריכת החיבורים — ואז הבקשה נפלה למסלול שפותח
+# session שלם לכל משיכה. כלומר תקלה רגעית אחת ייצרה עשרות בקשות נוספות מול
+# טלגרם, וזה בדיוק מה שהעמיס את החשבונות עד שהם נחנקו. ניסיון חוזר על אותו
+# חיבור, עם השהיה שמכפילה את עצמה, עולה בקשה אחת ולא מפיל כלום.
+BLOCK_RETRIES = int(os.environ.get("STREAM_BLOCK_RETRIES", "4"))
+BLOCK_BACKOFF_START = float(os.environ.get("STREAM_BLOCK_BACKOFF", "0.1"))
+BLOCK_BACKOFF_MAX = float(os.environ.get("STREAM_BLOCK_BACKOFF_MAX", "8"))
+
+
+async def _get_block(session: Session, location, offset: int, limit: int) -> bytes:
+    """מושך בלוק בודד, עם ניסיונות חוזרים והשהיה מכפילה.
+
+    FloodWait קצר: ישנים בדיוק כמה שטלגרם ביקש. שגיאת חיבור רגעית: משהים
+    ומנסים שוב על אותו חיבור. רק אחרי שכל הניסיונות נכשלו הכשל עולה למעלה.
+    """
+    backoff = BLOCK_BACKOFF_START
+    last = None
+    for attempt in range(max(1, BLOCK_RETRIES)):
         try:
             r = await session.invoke(functions.upload.GetFile(
-                location=location, offset=offset, limit=MEDIA_CHUNK, precise=False))
+                location=location, offset=offset, limit=limit, precise=False))
+            return getattr(r, "bytes", b"")
         except FloodWait as e:
-            # קריטי: הגרסה הקודמת לא תפסה FloodWait כאן כלל — כל האטה של טלגרם
-            # הפילה את הרצועה, ובעקבותיה נזרקה כל בריכת החיבורים (thrash) והסרט
-            # נתקע. FloodWait קצר: ישנים ומנסים שוב; ארוך: זורקים בשקט (fallback).
+            # FloodWait ארוך אינו האטה רגעית — עדיף לוותר ולתת לחלון ליפול
+            # לבוט אחר מאשר להחזיק את הצופה תקוע.
             if e.value > MEDIA_BAND_FLOOD_CAP:
                 raise
             await asyncio.sleep(e.value + 0.5)
             continue
-        chunk = getattr(r, "bytes", b"")
+        except (OSError, ConnectionError, EOFError, asyncio.TimeoutError) as e:
+            last = e
+            if attempt == BLOCK_RETRIES - 1:
+                raise
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, BLOCK_BACKOFF_MAX)
+    if last is not None:
+        raise last
+    return b""
+
+
+async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
+    """מושך בדיוק [lo, hi] דרך חיבור media יחיד ומחזיר את הבייטים."""
+    # בלוק של מגהבייט — המקסימום שהפרוטוקול מרשה. בלוק קטן יותר חוסך בייטים
+    # אבל מכפיל את מספר הבקשות, והמשאב שנגמר לנו הוא בקשות-לשנייה לכל חשבון
+    # (נמדד ~15-20), לא רוחב פס. נבדק: 3MB בבלוקים של 256KB = 13 בקשות מול 4.
+    block = MEDIA_CHUNK
+    out = bytearray()
+    offset = (lo // block) * block
+    produced = offset
+    while produced <= hi:
+        chunk = await _get_block(session, location, offset, block)
         if not chunk:
             break
         c_start, c_end = produced, produced + len(chunk)
@@ -1324,7 +1358,7 @@ async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
             out += chunk[a:b]
         produced = c_end
         offset = produced
-        if len(chunk) < MEDIA_CHUNK:
+        if len(chunk) < block:
             break
     return bytes(out)
 
