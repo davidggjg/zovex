@@ -873,7 +873,8 @@ async def _bot_can_download(bot) -> bool:
             return False
         want = 64 * 1024
         data = await asyncio.wait_for(
-            _band_fetch(sessions[0], location, 0, want - 1), timeout=20)
+            _band_fetch(sessions[0], location, 0, want - 1, bot["name"]),
+            timeout=20)
         return len(data) >= want
     except Exception:
         return False
@@ -1353,12 +1354,54 @@ def _is_dead_conn(err) -> bool:
 # session שלם לכל משיכה. כלומר תקלה רגעית אחת ייצרה עשרות בקשות נוספות מול
 # טלגרם, וזה בדיוק מה שהעמיס את החשבונות עד שהם נחנקו. ניסיון חוזר על אותו
 # חיבור, עם השהיה שמכפילה את עצמה, עולה בקשה אחת ולא מפיל כלום.
+# ── הגבלת קצב עצמית ─────────────────────────────────────────────────────────
+# טלגרם חונק חשבון סביב 15-20 בקשות בשנייה, וההגבלה היא לכל חשבון בנפרד.
+# עד עכשיו לא הייתה לנו שום בלימה: שלחנו כמה שה-event loop הרשה, ונמדדו 23
+# התחברויות בשנייה ואלפי בקשות — ואז טלגרם עשה לנו את מה שלא עשינו לעצמנו,
+# ו-12 מתוך 21 חשבונות נחנקו לשעות.
+#
+# teldrive, שמשרת הרבה יותר משתמשים מאיתנו, מגביל את עצמו ל-10 בקשות בשנייה
+# לכל בוט (rate.Every(100ms), burst 5) ומדליק את זה כברירת מחדל. הוא פשוט
+# לא מגיע לתקרה, ולכן לא נחנק. זה מה שמיושם כאן.
+#
+# זה לא מזרז את הצופה הבודד — הוא ממילא רחוק מהתקרה. הוא מונע את מחלקת
+# התקלות שהרסה לנו יומיים.
+RATE_PER_SEC = float(os.environ.get("STREAM_RATE_PER_SEC", "10"))
+RATE_BURST = float(os.environ.get("STREAM_RATE_BURST", "5"))
+_rate_buckets: dict = {}          # שם בוט -> [אסימונים, זמן_עדכון_אחרון]
+
+
+async def _rate_gate(owner: str):
+    """דלי אסימונים לכל בוט. מחזיק את הקצב מתחת לתקרה של טלגרם.
+
+    ממומש כדלי דולף ולא כתור: בקשה שמגיעה כשאין אסימון פשוט ישנה בדיוק את
+    הזמן שנחוץ לאסימון הבא. בלי תור אין תור שמתפוצץ תחת עומס, ובלי נעילה
+    גלובלית — כל בוט וקצב משלו, כי גם ההגבלה של טלגרם היא לכל חשבון בנפרד.
+    """
+    if RATE_PER_SEC <= 0:
+        return
+    now = time.monotonic()
+    b = _rate_buckets.get(owner)
+    if b is None:
+        _rate_buckets[owner] = [RATE_BURST - 1.0, now]
+        return
+    tokens, last = b
+    tokens = min(RATE_BURST, tokens + (now - last) * RATE_PER_SEC)
+    if tokens < 1.0:
+        wait = (1.0 - tokens) / RATE_PER_SEC
+        b[0], b[1] = 0.0, now + wait
+        await asyncio.sleep(wait)
+        return
+    b[0], b[1] = tokens - 1.0, now
+
+
 BLOCK_RETRIES = int(os.environ.get("STREAM_BLOCK_RETRIES", "4"))
 BLOCK_BACKOFF_START = float(os.environ.get("STREAM_BLOCK_BACKOFF", "0.1"))
 BLOCK_BACKOFF_MAX = float(os.environ.get("STREAM_BLOCK_BACKOFF_MAX", "8"))
 
 
-async def _get_block(session: Session, location, offset: int, limit: int) -> bytes:
+async def _get_block(session: Session, location, offset: int, limit: int,
+                     owner: str = None) -> bytes:
     """מושך בלוק בודד, עם ניסיונות חוזרים והשהיה מכפילה.
 
     FloodWait קצר: ישנים בדיוק כמה שטלגרם ביקש. שגיאת חיבור רגעית: משהים
@@ -1368,6 +1411,8 @@ async def _get_block(session: Session, location, offset: int, limit: int) -> byt
     last = None
     for attempt in range(max(1, BLOCK_RETRIES)):
         try:
+            if owner:
+                await _rate_gate(owner)
             r = await session.invoke(functions.upload.GetFile(
                 location=location, offset=offset, limit=limit, precise=False))
             return getattr(r, "bytes", b"")
@@ -1389,7 +1434,8 @@ async def _get_block(session: Session, location, offset: int, limit: int) -> byt
     return b""
 
 
-async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
+async def _band_fetch(session: Session, location, lo: int, hi: int,
+                      owner: str = None) -> bytes:
     """מושך בדיוק [lo, hi] דרך חיבור media יחיד ומחזיר את הבייטים."""
     # בלוק של מגהבייט — המקסימום שהפרוטוקול מרשה. בלוק קטן יותר חוסך בייטים
     # אבל מכפיל את מספר הבקשות, והמשאב שנגמר לנו הוא בקשות-לשנייה לכל חשבון
@@ -1399,7 +1445,7 @@ async def _band_fetch(session: Session, location, lo: int, hi: int) -> bytes:
     offset = (lo // block) * block
     produced = offset
     while produced <= hi:
-        chunk = await _get_block(session, location, offset, block)
+        chunk = await _get_block(session, location, offset, block, owner)
         if not chunk:
             break
         c_start, c_end = produced, produced + len(chunk)
@@ -1480,7 +1526,7 @@ async def _media_bands_fetch(chat_id, message_id, lo, hi, tried=None):
             if s > hi:
                 break
             e = min(hi, chunk_lo + (i + 1) * per_band * MEDIA_CHUNK - 1)
-            tasks.append(_band_fetch(sessions[i], location, s, e))
+            tasks.append(_band_fetch(sessions[i], location, s, e, bot["name"]))
             s = e + 1
         # התקציב נגזר מגודל *הרצועה* ולא מגודל החלון: הרצועות רצות במקביל,
         # ולכן מה שקובע הוא האיטית שבהן, לא הסכום. הגרסה הקודמת חישבה לפי
@@ -4243,7 +4289,7 @@ async def speedtest_bots(request: Request, mb: int = 4, n: int = 0):
                 continue
             per = -(-want // len(sessions))
             tasks = [_band_fetch(sessions[i], location, i * per,
-                                 min(want, (i + 1) * per) - 1)
+                                 min(want, (i + 1) * per) - 1, bot["name"])
                      for i in range(len(sessions)) if i * per < want]
             t0 = time.time()
             parts = await asyncio.wait_for(
