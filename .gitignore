@@ -3,3 +3,10 @@ dist/
 .env
 .env.local
 .env.*.local
+
+# runtime junk / other components not tracked on this branch
+__pycache__/
+*.pyc
+backups/
+discord-bot/
+tgbot/
