@@ -6,6 +6,7 @@ import MovieDetail from "@/components/MovieDetail.jsx";
 import SeriesView from "@/components/SeriesView.jsx";
 import { useGoogleAuth, LandingScreen } from "@/components/home/Auth.jsx";
 import HomePage from "@/components/home/HomePage.jsx";
+import LiveTV from "@/components/LiveTV.jsx";
 import AdBanner from "@/components/home/AdBanner.jsx";
 import AdminLoginScreen from "@/components/home/AdminLoginScreen.jsx";
 import DonationModalView from "@/components/home/DonationModalView.jsx";
