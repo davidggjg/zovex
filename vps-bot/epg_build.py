@@ -159,8 +159,39 @@ def build():
     doc = {"generated": int(time.time()), "channels": channels}
     return doc, (w_hit, i_hit, empty)
 
+MERGE_KEEP_HOURS = 8      # כמה אחורה שומרים תוכניות שהסתיימו
+
+
+def merge_previous(doc):
+    """ממזג את הבנייה הקודמת לתוך החדשה.
+
+    וואלה מגישה את לוח *היום*, והתוכנית הראשונה מתחילה אחרי חצות (נמדד:
+    00:06 בערוץ ויוה, 01:10 בספורט 1). לכן מיד אחרי חצות התוכנית שרצה
+    בפועל — זו שהתחילה אתמול — כבר לא נמצאת בנתונים, ו"עכשיו" יוצא ריק
+    לשעה ויותר. מיזוג עם הקובץ הקודם סוגר את החור בלי אף בקשה נוספת.
+    """
+    if not OUT.exists():
+        return doc
+    try:
+        old = json.loads(OUT.read_text(encoding="utf-8"))
+    except Exception:
+        return doc
+    cutoff = time.time() - MERGE_KEEP_HOURS * 3600
+    for slug, ch in doc["channels"].items():
+        prev = (old.get("channels", {}).get(slug) or {}).get("programs") or []
+        if not prev:
+            continue
+        seen = {(p["start"], p["title"]) for p in ch["programs"]}
+        extra = [p for p in prev
+                 if p.get("end", 0) > cutoff and (p["start"], p["title"]) not in seen]
+        if extra:
+            ch["programs"] = sorted(ch["programs"] + extra, key=lambda p: p["start"])
+    return doc
+
+
 def main():
     doc, (w_hit, i_hit, empty) = build()
+    doc = merge_previous(doc)
     if "--stdout" in sys.argv:
         print(json.dumps({k: len(v["programs"]) for k, v in doc["channels"].items()},
                          ensure_ascii=False, indent=1))
