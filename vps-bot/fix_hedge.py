@@ -5,106 +5,139 @@
 
 הבעיה שנמדדה
 ------------
-זמני משיכת חלון התפלגו לשתי קבוצות בלבד — מהיר (0.6-13ש') או תקוע
-(44-132ש'). אין ביניים. מקור ההגברה הוא הטיפול בכשל:
+זמני משיכת חלון מתפלגים לשתי קבוצות בלבד — מהיר (0.1-1.0ש', 4-10 MB/s)
+או תקוע (10ש', 34ש', ואף 130ש'). אין ביניים. גם כשהמערכת בריאה לגמרי,
+קפיצה בודדת מספיקה כדי לרוקן את הבאפר של הנגן ולעצור את הסרט.
 
-    parts = await asyncio.wait_for(gather(*bands), timeout=budget)
+מקור ההגברה נמצא ב-_fetch_window:
 
-כשרצועה *אחת* מאחרת, כל החלון נזרק — כולל הרצועות שכבר הצליחו — ואז
-מנסים את החלון כולו מחדש על בוט אחר, ורק אחרי MEDIA_BANDS_TRIES ניסיונות
-יורדים למסלול הוותיק שתולה SUBRANGE_TIMEOUT (25ש') לכל בוט:
+    fast = await _media_bands_fetch(chat_id, message_id, wstart, wend)
+    if fast is not None:
+        return fast
+    # ...נפילה למסלול הבוטים הוותיק
 
-    3 × 9ש' (מסלול מהיר) + 4 × 25ש' (מסלול ותיק) ≈ 127ש'
-
-וזה בדיוק מה שנמדד: 132, 125, 112. עיכוב רגעי של ~10ש' בבקשה בודדת
-לטלגרם (651 "Retrying upload.GetFile" בשעה) מתנפח לתקיעה של שתי דקות.
+ניסיון מהיר *אחד*. אם הוא מאחר — אין רשת ביניים, ונופלים ישר למסלול
+הוותיק שתולה SUBRANGE_TIMEOUT (25ש') לכל בוט עד שהוא מוותר. כך עיכוב
+רגעי אחד בבקשה לטלגרם (נמדדו 239 "Retrying" בעשר דקות) הופך לעשרות
+שניות של תקיעה מול הצופה.
 
 התיקון
 ------
-במקום להמתין לניסיון שייכשל עד הסוף ורק אז להתחיל את הבא — משגרים ניסיון
-נוסף על בוט אחר אחרי המתנה קצרה, ולוקחים את הראשון שמצליח. זו טכניקה
-סטנדרטית נגד "זנב" של השהיות: הבוט האיטי כבר לא קובע את זמן ההמתנה.
+במקום להמתין לניסיון שאולי ייכשל — משגרים ניסיון נוסף לבוט אחר אחרי
+המתנה קצרה, ולוקחים את הראשון שמצליח. טכניקה סטנדרטית נגד "זנב" של
+השהיות: הבוט האיטי כבר לא קובע כמה הצופה מחכה.
 
-    לפני:  בוט איטי → 9ש' → בוט → 9ש' → בוט → 9ש' → מסלול ותיק → 100ש'
+    לפני:  בוט איטי → תלוי עד שנכשל → מסלול ותיק → 25ש' לכל בוט
     אחרי:  בוט איטי → 4ש' → בוט נוסף במקביל → מי שענה ראשון מנצח
 
-עלות: כשהמערכת מהירה — אפס (הניסיון הראשון חוזר לפני ההמתנה, ואף בקשה
-נוספת לא נשלחת). כשהיא איטית — פי 2-3 משיכות לאותו חלון, בדיוק ברגע
-שבו הצופה עומד להיתקע. זו עסקה טובה.
+עלות: כשהמערכת מהירה — אפס. הניסיון הראשון חוזר תוך פחות משנייה, ואף
+בקשה נוספת לא נשלחת. הגידור מתעורר רק כשמשהו באמת נתקע.
 
-הרצה על השרת:
+בטיחות
+------
+מגבה לפני שינוי · בודק תחביר על עותק זמני *לפני* שנוגע בקובץ החי ·
+משחזר אוטומטית אם משהו השתבש · idempotent · --undo מחזיר מיד.
+
     python3 fix_hedge.py            # מחיל
+    python3 fix_hedge.py --check    # בודק התאמה בלי לשנות
     python3 fix_hedge.py --undo     # מחזיר מהגיבוי
 """
-import hashlib, py_compile, shutil, subprocess, sys, tempfile
+import py_compile, shutil, sys, tempfile
 from datetime import datetime
 from pathlib import Path
 
 MAIN = Path("/opt/zovex-bot/main.py")
 
-ANCHOR_TRIES = 'MEDIA_BANDS_TRIES = int(os.environ.get("STREAM_BANDS_TRIES", "3"))'
+# העוגן לקבועים — אחרי ההגדרה של SUBRANGE_TIMEOUT
+CONST_ANCHOR = "STREAM_SUBRANGE_TIMEOUT"
 
-NEW_TRIES = ANCHOR_TRIES + '''
-# השהיה לפני שיגור ניסיון מקביל לבוט אחר על אותו חלון. קצר מהתקציב של רצועה
-# בכוונה: המטרה היא לא לחכות לכשל אלא לעקוף אותו. 0 מכבה את הגידור.
-MEDIA_HEDGE_DELAY = float(os.environ.get("STREAM_HEDGE_DELAY", "4"))'''
+CONSTS = '''
+# ── בקשה מגודרת (hedge) ─────────────────────────────────────────────────
+# כמה שניות ממתינים לניסיון לפני שמשגרים עוד אחד לבוט אחר. קצר בכוונה:
+# המטרה אינה לחכות לכשל אלא לעקוף אותו. 0 מכבה את הגידור לגמרי.
+MEDIA_HEDGE_DELAY = float(os.environ.get("STREAM_HEDGE_DELAY", "4"))
+# מקסימום ניסיונות מקבילים לאותו חלון (כולל הראשון).
+MEDIA_HEDGE_TRIES = int(os.environ.get("STREAM_HEDGE_TRIES", "3"))
+'''
 
-ANCHOR_LOOP = '''        tried = set()
-        for _ in range(max(1, MEDIA_BANDS_TRIES)):
-            fast = await _media_bands_fetch(chat_id, message_id, wstart, wend, tried)
+# שלוש השורות שמוחלפות ב-_fetch_window
+L1 = "fast = await _media_bands_fetch(chat_id, message_id, wstart, wend)"
+L2 = "if fast is not None:"
+L3 = "return fast"
+
+BODY = '''# ניסיונות מגודרים: מתחילים באחד, וכל MEDIA_HEDGE_DELAY שניות שבהן
+# איש לא חזר — משגרים עוד אחד לבוט אחר. הראשון שמצליח מנצח והשאר
+# מבוטלים. כך בוט איטי בודד לא קובע כמה הצופה מחכה, ולא נופלים
+# למסלול הוותיק (שתולה SUBRANGE_TIMEOUT שניות לכל בוט) על כל עיכוב.
+_hedge_tasks, _hedge_n = set(), 0
+try:
+    while True:
+        if _hedge_n < MEDIA_HEDGE_TRIES:
+            _hedge_tasks.add(asyncio.create_task(
+                _media_bands_fetch(chat_id, message_id, wstart, wend)))
+            _hedge_n += 1
+        if not _hedge_tasks:
+            break
+        # עוד יש ניסיונות במלאי → ממתינים קצר ומשגרים עוד אחד.
+        # נגמרו → ממתינים עד שמישהו יחזור.
+        _hedge_wait = MEDIA_HEDGE_DELAY if (
+            _hedge_n < MEDIA_HEDGE_TRIES and MEDIA_HEDGE_DELAY > 0) else None
+        _hedge_done, _hedge_tasks = await asyncio.wait(
+            _hedge_tasks, timeout=_hedge_wait,
+            return_when=asyncio.FIRST_COMPLETED)
+        for _d in _hedge_done:
+            try:
+                fast = _d.result()
+            except Exception:
+                fast = None
             if fast is not None:
                 return fast
-'''
-
-NEW_LOOP = '''        tried = set()
-        # ניסיונות מגודרים: מתחילים באחד, וכל MEDIA_HEDGE_DELAY שניות שבהן
-        # אף אחד לא חזר — משגרים עוד אחד לבוט אחר. הראשון שמצליח מנצח,
-        # והשאר מבוטלים. כך בוט איטי בודד לא קובע את זמן ההמתנה של הצופה.
-        # ה-set המשותף tried דואג שכל ניסיון ייפול על בוט אחר.
-        tasks, launched = set(), 0
-        max_tries = max(1, MEDIA_BANDS_TRIES)
-        try:
-            while True:
-                if launched < max_tries:
-                    tasks.add(asyncio.create_task(_media_bands_fetch(
-                        chat_id, message_id, wstart, wend, tried)))
-                    launched += 1
-                if not tasks:
-                    break
-                # עוד יש ניסיונות במלאי → ממתינים קצר ומשגרים עוד אחד.
-                # נגמרו → ממתינים עד שמישהו יחזור.
-                wait_for = MEDIA_HEDGE_DELAY if (
-                    launched < max_tries and MEDIA_HEDGE_DELAY > 0) else None
-                done, tasks = await asyncio.wait(
-                    tasks, timeout=wait_for,
-                    return_when=asyncio.FIRST_COMPLETED)
-                for d in done:
-                    try:
-                        fast = d.result()
-                    except Exception:
-                        fast = None
-                    if fast is not None:
-                        return fast
-                if not done and launched >= max_tries:
-                    break
-        finally:
-            # מבטלים ניסיונות שנותרו — כולל כשיצאנו ב-return עם מנצח.
-            for t in tasks:
-                t.cancel()
-                t.add_done_callback(lambda x: x.cancelled() or x.exception())
+        if not _hedge_done and _hedge_n >= MEDIA_HEDGE_TRIES:
+            break
+finally:
+    # מבטלים ניסיונות שנותרו — כולל כשיצאנו ב-return עם מנצח.
+    for _t in _hedge_tasks:
+        _t.cancel()
+        _t.add_done_callback(lambda x: x.cancelled() or x.exception())
 '''
 
 
-def apply(text):
+def locate(lines):
+    """מוצא את שלוש השורות להחלפה. מחזיר (אינדקס, הזחה) או (None, סיבה)."""
+    hits = [i for i, l in enumerate(lines) if l.strip() == L1]
+    if len(hits) != 1:
+        return None, f"השורה '{L1[:40]}...' נמצאה {len(hits)} פעמים (צריך 1)"
+    i = hits[0]
+    if i + 2 >= len(lines):
+        return None, "הקובץ נגמר מוקדם מהצפוי"
+    if lines[i + 1].strip() != L2 or lines[i + 2].strip() != L3:
+        return None, (f"המבנה שונה מהצפוי בשורה {i+2}:\n"
+                      f"  {lines[i+1].strip()!r}\n  {lines[i+2].strip()!r}")
+    return i, len(lines[i]) - len(lines[i].lstrip())
+
+
+def build(text):
     if "MEDIA_HEDGE_DELAY" in text:
         return None, "כבר מוחל"
-    for name, anchor in (("MEDIA_BANDS_TRIES", ANCHOR_TRIES),
-                         ("_fetch_window", ANCHOR_LOOP)):
-        if text.count(anchor) != 1:
-            return None, f"עוגן '{name}' נמצא {text.count(anchor)} פעמים — עוצר"
-    text = text.replace(ANCHOR_TRIES, NEW_TRIES, 1)
-    text = text.replace(ANCHOR_LOOP, NEW_LOOP, 1)
-    return text, None
+    lines = text.split("\n")
+    i, info = locate(lines)
+    if i is None:
+        return None, info
+    indent = " " * info
+
+    # הקבועים — אחרי השורה שמגדירה את SUBRANGE_TIMEOUT
+    c_hits = [k for k, l in enumerate(lines) if CONST_ANCHOR in l and "=" in l]
+    if len(c_hits) != 1:
+        return None, f"עוגן הקבועים נמצא {len(c_hits)} פעמים (צריך 1)"
+
+    body = "\n".join((indent + ln) if ln.strip() else ""
+                     for ln in BODY.rstrip("\n").split("\n"))
+    lines[i:i + 3] = body.split("\n")
+
+    # מוסיפים את הקבועים אחרי ההחלפה, כדי שהאינדקס לא יזוז אם הוא קטן יותר
+    c = c_hits[0] if c_hits[0] < i else c_hits[0] + len(body.split("\n")) - 3
+    lines[c + 1:c + 1] = CONSTS.strip("\n").split("\n")
+    return "\n".join(lines), None
 
 
 def newest_backup():
@@ -128,12 +161,12 @@ def main():
         return 0
 
     original = MAIN.read_text(encoding="utf-8")
-    patched, err = apply(original)
+    patched, err = build(original)
     if patched is None:
-        print(err)
+        print(("✓ " if err == "כבר מוחל" else "✗ ") + err)
         return 0 if err == "כבר מוחל" else 1
 
-    # בדיקת תקינות תחביר על עותק זמני *לפני* שנוגעים בקובץ החי
+    # תחביר נבדק על עותק זמני לפני שנוגעים בקובץ החי
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False,
                                      encoding="utf-8") as t:
         t.write(patched)
@@ -146,21 +179,23 @@ def main():
     finally:
         tmp.unlink(missing_ok=True)
 
+    if "--check" in sys.argv:
+        print("✓ הפאץ' מתאים לקובץ ועובר קומפילציה. לא שונה כלום (--check).")
+        return 0
+
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     bak = MAIN.with_name(f"main.py.bak-hedge-{stamp}")
     shutil.copy2(MAIN, bak)
     MAIN.write_text(patched, encoding="utf-8")
-
     try:
         py_compile.compile(str(MAIN), doraise=True)
     except py_compile.PyCompileError as e:
         shutil.copy2(bak, MAIN)
-        print("שגיאה אחרי הכתיבה — שוחזר הגיבוי:\n", e, file=sys.stderr)
+        print("שגיאה אחרי הכתיבה — הגיבוי שוחזר:\n", e, file=sys.stderr)
         return 1
 
     print("גיבוי:", bak.name)
-    print("הוחל: בקשה מגודרת (hedge) בהשהיה של 4 שניות.")
-    print("sha256:", hashlib.sha256(patched.encode()).hexdigest()[:16])
+    print("✓ הוחל: בקשה מגודרת, 4 שניות, עד 3 ניסיונות מקבילים.")
     print("\nהפעל מחדש:  systemctl restart zovex-bot")
     print("ביטול:      python3 fix_hedge.py --undo && systemctl restart zovex-bot")
     return 0
