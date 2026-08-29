@@ -25,10 +25,12 @@ except Exception:                                  # פייתון ישן / בל�
     IL = None
 
 DATA = pathlib.Path("/opt/zovex-bot/data")
-# נכתב לתיקיית האתר הסטטית — nginx מגיש אותה ישירות תחת /epg.json (בלי proxy,
-# בלי שינוי קוד בשרת). אם התיקייה לא קיימת (בדיקה מקומית) — נופל ל-DATA.
-SITE = pathlib.Path("/opt/zovex-site")
-OUT  = (SITE / "epg.json") if SITE.is_dir() else (DATA / "epg.json")
+# נכתב *מחוץ* לתיקיית האתר בכוונה: פריסת אתר מריצה
+#     find /opt/zovex-site -mindepth 1 -delete
+# ולכן קובץ שיושב שם נמחק בכל פריסה, ו-nginx מתחיל להחזיר את index.html
+# במקום הלוח (נתפס בפועל). כאן הוא שורד פריסות; nginx מגיש אותו דרך
+#     location = /epg.json { alias /opt/zovex-bot/data/epg.json; }
+OUT = DATA / "epg.json"
 
 # ── מיפוי: slug שלנו → (מקור, מזהה) ─────────────────────────────────────
 # 'w' = קוד וואלה ; 'i' = מזהה isramedia. ערוץ שאינו כאן — אין לו לוח לינארי
