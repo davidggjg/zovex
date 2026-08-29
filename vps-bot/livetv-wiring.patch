@@ -1,5 +1,70 @@
+diff --git a/src/components/home/ContentRows.jsx b/src/components/home/ContentRows.jsx
+index e20f8eb..122f033 100644
+--- a/src/components/home/ContentRows.jsx
++++ b/src/components/home/ContentRows.jsx
+@@ -2,6 +2,27 @@ import { useState, useEffect, useMemo } from "react";
+ import { NetflixRow, NetflixGrid, buildCardHref } from "./NetflixCard";
+ import LiveBanner from "../LiveBanner";
+ 
++// ז'אנרים לשידורים החיים. הסדר קובע — ערוץ משויך לז'אנר הראשון שמתאים לו,
++// כך ש"HOT cinema" נופל ל"סרטים" ולא ל-HOT. אומת מול כל 96 הערוצים: אין
++// ערוץ שנשאר בלי שיוך.
++const LIVE_GENRES = [
++  ["ערוצי ישראל", /קשת|ר.?שת|כאן|מכאן|ערוץ 9|ערוץ 11|ערוץ 13|ערוץ 14|ערוץ 24|ערוץ 98|הכנסת|i24|c14|mako/i],
++  ["ספורט",       /ספורט|sport|\bone\b|יורוספורט|eurosport|ufc/i],
++  ["ילדים",       /ניק|הופ|לולי|ג.וניור|גוניור|junior|baby|בייבי|דיסני|דסני|זום|קריוקי|סלקום קידס|טין|wiz|כוכבים/i],
++  ["דרמות",       /טורקי|ויוה|viva|הודי|ספרדי|דרמות/i],
++  ["סרטים",       /cinema|סינמה|movies|סרטים|bolly|קולנוע|hbo|gold/i],
++  ["דוקו וטבע",   /discovery|דיסקברי|national|נשיונל|ווילד|history|היסטור|פרי דוקו|doco|דוקו/i],
++  ["משפחה ולייף", /אוכל|food|בריאות|health|חיים טובים|good|ים תיכוני|e!|בית|משפחה|hfc|real|ריל/i],
++  ["yes",         /\byes\b/i],
++  ["HOT",         /\bhot\b|הוט/i],
++  ["FREE TV",     /free ?tv/i],
++];
++const liveGenreOf = (ch) => {
++  const n = ch.title || ch.name || "";
++  const hit = LIVE_GENRES.find(([, re]) => re.test(n));
++  return hit ? hit[0] : "אחר";
++};
++
+ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user }) {
+   // נרמול לחיפוש: מסיר ניקוד עברי + גרשיים, אותיות קטנות, רווחים כפולים — כך
+   // "אס" מוצא גם "אָס". תמיכה בכמה מילים (כל מילה חייבת להימצא) וגם בשם האנגלי.
+@@ -32,7 +53,13 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
+     return [...seriesList, ...regularMovies];
+   };
+ 
++  const [liveGenre, setLiveGenre] = useState("הכל");
+   const liveItems = liveChannels.filter(ch => matchQ(ch.title, ch.name)).map(ch => ({ ...ch, is_live: true }));
++  // הז'אנרים שבאמת קיימים בערוצים שיש כרגע — בלי טאבים ריקים.
++  const liveGenreTabs = ["הכל", ...LIVE_GENRES.map(([g]) => g)
++    .filter(g => liveItems.some(ch => liveGenreOf(ch) === g))];
++  const shownLive = liveGenre === "הכל"
++    ? liveItems : liveItems.filter(ch => liveGenreOf(ch) === liveGenre);
+   const hasLiveRow = (selectedCategory === "הכל" || selectedCategory === "שידורים חיים") && liveItems.length > 0;
+ 
+   // קבע אילו שורות להציג לפי selectedCategory
+@@ -90,7 +117,17 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
+     <div style={{ paddingTop: 8 }}>
+       {/* שורת "המשך צפייה" מוצגת אך ורק בתוך קטגוריית "היסטוריה" (למעלה) —
+           לא במסך הראשי/"הכל" ולא בשום קטגוריה אחרת */}
+-      {hasLiveRow && <LiveBanner liveChannels={liveItems} onPlay={handleItemClick} isDesktop={isDesktop} />}
++      {hasLiveRow && selectedCategory === "שידורים חיים" && (
++        <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "4px 16px 12px", WebkitOverflowScrolling: "touch", direction: "rtl" }}>
++          {liveGenreTabs.map(g => (
++            <button key={g} onClick={() => setLiveGenre(g)}
++              style={{ background: g === liveGenre ? "#e50914" : "#1a1a1a", color: "#fff", border: "none", borderRadius: 20, padding: "7px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
++              {g}
++            </button>
++          ))}
++        </div>
++      )}
++      {hasLiveRow && <LiveBanner liveChannels={selectedCategory === "שידורים חיים" ? shownLive : liveItems} onPlay={handleItemClick} isDesktop={isDesktop} />}
+       {rowsToShow.map(row => {
+         // אותו כלל כמו באפליקציה (isNetflixMode ב-HomeScreen): "הכל" בלי חיפוש
+         // מוצג כגלגלות, וכל קטגוריה ספציפית או חיפוש מוצגים כרשת. גלגלת אחת
 diff --git a/src/pages/Home.jsx b/src/pages/Home.jsx
-index 817e9fe..e04bea9 100644
+index 817e9fe..f920c18 100644
 --- a/src/pages/Home.jsx
 +++ b/src/pages/Home.jsx
 @@ -5,6 +5,7 @@ import MovieDetail from "@/components/MovieDetail.jsx";
@@ -40,7 +105,7 @@ index 817e9fe..e04bea9 100644
    }, [slug, episode, liveChannels]);
  
    // ── early returns ──
-@@ -238,6 +242,22 @@ function HomeMain({ user, onLogout, isGuest }) {
+@@ -238,6 +242,19 @@ function HomeMain({ user, onLogout, isGuest }) {
      />
    );
  
@@ -48,10 +113,7 @@ index 817e9fe..e04bea9 100644
 +  // מוצג רק כשהנגן סגור; לחיצה על ▶ פותחת את הנגן מעליו, וסגירתו מחזירה לכאן.
 +  if (liveGuide && !showLivePlayer) return (
 +    <LiveTV
-+      channels={liveChannels}
-+      initialSlug={liveGuide.custom_slug ||
-+        encodeURIComponent((liveGuide.title || "").replace(/ /g, "-"))}
-+      isDesktop={isDesktop}
++      channel={liveGuide}
 +      onPlay={(ch) => setShowLivePlayer(ch)}
 +      onClose={() => {
 +        setLiveGuide(null);
@@ -63,7 +125,7 @@ index 817e9fe..e04bea9 100644
    // ── Movie page ──
    if (selectedMovie) return (
      <MovieDetail
-@@ -260,7 +280,7 @@ function HomeMain({ user, onLogout, isGuest }) {
+@@ -260,7 +277,7 @@ function HomeMain({ user, onLogout, isGuest }) {
        {showLivePlayer && (
          <CustomVideoPlayer
            movie={{ ...showLivePlayer, is_live: true }}

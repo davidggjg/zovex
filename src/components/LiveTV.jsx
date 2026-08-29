@@ -1,212 +1,157 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { ArrowRight, Play, Bell, BellRing } from "lucide-react";
+import { useEffect, useState } from "react";
 
-// ── דף השידורים החי (מדריך TV) ───────────────────────────────────────────
-// טאבים לפי קטגוריה, רשימת ערוצים, כפתור "פליי" גדול (פותח את הנגן הקיים),
-// ומתחת — "עכשיו / הבא" + לוח מלא של הערוץ הנבחר, עם כפתור "הזכר לי".
-// הלוח נמשך מ-/epg.json (נבנה בשרת כל שעתיים). הזמנים שם הם epoch שניות.
-
-const CATS = [
-  ["הכל", () => true],
-  ["חדשות וערוצים", n => /קשת|רשת|כאן|מכאן|ערוץ 9|ערוץ 14|ערוץ 24|ערוץ 98|הכנסת|c14|i24/i.test(n)],
-  ["דרמות טורקיות", n => /טורקי|ויוה|viva/i.test(n)],
-  ["yes", n => /yes/i.test(n)],
-  ["HOT", n => /hot|הוט/i.test(n)],
-  ["ספורט", n => /ספורט|sport|one|יורוספורט|eurosport/i.test(n)],
-  ["ילדים", n => /ניק|ניקל|הופ|לולי|ג'?וניור|גוניור|baby|בייבי|דיסני|דסני|זום|wiz|קריוקי|סלקום|טין/i.test(n)],
-  ["דוקו ולייף", n => /discovery|דיסקברי|national|נשיונל|history|היסטור|food|אוכל|בריאות|health|חיים טובים|good|ים תיכוני|e!/i.test(n)],
-  ["סרטים ובידור", n => /cinema|סינמה|movies|סרטים|bolly|הודי|קומדי|comedy|דרמה|drama|action|אקשן|קולנוע|בידור/i.test(n)],
-];
-
-const catOf = (name) => (CATS.find(([, m], i) => i > 0 && m(name || "")) || CATS[0])[0];
-
-// now/next מתוך מערך תוכניות (ממויין לפי start)
-function nowNext(programs) {
-  const t = Date.now() / 1000;
-  let now = null, next = null;
-  for (const p of programs) {
-    if (p.start <= t && t < p.end) now = p;
-    else if (p.start > t && !next) next = p;
-  }
-  return { now, next };
-}
+// ── דף ערוץ שידור חי ─────────────────────────────────────────────────────
+// אותו מבנה כמו דף סרט: תמונה למעלה, שם, כפתור צפייה — ומתחת לוח השידורים
+// של *הערוץ הזה בלבד*: מה משודר עכשיו, ומה עומד לשדר.
+//
+// הלוח נמשך מ-/epg.json (נבנה בשרת כל שעתיים). לא לכל ערוץ יש לוח — ערוצי
+// VOD וסרטים רצופים אין להם לוח לינארי מטבעם — ובמקרה כזה הדף פשוט מציג
+// את הערוץ בלי החלק התחתון, במקום להציג "אין מידע" מיותר.
 
 const fmt = (ep) =>
   new Date(ep * 1000).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
 
-// מפתח slug לערוץ (כמו ש-Home מחשב) — כדי להתאים ל-epg.json
 const chSlug = (ch) =>
-  ch.custom_slug || encodeURIComponent((ch.title || ch.name || "").replace(/ /g, "-"));
+  (ch && (ch.custom_slug ||
+    encodeURIComponent((ch.title || ch.name || "").replace(/ /g, "-")))) || "";
 
-// "הזכר לי" — באפליקציה (WebView) שולח לנייטיב; בדפדפן התראה מקומית (כל עוד פתוח)
+// "הזכר לי": באפליקציה נשלח לצד הנייטיב שיתזמן התראה; בדפדפן מתוזמנת
+// התראה מקומית שתעבוד כל עוד הלשונית פתוחה.
 function remind(program, channelTitle) {
   const when = program.start * 1000;
-  if (when - Date.now() < 0) return;
-  const bridge = window.ReactNativeWebView;
+  if (when <= Date.now()) return false;
+  const bridge = typeof window !== "undefined" && window.ReactNativeWebView;
   if (bridge && bridge.postMessage) {
     bridge.postMessage(JSON.stringify({
-      type: "remind", at: program.start, title: channelTitle, program: program.title,
+      type: "remind", at: program.start,
+      channel: channelTitle, program: program.title,
     }));
-    return "sent";
+    return true;
   }
-  if ("Notification" in window) {
-    const arm = () => {
-      const ms = when - Date.now();
-      if (ms > 0 && ms < 24 * 3600 * 1000) {
-        setTimeout(() => {
-          try { new Notification(`מתחיל עכשיו: ${program.title}`, { body: channelTitle }); } catch {}
-        }, ms);
-      }
-    };
-    if (Notification.permission === "granted") { arm(); return "armed"; }
-    if (Notification.permission !== "denied") {
-      Notification.requestPermission().then(p => { if (p === "granted") arm(); });
-      return "armed";
+  if (typeof Notification === "undefined") return false;
+  const arm = () => {
+    const ms = when - Date.now();
+    if (ms > 0 && ms < 24 * 3600 * 1000) {
+      setTimeout(() => {
+        try { new Notification(`מתחיל עכשיו: ${program.title}`, { body: channelTitle }); }
+        catch { /* הדפדפן חסם — אין מה לעשות */ }
+      }, ms);
     }
+  };
+  if (Notification.permission === "granted") { arm(); return true; }
+  if (Notification.permission !== "denied") {
+    Notification.requestPermission().then(p => { if (p === "granted") arm(); });
+    return true;
   }
-  return "unsupported";
+  return false;
 }
 
-export default function LiveTV({ channels = [], onPlay, onClose, initialSlug, isDesktop }) {
-  const [epg, setEpg] = useState(null);
-  const [cat, setCat] = useState("הכל");
-  const [selSlug, setSelSlug] = useState(initialSlug || null);
+export default function LiveTV({ channel, onPlay, onClose }) {
+  const [programs, setPrograms] = useState(null);   // null = עדיין טוען
   const [reminded, setReminded] = useState({});
-  const listRef = useRef(null);
+  const [, tick] = useState(0);
 
   useEffect(() => {
-    let live = true;
-    fetch("/epg.json").then(r => r.ok ? r.json() : null)
-      .then(d => { if (live && d && d.channels) setEpg(d.channels); })
-      .catch(() => {});
-    return () => { live = false; };
+    let alive = true;
+    fetch("/epg.json")
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!alive) return;
+        const entry = d && d.channels && d.channels[chSlug(channel)];
+        setPrograms((entry && entry.programs) || []);
+      })
+      .catch(() => alive && setPrograms([]));
+    return () => { alive = false; };
+  }, [channel]);
+
+  // מרענן "עכשיו/הבא" בלי למשוך שוב
+  useEffect(() => {
+    const id = setInterval(() => tick(x => x + 1), 60000);
+    return () => clearInterval(id);
   }, []);
 
-  // ריענון "עכשיו/הבא" כל דקה בלי למשוך מחדש
-  const [, tick] = useState(0);
-  useEffect(() => { const id = setInterval(() => tick(x => x + 1), 60000); return () => clearInterval(id); }, []);
-
-  const shown = useMemo(
-    () => channels.filter(c => cat === "הכל" || catOf(c.title || c.name) === cat),
-    [channels, cat]
-  );
-
-  const selected = useMemo(
-    () => channels.find(c => chSlug(c) === selSlug) || shown[0] || channels[0],
-    [channels, selSlug, shown]
-  );
-
-  const selProgs = (epg && selected && epg[chSlug(selected)]?.programs) || [];
-  const { now, next } = nowNext(selProgs);
-  const upcoming = selProgs.filter(p => p.end > Date.now() / 1000);
-
-  const wrap = { minHeight: "100vh", background: "#0a0a0a", color: "#fff", fontFamily: "Arial, sans-serif", direction: "rtl" };
-  const bell = (p) => {
-    const key = chSlug(selected) + p.start;
-    const done = reminded[key];
-    return (
-      <button
-        onClick={() => { const r = remind(p, selected.title || selected.name); if (r) setReminded(s => ({ ...s, [key]: true })); }}
-        style={{
-          background: done ? "#e50914" : "transparent", color: "#fff",
-          border: "1px solid " + (done ? "#e50914" : "#444"), borderRadius: 6,
-          padding: "4px 10px", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap",
-        }}
-        title="הזכר לי כשמתחיל"
-      >{done ? "✓ יזכיר" : "🔔 הזכר לי"}</button>
-    );
-  };
+  const now = Date.now() / 1000;
+  const list = programs || [];
+  const current = list.find(p => p.start <= now && now < p.end);
+  const upcoming = list.filter(p => p.end > now);
+  const title = channel?.title || channel?.name || "שידור חי";
 
   return (
-    <div style={wrap}>
-      {/* כותרת */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", borderBottom: "1px solid #1c1c1c", position: "sticky", top: 0, background: "#0a0a0a", zIndex: 5 }}>
-        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 24, cursor: "pointer" }}>→</button>
-        <span style={{ fontSize: 20, fontWeight: 800 }}>📺 שידורים חיים</span>
+    <div style={{ background: "#111", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
+      <button onClick={onClose} aria-label="חזרה"
+        style={{ position: "fixed", top: 15, right: 15, zIndex: 100, background: "rgba(0,0,0,.7)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+        <ArrowRight size={22} />
+      </button>
+
+      {/* תמונת הערוץ */}
+      <div style={{ position: "relative" }}>
+        {channel?.thumbnail_url
+          ? <img src={channel.thumbnail_url} alt="" onError={e => { e.target.style.display = "none"; }}
+              style={{ width: "100%", height: "55vw", maxHeight: 380, objectFit: "cover", display: "block" }} />
+          : <div style={{ width: "100%", height: "40vw", maxHeight: 240, background: "linear-gradient(135deg,#2a2a2a,#111)" }} />}
+        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 130, background: "linear-gradient(transparent,#111)" }} />
       </div>
 
-      {/* טאבים של קטגוריות */}
-      <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "12px 18px", WebkitOverflowScrolling: "touch" }}>
-        {CATS.map(([c]) => (
-          <button key={c} onClick={() => setCat(c)}
-            style={{
-              background: cat === c ? "#e50914" : "#1a1a1a", color: "#fff",
-              border: "none", borderRadius: 20, padding: "7px 16px", fontSize: 14,
-              fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
-            }}>{c}</button>
-        ))}
-      </div>
+      <div style={{ padding: 20 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 900, margin: "0 0 8px" }}>{title}</h1>
 
-      <div style={{ display: isDesktop ? "flex" : "block", gap: 20, padding: "8px 18px 40px", alignItems: "flex-start" }}>
-        {/* רשימת ערוצים */}
-        <div ref={listRef} style={{ flex: isDesktop ? "0 0 320px" : "unset", display: "grid", gridTemplateColumns: isDesktop ? "1fr" : "repeat(auto-fill,minmax(120px,1fr))", gap: 10, marginBottom: 20 }}>
-          {shown.map(ch => {
-            const on = selected && chSlug(ch) === chSlug(selected);
-            const prog = (epg && epg[chSlug(ch)]?.programs) || [];
-            const cur = nowNext(prog).now;
-            return (
-              <button key={chSlug(ch)} onClick={() => setSelSlug(chSlug(ch))}
-                style={{
-                  display: "flex", alignItems: "center", gap: 10, textAlign: "right",
-                  background: on ? "#181818" : "#111", border: "1px solid " + (on ? "#e50914" : "#222"),
-                  borderRadius: 10, padding: 8, cursor: "pointer", color: "#fff",
-                }}>
-                <img src={ch.thumbnail_url} alt="" style={{ width: 46, height: 46, borderRadius: 8, objectFit: "cover", background: "#000", flexShrink: 0 }}
-                  onError={e => { e.target.style.visibility = "hidden"; }} />
-                <span style={{ overflow: "hidden" }}>
-                  <span style={{ display: "block", fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>{ch.title || ch.name}</span>
-                  {cur && <span style={{ display: "block", fontSize: 12, color: "#e50914", whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>{cur.title}</span>}
-                </span>
-              </button>
-            );
-          })}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}>
+          <span style={{ background: "#e50914", color: "#fff", padding: "4px 12px", borderRadius: 20, fontSize: 12, fontWeight: "bold", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff", display: "inline-block" }} />
+            שידור חי
+          </span>
         </div>
 
-        {/* פאנל הערוץ הנבחר */}
-        {selected && (
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
-              <img src={selected.thumbnail_url} alt="" style={{ width: 64, height: 64, borderRadius: 10, objectFit: "cover", background: "#000" }}
-                onError={e => { e.target.style.visibility = "hidden"; }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 22, fontWeight: 800 }}>{selected.title || selected.name}</div>
-                {now
-                  ? <div style={{ fontSize: 14, color: "#bbb" }}>עכשיו: <b style={{ color: "#fff" }}>{now.title}</b> · {fmt(now.start)}-{fmt(now.end)}</div>
-                  : <div style={{ fontSize: 14, color: "#777" }}>אין מידע על השידור הנוכחי</div>}
-              </div>
-              <button onClick={() => onPlay(selected)}
-                style={{ background: "#e50914", color: "#fff", border: "none", borderRadius: 8, padding: "12px 22px", fontSize: 16, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}>
-                ▶ צפה
-              </button>
+        {/* מה משודר עכשיו */}
+        {current && (
+          <div style={{ margin: "0 0 18px" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>עכשיו משודר 📺</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>{current.title}</div>
+            <div style={{ fontSize: 13, color: "#e50914", marginTop: 3 }}>
+              {fmt(current.start)} – {fmt(current.end)}
             </div>
+            {current.desc && <p style={{ fontSize: 14, lineHeight: 1.8, color: "#bbb", margin: "8px 0 0" }}>{current.desc}</p>}
+          </div>
+        )}
 
-            {next && (
-              <div style={{ fontSize: 13, color: "#999", marginBottom: 16 }}>
-                הבא: <b style={{ color: "#ccc" }}>{next.title}</b> · {fmt(next.start)}
-              </div>
-            )}
+        <button onClick={() => onPlay(channel)}
+          style={{ width: "100%", background: "#e50914", color: "#fff", border: "none", padding: 16, fontSize: 17, fontWeight: "bold", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer" }}>
+          <Play fill="white" size={20} /> צפה בשידור החי
+        </button>
 
-            {/* לוח מלא */}
-            <div style={{ fontSize: 15, fontWeight: 800, margin: "6px 0 10px" }}>לוח שידורים</div>
-            {upcoming.length === 0 ? (
-              <div style={{ color: "#777", fontSize: 14, padding: "10px 0" }}>אין לוח שידורים זמין לערוץ זה.</div>
-            ) : (
-              <div>
-                {upcoming.map((p, i) => {
-                  const isNow = now && p.start === now.start;
-                  return (
-                    <div key={p.start + "_" + i}
-                      style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 8px", borderBottom: "1px solid #171717", background: isNow ? "rgba(229,9,20,0.08)" : "transparent" }}>
-                      <span style={{ fontVariantNumeric: "tabular-nums", color: isNow ? "#e50914" : "#888", fontWeight: 700, fontSize: 14, width: 48, flexShrink: 0 }}>{fmt(p.start)}</span>
-                      <span style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ display: "block", fontSize: 14, fontWeight: isNow ? 800 : 600 }}>{p.title || "—"}</span>
-                        {p.desc && <span style={{ display: "block", fontSize: 12, color: "#888", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.desc}</span>}
-                      </span>
-                      {isNow ? <span style={{ color: "#e50914", fontSize: 12, fontWeight: 800 }}>● עכשיו</span> : bell(p)}
+        {/* לוח השידורים של הערוץ — רק אם יש */}
+        {upcoming.length > 0 && (
+          <div style={{ marginTop: 26 }}>
+            <div style={{ fontSize: 14, fontWeight: 900, marginBottom: 12 }}>לוח שידורים</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {upcoming.slice(0, 40).map((p, i) => {
+                const isNow = current && p.start === current.start;
+                const key = p.start + "_" + i;
+                const done = reminded[key];
+                return (
+                  <div key={key}
+                    style={{ display: "flex", gap: 12, alignItems: "center", background: isNow ? "rgba(229,9,20,.12)" : "#1a1a1a", borderRadius: 12, padding: 10, border: "1px solid " + (isNow ? "#e50914" : "#2a2a2a") }}>
+                    <span style={{ fontVariantNumeric: "tabular-nums", color: isNow ? "#e50914" : "#888", fontWeight: 800, fontSize: 14, width: 46, flexShrink: 0, textAlign: "center" }}>
+                      {fmt(p.start)}
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: isNow ? 800 : 700, color: "#fff" }}>{p.title || "—"}</div>
+                      {p.desc && <div style={{ fontSize: 12, color: "#888", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.desc}</div>}
                     </div>
-                  );
-                })}
-              </div>
-            )}
+                    {isNow
+                      ? <span style={{ color: "#e50914", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>● עכשיו</span>
+                      : <button
+                          onClick={() => { if (remind(p, title)) setReminded(s => ({ ...s, [key]: true })); }}
+                          title="הזכר לי כשמתחיל"
+                          style={{ background: done ? "#e50914" : "transparent", color: "#fff", border: "1px solid " + (done ? "#e50914" : "#444"), borderRadius: 8, padding: "6px 10px", fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+                          {done ? <BellRing size={13} /> : <Bell size={13} />}
+                          {done ? "יזכיר" : "הזכר לי"}
+                        </button>}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
