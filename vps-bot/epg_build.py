@@ -62,6 +62,7 @@ MAP = {
     "zoom-tv": ("w", 3635),
     # סרטים ובידור
     "cellcom1": ("w", 3678), "bollywood": ("w", 3175),
+    "bait-plus": ("w", 504),
     # דרמות טורקיות / ויוה
     "viva-istanbul": ("w", 208), "viva-vintage": ("w", 4358),
     "viva-telenovelas": ("w", 3588), "viva-premium": ("w", 4433),
