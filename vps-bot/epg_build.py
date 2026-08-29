@@ -65,7 +65,30 @@ MAP = {
     # דרמות טורקיות / ויוה
     "viva-istanbul": ("w", 208), "viva-vintage": ("w", 4358),
     "viva-telenovelas": ("w", 3588), "viva-premium": ("w", 4433),
+
+    # ── מקור yes ('y') ─────────────────────────────────────────────────
+    # *רק* ערוצים שאין להם לוח בוואלה ולא ב-isramedia. חשוב: וואלה
+    # ו-isramedia נמשכות אוטומטית כל שעתיים, ואילו הלוח של yes נאסף ידנית
+    # מהדפדפן (yes_harvest.js — svc.yes.co.il חוסם כל גישה שאינה דפדפן
+    # אמיתי). ערוץ שיש לו מקור אוטומטי לא מועבר לכאן, כדי לא להחליף לוח
+    # מתעדכן בתצלום שמתיישן.
+    "Dramottorki": ("y", "CH70"), "Torki2": ("y", "CH80"),
+    "turkish-drama-3": ("y", "CH77"), "turkish-plus": ("y", "PT60"),
+    "turkish-plus-2": ("y", "TV20"), "turkish-plus-3": ("y", "CH75"),
+    "indian-drama-1": ("y", "CN19"), "indian-drama-2": ("y", "CN20"),
+    "spanish-drama-1": ("y", "CN30"), "spanish-drama-2": ("y", "CN31"),
+    "yes-movies-action": ("y", "YSA2"), "yes-movies-comedy-fhd": ("y", "YSA3"),
+    "yes-movies-drama-fhd": ("y", "YSA1"), "yes-movies-kids-fhd": ("y", "YSA4"),
+    "yes-israeli": ("y", "YSAU"),
+    "Sport6": ("y", "CN48"), "Oneedge": ("y", "CHN3"),
+    "star-channel": ("y", "CH19"), "knesset": ("y", "TV89"),
+    "channel-98": ("y", "TV43"), "i24": ("y", "CN28"),
+    "kaneducation": ("y", "CH57"), "wiz": ("y", "CH13"),
+    "karaoke": ("y", "CH79"),
 }
+
+# הלוח של yes נאסף מהדפדפן ונשמר כאן. ראה yes_harvest.js.
+YES_FILE = DATA / "yes-epg.json"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
@@ -140,15 +163,50 @@ def fetch_isra(cid):
     return rows
 
 # ── בנייה ────────────────────────────────────────────────────────────────
+def load_yes():
+    """קורא את הלוח של yes שנאסף מהדפדפן. מחזיר {channel_id: [תוכניות]}.
+
+    הזמנים שם הם ISO ב-UTC ('2026-08-30T03:00:00Z') — ממירים ל-epoch כמו
+    בשאר המקורות, כדי שהלקוח יקבל מבנה אחיד.
+    """
+    if not YES_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(YES_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  ⚠ קריאת {YES_FILE.name} נכשלה: {e}", file=sys.stderr)
+        return {}
+    out = {}
+    for cid, ch in (raw.get("channels") or {}).items():
+        progs = []
+        for p in ch.get("programs") or []:
+            try:
+                s = datetime.fromisoformat(p["start"].replace("Z", "+00:00"))
+                e = datetime.fromisoformat(p["end"].replace("Z", "+00:00"))
+                progs.append({"start": int(s.timestamp()), "end": int(e.timestamp()),
+                              "title": (p.get("title") or "").strip(),
+                              "desc": (p.get("desc") or "").strip()})
+            except Exception:
+                continue
+        if progs:
+            out[cid] = sorted(progs, key=lambda x: x["start"])
+    return out
+
+
 def build():
     walla = fetch_walla()
-    print(f"וואלה: {len(walla)} ערוצים", file=sys.stderr)
-    channels, w_hit, i_hit, empty = {}, 0, 0, 0
+    yes = load_yes()
+    print(f"וואלה: {len(walla)} ערוצים · yes: {len(yes)} ערוצים", file=sys.stderr)
+    channels, w_hit, i_hit, y_hit, empty = {}, 0, 0, 0, 0
     isra_cache = {}
+    names = {"w": "walla", "i": "isramedia", "y": "yes"}
     for slug, (src, cid) in MAP.items():
         if src == "w":
             progs = walla.get(cid, [])
             if progs: w_hit += 1
+        elif src == "y":
+            progs = yes.get(cid, [])
+            if progs: y_hit += 1
         else:
             if cid not in isra_cache:
                 isra_cache[cid] = fetch_isra(cid)
@@ -156,10 +214,9 @@ def build():
             if progs: i_hit += 1
         if not progs:
             empty += 1
-        channels[slug] = {"source": "walla" if src == "w" else "isramedia",
-                          "programs": progs}
+        channels[slug] = {"source": names[src], "programs": progs}
     doc = {"generated": int(time.time()), "channels": channels}
-    return doc, (w_hit, i_hit, empty)
+    return doc, (w_hit, i_hit, y_hit, empty)
 
 MERGE_KEEP_HOURS = 8      # כמה אחורה שומרים תוכניות שהסתיימו
 
@@ -192,7 +249,7 @@ def merge_previous(doc):
 
 
 def main():
-    doc, (w_hit, i_hit, empty) = build()
+    doc, (w_hit, i_hit, y_hit, empty) = build()
     doc = merge_previous(doc)
     if "--stdout" in sys.argv:
         print(json.dumps({k: len(v["programs"]) for k, v in doc["channels"].items()},
@@ -204,7 +261,7 @@ def main():
         tmp.replace(OUT)                            # כתיבה אטומית
     total = sum(len(v["programs"]) for v in doc["channels"].values())
     print(f"נכתב {OUT.name}: {len(doc['channels'])} ערוצים "
-          f"(וואלה {w_hit}, isramedia {i_hit}, ריקים {empty}) · {total} תוכניות")
+          f"(וואלה {w_hit}, isramedia {i_hit}, yes {y_hit}, ריקים {empty}) · {total} תוכניות")
 
 if __name__ == "__main__":
     main()
