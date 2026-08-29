@@ -1,0 +1,74 @@
+diff --git a/src/pages/Home.jsx b/src/pages/Home.jsx
+index 817e9fe..e04bea9 100644
+--- a/src/pages/Home.jsx
++++ b/src/pages/Home.jsx
+@@ -5,6 +5,7 @@ import MovieDetail from "@/components/MovieDetail.jsx";
+ import SeriesView from "@/components/SeriesView.jsx";
+ import { useGoogleAuth, LandingScreen } from "@/components/home/Auth.jsx";
+ import HomePage from "@/components/home/HomePage.jsx";
++import LiveTV from "@/components/LiveTV.jsx";
+ import AdBanner from "@/components/home/AdBanner.jsx";
+ import DonationModalView from "@/components/home/DonationModalView.jsx";
+ import DonationAd from "@/components/home/DonationAd.jsx";
+@@ -67,7 +68,10 @@ function HomeMain({ user, onLogout, isGuest }) {
+ 
+   // live streams — מערך של כמה שידורים חיים במקביל, כל אחד עם שם וקישור
+   // נשמרים ב-movies.json כתכנים עם category: "שידורים חיים" ו-is_live: true
+-  const [showLivePlayer, setShowLivePlayer] = useState(null); // האובייקט של הלייב שנפתח, או null
++  const [showLivePlayer, setShowLivePlayer] = useState(null);
++  // דף מדריך השידורים החי: פליי + קטגוריות + לוח. נפתח בלחיצה על ערוץ,
++  // והנגן נפתח רק מתוכו — כדי שלא "יקפוץ" ישר לשידור בלי הקשר.
++  const [liveGuide, setLiveGuide] = useState(null); // האובייקט של הלייב שנפתח, או null
+   const liveActive = liveChannels.length > 0;
+ 
+   const { playerMovie, setPlayerMovie, resumeSeconds, kalturaRefreshing, openWithKalturaRefresh } =
+@@ -155,7 +159,7 @@ function HomeMain({ user, onLogout, isGuest }) {
+       if (item.is_live) {
+         const slug = item.custom_slug || encodeURIComponent((item.title || item.name || "").replace(/ /g, "-"));
+         navigate(`/live/${slug}`);
+-        setShowLivePlayer(item);
++        setLiveGuide(item);
+         return;
+       }
+       if (isSer) {
+@@ -190,7 +194,7 @@ function HomeMain({ user, onLogout, isGuest }) {
+     const found = liveChannels.find(ch =>
+       ch.custom_slug === episode || encodeURIComponent((ch.title || "").replace(/ /g, "-")) === episode
+     );
+-    if (found) setShowLivePlayer(found);
++    if (found) setLiveGuide(found);
+   }, [slug, episode, liveChannels]);
+ 
+   // ── early returns ──
+@@ -238,6 +242,22 @@ function HomeMain({ user, onLogout, isGuest }) {
+     />
+   );
+ 
++  // ── דף השידורים החי ──
++  // מוצג רק כשהנגן סגור; לחיצה על ▶ פותחת את הנגן מעליו, וסגירתו מחזירה לכאן.
++  if (liveGuide && !showLivePlayer) return (
++    <LiveTV
++      channels={liveChannels}
++      initialSlug={liveGuide.custom_slug ||
++        encodeURIComponent((liveGuide.title || "").replace(/ /g, "-"))}
++      isDesktop={isDesktop}
++      onPlay={(ch) => setShowLivePlayer(ch)}
++      onClose={() => {
++        setLiveGuide(null);
++        navigate("/");
++      }}
++    />
++  );
++
+   // ── Movie page ──
+   if (selectedMovie) return (
+     <MovieDetail
+@@ -260,7 +280,7 @@ function HomeMain({ user, onLogout, isGuest }) {
+       {showLivePlayer && (
+         <CustomVideoPlayer
+           movie={{ ...showLivePlayer, is_live: true }}
+-          onClose={() => { setShowLivePlayer(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
++          onClose={() => { setShowLivePlayer(null); if (!liveGuide) window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
+         />
+       )}
+ 
