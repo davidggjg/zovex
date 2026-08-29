@@ -1,104 +1,142 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-מודד את התפוקה *המצטברת* של מסלול ההזרמה תחת מקביליות אמיתית.
+מאבחן איפה מסלול ההזרמה מאבד תפוקה.
 
-למה זה נחוץ: /speedtest/bots בודק בוט אחד בכל פעם, בטור. סכום התוצאות שלו
-*אינו* קיבולת המערכת — הוא רק אומר כמה כל בוט נותן כשהוא לבד. כאן מריצים
-כמה משיכות במקביל, דרך מסלול ההזרמה האמיתי, ומודדים כמה MB/s באמת יוצאים.
+הרקע: /speedtest/bots מודד משיכה ישירה דרך חיבורי המדיה ומקבל ~4 MB/s לבוט.
+אותה מערכת, דרך מסלול ההזרמה של /stream, נמדדה ב-0.06 MB/s — פער של פי 60.
+הכלי הזה מבודד את הסיבה בשלוש שאלות, בסדר הזה:
 
-רץ מול 127.0.0.1 כדי שרוחב הפס של הלקוח לא יהיה הגורם המגביל.
-הטווח נלקח מעומק הקובץ (מעבר למטמון הקצה) כדי שבאמת יימשך מטלגרם.
+  1. עומק  — האם משיכה מאמצע הקובץ איטית ממשיכה מתחילתו?
+             (אותו קובץ, אותו גודל חלון, רק ה-offset משתנה)
+  2. גודל  — האם חלון גדול מתנהג אחרת מחלון קטן?
+  3. מקביליות — האם התפוקה גדלה כשמושכים כמה קבצים יחד?
 
-הרצה:
-    python3 concurrency_test.py            # 1,2,4,8 במקביל
-    python3 concurrency_test.py --mb 16    # חלון גדול יותר לכל משיכה
+הקבצים נבחרים לפי גודל אמיתי (נקרא מ-Content-Range), כך שאף בקשה לא
+חורגת מסוף הקובץ — טעות שפסלה מדידה קודמת.
+
+הרצה:  python3 concurrency_test.py
 """
-import argparse, json, sys, time, threading, urllib.request
+import json, sys, time, threading, urllib.request
 
 LOCAL = "http://127.0.0.1:8000"
 SITE = "https://zovex.duckdns.org"
-OFFSET = 60 * 1024 * 1024          # 60MB לתוך הקובץ — הרחק מהמטמון
+HDRS = {"Referer": SITE + "/", "User-Agent": "zovex-diag"}
+MIN_SIZE = 400 * 1024 * 1024          # רק קבצים מעל 400MB
+EDGE_SAFE = 40 * 1024 * 1024          # מעבר למטמון הקצה (32MB)
+
+
+def _req(url, extra=None, timeout=240):
+    h = dict(HDRS)
+    if extra:
+        h.update(extra)
+    return urllib.request.Request(url, headers=h)
 
 
 def catalog():
-    req = urllib.request.Request(f"{SITE}/content", headers={"User-Agent": "zovex-test"})
-    with urllib.request.urlopen(req, timeout=90) as r:
+    with urllib.request.urlopen(_req(f"{SITE}/content"), timeout=90) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
-def pull(url, mb, out, idx):
-    """מושך חלון אחד ומדווח כמה בייטים ובכמה זמן."""
-    start, end = OFFSET, OFFSET + mb * 1024 * 1024 - 1
-    req = urllib.request.Request(url, headers={
-        "Referer": SITE + "/", "User-Agent": "zovex-test",
-        "Range": f"bytes={start}-{end}"})
+def file_size(url):
+    """גודל אמיתי מ-Content-Range של בקשה זעירה."""
+    try:
+        with urllib.request.urlopen(
+                _req(url, {"Range": "bytes=0-255"}), timeout=120) as r:
+            cr = r.headers.get("Content-Range", "")
+            r.read(256)
+            return int(cr.rsplit("/", 1)[1]) if "/" in cr else None
+    except Exception:
+        return None
+
+
+def pull(url, start, nbytes, out=None, idx=0):
+    """מושך חלון ומחזיר (בייטים, שניות, שגיאה)."""
     t0 = time.time()
     got = 0
+    err = None
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
+        with urllib.request.urlopen(
+                _req(url, {"Range": f"bytes={start}-{start + nbytes - 1}"}),
+                timeout=240) as r:
             while True:
                 b = r.read(262144)
                 if not b:
                     break
                 got += len(b)
     except Exception as e:
-        out[idx] = (0, time.time() - t0, type(e).__name__)
-        return
-    out[idx] = (got, time.time() - t0, None)
+        err = type(e).__name__
+    res = (got, time.time() - t0, err)
+    if out is not None:
+        out[idx] = res
+    return res
 
 
-def run(urls, n, mb):
-    """n משיכות במקביל, כל אחת מקובץ אחר. מחזיר (MB/s מצטבר, פירוט)."""
-    out = [None] * n
-    threads = [threading.Thread(target=pull, args=(urls[i % len(urls)], mb, out, i))
-               for i in range(n)]
-    t0 = time.time()
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    wall = time.time() - t0
-    total = sum(o[0] for o in out if o)
-    return total / 1024 / 1024 / wall, wall, out
+def rate(got, secs):
+    return (got / 1024 / 1024 / secs) if secs > 0 and got else 0.0
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mb", type=int, default=8, help="גודל חלון לכל משיכה")
-    ap.add_argument("--levels", default="1,2,4,8", help="רמות מקביליות")
-    a = ap.parse_args()
-
     try:
         cat = catalog()
     except Exception as e:
         print("שליפת קטלוג נכשלה:", e, file=sys.stderr)
         return 1
 
-    # קבצים גדולים מספיק כדי שיהיה מה למשוך ב-offset 60MB
     items = [e for e in cat
              if not e.get("is_live") and "/stream/" in str(e.get("video_url") or "")]
-    urls = [e["video_url"].replace(SITE, LOCAL) for e in items[:16]]
-    if not urls:
-        print("לא נמצאו קבצים", file=sys.stderr)
+
+    print("בוחר קבצים גדולים (מעל 400MB)...", flush=True)
+    picked = []
+    for e in items:
+        if len(picked) >= 4:
+            break
+        u = e["video_url"].replace(SITE, LOCAL)
+        s = file_size(u)
+        if s and s >= MIN_SIZE:
+            picked.append((u, s, (e.get("title") or "")[:28]))
+            print(f"   ✓ {picked[-1][2]}  ({s/1024/1024:.0f}MB)", flush=True)
+    if not picked:
+        print("לא נמצאו קבצים גדולים מספיק", file=sys.stderr)
         return 1
 
-    print(f"חלון {a.mb}MB לכל משיכה, מ-offset 60MB (מעבר למטמון).")
-    print("מודד תפוקה מצטברת אמיתית:\n")
-    print(f"{'במקביל':>8} | {'מצטבר':>12} | {'זמן':>7} | הצליחו")
-    print("-" * 48)
+    url, size, title = picked[0]
+    W = 4 * 1024 * 1024            # חלון 4MB לכל הבדיקות
 
-    for n in [int(x) for x in a.levels.split(",")]:
-        mbps, wall, out = run(urls, n, a.mb)
+    print(f"\n{'='*52}\n1. עומק — אותו קובץ, אותו חלון (4MB), offset משתנה\n{'='*52}")
+    for label, off in [("קרוב להתחלה (40MB)", EDGE_SAFE),
+                       ("רבע לתוך הקובץ", size // 4),
+                       ("אמצע הקובץ", size // 2)]:
+        got, secs, err = pull(url, off, W)
+        print(f"   {label:<22} {rate(got,secs):>6.2f} MB/s  ({secs:>6.1f}ש'"
+              f"{', ' + err if err else ''})", flush=True)
+
+    print(f"\n{'='*52}\n2. גודל החלון — מ-offset קבוע (40MB)\n{'='*52}")
+    for mb in (1, 4, 16):
+        got, secs, err = pull(url, EDGE_SAFE, mb * 1024 * 1024)
+        print(f"   חלון {mb:>2}MB              {rate(got,secs):>6.2f} MB/s"
+              f"  ({secs:>6.1f}ש'{', ' + err if err else ''})", flush=True)
+
+    print(f"\n{'='*52}\n3. מקביליות — קבצים שונים, חלון 4MB מ-40MB\n{'='*52}")
+    for n in (1, 2, 4):
+        out = [None] * n
+        ths = [threading.Thread(target=pull,
+                                args=(picked[i % len(picked)][0], EDGE_SAFE, W, out, i))
+               for i in range(n)]
+        t0 = time.time()
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        wall = time.time() - t0
+        total = sum(o[0] for o in out if o)
         ok = sum(1 for o in out if o and o[0] > 0)
-        print(f"{n:>8} | {mbps:>8.2f} MB/s | {wall:>5.1f}ש' | {ok}/{n}")
-        errs = {o[2] for o in out if o and o[2]}
-        if errs:
-            print(f"{'':>8} | שגיאות: {', '.join(errs)}")
-        time.sleep(3)
+        print(f"   {n} במקביל            {rate(total,wall):>6.2f} MB/s"
+              f"  ({wall:>6.1f}ש', {ok}/{n} הצליחו)", flush=True)
+        time.sleep(2)
 
-    print("\nאם המספר עולה עם המקביליות — יש עוד מקום, והמגבלה היא בכמה")
-    print("שאנחנו מושכים בבת אחת. אם הוא נעצר — מצאנו את התקרה האמיתית.")
+    print("\nמה לחפש: אם 'קרוב להתחלה' מהיר ו'אמצע' איטי — הבעיה היא")
+    print("קפיצה לעומק הקובץ. אם כולם איטיים באותה מידה — הבעיה כללית יותר.")
     return 0
 
 
