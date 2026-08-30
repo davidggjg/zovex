@@ -542,7 +542,8 @@ def main():
         write_per_channel(doc)
     total = sum(len(v["programs"]) for v in doc["channels"].values())
     print(f"נכתב {OUT.name}: {len(doc['channels'])} ערוצים (וואלה {hits['w']}, "
-          f"isramedia {hits['i']}, yes {hits['y']}, HOT {hits['h']}, ריקים {empty})"
+          f"isramedia {hits['i']}, yes {hits['y']}, HOT {hits['h']}, "
+          f"FreeTV {hits['f']}, ריקים {empty})"
           + (f" · {fell} נפלו למקור גיבוי" if fell else "")
           + (f" · {filled} הושלמו מחור" if filled else "")
           + f" · {total} תוכניות")
