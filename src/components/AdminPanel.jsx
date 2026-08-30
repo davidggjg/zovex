@@ -50,6 +50,17 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const existingSeriesNames = useMemo(() => Object.keys(seriesMap), [seriesMap]);
   const liveActive = liveChannels.length > 0;
 
+  // חיפוש בערוצי השידור החי. מעל מאה ערוצים, גלילה עד הערוץ הנכון היא עבודה
+  // — וכל ערוץ ברשימה מרנדר נגן משלו, כך שהסינון גם חוסך פתיחת עשרות נגנים
+  // בבת אחת. מחפש גם ב-slug ובכתובת, כדי שאפשר יהיה למצוא לפי כתובת מהלוג.
+  const liveFiltered = useMemo(() => {
+    const q = liveQ.trim().toLowerCase();
+    if (!q) return liveChannels;
+    return liveChannels.filter(ch =>
+      [ch.title, ch.custom_slug, ch.video_url]
+        .some(v => (v || "").toLowerCase().includes(q)));
+  }, [liveChannels, liveQ]);
+
   const [liveNameInput, setLiveNameInput] = useState("");
   const [liveUrlInput, setLiveUrlInput] = useState("");
   const [liveThumbInput, setLiveThumbInput] = useState("");
@@ -79,6 +90,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [editingCat, setEditingCat] = useState(null);
   const [editingCatVal, setEditingCatVal] = useState("");
   const [manageQ, setManageQ] = useState("");
+  const [liveQ, setLiveQ] = useState("");
 
   useEffect(() => {
     if (!tmdbQuery.trim() || !tmdbKey) { setTmdbResults([]); return; }
@@ -608,9 +620,33 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
 
             {liveChannels.length > 0 && (
               <div style={cardStyle}>
-                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>שידורים פעילים ({liveChannels.length})</div>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
+                  שידורים פעילים ({liveQ.trim() ? `${liveFiltered.length} מתוך ${liveChannels.length}` : liveChannels.length})
+                </div>
+
+                <div style={{ position: "relative", marginBottom: 12 }}>
+                  <input
+                    value={liveQ}
+                    onChange={e => setLiveQ(e.target.value)}
+                    placeholder="🔍 חפש ערוץ לפי שם, כתובת או קישור…"
+                    style={{ ...inp, marginBottom: 0, paddingLeft: liveQ ? 34 : undefined }}
+                  />
+                  {liveQ && (
+                    <button onClick={() => setLiveQ("")} aria-label="נקה חיפוש"
+                      style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", fontSize: 18, color: "#8e8e93", cursor: "pointer", lineHeight: 1, padding: 4 }}>
+                      ×
+                    </button>
+                  )}
+                </div>
+
+                {liveQ.trim() && liveFiltered.length === 0 && (
+                  <div style={{ fontSize: 12, color: "#8e8e93", padding: "14px 4px" }}>
+                    לא נמצא ערוץ בשם "{liveQ.trim()}"
+                  </div>
+                )}
+
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {liveChannels.map(ch => (
+                  {liveFiltered.map(ch => (
                     <div key={ch.id} style={{ background: "#F5F5F7", borderRadius: 12, padding: 12 }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

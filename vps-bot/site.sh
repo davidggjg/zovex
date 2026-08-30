@@ -98,6 +98,17 @@ server {
     location ~ /\.(?!well-known) { return 404; }               # .env .git .htaccess ...
     location ~* \.(php|sql|env|ini|conf|cfg|bak|old|log|sqlite|db)$ { return 404; }
 
+    # ── ZOVEX-EPG-ALIAS · לוח השידורים יושב מחוץ לתיקיית האתר ──
+    # השורה find … -delete למעלה מוחקת את כל $SITE_DIR בכל פריסה. כשהלוח ישב
+    # שם הוא נמחק בכל פריסה, ו-try_files החזיר את index.html בתשובה ל-
+    # /epg.json — כלומר "200 תקין" עם HTML במקום נתונים, וכל הלוחות ריקים.
+    # epg_build.py כותב ל-/opt/zovex-bot/data, וזה מגיש אותו משם.
+    location = /epg.json {
+        alias /opt/zovex-bot/data/epg.json;
+        add_header Cache-Control "no-cache" always;
+        default_type application/json;
+    }
+
     # ── נכסים ישנים עם קידומת /zovex/ (למשל לוגו של שידור חי) ──
     location /zovex/ { alias $SITE_DIR/; }
 
