@@ -653,8 +653,15 @@ function relayifyUrl(){
   if(u.protocol!=="http:"&&u.protocol!=="https:"){ msg.textContent="רק http/https"; return; }
   if(!RELAY_HOSTS.some(h=>h.host===u.hostname)){
     msg.textContent="ה-host הזה לא ברשימה המותרת — הוסף אותו קודם למטה."; return; }
-  el.value=location.origin+"/hls-relay/"+u.hostname+u.pathname+(u.search||"");
-  msg.style.color="#8aff9e"; msg.textContent="✓ הומר לרלֵיי דרך השרת שלנו";
+  // חייבים לשמור את הפורט. ספק אחד יכול לשרת כמה פורטים (tv.embyil.tv נותן
+  // גם 86 וגם 7070), והרלֵיי שומר פורט אחד לכל שם מארח — אבל כן מכבד פורט
+  // מפורש בכתובת. בלי זה ערוץ מ-7070 נשלח לפורט 86 ומחזיר 502.
+  const dflt = u.protocol==="https:" ? "443" : "80";
+  const seg = (u.port && u.port!==dflt) ? u.hostname+":"+u.port : u.hostname;
+  el.value=location.origin+"/hls-relay/"+seg+u.pathname+(u.search||"");
+  msg.style.color="#8aff9e";
+  msg.textContent = seg===u.hostname ? "✓ הומר לרלֵיי דרך השרת שלנו"
+                                     : "✓ הומר לרלֵיי, כולל פורט "+u.port;
 }
 
 function renderLive(){
