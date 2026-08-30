@@ -98,6 +98,14 @@ server {
     location ~ /\.(?!well-known) { return 404; }               # .env .git .htaccess ...
     location ~* \.(php|sql|env|ini|conf|cfg|bak|old|log|sqlite|db)$ { return 404; }
 
+    # ── ZOVEX-EPG-DIR · לוח נפרד לכל ערוץ ──
+    # דף ערוץ צריך ~19KB; בלי זה הוא מוריד את הקובץ המלא, 1.77MB.
+    location /epg/ {
+        alias /opt/zovex-bot/data/epg/;
+        add_header Cache-Control "public, max-age=300" always;
+        default_type application/json;
+    }
+
     # ── ZOVEX-EPG-ALIAS · לוח השידורים יושב מחוץ לתיקיית האתר ──
     # השורה find … -delete למעלה מוחקת את כל $SITE_DIR בכל פריסה. כשהלוח ישב
     # שם הוא נמחק בכל פריסה, ו-try_files החזיר את index.html בתשובה ל-
