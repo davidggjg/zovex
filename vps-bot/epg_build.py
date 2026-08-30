@@ -38,6 +38,12 @@ DATA = pathlib.Path("/opt/zovex-bot/data")
 #     location = /epg.json { alias /opt/zovex-bot/data/epg.json; }
 OUT = DATA / "epg.json"
 
+# בנוסף לקובץ המלא, כותבים קובץ קטן לכל ערוץ. הדף של ערוץ בודד צריך ~19KB
+# ומשך עד היום 1.77MB — פי 95 — כי הכל ישב בקובץ אחד. בסלולר איטי זה כעשר
+# שניות שבהן הלוח פשוט לא מוצג, וזה נראה בדיוק כמו ערוץ בלי לוח.
+# הקובץ המלא נשאר לתאימות (האפליקציה ולקוחות ישנים עדיין מושכים אותו).
+OUT_DIR = DATA / "epg"
+
 # ── מיפוי: slug שלנו → (מקור, מזהה) ─────────────────────────────────────
 # 'w' = קוד וואלה ; 'i' = מזהה isramedia ; 'h' = מזהה ערוץ ב-HOT ;
 # 'y' = מזהה ערוץ בתצלום של yes.
@@ -468,6 +474,35 @@ def merge_previous(doc):
     return doc
 
 
+_SAFE = re.compile(r"[^A-Za-z0-9._%-]")
+
+
+def write_per_channel(doc):
+    """כותב קובץ קטן לכל ערוץ תחת DATA/epg/<slug>.json.
+
+    ה-slug מגיע מהתוכן שלנו ויכול להכיל כל תו; מסננים כדי שלא ייווצר נתיב
+    מחוץ לתיקייה. ערוץ שה-slug שלו לא שורד את הסינון פשוט לא מקבל קובץ
+    קטן — הדף ייפול חזרה לקובץ המלא ויעבוד, רק לאט יותר.
+    """
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    gen, kept = doc["generated"], set()
+    for slug, ch in doc["channels"].items():
+        name = _SAFE.sub("", slug)
+        if not name:
+            continue
+        kept.add(name + ".json")
+        body = json.dumps({"generated": gen, "source": ch["source"],
+                           "programs": ch["programs"]}, ensure_ascii=False)
+        tmp = OUT_DIR / (name + ".json.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(OUT_DIR / (name + ".json"))
+    # ערוץ שהוסר מהמיפוי לא ישאיר אחריו לוח מת שימשיך להיות מוגש
+    for old in OUT_DIR.glob("*.json"):
+        if old.name not in kept:
+            old.unlink(missing_ok=True)
+    return len(kept)
+
+
 def main():
     doc, (hits, empty, fell, filled) = build()
     doc = merge_previous(doc)
@@ -479,6 +514,7 @@ def main():
         tmp = OUT.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
         tmp.replace(OUT)                            # כתיבה אטומית
+        write_per_channel(doc)
     total = sum(len(v["programs"]) for v in doc["channels"].values())
     print(f"נכתב {OUT.name}: {len(doc['channels'])} ערוצים (וואלה {hits['w']}, "
           f"isramedia {hits['i']}, yes {hits['y']}, HOT {hits['h']}, ריקים {empty})"
