@@ -123,6 +123,21 @@ MAP = {
     "hot-real": ("h", "555"), "Hotril": ("h", "555"),
     # "הוט משפחה גיבוי" הוא גיבוי של אותו ערוץ.
     "hotfrns": ("h", "606"), "hot-family-backup": ("h", "606"),
+
+    # ── מקור FreeTV ('f') ──────────────────────────────────────────────
+    # רק התאמות שם מדויקות. שלושה ערוצים נוספים שלנו נושאים שם חלקי
+    # ("FREE TV דרמה", "FREE TVקומדיה", "FREE TV סרטים") ויש להם יותר
+    # ממועמד אחד אצל FreeTV (סרטים דרמה מול סדרות דרמה וכו') — הם לא
+    # נכנסים לכאן עד שיזוהו בוודאות.
+    "free-doco": ("f", 3611642),          # FreeTV דוקו
+    "Freetvfod": ("f", 3611644),          # FreeTV אוכל
+    "Freetvlffs": ("f", 3611643),         # FreeTV לייף סטייל
+    "Freetvfrins": ("f", 4810483),        # FreeTV סרטים משפחה
+    "Freetvkomdia2": ("f", 7313885),      # FreeTV סדרות קומדיה 2
+    "Freetvisral": ("f", 3479997),        # FreeTV סרטים ישראלי
+    "Fretv10": ("f", 3540298),            # FreeTV גלובל
+    "Freetv9": ("f", 3579248),            # FreeTV סרטים אימה
+    "Freetv2": ("f", 3579249),            # FreeTV סרטים רומנטי
 }
 
 # הלוח של yes נאסף מהדפדפן ונשמר כאן. ראה yes_harvest.js.
@@ -253,6 +268,57 @@ def fetch_hot(want=None):
         out[cid] = uniq
     return out
 
+# ── FreeTV ───────────────────────────────────────────────────────────────
+# האתר השיווקי freetv.co.il הוא וורדפרס בלי נתונים, אבל אפליקציית הצפייה
+# ב-web.freetv.tv רצה על פלטפורמת RedGalaxy וחושפת API פתוח בלי הרשמה
+# ובלי חסימה גיאוגרפית. הפרמטרים נלקחו מקוד האפליקציה עצמו:
+#   platform=BROWSER חובה (בלעדיו PLATFORM_UNDEFINED)
+#   since/till בפורמט 'YYYY-MM-DDTHH:mm+0300' (DATETIME_HOUR_MINUTE_DETAILED)
+#   liveId[] חוזר לכל ערוץ — אפשר להביא את כולם בבקשה אחת
+# מגבלה שנמדדה: חלון של יותר מיממה מוחזר כ-400, ולכן בקשה ליום.
+FTV_API = "https://web.freetv.tv/api/products/lives/programmes"
+FTV_DAYS = 2
+
+def fetch_freetv(want):
+    """מחזיר {liveId: [ {start,end,title,desc}... ]} מהלוח של FreeTV."""
+    if not want:
+        return {}
+    out = {}
+    base = (datetime.now(IL) if IL else datetime.now()).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    for i in range(FTV_DAYS):
+        s, t = base + timedelta(days=i), base + timedelta(days=i + 1)
+        q = [("platform", "BROWSER"),
+             ("since", s.strftime("%Y-%m-%dT%H:%M%z")),
+             ("till",  t.strftime("%Y-%m-%dT%H:%M%z"))]
+        q += [("liveId[]", cid) for cid in sorted(want)]
+        try:
+            raw = _get(FTV_API + "?" + urllib.parse.urlencode(q), timeout=60)
+            items = json.loads(raw)
+        except Exception as e:
+            print(f"  ⚠ FreeTV יום {i} נכשל: {e}", file=sys.stderr); continue
+        for p in items:
+            cid = (p.get("live") or {}).get("id")
+            if cid is None:
+                continue
+            try:
+                out.setdefault(cid, []).append({
+                    "start": _iso_epoch(p["since"].replace("Z", "+00:00")),
+                    "end":   _iso_epoch(p["till"].replace("Z", "+00:00")),
+                    "title": (p.get("title") or "").strip(),
+                    "desc":  (p.get("description") or p.get("lead") or "").strip(),
+                })
+            except Exception:
+                continue
+    for cid, progs in out.items():
+        seen, uniq = set(), []
+        for p in sorted(progs, key=lambda x: x["start"] or 0):
+            k = (p["start"], p["title"])
+            if p["start"] and k not in seen:
+                seen.add(k); uniq.append(p)
+        out[cid] = uniq
+    return out
+
 # ── בנייה ────────────────────────────────────────────────────────────────
 def load_yes():
     """קורא את הלוח של yes שנאסף מהדפדפן. מחזיר {channel_id: [תוכניות]}.
@@ -284,7 +350,7 @@ def load_yes():
     return out
 
 
-NAMES = {"w": "walla", "i": "isramedia", "y": "yes", "h": "hot"}
+NAMES = {"w": "walla", "i": "isramedia", "y": "yes", "h": "hot", "f": "freetv"}
 
 def _fresh(progs):
     """יש כאן לוח שימושי? כלומר תוכנית אחת לפחות שעוד לא הסתיימה.
@@ -300,12 +366,15 @@ def _fresh(progs):
 def build():
     walla = fetch_walla()
     yes = load_yes()
-    # מושכים מ-HOT רק את הערוצים שבאמת ממופים אליו
-    want = {cid for v in MAP.values()
-            for src, cid in (v if isinstance(v, list) else [v]) if src == "h"}
-    hot = fetch_hot(want)
-    print(f"וואלה: {len(walla)} · yes: {len(yes)} · HOT: {len(hot)}/{len(want)} ערוצים",
-          file=sys.stderr)
+    # מושכים מכל מקור רק את הערוצים שבאמת ממופים אליו
+    def ids(letter):
+        return {cid for v in MAP.values()
+                for src, cid in (v if isinstance(v, list) else [v]) if src == letter}
+    w_hot, w_ftv = ids("h"), ids("f")
+    hot = fetch_hot(w_hot)
+    ftv = fetch_freetv(w_ftv)
+    print(f"וואלה: {len(walla)} · yes: {len(yes)} · HOT: {len(hot)}/{len(w_hot)} · "
+          f"FreeTV: {len(ftv)}/{len(w_ftv)} ערוצים", file=sys.stderr)
 
     channels, hits, empty, fell = {}, {k: 0 for k in NAMES}, 0, 0
     isra_cache = {}
@@ -317,6 +386,8 @@ def build():
             return yes.get(cid, [])
         if src == "h":
             return hot.get(cid, [])
+        if src == "f":
+            return ftv.get(cid, [])
         if cid not in isra_cache:
             isra_cache[cid] = fetch_isra(cid)
         return isra_cache[cid]
