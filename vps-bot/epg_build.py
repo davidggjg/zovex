@@ -42,9 +42,11 @@ OUT = DATA / "epg.json"
 # 'w' = קוד וואלה ; 'i' = מזהה isramedia ; 'h' = מזהה ערוץ ב-HOT ;
 # 'y' = מזהה ערוץ בתצלום של yes.
 #
-# אפשר לתת *רשימה* של מקורות במקום אחד, והם ינוסו לפי הסדר: הראשון שיש לו
-# תוכניות שעוד לא הסתיימו — מנצח. כך תצלום yes מספק את הכותרות המפורטות
-# שלו כל עוד הוא טרי, וכשהוא מתיישן HOT נכנס תחתיו מעצמו בלי שנגע בכלום.
+# אפשר לתת *רשימה* של מקורות במקום אחד. הראשון שיש לו תוכניות שעוד לא
+# הסתיימו הוא הראשי, והשאר *ממלאים את החורים בו* ולא מחליפים אותו — ראה
+# _fill_gaps. כך הכותרות המפורטות של yes נשמרות בשעות שיש לו נתונים, ו-HOT
+# מכסה את השעות שאין (היממה של yes מתחילה ב-06:00), וגם תופס לגמרי כשהתצלום
+# מתיישן — הכל בלי שנגע בכלום.
 #
 # ערוץ שאינו כאן — אין לו לוח לינארי (VOD / סרטים רצופים / ניש) ופשוט לא
 # יוצג לו לוח.
@@ -366,6 +368,25 @@ def _fresh(progs):
     return any(p.get("end", 0) > now for p in progs)
 
 
+def _fill_gaps(base, extra):
+    """מוסיף מ-extra רק תוכניות שלא חופפות לשום תוכנית ב-base.
+
+    למה לא פשוט לבחור מקור אחד: היממה של yes מתחילה ב-06:00, ולכן בין חצות
+    לשש אין לו שום תוכנית — 23 ערוצים הופיעו בלי "עכשיו משודר" כל לילה. אבל
+    yes *כן* מלא בהמשך היום, אז בדיקת "יש נתונים" לא מזהה את החור והגיבוי
+    לא נכנס. מיזוג פותר את שניהם: הכותרות המפורטות של yes נשארות בשעות שיש
+    לו, ו-HOT ממלא בדיוק את השעות שאין.
+    """
+    if not extra:
+        return base
+    spans = [(p["start"], p["end"]) for p in base]
+    added = [p for p in extra
+             if not any(p["start"] < be and p["end"] > bs for bs, be in spans)]
+    if not added:
+        return base
+    return sorted(base + added, key=lambda p: p["start"])
+
+
 def build():
     walla = fetch_walla()
     yes = load_yes()
@@ -379,7 +400,7 @@ def build():
     print(f"וואלה: {len(walla)} · yes: {len(yes)} · HOT: {len(hot)}/{len(w_hot)} · "
           f"FreeTV: {len(ftv)}/{len(w_ftv)} ערוצים", file=sys.stderr)
 
-    channels, hits, empty, fell = {}, {k: 0 for k in NAMES}, 0, 0
+    channels, hits, empty, fell, filled = {}, {k: 0 for k in NAMES}, 0, 0, 0
     isra_cache = {}
 
     def get(src, cid):
@@ -396,22 +417,26 @@ def build():
         return isra_cache[cid]
 
     for slug, val in MAP.items():
-        chain = val if isinstance(val, list) else [val]
-        progs, used = [], chain[0][0]
-        for n, (src, cid) in enumerate(chain):
-            progs = get(src, cid)
-            used = src
-            if _fresh(progs):
-                if n:
-                    fell += 1
-                break
+        chain = [(src, get(src, cid))
+                 for src, cid in (val if isinstance(val, list) else [val])]
+        # הראשון עם לוח שימושי הוא המקור הראשי; השאר רק ממלאים את החורים בו.
+        main = next((i for i, (_, p) in enumerate(chain) if _fresh(p)), 0)
+        used, progs = chain[main][0], list(chain[main][1])
+        if main:
+            fell += 1
+        for i, (_, p) in enumerate(chain):
+            if i != main:
+                before = len(progs)
+                progs = _fill_gaps(progs, p)
+                if len(progs) > before:
+                    filled += 1
         if _fresh(progs):
             hits[used] += 1
         else:
             empty += 1
         channels[slug] = {"source": NAMES[used], "programs": progs}
     doc = {"generated": int(time.time()), "channels": channels}
-    return doc, (hits, empty, fell)
+    return doc, (hits, empty, fell, filled)
 
 MERGE_KEEP_HOURS = 8      # כמה אחורה שומרים תוכניות שהסתיימו
 
@@ -444,7 +469,7 @@ def merge_previous(doc):
 
 
 def main():
-    doc, (hits, empty, fell) = build()
+    doc, (hits, empty, fell, filled) = build()
     doc = merge_previous(doc)
     if "--stdout" in sys.argv:
         print(json.dumps({k: len(v["programs"]) for k, v in doc["channels"].items()},
@@ -457,7 +482,8 @@ def main():
     total = sum(len(v["programs"]) for v in doc["channels"].values())
     print(f"נכתב {OUT.name}: {len(doc['channels'])} ערוצים (וואלה {hits['w']}, "
           f"isramedia {hits['i']}, yes {hits['y']}, HOT {hits['h']}, ריקים {empty})"
-          + (f" · {fell} ערוצים נפלו למקור גיבוי" if fell else "")
+          + (f" · {fell} נפלו למקור גיבוי" if fell else "")
+          + (f" · {filled} הושלמו מחור" if filled else "")
           + f" · {total} תוכניות")
 
 if __name__ == "__main__":

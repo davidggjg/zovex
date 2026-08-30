@@ -16,35 +16,20 @@ const chSlug = (ch) =>
   (ch && (ch.custom_slug ||
     encodeURIComponent((ch.title || ch.name || "").replace(/ /g, "-")))) || "";
 
-// "הזכר לי": באפליקציה נשלח לצד הנייטיב שיתזמן התראה; בדפדפן מתוזמנת
-// התראה מקומית שתעבוד כל עוד הלשונית פתוחה.
+// "הזכר לי" קיים רק באפליקציה. באתר ההתראה הייתה מתוזמנת בתוך הלשונית
+// ומתה ברגע שסוגרים אותה — כלומר כפתור שמבטיח משהו שלא יקרה. באפליקציה
+// הבקשה עוברת לצד הנייטיב, שמתזמן התראת מערכת אמיתית.
+const inApp = () =>
+  typeof window !== "undefined" &&
+  !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
+
 function remind(program, channelTitle) {
-  const when = program.start * 1000;
-  if (when <= Date.now()) return false;
-  const bridge = typeof window !== "undefined" && window.ReactNativeWebView;
-  if (bridge && bridge.postMessage) {
-    bridge.postMessage(JSON.stringify({
-      type: "remind", at: program.start,
-      channel: channelTitle, program: program.title,
-    }));
-    return true;
-  }
-  if (typeof Notification === "undefined") return false;
-  const arm = () => {
-    const ms = when - Date.now();
-    if (ms > 0 && ms < 24 * 3600 * 1000) {
-      setTimeout(() => {
-        try { new Notification(`מתחיל עכשיו: ${program.title}`, { body: channelTitle }); }
-        catch { /* הדפדפן חסם — אין מה לעשות */ }
-      }, ms);
-    }
-  };
-  if (Notification.permission === "granted") { arm(); return true; }
-  if (Notification.permission !== "denied") {
-    Notification.requestPermission().then(p => { if (p === "granted") arm(); });
-    return true;
-  }
-  return false;
+  if (program.start * 1000 <= Date.now() || !inApp()) return false;
+  window.ReactNativeWebView.postMessage(JSON.stringify({
+    type: "remind", at: program.start,
+    channel: channelTitle, program: program.title,
+  }));
+  return true;
 }
 
 export default function LiveTV({ channel, onPlay, onClose }) {
@@ -141,6 +126,7 @@ export default function LiveTV({ channel, onPlay, onClose }) {
                     </div>
                     {isNow
                       ? <span style={{ color: "#e50914", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>● עכשיו</span>
+                      : !inApp() ? null
                       : <button
                           onClick={() => { if (remind(p, title)) setReminded(s => ({ ...s, [key]: true })); }}
                           title="הזכר לי כשמתחיל"
