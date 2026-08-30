@@ -24,7 +24,9 @@ LOCAL = "http://127.0.0.1:8000"
 SITE = "https://zovex.duckdns.org"
 HDRS = {"Referer": SITE + "/", "User-Agent": "zovex-bench"}
 MIN_SIZE = 400 * 1024 * 1024
-STALL = 10.0          # שנייה שמעליה זו "תקיעה" מבחינת הצופה
+STALL = 10.0          # ברירת מחדל; --stall משנה אותה
+# מעל הסף הזה הצפייה נשברת בעיני המשתמש. 10 שניות הן ההגדרה
+# ההנדסית (הבאפר מתרוקן); 20 הן הסף שהמשתמש הגדיר כנסבל.
 
 
 def _req(url, extra=None):
@@ -67,6 +69,8 @@ def main():
     ap.add_argument("--runs", type=int, default=15)
     ap.add_argument("--mb", type=int, default=4)
     ap.add_argument("--label", default="")
+    ap.add_argument("--stall", type=float, default=STALL,
+                    help="מעל כמה שניות נחשב תקיעה")
     a = ap.parse_args()
 
     try:
@@ -93,7 +97,8 @@ def main():
     n = a.mb * 1024 * 1024
     print(f"{a.runs} דגימות של {a.mb}MB, אופסטים אקראיים, {len(files)} קבצים"
           + (f"  [{a.label}]" if a.label else ""))
-    print("תקיעה = מעל %.0f שניות\n" % STALL, flush=True)
+    stall = args.stall
+    print("תקיעה = מעל %.0f שניות\n" % stall, flush=True)
 
     times, stalls, errs = [], 0, 0
     for i in range(1, a.runs + 1):
@@ -105,7 +110,7 @@ def main():
         if err or got == 0:
             errs += 1
         mark = ""
-        if secs > STALL:
+        if secs > stall:
             stalls += 1
             mark = "  ← תקיעה"
         rate = (got / 1024 / 1024 / secs) if secs > 0 and got else 0
