@@ -7,7 +7,7 @@
     "dev": "vite",
     "prebuild": "node scripts/generate-sitemap.js",
     "build": "vite build",
-    "build:vps": "vite build --base=/",
+    "build:vps": "SITE_URL=https://zovex.duckdns.org node scripts/generate-sitemap.js && vite build --base=/ && SITE_URL=https://zovex.duckdns.org node scripts/prerender-routes.js && sed -i 's#https://davidggjg.github.io/zovex#https://zovex.duckdns.org#g' dist/robots.txt",
     "postbuild": "node scripts/prerender-routes.js",
     "preview": "vite preview",
     "scan": "node scripts/scan.js",

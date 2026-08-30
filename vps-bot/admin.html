@@ -175,7 +175,12 @@
       <div id="relayHostsList" style="margin-top:10px"></div>
       <div id="rhMsg" class="err"></div>
     </div>
-    <div class="card"><h2>שידורים פעילים</h2><div id="liveList"></div></div>
+    <div class="card">
+      <div class="toprow"><h2>שידורים פעילים <span id="liveCount" class="muted" style="font-size:13px;font-weight:400"></span></h2></div>
+      <input id="liveSearch" placeholder="🔍 חפש ערוץ לפי שם, כתובת או קישור…"
+             oninput="renderLive()" style="margin-bottom:10px">
+      <div id="liveList"></div>
+    </div>
   </div>
 
   <!-- העלאות -->
@@ -641,13 +646,21 @@ function relayifyUrl(){
 }
 
 function renderLive(){
-  const live=movies.filter(m=>m.category==="שידורים חיים");
+  const all=movies.filter(m=>m.category==="שידורים חיים");
+  // מעל מאה ערוצים, גלילה עד הערוץ הנכון היא עבודה. מחפשים גם ב-slug ובכתובת
+  // הזרם, כדי שאפשר יהיה למצוא ערוץ לפי קטע מקישור שראית ביומן.
+  const q=(($("liveSearch")||{}).value||"").trim().toLowerCase();
+  const live = q ? all.filter(ch=>[ch.title,ch.custom_slug,ch.video_url]
+                    .some(v=>(v||"").toLowerCase().includes(q))) : all;
+  const cnt=$("liveCount");
+  if(cnt) cnt.textContent = q ? `(${live.length} מתוך ${all.length})` : `(${all.length})`;
   $("liveList").innerHTML = live.map(ch=>`<div class="item">
     <img src="${ch.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
     <div class="meta"><div class="t">${esc(ch.title||"—")}</div><div class="s">${esc((ch.video_url||"").slice(0,40))}…</div></div>
     <button class="mini sec" onclick="editLive('${ch.id}')">✏️</button>
     <button class="mini gray" onclick="quickDel('${ch.id}')">🗑</button></div>`).join("")
-    || '<div class="muted">אין שידורים.</div>';
+    || (q ? `<div class="muted">לא נמצא ערוץ בשם "${esc(q)}".</div>`
+          : '<div class="muted">אין שידורים.</div>');
 }
 function liveReset(){ liveEditId=null; ["l_title","l_url","l_thumb","l_slug"].forEach(i=>$(i).value="");
   $("liveEditTitle").textContent="הוסף שידור חי"; $("liveCancel").classList.add("hidden"); $("liveMsg").textContent=""; }
