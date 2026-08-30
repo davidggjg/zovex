@@ -119,6 +119,12 @@ async def probe(client, sem, tmpl, n, found, sigs, errs):
             if not body.lstrip().startswith("#EXTM3U"):
                 errs["לא m3u8"] = errs.get("לא m3u8", 0) + 1
                 return
+            # siauliairsavlt מחזיר לכל מזהה שלא קיים שלד ריק שמתחיל ב-#EXTM3U
+            # (72 בייט, MEDIA-SEQUENCE:0, TARGETDURATION:0, בלי שום מקטע).
+            # בלי הבדיקה הזאת כל מזהה נספר כערוץ ו-20,000 "ערוצים" נמצאים.
+            if not any(l.strip() and not l.startswith("#") for l in body.splitlines()):
+                errs["פלייליסט ריק"] = errs.get("פלייליסט ריק", 0) + 1
+                return
             sig = hash(body[:400])
             found.append({"id": n, "url": url, "sig": sig})
             sigs[sig] = sigs.get(sig, 0) + 1
