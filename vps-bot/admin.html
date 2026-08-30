@@ -305,6 +305,18 @@
       <input id="v_notes" placeholder="הודעת עדכון (לא חובה)" style="margin-top:8px">
       <button class="mini" style="margin-top:8px" onclick="saveVersion()">שמור גרסה</button>
       <div id="verMsg" class="muted" style="margin-top:6px"></div></div>
+
+    <div class="card" style="border:1px solid #e50914"><h2>🚫 חסימת גישה לפי מייל</h2>
+      <div class="muted">מייל שנחסם כאן לא יוכל להשתמש באתר ובאפליקציה — בשניהם תוצג
+        הודעת חסימה במקום התוכן. החסימה חלה על מי שמחובר עם חשבון גוגל; אורח
+        שלא התחבר לא מזוהה בכלל, ולכן מי שרוצה לעקוף פשוט לא יתחבר — זה חוסם
+        אדם מסוים מהחשבון שלו, לא מהאינטרנט.</div>
+      <div class="grid2" style="margin-top:8px">
+        <input id="b_email" dir="ltr" type="email" placeholder="someone@gmail.com">
+        <button class="mini" onclick="addBan()">🚫 חסום</button>
+      </div>
+      <input id="b_msg" placeholder="הודעה שתוצג לו (לא חובה — ברירת מחדל: הגישה שלך נחסמה)" style="margin-top:6px">
+      <div id="banErr" class="err"></div><div id="bansList" style="margin-top:8px"></div></div>
   </div>
 </div>
 
@@ -367,7 +379,7 @@ function showTab(n){
   if(n==="pool") loadPool();
   if(n==="import"){ pollImport(); startImportPoll(); loadChannels(); }
   if(n==="stats") loadStats();
-  if(n==="admins"){ loadAdmins(); loadVersion(); }
+  if(n==="admins"){ loadAdmins(); loadVersion(); loadBans(); }
 }
 
 // ── תוכן: טעינה ושמירה מהשרת ──
@@ -853,6 +865,29 @@ async function addAdmin(){ const id=$("a_id").value,name=$("a_name").value;
   try{ renderAdmins((await panelApi("add",{id:parseInt(id),name})).admins); $("a_id").value="";$("a_name").value="";$("adminErr").textContent="";}
   catch(e){ $("adminErr").textContent=e.message; } }
 async function rmAdmin(id){ try{ renderAdmins((await panelApi("remove",{id})).admins);}catch(e){ alert(e.message); } }
+
+// ── חסימת גישה לפי מייל ──
+async function bansApi(action,email,message){
+  const r=await fetch("/panel/bans",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({password:PASS,action,email,message})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.detail||("שגיאה "+r.status+(r.status===405?" — צריך להריץ add_bans.py בשרת ולהפעיל מחדש":"")));
+  return d;
+}
+async function loadBans(){ try{ renderBans((await bansApi("list")).bans); $("banErr").textContent=""; }
+  catch(e){ $("banErr").textContent=e.message; } }
+function renderBans(b){ $("bansList").innerHTML=(b&&b.length)?b.map(x=>`<div class="item">
+  <div class="meta"><div class="t" dir="ltr" style="text-align:left">${esc(x.email)}</div>
+    <div class="s">${esc(x.message||"")}</div></div>
+  <button class="mini gray" onclick="rmBan('${esc(x.email)}')">בטל חסימה</button></div>`).join("")
+  :'<div class="muted">אין מיילים חסומים.</div>'; }
+async function addBan(){ const email=$("b_email").value.trim(), message=$("b_msg").value.trim();
+  if(!email){ $("banErr").textContent="חסר מייל"; return; }
+  try{ renderBans((await bansApi("add",email,message)).bans);
+       $("b_email").value=""; $("b_msg").value=""; $("banErr").textContent=""; }
+  catch(e){ $("banErr").textContent=e.message; } }
+async function rmBan(email){ try{ renderBans((await bansApi("remove",email)).bans); $("banErr").textContent=""; }
+  catch(e){ $("banErr").textContent=e.message; } }
 
 // ── תמיכה / משוב ──
 // ── סטטיסטיקות צפייה ──
