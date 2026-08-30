@@ -237,7 +237,10 @@ def fetch_hot(want=None):
     """
     out = {}
     today = (datetime.now(IL) if IL else datetime.now()).date()
-    for i in range(HOT_DAYS):
+    # מתחילים מאתמול: HOT מחזיר בדיוק את יממת התאריך המבוקש, ולכן תוכנית
+    # שהתחילה אמש ורצה עכשיו (סרט שהתחיל ב-01:30, למשל) פשוט לא תופיע
+    # בבקשה של היום — והערוץ ייראה בלי "עכשיו משודר" עד הבוקר.
+    for i in range(-1, HOT_DAYS):
         day = (today + timedelta(days=i)).strftime("%Y/%m/%d")
         try:
             res = _post_json(HOT_API,
