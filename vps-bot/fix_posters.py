@@ -66,9 +66,11 @@ POSTERS = {
     # שמות ויוה. לכן הם מקבלים את הלוגו של הערוץ האמיתי שלהם.
     "Dramottorki":     TVL + "turkish-dramas-channel-plus-il.png",  # HOT: הדרמות הטורקיות +
     "Torki2":          TVL + "turkish-dramas-channel-2-il.png",
-    "turkish-plus":    TVL + "viva-il.png",            # ויוה איסטנבול
-    "turkish-plus-2":  TVL + "viva-plus-il.png",       # ויוה טלנובלות
-    "turkish-plus-3":  TVL + "viva-vintage-il.png",    # ויוה וינטג'
+    # הזיווג אומת מול הלוח החי, לא לפי השמות: שודרה אותה תוכנית ואותו פרק
+    # באותה דקה. לפי השם לבדו הם היו יוצאים הפוך.
+    "turkish-plus":    TVL + "viva-plus-il.png",       # = ויוה טלנובלות ("בעושר ובעוני")
+    "turkish-plus-2":  TVL + "viva-il.png",            # = ויוה איסטנבול ("בנות הירח")
+    "turkish-plus-3":  TVL + "viva-vintage-il.png",    # = ויוה וינטג' ("דולסה אמור")
 }
 
 
