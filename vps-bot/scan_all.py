@@ -33,20 +33,24 @@ OUT = DATA / "scan_all.json"
 HDR = {"User-Agent": ("Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")}
 
+# sentinel = מזהה שאנחנו *יודעים* שקיים (ערוץ שעובד באתר היום). נבדק לפני
+# הסריקה: אם הוא לא עונה, הבעיה בחיבור ולא בקטלוג, ואין טעם לסרוק 20,000
+# מזהים ולקבל אפס. בלי הבדיקה הזאת סריקה שבורה נראית בדיוק כמו ספק ריק.
 PROVIDERS = {
     "cellcom": dict(
         url="https://tv.embyil.tv:7070/p/embyil/s/{n}/playlist.m3u8",
-        rx=r"/p/embyil/s/(\d+)/", hi=6000, tag="C"),
+        rx=r"/p/embyil/s/(\d+)/", hi=6000, tag="C", sentinel=103, conns=30),
     "embyil": dict(
         url="https://tv.embyil.tv:86/live/{n}/chunks.m3u8",
-        rx=r"tv\.embyil\.tv[^/]*/live/(\d+)/", hi=6000, tag="E"),
+        rx=r"tv\.embyil\.tv[^/]*/live/(\d+)/", hi=6000, tag="E", sentinel=320, conns=30),
     "pw": dict(
         url="https://sewv654wfcsdwfi87fwvgbngh.siauliairsavlt.pw"
             "/iptv/F5GDYXTUM2QBV3/{n}/index.m3u8",
-        rx=r"siauliairsavlt\.pw/iptv/[^/]+/(\d+)/", hi=20000, tag="P"),
+        rx=r"siauliairsavlt\.pw/iptv/[^/]+/(\d+)/", hi=20000, tag="P",
+        sentinel=2341, conns=8),
     "mcquack": dict(
         url="https://stream.mcquack.net/{n}/index.m3u8",
-        rx=r"stream\.mcquack\.net/(\d+)/", hi=3000, tag="M"),
+        rx=r"stream\.mcquack\.net/(\d+)/", hi=3000, tag="M", sentinel=47, conns=20),
 }
 
 
@@ -66,38 +70,69 @@ def existing(rx):
     return out
 
 
-async def probe(client, sem, tmpl, n, found, sigs):
+async def probe(client, sem, tmpl, n, found, sigs, errs):
+    """errs סופר *למה* נכשל. בלי זה כשל רשת ומזהה שלא קיים נראים זהים."""
     url = tmpl.format(n=n)
     async with sem:
-        for _ in range(2):
+        last = None
+        for attempt in range(3):
             try:
-                r = await client.get(url, headers=HDR, timeout=9)
-            except Exception:
-                await asyncio.sleep(0.25)
+                r = await client.get(url, headers=HDR, timeout=12)
+            except Exception as e:
+                last = type(e).__name__
+                await asyncio.sleep(0.4 * (attempt + 1))
                 continue
             if r.status_code != 200:
+                errs[f"HTTP {r.status_code}"] = errs.get(f"HTTP {r.status_code}", 0) + 1
                 return
             body = r.text
             if not body.lstrip().startswith("#EXTM3U"):
+                errs["לא m3u8"] = errs.get("לא m3u8", 0) + 1
                 return
             sig = hash(body[:400])
             found.append({"id": n, "url": url, "sig": sig})
             sigs[sig] = sigs.get(sig, 0) + 1
             return
+        errs[last or "כשל חיבור"] = errs.get(last or "כשל חיבור", 0) + 1
+
+
+async def sentinel_ok(client, p):
+    """בודק מזהה שידוע שקיים, לפני שסורקים אלפים."""
+    url = p["url"].format(n=p["sentinel"])
+    for _ in range(3):
+        try:
+            r = await client.get(url, headers=HDR, timeout=20)
+            if r.status_code == 200 and r.text.lstrip().startswith("#EXTM3U"):
+                return True, "תקין"
+            return False, f"HTTP {r.status_code}"
+        except Exception as e:
+            err = type(e).__name__
+            await asyncio.sleep(1.5)
+    return False, err
 
 
 async def scan(client, key, lo, hi, conns):
     p = PROVIDERS[key]
     have = existing(p["rx"])
-    print(f"\n{'='*58}\n{key}   טווח {lo}–{hi}   כבר באתר: {len(have)}")
-    found, sigs = [], {}
+    conns = conns or p["conns"]
+    print(f"\n{'='*58}\n{key}   טווח {lo}–{hi}   כבר באתר: {len(have)}   {conns} במקביל")
+
+    ok, why = await sentinel_ok(client, p)
+    print(f"  בדיקת שפיות (מזהה {p['sentinel']}, ידוע שעובד): {'✓ ' + why if ok else '✗ ' + why}")
+    if not ok:
+        print(f"  ⚠️  הספק לא עונה גם למזהה שעובד באתר. מדלגת — סריקה עכשיו "
+              f"הייתה מחזירה אפס ומטעה.")
+        return {"provider": key, "tag": p["tag"], "all": [], "new": [],
+                "error": f"sentinel נכשל: {why}"}
+
+    found, sigs, errs = [], {}, {}
     sem = asyncio.Semaphore(conns)
     t0 = time.time()
     STEP = 1000
     for a in range(lo, hi + 1, STEP):
         b = min(a + STEP - 1, hi)
         before = len(found)
-        await asyncio.gather(*[probe(client, sem, p["url"], n, found, sigs)
+        await asyncio.gather(*[probe(client, sem, p["url"], n, found, sigs, errs)
                                for n in range(a, b + 1)])
         print(f"  {a}–{b}:  +{len(found)-before}   (סה\"כ {len(found)})", flush=True)
 
@@ -108,6 +143,9 @@ async def scan(client, key, lo, hi, conns):
         f.pop("sig", None)
     print(f"  זמן {time.time()-t0:.0f}ש · תקינים {len(real)} · "
           f"מסוננים {len(found)-len(real)} · חדשים {len(new)}")
+    top = sorted(errs.items(), key=lambda x: -x[1])[:4]
+    if top:
+        print("  תשובות שלא נספרו: " + " · ".join(f"{k}×{v}" for k, v in top))
     return {"provider": key, "tag": p["tag"], "all": real, "new": new}
 
 
@@ -116,7 +154,7 @@ async def main():
     ap.add_argument("--only", help="cellcom / embyil / pw / mcquack")
     ap.add_argument("--from", dest="lo", type=int, default=1)
     ap.add_argument("--to", dest="hi", type=int, default=0, help="0 = ברירת המחדל של הספק")
-    ap.add_argument("--conns", type=int, default=30)
+    ap.add_argument("--conns", type=int, default=0, help="0 = לפי הספק")
     a = ap.parse_args()
 
     keys = [a.only] if a.only else list(PROVIDERS)
