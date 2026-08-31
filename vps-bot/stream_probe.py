@@ -57,8 +57,27 @@ def dump_server_log(since_epoch):
         say("   (היומן שקט לגמרי — כלומר השרת לא חשב שקרתה תקלה)")
 
 
+def load_catalog():
+    """חייבים למשוך מ-/movies.json ולא לקרוא את content.json.
+
+    content.json שומר "%BASE%/stream/..." כמציין מקום; השרת מחליף אותו
+    בכתובת האמיתית *ומוסיף את החתימה* רק כשהוא מגיש את הקטלוג ללקוח.
+    קריאה ישירה מהקובץ מחזירה מחרוזת שאינה URL, וכל ניסוי מת מיד."""
+    last = None
+    for base in ("http://127.0.0.1:8000", "https://zovex.duckdns.org"):
+        try:
+            req = urllib.request.Request(base + "/movies.json",
+                                         headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            last = f"{base}: {type(e).__name__}: {e}"
+            say(f"(לא ניתן למשוך קטלוג מ-{base} — {type(e).__name__})")
+    sys.exit(f"לא ניתן למשוך את movies.json. אחרון: {last}")
+
+
 def pick_url():
-    data = json.loads(CONTENT.read_text(encoding="utf-8"))
+    data = load_catalog()
     items = data if isinstance(data, list) else data.get("movies", [])
     # סרטים בלבד ולא פרקים: פרק קצר ייגמר לפני שנגיע ל-20 דקות הקריטיות
     pool = [m for m in items
@@ -67,8 +86,12 @@ def pick_url():
             and m.get("category") not in ("שידורים חיים",)]
     if not pool:
         sys.exit("לא נמצא פריט מתאים ב-content.json")
-    m = random.choice(pool)
-    return m.get("title") or "?", m["video_url"]
+    random.shuffle(pool)
+    for m in pool:
+        u = m.get("video_url") or ""
+        if u.startswith("http"):
+            return m.get("title") or "?", u
+    sys.exit("כל הכתובות בקטלוג אינן http — משהו שבור בהגשת הקטלוג")
 
 
 def main():
@@ -89,10 +112,9 @@ def main():
     say(f"קצב מדומה {a.mbps} Mbps · עד {a.minutes} דקות · דיווח כל {a.report}ש")
     say(f"URL: {url[:110]}")
 
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Referer": "https://zovex.duckdns.org/",
-        "Range": "bytes=0-",            # בדיוק כמו נגן: מבקש מההתחלה והלאה
-    })
+    if not url.startswith("http"):
+        say(f"⛔ הכתובת אינה URL תקין: {url[:60]}")
+        sys.exit(1)
 
     t0 = time.time()
     got = 0
@@ -100,6 +122,12 @@ def main():
     clen = None
     status = None
     try:
+        # נבנה כאן ולא למעלה: חריגה בבניית הבקשה הייתה עוקפת את ה-try
+        # ואת ה-finally, והניסוי היה מת בלי להשאיר ולו שורת הסבר אחת.
+        req = urllib.request.Request(url, headers={
+            "User-Agent": UA, "Referer": "https://zovex.duckdns.org/",
+            "Range": "bytes=0-",        # בדיוק כמו נגן: מההתחלה והלאה
+        })
         r = urllib.request.urlopen(req, timeout=90)
         status = r.status
         clen = r.headers.get("Content-Length")
