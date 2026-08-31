@@ -285,8 +285,8 @@ def run_level(n, pool, seconds, rate, stall, dev):
     # served = מה שהאפליקציה באמת הגישה. זה המספר להשוואה מול קיבולת הקו,
     # ולא מונה הכרטיס: הבדיקה רצה מול 127.0.0.1 והתעבורה כלל לא חוצה את
     # הכרטיס, כך שהמונה שלו יראה 0 גם כשהאפליקציה דוחפת מאות מגהביט.
-    return dict(n=n, ok=len(ok), served=served, out=out_mbps, cpu=peak_cpu,
-                worst_gap=gaps[-1], sig=sig)
+    return dict(n=n, ok=len(ok), served=served, out=out_mbps, inbound=in_mbps,
+                cpu=peak_cpu, worst_gap=gaps[-1], sig=sig)
 
 
 def verdict(rows, link_mbps, rate):
@@ -307,7 +307,7 @@ def verdict(rows, link_mbps, rate):
     if not broke:
         say("   לא הגענו לתקרה — הרץ שוב עם --levels גבוה יותר כדי למצוא אותה.")
     else:
-        _blame(broke[0], link_mbps)
+        _blame(broke[0], link_mbps, broke[0]["inbound"])
 
     say("")
     if link_mbps:
@@ -321,8 +321,13 @@ def verdict(rows, link_mbps, rate):
             f"{rate} Mbps כדי לקבל את תקרת הצופים מהצד הזה.")
 
 
-def _blame(first, link_mbps):
-    """מייחס את הכישלון לתקרה שנמדדה, ולא לניחוש."""
+def _blame(first, link_mbps, in_mbps):
+    """מייחס את הכישלון לתקרה שנמדדה, ולא לניחוש.
+
+    הגרסה הראשונה בדקה את הקטגוריות בסדר שבו הן כתובות והדפיסה את הראשונה
+    שנמצאה. בריצה אמיתית זה תלה את הכישלון ב'צד טלגרם' על סמך 63 אירועים,
+    בזמן ש'חיבורים נופלים' עמד על 1168 — פי 18 — והמסקנה יצאה הפוכה:
+    'תוסיף בוטים' במקום 'תפסיק להפיל חיבורים'. לכן הדירוג הוא לפי כמות."""
     say(f"⚠️  נשבר ב-{first['n']} צופים ({first['ok']} תקינים).")
 
     if link_mbps and first["served"] > 0.75 * link_mbps:
@@ -330,19 +335,48 @@ def _blame(first, link_mbps):
             f"והקו נותן {link_mbps} — בעולם האמיתי הוא היה נחנק כאן.")
         say("   בוטים נוספים לא יעזרו כאן בכלל. צריך יותר רוחב פס, או "
             "להוריד את קצב הסיביות של התוכן, או שרת נוסף.")
-    elif first["cpu"] > 85:
+        return
+    if first["cpu"] > 85:
         say(f"   הסיבה: **מעבד** ({first['cpu']:.0f}%). בוטים לא יעזרו.")
-    elif any("טלגרם" in k for k in first["sig"]):
-        say("   הסיבה: **צד טלגרם** — " +
-            " · ".join(f"{k} ×{v}" for k, v in first["sig"].items() if "טלגרם" in k))
-        say("   *כאן* בוטים נוספים כן עוזרים: כל בוט הוא מכסת FloodWait נפרדת "
-            "וחיבורי מדיה נפרדים. שווה להוסיף ולהריץ את הבדיקה שוב.")
-    elif any("חיבורים" in k for k in first["sig"]):
-        say("   הסיבה: **חיבורים שנופלים ונבנים מחדש** — אותו שורש שהשארנו "
-            "פתוח. עוד בוטים ירככו אבל לא ירפאו.")
-    else:
+        return
+
+    sig = first["sig"]
+    if not sig:
         say("   הסיבה לא חד-משמעית מהמדידה. הרץ שוב עם --seconds 180 — "
             "שלב קצר מדי נותן רעש.")
+        return
+
+    ranked = sorted(sig.items(), key=lambda kv: -kv[1])
+    top, n_top = ranked[0]
+    rest = sum(v for _, v in ranked[1:])
+    say("   סימנים ביומן, לפי כמות: " +
+        " · ".join(f"{k} ×{v}" for k, v in ranked))
+
+    if n_top < 2 * max(1, rest):
+        say(f"   אין סימן דומיננטי ({top} מוביל אבל לא בפער משמעותי) — "
+            "אל תתקן על סמך זה. הרץ שוב עם --seconds 180.")
+        return
+
+    if "חיבורים" in top:
+        say(f"   הסיבה: **חיבורים לטלגרם נופלים ונבנים מחדש** ({n_top} פעמים).")
+        say("   בוטים נוספים לא מרפאים את זה — כל בוט נוסף פותח עוד חיבורים "
+            "שנופלים באותו קצב, כלומר יותר רעש ולא יותר קיבולת.")
+    elif "טלגרם" in top:
+        say(f"   הסיבה: **צד טלגרם** ({top}, {n_top} פעמים).")
+        say("   *כאן* בוטים נוספים כן עוזרים: כל בוט הוא מכסת FloodWait נפרדת "
+            "וחיבורי מדיה נפרדים. שווה להוסיף ולהריץ את הבדיקה שוב.")
+    else:
+        say(f"   הסיבה: {top} ({n_top} פעמים).")
+
+    # יחס בזבוז: כמה נמשך מטלגרם לעומת כמה הגיע לצופה. יחס גבוה = בייטים
+    # נמשכים ונזרקים (חלונות שנכשלו ונמשכו שוב), וזה מכפיל את העומס על
+    # טלגרם בלי להוסיף ולו צופה אחד.
+    if first["served"] > 1 and in_mbps > 0:
+        ratio = in_mbps / first["served"]
+        if ratio > 1.3:
+            say(f"   ובנוסף: נמשכו {in_mbps:.0f} Mbps מטלגרם כדי להגיש "
+                f"{first['served']:.0f} — יחס {ratio:.1f}. כלומר "
+                f"{100*(1-1/ratio):.0f}% מהבייטים נמשכו ונזרקו.")
 
 
 def main():
