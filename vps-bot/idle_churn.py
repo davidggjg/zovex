@@ -31,6 +31,7 @@ PATTERNS = {
     "Session stopped": r"Session stopped",
     "Session started": r"Session started",
 }
+TELEGRAM_PORTS = ("443", "80")
 RETRY_RX = re.compile(r'Retrying "([A-Za-z.]+)"')
 
 
@@ -54,18 +55,28 @@ def pick_dev():
 
 
 def conns():
-    """חיבורי TCP פתוחים אל האפליקציה — כלומר צופים אמיתיים ברגע זה."""
+    """(צופים, חיבורים יוצאים לטלגרם).
+
+    שים לב לעמודות: כשנותנים ל-ss מסנן מצב, עמודת ה-State נעלמת מהפלט
+    והשדות הם Recv-Q Send-Q Local Peer. הגרסה הראשונה קראה את השדה הרביעי
+    בהנחה שהוא המקומי, וספרה בפועל את הצד *המרוחק* — כלומר הדפיסה 144
+    "צופים" שהיו למעשה החיבורים היוצאים של השרת אל טלגרם."""
     try:
         out = subprocess.run(["ss", "-tn", "state", "established"],
                              capture_output=True, text=True, timeout=10).stdout
     except Exception:
-        return -1
-    n = 0
-    for line in out.splitlines()[1:]:
+        return -1, -1
+    viewers = outbound = 0
+    for line in out.splitlines():
         f = line.split()
-        if len(f) >= 4 and f[3].rsplit(":", 1)[-1] in SITE_PORTS:
-            n += 1
-    return n
+        if len(f) < 4 or f[0] == "Recv-Q":
+            continue
+        local, peer = f[2], f[3]
+        if local.rsplit(":", 1)[-1] in SITE_PORTS:
+            viewers += 1
+        if peer.rsplit(":", 1)[-1] in TELEGRAM_PORTS:
+            outbound += 1
+    return viewers, outbound
 
 
 def journal(since_str):
@@ -89,11 +100,13 @@ def main():
     print(f"ממשק {dev} · {a.minutes:.0f} דקות · דגימה כל {a.every}ש")
     print("אל תיגע באתר. משתמשים אמיתיים כן עשויים להיות פעילים — "
           "בדיוק בשביל זה נמדדת גם התעבורה.\n")
-    print("  דקה   Mbps החוצה   חיבורים   נפילות מצטברות")
+    print("  דקה   Mbps החוצה   צופים   לטלגרם   נפילות בדגימה")
 
     prev_tx = tx_bytes(dev)
     prev_t = t0
     peak_mbps, peak_conns = 0.0, -1      # -1 = ss לא זמין
+    prev_sends = 0
+    samples = []                          # (Mbps, נפילות בדגימה)
     end = t0 + a.minutes * 60
     while True:
         left = end - time.time()
@@ -104,15 +117,19 @@ def main():
         cur_tx = tx_bytes(dev)
         mbps = (cur_tx - prev_tx) * 8 / max(0.001, now - prev_t) / 1e6
         prev_tx, prev_t = cur_tx, now
-        c = conns()
+        c, tg = conns()
         peak_mbps = max(peak_mbps, mbps)
         if c >= 0:
             peak_conns = max(peak_conns, c)
         sofar = journal(since)
         sends = len(re.findall(PATTERNS["Send exception"], sofar))
+        # ההפרש, לא המצטבר: רק הוא מראה אם הקצב זז יחד עם התעבורה.
+        delta = sends - prev_sends
+        prev_sends = sends
+        samples.append((mbps, delta))
         print(f"  {(now-t0)/60:4.1f}   {mbps:10.1f}   "
-              f"{(str(c) if c >= 0 else '?'):>7}   "
-              f"Send exception {sends}")
+              f"{(str(c) if c >= 0 else '?'):>5}   {(str(tg) if tg >= 0 else '?'):>7}   "
+              f"{delta:>8}")
 
     log = journal(since)
     elapsed_min = (time.time() - t0) / 60
@@ -134,21 +151,43 @@ def main():
             print(f"      {k:<26} {v}")
 
     print()
-    # ההכרעה. הסף על התעבורה נמוך בכוונה: סרט אחד הוא ~6 Mbps, ולכן כל דבר
-    # מתחת ל-2 Mbps אינו יכול להיות צפייה פעילה אלא רק דפים ובקשות קטנות.
-    busy = peak_mbps >= 2.0
+    # ההכרעה היא *קורלציה*, לא שקט.
+    #
+    # הגרסה הראשונה פסלה כל מדידה שבה עברה תעבורה, ובכך זרקה את הראיה
+    # החזקה ביותר: בריצה אמיתית הקצב עמד על 32 נפילות לכל 20 שניות גם
+    # ב-0.0 Mbps וגם ב-12.7 Mbps. קצב שאינו זז עם העומס אינו נגרם מהעומס —
+    # וזו הוכחה חזקה יותר מחלון שקט, שקשה מאוד להשיג באתר חי.
     churn = counts["Send exception"] / max(0.1, elapsed_min)
-    if busy:
-        print(f"⚠️  לא הייתה מנוחה — יצאו עד {peak_mbps:.1f} Mbps, כלומר מישהו צפה.")
-        print("   המדידה הזאת לא יכולה להפריד בין תקלת רקע לבין עומס אמיתי.")
-        print("   הרץ שוב בשעה שקטה יותר.")
-    elif churn >= 10:
-        print(f"❌ מנוחה אמיתית ({peak_mbps:.1f} Mbps) אבל {churn:.0f} נפילות לדקה.")
-        print("   כלומר החיבורים לטלגרם נשברים מעצמם, בלי שום צופה. זו תקלת רקע.")
-    elif churn > 0:
-        print(f"✔️  מנוחה, ורק {churn:.0f} נפילות לדקה — רעש סביר.")
+    if not samples or churn == 0:
+        print("✅ אפס נפילות.")
+        return
+
+    quiet = [d for m, d in samples if m < 2.0]
+    loud = [d for m, d in samples if m >= 2.0]
+    print(f"קצב הנפילות: {churn:.0f} לדקה.")
+    if quiet and loud:
+        q = sum(quiet) / len(quiet)
+        l = sum(loud) / len(loud)
+        print(f"  בדגימות ללא תעבודה ({len(quiet)}): {q:.0f} לדגימה")
+        print(f"  בדגימות עם תעבורה  ({len(loud)}): {l:.0f} לדגימה")
+        ratio = l / max(0.1, q)
+        if ratio < 1.4:
+            print()
+            print("❌ הקצב כמעט זהה עם עומס ובלעדיו — כלומר הנפילות **אינן** "
+                  "נגרמות מהצופים.")
+            print("   יש תהליך רקע מחזורי ששובר חיבורים כל הזמן. זו התקלה.")
+        elif ratio > 2.5:
+            print()
+            print("↗️  הקצב עולה משמעותית עם העומס — הנפילות נגרמות ממקביליות, "
+                  "לא מלולאת רקע.")
+        else:
+            print()
+            print("↔️  הקצב עולה מעט עם העומס — ככל הנראה שילוב של השניים.")
+    elif quiet:
+        print("  (לא נצפתה תעבורה משמעותית — הנפילות הן ברקע מוחלט.)")
     else:
-        print("✅ מנוחה מלאה, אפס נפילות.")
+        print("  (הייתה תעבורה בכל הדגימות — הרץ שוב כדי לקבל דגימות שקטות "
+              "להשוואה.)")
 
 
 if __name__ == "__main__":
