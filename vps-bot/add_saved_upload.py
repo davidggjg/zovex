@@ -64,6 +64,29 @@ def _pick_userbot():
     return users[0]
 
 
+def _check_upload_code(request: Request, code: str):
+    """מאמת את קוד ההעלאה עם אותה הגנת ניחוש של סיסמת הפאנל.
+
+    משתמש ב-_auth_fails וב-_client_ip הקיימים, כלומר ניסיונות ניחוש בשני
+    השערים נספרים יחד — מי שמנסה לנחש את קוד ההעלאה נחסם גם מהפאנל.
+    ההשוואה ב-hmac.compare_digest (זמן קבוע), כדי לא לדלוף מידע דרך תזמון.
+    """
+    if not UPLOAD_PANEL_CODE:
+        raise HTTPException(status_code=503, detail="פאנל ההעלאה לא מוגדר בשרת")
+    ip = _client_ip(request)
+    now = time.time()
+    fails = [t for t in _auth_fails.get(ip, []) if now - t < AUTH_LOCK]
+    if len([t for t in fails if now - t < AUTH_WINDOW]) >= AUTH_MAX_FAILS:
+        _auth_fails[ip] = fails
+        raise HTTPException(status_code=429,
+                            detail="יותר מדי ניסיונות — נסה שוב בעוד כמה דקות")
+    if not hmac.compare_digest(code or "", UPLOAD_PANEL_CODE):
+        fails.append(now)
+        _auth_fails[ip] = fails
+        raise HTTPException(status_code=403, detail="קוד שגוי")
+    _auth_fails.pop(ip, None)
+
+
 @api.post("/panel/entry-code")
 async def panel_entry_code(req: Request):
     """אימות קוד הכניסה לפאנל. הקוד יושב כאן ולא באפליקציה."""
@@ -71,12 +94,7 @@ async def panel_entry_code(req: Request):
         body = await req.json()
     except Exception:
         body = {}
-    if not UPLOAD_PANEL_CODE:
-        raise HTTPException(status_code=503, detail="פאנל ההעלאה לא מוגדר בשרת")
-    ok = hmac.compare_digest(str(body.get("code") or ""), UPLOAD_PANEL_CODE)
-    if not ok:
-        _auth_note_fail(req)      # אותה הגנה מפני ניחוש שמשמשת את שאר הפאנל
-        raise HTTPException(status_code=403, detail="קוד שגוי")
+    _check_upload_code(req, str(body.get("code") or ""))
     bot = _pick_userbot()
     return {"ok": True, "account": (bot or {}).get("who") or "",
             "ready": bot is not None}
@@ -133,10 +151,7 @@ async def saved_upload(request: Request):
     שנכתבת ליומני הגישה), והשם והכיתוב בשאילתה כי הם עברית ואי אפשר לשים
     עברית בכותרת HTTP.
     """
-    code = request.headers.get("x-upload-code", "")
-    if not UPLOAD_PANEL_CODE or not hmac.compare_digest(code, UPLOAD_PANEL_CODE):
-        _auth_note_fail(request)
-        raise HTTPException(status_code=403, detail="קוד שגוי")
+    _check_upload_code(request, request.headers.get("x-upload-code", ""))
     if _pick_userbot() is None:
         raise HTTPException(status_code=503,
                             detail="אין חשבון משתמש מחובר בשרת")
@@ -226,7 +241,11 @@ def main():
         print("✓ כבר מוחל. אין מה לעשות.")
         return
     for dep, why in (("_stream_bots", "חסרה בריכת הבוטים"),
-                     ("_auth_note_fail", "חסרה הגנת הניחוש של הפאנל"),
+                     ("_auth_fails", "חסר מונה כישלונות האימות"),
+                     ("def _client_ip", "חסרה _client_ip"),
+                     ("AUTH_MAX_FAILS", "חסרים קבועי הגנת הניחוש"),
+                     ("AUTH_WINDOW", "חסרים קבועי הגנת הניחוש"),
+                     ("AUTH_LOCK", "חסרים קבועי הגנת הניחוש"),
                      ("DATA_DIR", "חסר DATA_DIR")):
         if dep not in src:
             _fail(why)
