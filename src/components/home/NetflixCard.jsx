@@ -23,12 +23,14 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
   return (
     <a
       href={href}
+      className="zv-card"
       onClick={e => { e.preventDefault(); onClick(item, isSer); }}
-      style={{ flexShrink: 0, width: cardW, cursor: "pointer", direction: "rtl", textDecoration: "none", color: "inherit", display: "block" }}
+      style={{ flexShrink: 0, width: cardW, cursor: "pointer", direction: "rtl" }}
     >
-      <div style={{ width: cardW, height: cardH, borderRadius: 12, overflow: "hidden", background: isLive ? "#1a1a1a" : "#1c1c1e", position: "relative", border: isLive ? "2px solid #e50914" : "none", transition: "transform .18s", boxShadow: "0 2px 8px rgba(0,0,0,.4)" }}
-        onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.04)"; e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,.18)"; }}
-        onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,.10)"; }}>
+      {/* ההרמה, הצל וטבעת המיקוד יושבים ב-CSS (‎.zv-card‎ ב-index.css) ולא
+          במטפלי עכבר: בטלוויזיה אין עכבר, ו-focus-visible הוא הדרך היחידה
+          שהכרטיס שהשלט עומד עליו ייראה שונה מהשאר. */}
+      <div className="zv-card__art" style={{ width: cardW, height: cardH, background: isLive ? "#1a1a1a" : "#1c1c1e", border: isLive ? "2px solid #e50914" : "1px solid rgba(255,255,255,0.07)" }}>
         {isLive && item.thumbnail_url ? (
           <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
         ) : isLive ? (
