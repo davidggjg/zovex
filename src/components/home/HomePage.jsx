@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Search, Send, Eye, ChevronDown, X, Download } from "lucide-react";
 import { SPIN, ls, lsSet } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
+import AmbientGlow, { AMBIENT_KEYFRAMES } from "./AmbientGlow";
 
 // מסך הבית — לוגו, חיפוש, תפריט משתמש, קטגוריות, ורשימות התוכן
 export default function HomePage({
@@ -25,9 +26,20 @@ export default function HomePage({
   }, [userMenuOpen]);
 
   return (
-    <div style={{ background: "#0a0a0a", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif" }}>
-      <style>{SPIN}</style>
-      <header style={{ padding: "14px 14px 0", background: "#0a0a0a", borderBottom: "1px solid #1a1a1a" }}>
+    <div style={{ minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", position: "relative", isolation: "isolate" }}>
+      <style>{SPIN}{AMBIENT_KEYFRAMES}</style>
+      {/* הזוהר יושב מאחורי הכל ומשתנה לפי הקטגוריה הנבחרת */}
+      <AmbientGlow seed={selectedCategory} />
+      {/* כותרת "זכוכית": חצי־שקופה עם טשטוש של מה שעובר מתחתיה, ודביקה
+          למעלה — כך היא מרחפת מעל התוכן במקום לחתוך אותו בפס אטום. */}
+      <header style={{
+        padding: "14px 14px 0",
+        position: "sticky", top: 0, zIndex: 40,
+        background: "rgba(10,10,10,0.62)",
+        backdropFilter: "blur(20px) saturate(140%)",
+        WebkitBackdropFilter: "blur(20px) saturate(140%)",
+        borderBottom: "1px solid rgba(255,255,255,0.07)",
+      }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
           <h1
             onClick={onLogoClick}
@@ -151,7 +163,7 @@ export default function HomePage({
           </button>
         </div>
       )}
-      <main style={{ padding: "8px 0 100px", background: "#0a0a0a" }}>
+      <main style={{ padding: "8px 0 100px", position: "relative", zIndex: 1 }}>
         <RecentlyAddedBanner movies={movies} seriesMap={seriesMap} handleItemClick={handleItemClick} />
         <NetflixRows
           movies={movies}
