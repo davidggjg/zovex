@@ -1,6 +1,71 @@
 import { useState, useEffect, useMemo } from "react";
 import { NetflixRow, buildCardHref } from "./NetflixCard";
 import LiveBanner from "../LiveBanner";
+import { NetflixCard } from "./NetflixCard";
+import { groupLiveByGenre } from "./liveGenres";
+
+// ── רשת פריטים ─────────────────────────────────────────────────────────
+// קטגוריה ספציפית הוצגה עד עכשיו כשורה אופקית אחת, ו-NetflixRow טוען רק
+// 20 פריטים בכל פעם. כלומר בקטגוריה עם מאות פריטים ראו עשרים, וכדי לראות
+// עוד היה צריך לגלול הצידה שוב ושוב — זה מה שנראה כמו "לא מוצג הכל".
+// רשת מציגה שורות רבות בבת אחת, וכפתור מפורש מוסיף עוד. כפתור ולא גלילה
+// אינסופית, כי בשלט של הטלוויזיה אפשר להגיע לכפתור אבל אי אפשר "לגלול עוד".
+const GRID_PAGE = 60;
+
+function CardGrid({ title, items, isDesktop, handleItemClick }) {
+  const [shown, setShown] = useState(GRID_PAGE);
+  useEffect(() => { setShown(GRID_PAGE); }, [items]);
+
+  const cardW = isDesktop ? 184 : 143;
+  const cardH = isDesktop ? 260 : 202;
+  const visible = items.slice(0, shown);
+
+  return (
+    <div style={{ padding: "0 16px 30px", direction: "rtl" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+        <h2 style={{ fontSize: isDesktop ? 21 : 18, fontWeight: 900, color: "#fff", margin: 0, letterSpacing: "-0.3px" }}>{title}</h2>
+        <span style={{ fontSize: 12, color: "#888" }}>({items.length})</span>
+      </div>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(auto-fill, minmax(${cardW}px, 1fr))`,
+        gap: isDesktop ? 18 : 12,
+        justifyItems: "center",
+      }}>
+        {visible.map(item => {
+          const isSer = !!item.episodes;
+          return (
+            <NetflixCard
+              key={isSer ? "s-" + item.name : item.id}
+              item={item}
+              isSer={isSer}
+              isLive={!!item.is_live}
+              onClick={handleItemClick}
+              cardW={cardW}
+              cardH={cardH}
+            />
+          );
+        })}
+      </div>
+      {shown < items.length && (
+        <button
+          onClick={() => setShown(v => v + GRID_PAGE)}
+          style={{
+            display: "block", margin: "22px auto 0", padding: "12px 28px",
+            borderRadius: 26, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 14, fontWeight: 800, color: "#fff",
+            background: "rgba(255,255,255,0.055)",
+            backdropFilter: "blur(14px) saturate(150%)",
+            WebkitBackdropFilter: "blur(14px) saturate(150%)",
+            border: "1px solid rgba(255,255,255,0.11)",
+          }}
+        >
+          הצג עוד ({items.length - shown})
+        </button>
+      )}
+    </div>
+  );
+}
 
 function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user }) {
   const q = searchTerm.toLowerCase();
@@ -35,11 +100,8 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
       const items = buildItems(cat);
       if (items.length > 0) rowsToShow.push({ title: cat, items, isLive: false });
     });
-  } else if (selectedCategory !== "שידורים חיים" && selectedCategory !== "היסטוריה") {
-    // קטגוריה ספציפית — שורה אחת
-    const items = buildItems(selectedCategory);
-    if (items.length > 0) rowsToShow.push({ title: selectedCategory, items, isLive: false });
   }
+  // קטגוריה ספציפית ושידורים חיים מטופלים למטה כרשת/כשורות ז'אנר, לא כאן.
 
   // שורת "המשך צפייה" — רק למחוברים עם היסטוריה
   const continueWatchingItems = user && history && history.length > 0
@@ -69,6 +131,46 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
             <p style={{ fontSize: 13, marginTop: 8 }}>ההיסטוריה שלך תופיע כאן</p>
           </div>
         )}
+      </div>
+    );
+  }
+
+  const empty = (
+    <div style={{ textAlign: "center", padding: "60px 20px", color: "#aaa" }}>
+      <p style={{ fontSize: 18 }}>לא נמצאו תוצאות</p>
+    </div>
+  );
+
+  // ── שידורים חיים: שורה לכל ז'אנר ─────────────────────────────────────
+  // עד עכשיו כל 102 הערוצים נדחסו לשורה אופקית אחת שטוענת 20 בכל פעם, ולכן
+  // רובם היו בלתי נגישים בפועל. אין שדה ז'אנר בנתונים, אז הוא נגזר מהשם
+  // (ראה liveGenres.js) — כל 102 הערוצים מסווגים.
+  if (selectedCategory === "שידורים חיים") {
+    const groups = groupLiveByGenre(liveItems);
+    if (groups.length === 0) return empty;
+    return (
+      <div style={{ paddingTop: 8 }}>
+        {groups.map(g => (
+          <NetflixRow
+            key={g.title}
+            title={g.title}
+            items={g.items}
+            isDesktop={isDesktop}
+            handleItemClick={handleItemClick}
+            isLiveRow
+          />
+        ))}
+      </div>
+    );
+  }
+
+  // ── קטגוריה ספציפית: רשת ולא רצועה אופקית ────────────────────────────
+  if (selectedCategory !== "הכל") {
+    const items = buildItems(selectedCategory);
+    if (items.length === 0) return empty;
+    return (
+      <div style={{ paddingTop: 8 }}>
+        <CardGrid title={selectedCategory} items={items} isDesktop={isDesktop} handleItemClick={handleItemClick} />
       </div>
     );
   }

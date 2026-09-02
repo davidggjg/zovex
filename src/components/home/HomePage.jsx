@@ -164,7 +164,12 @@ export default function HomePage({
         </div>
       )}
       <main style={{ padding: "8px 0 100px", position: "relative", zIndex: 1 }}>
-        <RecentlyAddedBanner movies={movies} seriesMap={seriesMap} handleItemClick={handleItemClick} />
+        {/* "עלה עכשיו" שייך למסך הבית בלבד. בתוך קטגוריה או בחיפוש הוא מציג
+            פריט שאינו קשור למה שביקשת, וגוזל את החלק העליון של המסך בדיוק
+            כשמחפשים משהו מסוים. */}
+        {selectedCategory === "הכל" && !searchTerm && (
+          <RecentlyAddedBanner movies={movies} seriesMap={seriesMap} handleItemClick={handleItemClick} />
+        )}
         <NetflixRows
           movies={movies}
           seriesMap={seriesMap}
