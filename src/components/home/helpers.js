@@ -39,6 +39,10 @@ export function extractVideoInfo(url) {
     const m = url.match(/src=["']([^"']+)['"]/);
     if (m) url = m[1];
   }
+  // "ttps://" — ה-h הראשונה נבלעה בהעתקה. בלי התיקון כאן הבדיקה הבאה
+  // (startsWith("http")) נכשלת, הפריט נשמר כ-direct עם כתובת פגומה, ולא
+  // מתנגן לעולם. בקטלוג יש 9 פרקים כאלה.
+  url = url.replace(/^(?:ttps?):\/\//i, m => (m.toLowerCase().startsWith("ttps") ? "https://" : "http://"));
   if (!url.startsWith("http")) return { type: "direct", video_id: url };
   if (url.includes("youtube.com") || url.includes("youtu.be")) {
     const m = url.match(/(?:v=|youtu\.be\/)([^&/?]+)/);

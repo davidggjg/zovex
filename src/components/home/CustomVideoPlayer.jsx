@@ -53,8 +53,29 @@ const TG_CHANNELS = {};
 const TG_PROXY = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
 
 // ─── helpers ────────────────────────────────────────────────
+// שתי צורות שבורות שקיימות בקטלוג בפועל, ושתיהן ניתנות לשחזור ודאי:
+//
+//   <iframe src="https://…"></iframe>   הודבק קוד ההטמעה במקום הכתובת.
+//                                       ב"פאוור קאפל" 7 פרקים שמורים כתובת
+//                                       נקייה ו-3 כ-iframe שלם — אותו יעד
+//                                       בדיוק, ולכן החילוץ אינו ניחוש.
+//   ttps://…                            נבלעה ה-h הראשונה (9 פרקים ב"הכבוד
+//                                       של אשרף"). שם זה ניצל במקרה כי זיהוי
+//                                       dailymotion מסתכל על הדומיין, אבל
+//                                       באותה תקלה בכתובת ישירה אין הצלה.
+//
+// מנקים בכניסה, כדי שכל ענפי הזיהוי שלמטה יקבלו כתובת אמיתית.
+function cleanVideoRef(raw) {
+  let v = (raw || "").trim();
+  if (!v) return "";
+  const iframe = v.match(/<iframe[^>]*\ssrc=["']([^"']+)["']/i);
+  if (iframe) v = iframe[1].trim();
+  v = v.replace(/^(?:ttps?):\/\//i, m => (m.toLowerCase().startsWith("ttps") ? "https://" : "http://"));
+  return v.replace(/&amp;/g, "&");
+}
+
 function buildSrc(movie, startTime = 0) {
-  const vid = (movie.video_id || movie.video_url || "").trim();
+  const vid = cleanVideoRef(movie.video_id || movie.video_url || "");
   const type = movie.type || "direct";
   const t = Math.max(0, Math.floor(startTime || 0));
   if (!vid) return null;
