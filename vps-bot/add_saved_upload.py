@@ -29,6 +29,14 @@ ANCHOR = 'if __name__ == "__main__":'
 
 BLOCK = '''
 # ── העלאה ל"הודעות שמורות" מהאפליקציה ────────────────────────────────────────
+# הייבואים מפורשים כאן ולא מנוחשים מהקובץ. הגרסה הראשונה הניחה שמה שהקוד
+# הזה צריך כבר מיובא, ונפלה על NameError: pathlib — כי בקובץ היעד יש
+# "from pathlib import Path", כלומר Path מוגדר אבל pathlib לא. השירות נכנס
+# ללולאת קריסה והאתר ירד. ייבוא חוזר של מודול שכבר יובא הוא זול וחסר תופעות
+# לוואי, ולכן עדיף על כל ניסיון לזהות מה קיים.
+import asyncio, hmac, os, pathlib, re, time, uuid
+from urllib.parse import unquote
+
 # ראה add_saved_upload.py להסבר מלא. בקצרה: הטלפון מעלה לשרת, השרת מעלה
 # לטלגרם דרך היוזרבוט, והקובץ הזמני נמחק בסיום — גם כשההעלאה נכשלת.
 UPLOAD_PANEL_CODE = os.environ.get("UPLOAD_PANEL_CODE", "").strip()
@@ -252,19 +260,7 @@ def main():
     if src.count(ANCHOR) != 1:
         _fail(f"נקודת העיגון נמצאה {src.count(ANCHOR)} פעמים (ציפינו לאחת)")
 
-    # ייבוא־חסר הוא הכשל השקט הקלאסי כאן: הקוד יתקמפל ויפול רק בזמן ריצה,
-    # בתוך משימת רקע, כלומר בלי שאיש ישים לב.
-    head = src[:src.index(ANCHOR)]
-    need = []
-    if "unquote" not in head:
-        need.append("from urllib.parse import unquote")
-    if "import uuid" not in head:
-        need.append("import uuid")
-    if "import hmac" not in head:
-        need.append("import hmac")
-    extra = ("\n".join(need) + "\n") if need else ""
-
-    out = src.replace(ANCHOR, extra + BLOCK.lstrip("\n") + "\n" + ANCHOR, 1)
+    out = src.replace(ANCHOR, BLOCK.lstrip("\n") + "\n" + ANCHOR, 1)
 
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False,
                                      encoding="utf-8") as t:
@@ -282,8 +278,6 @@ def main():
     TARGET.write_text(out, encoding="utf-8")
     print("✅ הוחל.")
     print(f"   גיבוי: {os.path.basename(bak)}")
-    if need:
-        print("   נוספו ייבואים: " + ", ".join(need))
     print()
     print("   הגדר קוד:  systemctl edit zovex-bot   →  Environment=UPLOAD_PANEL_CODE=…")
     print("   הרץ:       systemctl restart zovex-bot")
