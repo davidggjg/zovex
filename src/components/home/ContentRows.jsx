@@ -251,28 +251,50 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
       onClick={e => { e.preventDefault(); handleItemClick(displayItem, isSer); }}
       style={{
         position: "relative", margin: "6px 14px 16px", borderRadius: 16, overflow: "hidden",
-        cursor: "pointer", height: 170, background: "#111",
+        cursor: "pointer", height: 186, background: "#111",
         opacity: visible ? 1 : 0, transition: "opacity .35s ease",
         display: "block", textDecoration: "none", color: "inherit",
       }}
     >
+      {/* שתי שכבות של אותה תמונה. הגרסה הקודמת מתחה פוסטר לגובה לתוך מלבן
+          רחב ונמוך עם objectFit: cover, כלומר הדפדפן חתך ממנו פס אופקי
+          מהאמצע — הראש והכיתוב נעלמו. עכשיו הפוסטר מוצג בשלמותו ביחס
+          הטבעי שלו, ואותה תמונה מטושטשת ממלאת את הרקע מאחוריו. */}
       {movie.thumbnail_url && (
         <img
-          src={movie.thumbnail_url} alt={title}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+          src={movie.thumbnail_url} alt=""
+          aria-hidden="true"
+          style={{
+            position: "absolute", inset: 0, width: "100%", height: "100%",
+            objectFit: "cover", filter: "blur(20px) saturate(130%)",
+            transform: "scale(1.15)",
+          }}
         />
       )}
-      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(0,0,0,.88), rgba(0,0,0,.1) 65%)" }} />
-      <div style={{ position: "absolute", top: 10, right: 10, background: "#e50914", color: "#fff", fontSize: 11, fontWeight: 800, padding: "3px 10px", borderRadius: 20 }}>
-        עלה עכשיו
-      </div>
-      <div style={{ position: "absolute", bottom: 12, right: 14, left: 14 }}>
-        <div style={{ color: "#fff", fontSize: 17, fontWeight: 800 }}>{title}</div>
-        {!!movie.description && (
-          <div style={{ color: "#ddd", fontSize: 12, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {movie.description}
-          </div>
+      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to left, rgba(0,0,0,.55), rgba(0,0,0,.82))" }} />
+
+      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 14, height: "100%", padding: 14 }}>
+        {movie.thumbnail_url && (
+          <img
+            src={movie.thumbnail_url} alt={title}
+            style={{
+              height: "100%", width: "auto", flexShrink: 0,
+              objectFit: "contain", borderRadius: 10,
+              boxShadow: "0 6px 20px rgba(0,0,0,.55)",
+            }}
+          />
         )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "inline-block", background: "#e50914", color: "#fff", fontSize: 11, fontWeight: 800, padding: "3px 10px", borderRadius: 20, marginBottom: 8 }}>
+            עלה עכשיו
+          </span>
+          <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
+          {!!movie.description && (
+            <div style={{ color: "#ccc", fontSize: 12, marginTop: 5, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+              {movie.description}
+            </div>
+          )}
+        </div>
       </div>
     </a>
   );
