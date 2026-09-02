@@ -11,7 +11,10 @@ const ROOT = path.resolve(__dirname, "..");
 const MOVIES_PATH = path.join(ROOT, "public", "movies.json");
 const SITEMAP_PATH = path.join(ROOT, "public", "sitemap.xml");
 
-const SITE_URL = "https://davidggjg.github.io/zovex";
+// build:vps כבר מייצא SITE_URL, אבל איש לא קרא אותו — הערך היה
+// מקודד קשיח, והדפים שנוצרו הצביעו על אתר ה-GitHub Pages שנסגר.
+const SITE_URL = process.env.SITE_URL || "https://zovex.duckdns.org";
+const CATALOG_URL = process.env.CATALOG_URL || "https://zovex.duckdns.org/content/lite";
 
 function slugifyMovie(movie) {
   if (movie.custom_slug) return movie.custom_slug;
@@ -47,25 +50,37 @@ function buildUrls(movies) {
   return Array.from(urls);
 }
 
-function generateSitemap() {
-  if (!fs.existsSync(MOVIES_PATH)) {
-    console.warn("[sitemap] movies.json not found, skipping sitemap generation.");
-    return;
+// טעינת הקטלוג. עד עכשיו, קובץ חסר גרם ל"skipping" שקט — והבנייה הצליחה
+// והפיקה dist בלי אף דף ייעודי. מכיוון שהפריסה מוחקת את כל תיקיית האתר
+// לפני שהיא פורסת, בנייה כזאת מוחקת בשקט אלפי דפי נחיתה מגוגל. לכן אם
+// הקובץ המקומי חסר, מושכים את הקטלוג מהאתר החי במקום לוותר.
+async function loadCatalog(tag) {
+  if (fs.existsSync(MOVIES_PATH)) {
+    try {
+      const arr = JSON.parse(fs.readFileSync(MOVIES_PATH, "utf-8"));
+      if (Array.isArray(arr)) return arr;
+      console.warn(`[${tag}] movies.json אינו מערך — מנסה למשוך מהאתר`);
+    } catch (e) {
+      console.warn(`[${tag}] movies.json פגום (${e.message}) — מנסה למשוך מהאתר`);
+    }
   }
-
-  const raw = fs.readFileSync(MOVIES_PATH, "utf-8");
-  let movies;
   try {
-    movies = JSON.parse(raw);
+    console.log(`[${tag}] מושך קטלוג מ-${CATALOG_URL}`);
+    const res = await fetch(CATALOG_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arr = await res.json();
+    if (!Array.isArray(arr)) throw new Error("התשובה אינה מערך");
+    console.log(`[${tag}] התקבלו ${arr.length} פריטים`);
+    return arr;
   } catch (e) {
-    console.error("[sitemap] Failed to parse movies.json:", e.message);
-    return;
+    console.error(`[${tag}] לא ניתן לטעון קטלוג: ${e.message}`);
+    return null;
   }
+}
 
-  if (!Array.isArray(movies)) {
-    console.warn("[sitemap] movies.json is not an array, skipping.");
-    return;
-  }
+async function generateSitemap() {
+  const movies = await loadCatalog("sitemap");
+  if (!movies) return;
 
   const paths = buildUrls(movies);
   const today = new Date().toISOString().split("T")[0];
@@ -88,4 +103,4 @@ function generateSitemap() {
   console.log(`[sitemap] Generated sitemap.xml with ${paths.length} URLs.`);
 }
 
-generateSitemap();
+await generateSitemap();
