@@ -32,7 +32,9 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
           שהכרטיס שהשלט עומד עליו ייראה שונה מהשאר. */}
       <div className="zv-card__art" style={{ width: cardW, height: cardH, background: isLive ? "#1a1a1a" : "#1c1c1e", border: isLive ? "2px solid #e50914" : "1px solid rgba(255,255,255,0.07)" }}>
         {isLive && item.thumbnail_url ? (
-          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
+          // contain ולא cover: לוגו ערוץ חייב להיראות במלואו. הרקע הרדיאלי
+          // ממלא את השוליים שנוצרים סביבו כשיחס הלוגו אינו 16:9.
+          <img src={item.thumbnail_url} alt={title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", padding: 12, display: "block", background: "radial-gradient(circle at 50% 38%, #24242c 0%, #131316 100%)" }} onError={e => e.target.style.display = "none"} />
         ) : isLive ? (
           <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "linear-gradient(135deg,#1a1a1a,#2a0a0c)" }}>
             <Eye size={30} color="#e50914" strokeWidth={2} />
@@ -64,8 +66,11 @@ const ROW_PAGE_SIZE = 20;
 
 function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
   const rowRef = React.useRef(null);
-  const cardW = isDesktop ? 170 : 130;
-  const cardH = isDesktop ? 240 : 185;
+  // ערוץ חי אינו פוסטר. הלוגו שלו ריבועי או רוחבי, ומלבן 2:3 עם
+  // objectFit: cover חתך אותו — זה מה שנראה כמו "מפוצל לחצי, לא רואים
+  // כלום". אריח 16:9 מתאים לצורת הלוגו, ושאר הכרטיסים גדלו מעט.
+  const cardW = isLiveRow ? (isDesktop ? 250 : 192) : (isDesktop ? 184 : 143);
+  const cardH = isLiveRow ? (isDesktop ? 141 : 108) : (isDesktop ? 260 : 202);
   const [visibleCount, setVisibleCount] = React.useState(ROW_PAGE_SIZE);
 
   // הרשימה עצמה משתנה (חיפוש/קטגוריה) - איפוס לדף הראשון בכל פעם שהתוכן משתנה
@@ -97,12 +102,12 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
       <div style={{ padding: "0 16px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {isLiveRow && <Eye size={16} color="#e50914" />}
-          <h2 style={{ fontSize: isDesktop ? 18 : 16, fontWeight: 900, color: "#fff", margin: 0 }}>{title}</h2>
+          <h2 style={{ fontSize: isDesktop ? 21 : 18, fontWeight: 900, color: "#fff", margin: 0, letterSpacing: "-0.3px" }}>{title}</h2>
           <span style={{ fontSize: 12, color: "#888" }}>({items.length})</span>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={() => scroll("right")} style={{ background: "#1a1a1a", border: "1px solid #333", color: "#fff", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>›</button>
-          <button onClick={() => scroll("left")} style={{ background: "#1a1a1a", border: "1px solid #333", color: "#fff", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>‹</button>
+          <button onClick={() => scroll("right")} style={{ background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", color: "#fff", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, boxShadow: "0 2px 10px rgba(0,0,0,0.35)" }}>›</button>
+          <button onClick={() => scroll("left")} style={{ background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", color: "#fff", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, boxShadow: "0 2px 10px rgba(0,0,0,0.35)" }}>‹</button>
         </div>
       </div>
       {/* הcarousel */}

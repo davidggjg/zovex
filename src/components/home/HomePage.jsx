@@ -44,7 +44,7 @@ export default function HomePage({
           <h1
             onClick={onLogoClick}
             style={{ color: "#e50914", fontSize: 26, fontWeight: 900, letterSpacing: 4, margin: 0, flexShrink: 0, cursor: "pointer" }}>ZOVEX</h1>
-          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.06)", padding: "9px 14px", borderRadius: 50, border: "1px solid #333" }}>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", padding: "10px 15px", borderRadius: 50 }}>
             <Search size={16} color="#888" />
             <input type="text" placeholder="חפש סרט או סדרה..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} style={{ background: "none", border: "none", outline: "none", width: "100%", fontSize: 15, color: "#fff" }} />
             {searchTerm && <span onClick={() => setSearchTerm("")} style={{ cursor: "pointer", color: "#888", fontSize: 18 }}>×</span>}
@@ -124,7 +124,7 @@ export default function HomePage({
         <div style={{ paddingBottom: 11 }}>
           <button
             onClick={() => setShowCatModal(true)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", background: "#1a1a1a", border: "1px solid #333", borderRadius: 14, padding: "13px 16px", cursor: "pointer", fontFamily: "inherit" }}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 16, padding: "14px 16px", cursor: "pointer", fontFamily: "inherit" }}
           >
             <span style={{ fontSize: 14, fontWeight: 800, color: "#fff", display: "flex", alignItems: "center", gap: 6 }}>
               {selectedCategory === "שידורים חיים" && <Eye size={14} color="#e50914" />}
