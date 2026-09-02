@@ -43,10 +43,16 @@ export default function AmbientGlow({ seed }) {
     // הערכים מכוילים מול הדמיה פיקסלית של מה שהדפדפן מצייר בפועל. הגרסה
     // הראשונה (אלפא 0.5/0.38/0.32 עם החשכה 0.62→0.90) יצאה כמעט שחורה
     // לגמרי — שכבת ההחשכה בלעה את כל הצבע ולא נשאר שום אפקט.
+    // המידות ב-vmax ולא ב-vw, וזה תיקון ולא העדפה: vw הוא אחוז מ*רוחב*
+    // המסך, ובטלפון (390 רוחב על 844 גובה) כתם של 78vw הוא 304 פיקסלים
+    // בלבד על מסך בגובה 844 — כיסוי של שליש, שאחרי טשטוש של 72 פיקסלים
+    // כמעט נעלם. בדסקטופ אותו ערך הוא 1123 פיקסלים ונראה מצוין, ולכן
+    // הכיול המקורי (שנעשה בפרופורציות של מסך רחב) הטעה. vmax נמדד לפי
+    // הצלע הגדולה, כך שהאפקט זהה בשני המקרים.
     return [
-      { hue: h, top: "-14%", left: "-10%", size: "78vw", a: 0.62, dur: "26s", delay: "0s" },
-      { hue: (h + 38) % 360, top: "26%", left: "52%", size: "68vw", a: 0.5, dur: "34s", delay: "-8s" },
-      { hue: (h + 320) % 360, top: "68%", left: "4%", size: "72vw", a: 0.44, dur: "30s", delay: "-16s" },
+      { hue: h, top: "-18%", left: "-14%", size: "82vmax", a: 0.66, dur: "26s", delay: "0s" },
+      { hue: (h + 38) % 360, top: "22%", left: "44%", size: "74vmax", a: 0.54, dur: "34s", delay: "-8s" },
+      { hue: (h + 320) % 360, top: "62%", left: "-6%", size: "78vmax", a: 0.48, dur: "30s", delay: "-16s" },
     ];
   }, [seed]);
 
@@ -59,7 +65,9 @@ export default function AmbientGlow({ seed }) {
         zIndex: 0,
         pointerEvents: "none",
         overflow: "hidden",
-        background: "#0a0a0a",
+        // לא #0a0a0a אחיד. שחור שטוח לחלוטין הוא מה שגורם למסך להיראות
+        // "ריק"; מדרג עדין לכחלחל־כהה נותן עומק עוד לפני שהצבע נכנס.
+        background: "linear-gradient(170deg, #101018 0%, #0b0b10 40%, #08080b 100%)",
       }}
     >
       {blobs.map((b, i) => (
@@ -90,7 +98,7 @@ export default function AmbientGlow({ seed }) {
           position: "absolute",
           inset: 0,
           background:
-            "linear-gradient(180deg, rgba(10,10,10,0.34) 0%, rgba(10,10,10,0.47) 45%, rgba(10,10,10,0.6) 100%)",
+            "linear-gradient(180deg, rgba(8,8,11,0.26) 0%, rgba(8,8,11,0.42) 45%, rgba(8,8,11,0.58) 100%)",
         }}
       />
     </div>
