@@ -127,15 +127,30 @@ def read_journal(minutes):
 
     counts = Counter()
     reqs = []
+    errors = Counter()
+    churn = defaultdict(Counter)      # דקה → {נסגר, נבנה, מת}
     for line in out:
         m = REQ.search(line)
         if m:
             reqs.append((TS.match(line).group(1) if TS.match(line) else "",
                          m.group(1).split("?")[0], m.group(2)))
             continue
+        stamp = TS.match(line)
+        minute = stamp.group(1)[:-3] if stamp else ""
+        if "Session stopped" in line:
+            churn[minute]["נסגר"] += 1
+        elif "Session started" in line:
+            churn[minute]["נבנה"] += 1
+        elif "Send exception" in line or "TCPTransport closed" in line:
+            churn[minute]["מת"] += 1
         for pat, meaning in PATTERNS:
             if re.search(pat, line):
                 counts[meaning] += 1
+                if meaning.startswith("🔥"):
+                    # הטקסט עצמו, בלי החותמת והמארח — כדי שנוכל לאחד כפילויות
+                    txt = re.sub(r"^[A-Za-z]{3} \d{2} [\d:]{8} \S+ \S+?: ", "", line)
+                    txt = re.sub(r"0x[0-9a-f]+|\b\d{5,}\b", "…", txt)
+                    errors[txt.strip()[:150]] += 1
                 break
     print(f"   {len(out)} שורות ביומן · {len(reqs)} בקשות")
     print()
@@ -146,14 +161,38 @@ def read_journal(minutes):
         print("   שום דבר ביומן שמסביר תקיעה.")
         print("   זה ממצא בפני עצמו: אף רכיב לא דיווח על תקלה, כלומר")
         print("   ההמתנה היא לטלגרם והיא לא מרימה שגיאה בכלל.")
+    if errors:
+        print()
+        print("   מה השגיאות אומרות בפועל:")
+        for txt, c in errors.most_common(8):
+            print(f"   {c:5}×  {txt}")
+
+    if churn:
+        rows = sorted(churn.items())
+        interesting = [r for r in rows if sum(r[1].values()) > 0]
+        if interesting:
+            print()
+            print("   מחזור החיבורים, לפי דקה:")
+            print("        דקה        נסגר   נבנה    מת")
+            for minute, c in interesting[-10:]:
+                print(f"   {minute:>14}  {c['נסגר']:6} {c['נבנה']:6} {c['מת']:5}")
+            tot_stop = sum(c["נסגר"] for _, c in rows)
+            tot_start = sum(c["נבנה"] for _, c in rows)
+            if tot_stop > 50 and tot_stop > tot_start * 1.3:
+                print()
+                print(f"   ⚠️  נסגרו {tot_stop} וניבנו {tot_start} — נסגרים מהר")
+                print("       יותר ממה שנבנים. הבריכה מתכווצת בזמן אמת.")
     return counts, reqs
 
 
 def read_gaps(reqs):
     print()
     print("─" * 62)
-    print("3 · פערים בין בקשות — איפה הנגן חיכה")
+    print("3 · פערים בין בקשות")
     print("─" * 62)
+    print("   ⚠️  /stream מחזיר תשובה מזרימה: בקשה אחת יכולה לרוץ חצי שעה")
+    print("       בלי לרשום עוד שורה. לכן פער כאן אינו תקיעה — הוא רק אומר")
+    print("       שלא התחילה בקשה חדשה. לקריאה בלבד, לא כראיה.")
     if not reqs:
         print("   אין בקשות בחלון הזה. הנגן לא ביקש כלום —")
         print("   כלומר הוא לא הגיע לשרת בכלל.")
@@ -199,10 +238,9 @@ def verdict(times, counts, gaps):
     if times and not slow and max(times) < 2:
         print("   השרת עונה מהר **עכשיו** ({:.1f}ש' הכי גרוע).".format(max(times)))
         if gaps:
-            print("   אבל היו פערי שקט בבקשות — כלומר התקיעה כבר עברה,")
-            print("   או שהיא בייצור תשובה מסוימת ולא במשיכה הכללית.")
+            print("   (הפערים בסעיף 3 אינם ראיה — ראה האזהרה שם.)")
+            print()
         else:
-            print("   ולא נמצאו פערים בבקשות.")
             print()
             print("   ⇒ המשיכה מטלגרם תקינה. אם ראית תקיעה בזמן הזה, היא")
             print("     אצל הצופה — קליטה, נגן, או המכשיר. זה מוציא את")
