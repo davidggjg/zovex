@@ -146,10 +146,22 @@ def read_journal(minutes):
                 continue
             # השורה הראשונה שאינה מוזחת היא החריגה עצמה — כאן ה-traceback נגמר
             exc = re.sub(r"0x[0-9a-f]+|\b\d{6,}\b", "…", body.strip())[:120]
-            mine = ""
+            # שם הקובץ האמיתי, לא תווית קבועה. הגרסה הקודמת הדפיסה
+            # "main.py:" לכל מסגרת שהנתיב שלה הכיל "zovex" — וזה תופס גם
+            # ספריות שמותקנות תחת /opt/zovex-bot/venv. כך שורות של pyrogram
+            # הוצגו כאילו הן הקוד שלנו.
+            ours, last = "", ""
             for fr in FRAME.finditer("\n".join(tb_lines)):
-                if "main.py" in fr.group(1) or "zovex" in fr.group(1):
-                    mine = f"main.py:{fr.group(2)} ב-{fr.group(3)}"
+                path, ln, fn = fr.group(1), fr.group(2), fr.group(3)
+                base = path.rsplit("/", 1)[-1]
+                lib = ""
+                for marker in ("site-packages/", "dist-packages/"):
+                    if marker in path:
+                        lib = path.split(marker, 1)[1].split("/")[0]
+                last = f"{base}:{ln} ב-{fn}" + (f"   [{lib}]" if lib else "")
+                if base == "main.py" and "packages/" not in path:
+                    ours = f"main.py:{ln} ב-{fn}"
+            mine = ours or (last + ("  ← לא הקוד שלנו" if "[" in last else ""))
             tracebacks[(exc, mine)] += 1
             in_tb, tb_lines = False, []
             # ממשיכים לסווג את השורה הזאת כרגיל
@@ -302,13 +314,44 @@ def verdict(times, counts, gaps):
     print("─" * 62)
 
 
+def dump_full(minutes, n):
+    """N שגיאות במלואן, כלשונן. ספירה לא מספיקה כדי לדעת מי קרא למי."""
+    out = subprocess.run(
+        ["journalctl", "-u", "zovex-bot", "--since", f"{minutes} min ago",
+         "--no-pager", "-o", "short"],
+        capture_output=True, text=True).stdout.splitlines()
+    shown, block, inside = 0, [], False
+    for raw in out:
+        body = PREFIX.sub("", raw)
+        if inside:
+            block.append(body)
+            if not body.startswith(("  ", "\t")) and not body.startswith("Traceback"):
+                print("═" * 62)
+                print("\n".join(block))
+                print()
+                shown += 1
+                inside, block = False, []
+                if shown >= n:
+                    return
+        elif "Traceback (most recent call last)" in body:
+            inside, block = True, [body]
+    if not shown:
+        print(f"לא נמצאה אף שגיאה ב-{minutes} הדקות האחרונות.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--min", type=int, default=3, help="כמה דקות אחורה")
     ap.add_argument("--movie", default=DEFAULT_MOVIE)
+    ap.add_argument("--full", type=int, default=0, metavar="N",
+                    help="להדפיס N שגיאות במלואן, כלשונן. זה מה שמראה "
+                         "את שרשרת הקריאות שהובילה לשגיאה.")
     a = ap.parse_args()
     print()
     print(f"למה זה נתקע — {time.strftime('%H:%M:%S')}")
+    if a.full:
+        dump_full(a.min, a.full)
+        return
     times = measure_now(a.movie)
     counts, reqs = read_journal(a.min)
     gaps = read_gaps(reqs) if reqs is not None else []
