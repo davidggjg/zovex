@@ -144,6 +144,11 @@ def read_journal(minutes):
 
     counts = Counter()
     reqs = []
+    # כל שורה, לא רק מה שסיווגנו. בריצה בשרת 22,750 שורות ב-5 דקות הסתכמו
+    # ב-5,000 מסווגות — כלומר 17,000 שורות שאיש לא הסתכל עליהן. כתיבה ליומן
+    # היא פעולה סינכרונית, והתיעוד של Pyrogram מונה "חסימת לולאת האירועים"
+    # כאחת משתי הסיבות לשגיאות הרשת שאנחנו רואים.
+    every = Counter()
     errors = Counter()
     tracebacks = Counter()      # (החריגה, המסגרת האחרונה ב-main.py) → כמה
     tb_lines, in_tb = [], False
@@ -188,6 +193,9 @@ def read_journal(minutes):
             reqs.append((TS.match(line).group(1) if TS.match(line) else "",
                          m.group(1).split("?")[0], m.group(2)))
             continue
+        norm = re.sub(r"\d+", "#", body).strip()[:110]
+        if norm:
+            every[norm] += 1
         stamp = TS.match(line)
         minute = stamp.group(1)[:-3] if stamp else ""
         if "Session stopped" in line:
@@ -244,6 +252,15 @@ def read_journal(minutes):
                 print()
                 print(f"   ⚠️  נסגרו {tot_stop} וניבנו {tot_start} — נסגרים מהר")
                 print("       יותר ממה שנבנים. הבריכה מתכווצת בזמן אמת.")
+    classified = sum(counts.values())
+    print()
+    print(f"   מה מציף את היומן  ({len(out)} שורות, "
+          f"{len(out) / max(minutes * 60, 1):.0f} בשנייה):")
+    for norm, c in every.most_common(12):
+        share = c * 100 / max(len(out), 1)
+        print(f"   {c:6}× ({share:4.1f}%)  {norm}")
+    print(f"   מזה מסווג כהסבר לתקיעה: {classified}")
+
     chain(counts, sum(c for (e, _), c in tracebacks.items()
                       if "shorter than Content-Length" in e))
     return counts, reqs
