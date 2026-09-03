@@ -34,8 +34,12 @@ HELPER_OLD = '''@api.post("/panel/entry-code")
 HELPER_NEW = '''# מגבלת טלגרם לפי סוג החשבון. נשמרת לשעה: is_premium אינו משתנה בתדירות
 # שמצדיקה קריאת רשת בכל בקשה.
 _saved_premium = {"at": 0.0, "premium": None}
-SAVED_LIMIT_FREE = 2 * 1024 ** 3
-SAVED_LIMIT_PREMIUM = 4 * 1024 ** 3
+# בדיוק מה ש-Pyrogram אוכף בעצמו ב-save_file:
+#     file_size_limit_mib = 4000 if self.me.is_premium else 2000
+# אלה MiB ולא GiB. ספירה ב-GiB הייתה מתירה 50MB יותר בחשבון רגיל ו-100MB
+# יותר ב-Premium, כלומר קובץ בחלון הזה היה עובר את הבדיקה כאן ונופל שם.
+SAVED_LIMIT_FREE = 2000 * 1024 * 1024
+SAVED_LIMIT_PREMIUM = 4000 * 1024 * 1024
 
 
 async def _saved_max_size():
@@ -107,7 +111,7 @@ GUARD_NEW = '''    _check_upload_code(request, request.headers.get("x-upload-cod
         if _max and _declared > _max:
             raise HTTPException(status_code=413, detail=(
                 f"הקובץ {_declared / _gb:.2f}GB, וטלגרם מגביל את החשבון הזה "
-                f"ל-{_max // _gb}GB. חשבון Premium מגיע ל-4GB."))
+                f"ל-{_max / _gb:.2f}GB. חשבון Premium מגיע ל-3.91GB."))
         _free = _saved_free_disk()
         # שוליים של חצי ג'יגה: הקובץ אינו הדבר היחיד שכותב לדיסק הזה.
         if _free and _free < _declared + 512 * 1024 * 1024:
