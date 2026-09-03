@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+מריצים **ברגע שנתקע**, ומקבלים למה.
+
+אין צורך להריץ מראש: היומן של השירות כבר שמור, ולכן אפשר להסתכל אחורה. מה
+שכן חייב להימדד עכשיו הוא המצב החי — ולכן הסקריפט גם מודד בעצמו בזמן שאתה
+עדיין תקוע.
+
+    python3 whystuck.py            # שלוש הדקות האחרונות
+    python3 whystuck.py --min 10   # עשר הדקות האחרונות
+
+מה נבדק, לפי הסדר:
+
+**1. עכשיו** — שלוש משיכות של 256KB מעומק אקראי דרך `127.0.0.1`. מדידה מלקוח
+חיצוני מוגבלת ברוחב הפס של הלקוח, ולכן חסרת ערך (מלכודת ג' ב-
+STREAMING_DIAGNOSIS.md). זה המבחן שמפריד בין "השרת תקוע" ל"הקליטה שלך".
+
+**2. אחורה ביומן** — כל מה שיכול להסביר תקיעה, מתורגם למשמעות.
+
+**3. הבקשות** — אם הנגן ביקש משהו ואז היה שקט של 40 שניות, התקיעה בייצור
+התשובה ולא ברשת של הצופה.
+
+**4. פסק דין** — מה הנתונים אומרים, ומה הם *לא* אומרים.
+
+קריאה בלבד. לא משנה כלום ולא מפעיל כלום מחדש.
+"""
+import argparse, json, random, re, shutil, subprocess, sys, time
+from collections import Counter, defaultdict
+
+LOCAL = "http://127.0.0.1:8000"
+DEFAULT_MOVIE = "-1003936100530/8967"      # ונסדיי עונה 1 פרק 1
+
+PATTERNS = [
+    (r"FloodWait", "🚦 טלגרם הגביל אותנו (FloodWait)"),
+    (r"Send exception|TCPTransport closed", "💀 חיבור מת לטלגרם"),
+    (r"Retrying", "🔁 בקשה לטלגרם לא חזרה בזמן, ניסיון נוסף"),
+    (r"נכשל סופית|ויתר", "❌ חלון נזנח אחרי כל הניסיונות"),
+    (r"חלון", "🪟 חלון נמשך מחדש"),
+    (r"קריאה-מראש", "📖 קריאה מראש"),
+    (r"choke|חנוק", "🥶 בוט נחנק והוצא מהמחזור"),
+    (r"FileReferenceExpired", "🔑 מזהה הקובץ פג ונמשך מחדש"),
+    (r"Session started", "🔌 חיבור חדש לטלגרם נבנה"),
+    (r"Session stopped", "🔻 חיבור לטלגרם נסגר"),
+    (r"🩺", "🩺 בדיקת בריאות לבריכה"),
+    (r"vodfix", "🎬 מסלול תיקון ה-VOD"),
+    (r"hls_fix", "📺 צינור הערוצים החיים"),
+    (r"Traceback|CRITICAL|ERROR", "🔥 שגיאה"),
+]
+
+REQ = re.compile(r'"(?:GET|POST) (\S+) HTTP/[\d.]+" (\d{3})')
+TS = re.compile(r"^(\w{3} \d{2} \d{2}:\d{2}:\d{2})")
+
+CURL = ["curl", "-sS", "--noproxy", "127.0.0.1"]
+
+
+def signed_url(movie):
+    """קישור חתום טרי מהקטלוג של השרת עצמו, מופנה ל-127.0.0.1."""
+    try:
+        raw = subprocess.run(CURL + ["--max-time", "60", f"{LOCAL}/movies.json"],
+                             capture_output=True).stdout
+        chat, msg = movie.split("/")
+        for m in json.loads(raw):
+            if (str(m.get("channel_id")) == chat
+                    and str(m.get("channel_msg_id")) == msg):
+                return m["video_url"].replace("https://zovex.duckdns.org", LOCAL)
+    except Exception:
+        pass
+    return f"{LOCAL}/stream/{movie}"
+
+
+def measure_now(movie, n=3):
+    print("─" * 62)
+    print("1 · מה קורה **ברגע זה** (דרך 127.0.0.1, לא דרך האינטרנט)")
+    print("─" * 62)
+    url = signed_url(movie)
+    txt = subprocess.run(CURL + ["-D", "-", "-o", "/dev/null", "--max-time", "40",
+                                 "-H", "Range: bytes=0-1", url],
+                         capture_output=True, text=True).stdout
+    size = None
+    for l in txt.splitlines():
+        if l.lower().startswith("content-range"):
+            try:
+                size = int(l.rsplit("/", 1)[1])
+            except ValueError:
+                pass
+    if not size:
+        print("   ❌ אין תשובה מ-127.0.0.1:8000.")
+        print("      או שהשירות למטה (systemctl status zovex-bot),")
+        print("      או שאתה לא מריץ את זה על השרת עצמו.")
+        return []
+    times = []
+    for i in range(n):
+        off = random.randint(0, max(0, size - 300000))
+        r = subprocess.run(
+            CURL + ["-o", "/dev/null", "--max-time", "90",
+                    "-w", "%{time_starttransfer} %{http_code} %{size_download}",
+                    "-H", f"Range: bytes={off}-{off + 262143}", url],
+            capture_output=True, text=True)
+        p = r.stdout.split()
+        try:
+            ttfb = float(p[0]); code = p[1]; got = int(p[2])
+        except (IndexError, ValueError):
+            ttfb, code, got = 999.0, "?", 0
+        times.append(ttfb)
+        mark = "🛑" if (ttfb >= 6 or got == 0) else ("⚠️" if ttfb >= 2 else "✓")
+        print(f"   {mark} {ttfb:6.1f} שניות   עומק {off / size * 100:3.0f}%"
+              f"   קוד {code}   {got // 1024}KB")
+    return times
+
+
+def read_journal(minutes):
+    print()
+    print("─" * 62)
+    print(f"2 · מה היומן אומר על {minutes} הדקות האחרונות")
+    print("─" * 62)
+    if not shutil.which("journalctl"):
+        print("   ❌ אין journalctl")
+        return None, None
+    out = subprocess.run(
+        ["journalctl", "-u", "zovex-bot", "--since", f"{minutes} min ago",
+         "--no-pager", "-o", "short"],
+        capture_output=True, text=True).stdout.splitlines()
+    if not out:
+        print("   היומן ריק לחלון הזה.")
+        return Counter(), []
+
+    counts = Counter()
+    reqs = []
+    for line in out:
+        m = REQ.search(line)
+        if m:
+            reqs.append((TS.match(line).group(1) if TS.match(line) else "",
+                         m.group(1).split("?")[0], m.group(2)))
+            continue
+        for pat, meaning in PATTERNS:
+            if re.search(pat, line):
+                counts[meaning] += 1
+                break
+    print(f"   {len(out)} שורות ביומן · {len(reqs)} בקשות")
+    print()
+    if counts:
+        for meaning, c in counts.most_common(14):
+            print(f"   {c:5}×  {meaning}")
+    else:
+        print("   שום דבר ביומן שמסביר תקיעה.")
+        print("   זה ממצא בפני עצמו: אף רכיב לא דיווח על תקלה, כלומר")
+        print("   ההמתנה היא לטלגרם והיא לא מרימה שגיאה בכלל.")
+    return counts, reqs
+
+
+def read_gaps(reqs):
+    print()
+    print("─" * 62)
+    print("3 · פערים בין בקשות — איפה הנגן חיכה")
+    print("─" * 62)
+    if not reqs:
+        print("   אין בקשות בחלון הזה. הנגן לא ביקש כלום —")
+        print("   כלומר הוא לא הגיע לשרת בכלל.")
+        return []
+    def secs(t):
+        try:
+            h, m, s = t.split()[-1].split(":")
+            return int(h) * 3600 + int(m) * 60 + int(s)
+        except Exception:
+            return None
+    gaps = []
+    for i in range(1, len(reqs)):
+        a, b = secs(reqs[i - 1][0]), secs(reqs[i][0])
+        if a is None or b is None:
+            continue
+        d = b - a
+        if d < 0:
+            d += 86400
+        if d >= 15:
+            gaps.append((d, reqs[i - 1], reqs[i]))
+    if not gaps:
+        print("   אין פער מעל 15 שניות. הבקשות זרמו ברצף.")
+    else:
+        for d, before, after in sorted(gaps, reverse=True)[:8]:
+            print(f"   🕳️  {d:4} שניות שקט")
+            print(f"        אחרי:  {before[0]}  {before[1]} → {before[2]}")
+            print(f"        ואז:   {after[0]}  {after[1]} → {after[2]}")
+    bad = [r for r in reqs if r[2] not in ("200", "206", "304")]
+    if bad:
+        print()
+        print(f"   בקשות שנכשלו ({len(bad)}):")
+        for t, path, code in bad[-8:]:
+            print(f"      {t}  {path} → {code}")
+    return gaps
+
+
+def verdict(times, counts, gaps):
+    print()
+    print("─" * 62)
+    print("4 · פסק דין")
+    print("─" * 62)
+    slow = [t for t in times if t >= 6]
+    if times and not slow and max(times) < 2:
+        print("   השרת עונה מהר **עכשיו** ({:.1f}ש' הכי גרוע).".format(max(times)))
+        if gaps:
+            print("   אבל היו פערי שקט בבקשות — כלומר התקיעה כבר עברה,")
+            print("   או שהיא בייצור תשובה מסוימת ולא במשיכה הכללית.")
+        else:
+            print("   ולא נמצאו פערים בבקשות.")
+            print()
+            print("   ⇒ המשיכה מטלגרם תקינה. אם ראית תקיעה בזמן הזה, היא")
+            print("     אצל הצופה — קליטה, נגן, או המכשיר. זה מוציא את")
+            print("     השרת מהחשד, וזו תשובה שווה בדיוק כמו כל אחרת.")
+    elif slow:
+        print(f"   השרת איטי **עכשיו**: {len(slow)} מתוך {len(times)} מדידות "
+              f"מעל 6 שניות, הגרועה {max(times):.1f}.")
+        print()
+        print("   ⇒ התקיעה בשרת, והיא חיה ברגע זה. מה שרשום בסעיף 2 הוא")
+        print("     ההסבר — תשלח לי את זה.")
+    else:
+        print("   לא הצלחתי למדוד. תסתכל בסעיף 2.")
+
+    if counts:
+        dead = sum(c for k, c in counts.items() if "חיבור מת" in k)
+        started = sum(c for k, c in counts.items() if "חיבור חדש" in k)
+        if dead > 20 and started == 0:
+            print()
+            print(f"   ⚠️  {dead} חיבורים מתים ו-{started} חיבורים חדשים.")
+            print("      חיבורים מתים ואף אחד לא בונה אותם מחדש — זה")
+            print("      החשוד המרכזי שנשאר פתוח ב-STREAMING_DIAGNOSIS.md.")
+    print("─" * 62)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--min", type=int, default=3, help="כמה דקות אחורה")
+    ap.add_argument("--movie", default=DEFAULT_MOVIE)
+    a = ap.parse_args()
+    print()
+    print(f"למה זה נתקע — {time.strftime('%H:%M:%S')}")
+    times = measure_now(a.movie)
+    counts, reqs = read_journal(a.min)
+    gaps = read_gaps(reqs) if reqs is not None else []
+    verdict(times, counts or Counter(), gaps)
+    print()
+
+
+if __name__ == "__main__":
+    main()
