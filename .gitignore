@@ -10,3 +10,5 @@ __pycache__/
 backups/
 discord-bot/
 tgbot/
+vps-bot/audio_scan.json
+vps-bot/audio_fix_state.json
