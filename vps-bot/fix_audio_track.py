@@ -109,17 +109,54 @@ def size_of(url):
     return None
 
 
-def download(url, dst, expect):
+def download(url, dst, expect, rate="5M", tries=40, verbose=True):
+    """מוריד עם המשכיות.
+
+    הורדה רצופה אחת של קובץ 1.6GB מ-/stream נסגרת באמצע (נמדד: curl 18 אחרי
+    206MB). זה לא באג בהורדה — זו אותה נפילת חלון שמפילה גם צופה. לכן במקום
+    להיכשל, ממשיכים מאותה נקודה בבקשת Range. כל ניסיון שמתקדם מאפס את מונה
+    הכישלונות; רק חוסר התקדמות נחשב כישלון אמיתי.
+
+    הקצב מוגבל כברירת מחדל: כל משיכת רקע מטלגרם נגזלת ישירות מהצופים
+    (STREAMING_DIAGNOSIS.md, מלכודת ב').
+    """
     t0 = time.time()
-    r = subprocess.run(["curl", "-sS", "--fail", "--max-time", "5400",
-                        "-o", str(dst), url], capture_output=True, text=True)
-    if r.returncode != 0:
-        return False, f"curl {r.returncode}: {r.stderr.strip()[:200]}"
-    got = dst.stat().st_size if dst.exists() else 0
+    stuck = 0
+    last_err = ""
+    while True:
+        have = dst.stat().st_size if dst.exists() else 0
+        if expect and have >= expect:
+            break
+        cmd = ["curl", "-sS", "--max-time", "3600", "--connect-timeout", "20",
+               "-C", "-", "-o", str(dst), url]
+        if rate and rate != "0":
+            cmd[1:1] = ["--limit-rate", rate]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        now = dst.stat().st_size if dst.exists() else 0
+        if expect and now >= expect:
+            break
+        if now > have:
+            stuck = 0
+            if verbose:
+                print(f"      המשך מ-{now / 1048576:.0f}MB "
+                      f"מתוך {(expect or 0) / 1048576:.0f}MB", flush=True)
+        else:
+            stuck += 1
+            last_err = (r.stderr.strip() or f"curl {r.returncode}")[:160]
+            if stuck >= 6:
+                return False, (f"נתקע על {now / 1048576:.0f}MB מתוך "
+                               f"{(expect or 0) / 1048576:.0f}MB — {last_err}")
+            time.sleep(min(60, 3 * 2 ** (stuck - 1)))
+        tries -= 1
+        if tries <= 0:
+            return False, f"יותר מדי ניסיונות, נעצר על {now / 1048576:.0f}MB"
+
+    got = dst.stat().st_size
     if expect and got != expect:
-        return False, f"הורדה חלקית: {got} מתוך {expect} בייט"
-    dt = time.time() - t0
-    return True, f"{got / 1048576:.0f}MB ב-{dt / 60:.1f} דק' ({got / 1048576 / max(dt, 1):.1f} MB/s)"
+        return False, f"גודל לא תואם: {got} מול {expect}"
+    dt = max(time.time() - t0, 1)
+    return True, (f"{got / 1048576:.0f}MB ב-{dt / 60:.1f} דק' "
+                  f"({got / 1048576 / dt:.1f} MB/s)")
 
 
 def sub_args(path):
@@ -186,6 +223,9 @@ def main():
     ap.add_argument("--id", action="append", default=[], help="פריט בודד לפי id")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--bitrate", default="192k")
+    ap.add_argument("--rate", default="5M",
+                    help="תקרת קצב הורדה. כל משיכת רקע מטלגרם נגזלת מהצופים. "
+                         "0 = בלי הגבלה.")
     ap.add_argument("--delete-old", action="store_true",
                     help="למחוק את ההודעה הישנה בטלגרם. בלי זה היא נשארת.")
     ap.add_argument("--dry-run", action="store_true")
@@ -261,10 +301,12 @@ def main():
 
         raw = WORK / f"{iid}.src.mp4"
         out = WORK / f"{iid}.aac.mp4"
-        for p in (raw, out):
-            p.unlink(missing_ok=True)
+        # קובץ מקור חלקי מריצה קודמת נשמר בכוונה — ההורדה ממשיכה ממנו.
+        out.unlink(missing_ok=True)
+        if raw.exists() and n and raw.stat().st_size > n:
+            raw.unlink()      # גדול מהמקור = שארית של קובץ אחר
 
-        good, msg = download(url, raw, n)
+        good, msg = download(url, raw, n, a.rate)
         print(f"   הורדה: {msg}", flush=True)
         if not good:
             fail += 1
