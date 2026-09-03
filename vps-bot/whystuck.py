@@ -50,6 +50,10 @@ PATTERNS = [
 
 REQ = re.compile(r'"(?:GET|POST) (\S+) HTTP/[\d.]+" (\d{3})')
 TS = re.compile(r"^(\w{3} \d{2} \d{2}:\d{2}:\d{2})")
+# journald מקדים לכל שורה חותמת, מארח ושם התהליך. בלי להסיר אותה, ההזחה
+# של ה-traceback לא נראית ואי אפשר לזהות איפה הוא נגמר.
+PREFIX = re.compile(r"^\w{3} \d{2} [\d:]{8} \S+ [^:]+?(?:\[\d+\])?: ")
+FRAME = re.compile(r'File "([^"]+)", line (\d+), in (\S+)')
 
 CURL = ["curl", "-sS", "--noproxy", "127.0.0.1"]
 
@@ -128,8 +132,32 @@ def read_journal(minutes):
     counts = Counter()
     reqs = []
     errors = Counter()
+    tracebacks = Counter()      # (החריגה, המסגרת האחרונה ב-main.py) → כמה
+    tb_lines, in_tb = [], False
     churn = defaultdict(Counter)      # דקה → {נסגר, נבנה, מת}
-    for line in out:
+    for raw in out:
+        line = raw
+        body = PREFIX.sub("", raw)
+
+        # ── איסוף traceback שלם ─────────────────────────────────────────
+        if in_tb:
+            if body.startswith(("  ", "\t")) or body.startswith("Traceback"):
+                tb_lines.append(body)
+                continue
+            # השורה הראשונה שאינה מוזחת היא החריגה עצמה — כאן ה-traceback נגמר
+            exc = re.sub(r"0x[0-9a-f]+|\b\d{6,}\b", "…", body.strip())[:120]
+            mine = ""
+            for fr in FRAME.finditer("\n".join(tb_lines)):
+                if "main.py" in fr.group(1) or "zovex" in fr.group(1):
+                    mine = f"main.py:{fr.group(2)} ב-{fr.group(3)}"
+            tracebacks[(exc, mine)] += 1
+            in_tb, tb_lines = False, []
+            # ממשיכים לסווג את השורה הזאת כרגיל
+        elif "Traceback (most recent call last)" in body:
+            in_tb, tb_lines = True, [body]
+            counts["🔥 שגיאה"] += 1
+            continue
+
         m = REQ.search(line)
         if m:
             reqs.append((TS.match(line).group(1) if TS.match(line) else "",
@@ -161,10 +189,19 @@ def read_journal(minutes):
         print("   שום דבר ביומן שמסביר תקיעה.")
         print("   זה ממצא בפני עצמו: אף רכיב לא דיווח על תקלה, כלומר")
         print("   ההמתנה היא לטלגרם והיא לא מרימה שגיאה בכלל.")
-    if errors:
+    if tracebacks:
         print()
-        print("   מה השגיאות אומרות בפועל:")
-        for txt, c in errors.most_common(8):
+        print("   השגיאות עצמן — מה נזרק ואיפה:")
+        for (exc, mine), c in tracebacks.most_common(8):
+            print(f"   {c:5}×  {exc}")
+            if mine:
+                print(f"          └─ {mine}")
+    leftovers = {t: c for t, c in errors.items()
+                 if "Traceback" not in t and t.strip()}
+    if leftovers:
+        print()
+        print("   שורות שגיאה נוספות:")
+        for txt, c in sorted(leftovers.items(), key=lambda kv: -kv[1])[:6]:
             print(f"   {c:5}×  {txt}")
 
     if churn:
