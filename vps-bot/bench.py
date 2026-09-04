@@ -97,7 +97,7 @@ def main():
     n = a.mb * 1024 * 1024
     print(f"{a.runs} דגימות של {a.mb}MB, אופסטים אקראיים, {len(files)} קבצים"
           + (f"  [{a.label}]" if a.label else ""))
-    stall = args.stall
+    stall = a.stall
     print("תקיעה = מעל %.0f שניות\n" % stall, flush=True)
 
     times, stalls, errs = [], 0, 0
