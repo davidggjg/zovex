@@ -708,6 +708,80 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     video.addEventListener("pause", onPause);
     video.addEventListener("ended", onEnded);
 
+    // ── שומר-סף לתקיעה ────────────────────────────────────────────────────
+    // כשחלון לא מסתיים בזמן, השרת מסיים את התשובה באמצע *במכוון*. ההערה
+    // בקוד השרת אומרת "הנגן לא שורד שתיקה ארוכה, אבל כן מתאושש מתשובה
+    // קטועה" — וזה נכון ל-ExoPlayer שבאפליקציה, שמבקש את הטווח שוב מעצמו.
+    // דפדפן על MP4 רגיל אינו עושה זאת: הוא יורה waiting, מציג ספינר, ונשאר
+    // שם. זה ההסבר לכך שאותו סרט נתקע באתר ולא באפליקציה.
+    //
+    // נמדד בשרת: חלון או חוזר תוך שנייה-שתיים, או נזנח אחרי 30. אין אמצע.
+    // לכן חוסר התקדמות של 8 שניות פירושו כמעט תמיד שהבקשה הנוכחית אבודה,
+    // ובקשה חדשה תחסוך לצופה את 22 השניות הנותרות.
+    const bufferAhead = (v) => {
+      try {
+        for (let i = 0; i < v.buffered.length; i++) {
+          if (v.buffered.start(i) <= v.currentTime + 0.1 &&
+              v.buffered.end(i) > v.currentTime) {
+            return v.buffered.end(i) - v.currentTime;
+          }
+        }
+      } catch {}
+      return 0;
+    };
+
+    // טעינה מחדש מאותה נקודה בדיוק. אחרון במדרג — הוא עולה שנייה-שתיים.
+    const reloadAt = (pos) => {
+      try {
+        video.src = src;
+        video.load();
+        const resume = () => {
+          video.removeEventListener("loadedmetadata", resume);
+          try { video.currentTime = pos; } catch {}
+          video.play().catch(() => {});
+        };
+        video.addEventListener("loadedmetadata", resume);
+      } catch {}
+    };
+
+    const onError = () => {
+      if (destroyed) return;
+      reloadAt(video.currentTime || startTime || 0);
+    };
+    video.addEventListener("error", onError);
+
+    let lastT = -1, stuckSince = 0, nudges = 0;
+    const stallWatch = setInterval(() => {
+      if (destroyed || video.paused || video.ended || video.seeking) {
+        lastT = -1; stuckSince = 0;
+        return;
+      }
+      const t = video.currentTime;
+      if (Math.abs(t - lastT) > 0.05) {         // הזמן מתקדם — הכול תקין
+        lastT = t; stuckSince = 0; nudges = 0;
+        return;
+      }
+      // תקוע *ויש* עוד באפר פירושו תקלת פענוח רגעית, לא רעב נתונים.
+      // נגיעה כזאת רק תזרוק באפר תקין, ולכן לא נוגעים.
+      if (bufferAhead(video) > 0.5) return;
+      if (!stuckSince) { stuckSince = Date.now(); return; }
+      if (Date.now() - stuckSince < 8000) return;
+
+      stuckSince = 0;
+      nudges += 1;
+      const pos = video.currentTime;
+      if (nudges <= 2) {
+        // קפיצה זעירה לאותו מקום מכריחה את הדפדפן לפתוח בקשת טווח חדשה.
+        try {
+          video.currentTime = pos + 0.001;
+          video.play().catch(() => {});
+        } catch {}
+      } else {
+        nudges = 0;
+        reloadAt(pos);
+      }
+    }, 1000);
+
     // שמירת התקדמות תקופתית (כל 5 שניות בזמן צפייה)
     const reportInterval = setInterval(() => {
       if (!video.paused && !video.ended) {
@@ -719,7 +793,9 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     return () => {
       destroyed = true;
       clearInterval(reportInterval);
+      clearInterval(stallWatch);
       { const dur = getUsableDuration(video); if (dur > 0) reportProgress(onProgressRef, video.currentTime, dur); }
+      video.removeEventListener("error", onError);
       video.removeEventListener("loadedmetadata", onLoaded);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
