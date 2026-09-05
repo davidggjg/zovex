@@ -28,10 +28,10 @@ export default function Home() {
   if (!user && !skipped) {
     return <LandingScreen onLogin={loginWithGoogle} onSkip={skip} />;
   }
-  return <HomeMain user={user} onLogout={logout} isGuest={!user && skipped} />;
+  return <HomeMain user={user} onLogout={logout} isGuest={!user && skipped} loginWithGoogle={loginWithGoogle} />;
 }
 
-function HomeMain({ user, onLogout, isGuest }) {
+function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   const { slug, episode } = useParams();
   const navigate = useNavigate();
 
@@ -288,6 +288,7 @@ function HomeMain({ user, onLogout, isGuest }) {
       <HomePage
         user={user}
         onLogout={onLogout}
+        loginWithGoogle={loginWithGoogle}
         searchTerm={searchTerm}
         setSearchTerm={setSearchTerm}
         selectedCategory={selectedCategory}

@@ -29,7 +29,7 @@ async function api(path, options) {
   return res.json();
 }
 
-export default function SupportModal({ open, onClose, user }) {
+export default function SupportModal({ open, onClose, user, loginWithGoogle }) {
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [kind, setKind] = useState("support");
@@ -106,9 +106,15 @@ export default function SupportModal({ open, onClose, user }) {
         onClick={e => e.stopPropagation()}
         style={{
           width: "100%", maxWidth: 520, height: "min(86vh, 640px)",
-          background: "linear-gradient(180deg, #15151c 0%, #0d0d12 100%)",
-          borderRadius: "20px 20px 0 0", border: "1px solid rgba(255,255,255,0.09)",
+          // זכוכית שקופה למחצה: הזוהר של AmbientGlow שכבר יושב מאחורי כל
+          // האתר נראה דרך הכרטיס במקום שכרטיס שטוח יסתיר אותו לגמרי — אותה
+          // תחושת עומק שכבר יש בשאר האתר, מורחבת לכאן.
+          background: "linear-gradient(180deg, rgba(24,24,32,0.66) 0%, rgba(13,13,19,0.82) 100%)",
+          backdropFilter: "blur(22px) saturate(160%)",
+          WebkitBackdropFilter: "blur(22px) saturate(160%)",
+          borderRadius: "20px 20px 0 0", border: "1px solid rgba(255,255,255,0.12)",
           borderBottom: "none", display: "flex", flexDirection: "column", overflow: "hidden",
+          boxShadow: "0 -12px 48px rgba(0,0,0,0.55)",
         }}
       >
         <div style={{
@@ -126,15 +132,25 @@ export default function SupportModal({ open, onClose, user }) {
         </div>
 
         {!userId ? (
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "30px 26px", textAlign: "center", gap: 12 }}>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "30px 26px", textAlign: "center", gap: 14 }}>
             <div style={{ fontSize: 40 }}>🔒</div>
-            <div style={{ color: "#fff", fontSize: 17, fontWeight: 800 }}>צריך להתחבר כדי לכתוב לתמיכה</div>
+            <div style={{ color: "#fff", fontSize: 17, fontWeight: 800 }}>אנא התחברו עם Google כדי לכתוב לתמיכה</div>
             <div style={{ color: "#9a9aa5", fontSize: 13, lineHeight: 1.6, maxWidth: 330 }}>
-              ההתחברות מאפשרת לנו לענות לך אישית ולעקוב אחרי הפנייה. אפשר להתחבר
-              מהתפריט למעלה.
+              ההתחברות מאפשרת לנו לענות לכם אישית ולעקוב אחרי הפנייה.
             </div>
+            {loginWithGoogle && (
+              <button onClick={loginWithGoogle} style={{
+                marginTop: 2, background: "#fff", color: "#3c3c3c", border: "none",
+                borderRadius: 12, padding: "11px 22px", fontSize: 14, fontWeight: 700,
+                cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
+                fontFamily: "inherit", boxShadow: "0 4px 14px rgba(0,0,0,0.3)",
+              }}>
+                <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.2l6.7-6.7C35.7 2.4 30.2 0 24 0 14.8 0 6.9 5.4 2.8 13.3l7.8 6.1C12.5 13 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.6 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.5 2.9-2.2 5.3-4.7 6.9l7.3 5.7c4.3-4 6.3-9.9 7.3-16.6z"/><path fill="#FBBC05" d="M10.6 28.6A14.7 14.7 0 0 1 9.5 24c0-1.6.3-3.2.8-4.6L2.5 13.3A23.8 23.8 0 0 0 0 24c0 3.8.9 7.4 2.5 10.6l8.1-6z"/><path fill="#34A853" d="M24 48c6.2 0 11.4-2 15.2-5.5l-7.3-5.7c-2 1.4-4.6 2.2-7.9 2.2-6.2 0-11.5-4.2-13.4-9.9l-7.9 6.1C6.9 42.6 14.8 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
+                התחבר עם Google
+              </button>
+            )}
             <a href={TELEGRAM_GROUP} target="_blank" rel="noreferrer" style={{
-              marginTop: 6, color: "#9ecbff", fontSize: 13, textDecoration: "none",
+              marginTop: loginWithGoogle ? 0 : 6, color: "#9ecbff", fontSize: 13, textDecoration: "none",
             }}>
               או הצטרפו לקבוצת הטלגרם ←
             </a>

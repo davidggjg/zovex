@@ -7,7 +7,7 @@ import SupportModal from "./SupportModal";
 
 // מסך הבית — לוגו, חיפוש, תפריט משתמש, קטגוריות, ורשימות התוכן
 export default function HomePage({
-  user, onLogout, searchTerm, setSearchTerm, selectedCategory, setSelectedCategory,
+  user, onLogout, loginWithGoogle, searchTerm, setSearchTerm, selectedCategory, setSelectedCategory,
   allCategories, refreshHistory, onLogoClick,
   movies, seriesMap, liveChannels, isDesktop, handleItemClick, handleContinueWatchingClick, history,
 }) {
@@ -211,7 +211,7 @@ export default function HomePage({
           <span style={{ fontSize: 12, fontWeight: 700 }}>תמיכה</span>
         </button>
       </div>
-      <SupportModal open={supportOpen} onClose={() => setSupportOpen(false)} user={user} />
+      <SupportModal open={supportOpen} onClose={() => setSupportOpen(false)} user={user} loginWithGoogle={loginWithGoogle} />
     </div>
   );
 }
