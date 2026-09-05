@@ -5,6 +5,7 @@ import AdminPanel from "@/components/AdminPanel.jsx";
 import MovieDetail from "@/components/MovieDetail.jsx";
 import SeriesView from "@/components/SeriesView.jsx";
 import { useGoogleAuth, LandingScreen } from "@/components/home/Auth.jsx";
+import ZovexIntro from "@/components/ZovexIntro.jsx";
 import HomePage from "@/components/home/HomePage.jsx";
 import LiveTV from "@/components/LiveTV.jsx";
 import AdBanner from "@/components/home/AdBanner.jsx";
@@ -23,6 +24,12 @@ const SECRET_TRIGGER = "ZovexAdmin2026";
 
 export default function Home() {
   const { user, skipped, loginWithGoogle, logout, skip } = useGoogleAuth();
+  const [introDone, setIntroDone] = useState(false);
+
+  // הפתיח הקולנועי — משחק פעם אחת בכניסה, לפני כל השאר (בדיוק כמו באפליקציה).
+  if (!introDone) {
+    return <ZovexIntro onDone={() => setIntroDone(true)} />;
+  }
 
   // מסך כניסה — הצג אם לא מחובר ולא דילג
   if (!user && !skipped) {
