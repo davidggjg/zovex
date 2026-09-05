@@ -20,6 +20,7 @@ const KINDS = [
 ];
 
 const TELEGRAM_GROUP = "https://t.me/ZOVE8";
+const DISCORD_INVITE = "https://discord.gg/z3qaFywJk";
 
 // נקודות הקצה יושבות על אותו דומיין שממנו מוגש האתר, ולכן נתיב יחסי —
 // בלי CORS ובלי תלות בכתובת חיצונית שעלולה להתיישן.
@@ -149,11 +150,21 @@ export default function SupportModal({ open, onClose, user, loginWithGoogle }) {
                 התחבר עם Google
               </button>
             )}
-            <a href={TELEGRAM_GROUP} target="_blank" rel="noreferrer" style={{
-              marginTop: loginWithGoogle ? 0 : 6, color: "#9ecbff", fontSize: 13, textDecoration: "none",
+            <div style={{
+              marginTop: loginWithGoogle ? 0 : 6, display: "flex", gap: 14,
+              alignItems: "center", justifyContent: "center",
             }}>
-              או הצטרפו לקבוצת הטלגרם ←
-            </a>
+              <a href={TELEGRAM_GROUP} target="_blank" rel="noreferrer" style={{
+                color: "#9ecbff", fontSize: 13, textDecoration: "none",
+              }}>
+                קבוצת הטלגרם ←
+              </a>
+              <a href={DISCORD_INVITE} target="_blank" rel="noreferrer" style={{
+                color: "#b9a6ff", fontSize: 13, textDecoration: "none",
+              }}>
+                שרת הדיסקורד ←
+              </a>
+            </div>
           </div>
         ) : (
           <>
@@ -189,6 +200,14 @@ export default function SupportModal({ open, onClose, user, loginWithGoogle }) {
             )}
 
             <div style={{ padding: "10px 14px 16px", borderTop: "1px solid rgba(255,255,255,0.07)" }}>
+              <div style={{ display: "flex", gap: 12, marginBottom: 9, fontSize: 11.5 }}>
+                <a href={TELEGRAM_GROUP} target="_blank" rel="noreferrer" style={{ color: "#9ecbff", textDecoration: "none" }}>
+                  קהילת הטלגרם ←
+                </a>
+                <a href={DISCORD_INVITE} target="_blank" rel="noreferrer" style={{ color: "#b9a6ff", textDecoration: "none" }}>
+                  קהילת הדיסקורד ←
+                </a>
+              </div>
               <div style={{ display: "flex", gap: 7, marginBottom: 9 }}>
                 {KINDS.map(k => (
                   <button key={k.k} onClick={() => setKind(k.k)} style={{
