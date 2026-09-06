@@ -16,8 +16,15 @@
 ספורט 1 בשידור חי יראה אותו בדיוק כמו 5LIVE. זו הסיבה ששני ערוצים נראו
 "אותו דבר" בבדיקה קודמת.
 
-**מה שכן מזהה: הלוגו של המותג** — ה-5 המשופע הכחול, ולצידו המילה שמבדילה
-בין הערוצים במשפחה.
+**⚠️ נבדק בשטח ב-06/09 — והשיטה הזאת אינה עובדת.** חמישה ערוצי ספורט 5
+שידרו חמישה משחקים שונים והציגו **סימן פינה זהה לחלוטין** (דגל + 5 + תג
+אדום). והתג עצמו מתחלף: ערוץ 12255 הראה `LIVE` באנגלית, ושתי דקות אחר כך
+`ישיר` בעברית. **הפינה אינה מזהה את הערוץ, לא לפי הלוגו ולא לפי המילה.**
+
+מה שכן מבדיל הוא **התוכן**: כל ערוץ משדר משחק אחר, ואת זה אפשר להצליב מול
+לוח השידורים הרשמי. לכן הכלי הזה שווה למיפוי ולתפיסת פריימים — אבל התיוג
+הסופי דורש מקור חיצוני, או תפיסה בשעה שקטה שבה כל ערוץ מציג את המותג שלו
+במקום גרפיקת הליגה המשותפת.
 
 ## למה מתחילים מערוצים שכבר ידועים
 
@@ -105,12 +112,30 @@ def grab(host_path: str, n: int, workdir: pathlib.Path, shots=3, spacing=14):
     return got
 
 
+def has_drawtext() -> bool:
+    """לא כל בניית ffmpeg כוללת drawtext — הוא דורש libfreetype. הבנייה
+    הסטטית שנבדקה כאן *אינה* כוללת אותו, וזה הפיל את כל השלב."""
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
+                         capture_output=True, text=True).stdout
+    return " drawtext " in out
+
+
+_DRAWTEXT = None
+
+
 def strip_and_label(src: pathlib.Path, label: str, dst: pathlib.Path):
     """חותך את הרצועה העליונה ומגדיל אותה. הלוגו יושב שם כמעט תמיד, ובפריים
-    מוקטן הוא נמרח לכמה פיקסלים ואי אפשר לקרוא אותו."""
-    vf = ("crop=iw:ih*0.20:0:0,scale=1200:-2,"
-          f"drawtext=text='{label}':x=10:y=10:fontsize=34:fontcolor=yellow:"
-          "box=1:boxcolor=black@0.7:boxborderw=6")
+    מוקטן הוא נמרח לכמה פיקסלים ואי אפשר לקרוא אותו.
+
+    התווית נצרבת רק אם ffmpeg יודע. אחרת היא נשארת בשם הקובץ — עדיף פריים
+    בלי כיתוב מאשר שלב שנופל כולו."""
+    global _DRAWTEXT
+    if _DRAWTEXT is None:
+        _DRAWTEXT = has_drawtext()
+    vf = "crop=iw:ih*0.20:0:0,scale=1200:-2"
+    if _DRAWTEXT:
+        vf += (f",drawtext=text='{label}':x=10:y=10:fontsize=34:"
+               "fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=6")
     subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                     "-i", str(src), "-vf", vf, "-frames:v", "1", "-q:v", "2",
                     "-y", str(dst)], capture_output=True, timeout=60)
