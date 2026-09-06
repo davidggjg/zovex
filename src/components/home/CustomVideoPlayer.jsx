@@ -177,8 +177,6 @@ function reportProgress(onProgressRef, currentTime, duration) {
   onProgressRef.current?.(finished ? 0 : currentTime, duration);
 }
 
-const STREAM_BACKEND_URL = "https://maco11.onrender.com";
-
 function formatTime(secs) {
   if (!secs || isNaN(secs) || !isFinite(secs)) return "0:00";
   const m = Math.floor(secs / 60);
@@ -852,46 +850,13 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
   const onProgressRef = useRef(onProgress);
   onProgressRef.current = onProgress;
 
-  // ─── Auto-refresh: שומר את ה-src הנוכחי ומרענן כל 25 דקות ───
-  const currentSrcRef = useRef(src);
-  const refreshTimerRef = useRef(null);
   // מנקה את שומר-הסף של "נטען אבל תקוע" (ראו armStall למטה) בעת פירוק הנגן
   const stallTimerRef = useRef(null);
-
-  // פונקציה שמושכת src חדש מהשרת ומטעינה מחדש
-  const refreshStream = useCallback(async () => {
-    try {
-      const res = await fetch(`${STREAM_BACKEND_URL}/api/refresh-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ current_src: currentSrcRef.current }),
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      const newSrc = data.hls_url || data.url;
-      if (!newSrc || newSrc === currentSrcRef.current) return;
-      currentSrcRef.current = newSrc;
-      // טעינה מחדש בלי רענון דף
-      const shaka = playerRef.current?.shaka;
-      if (shaka) {
-        try { await shaka.load(newSrc); } catch {}
-      }
-    } catch {}
-  }, []);
-
-  // הפעלת טיימר של 25 דקות לרענון אוטומטי
-  const startRefreshTimer = useCallback(() => {
-    if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-    refreshTimerRef.current = setInterval(() => {
-      refreshStream();
-    }, 25 * 60 * 1000); // 25 דקות
-  }, [refreshStream]);
 
   useEffect(() => {
     if (!src || !containerRef.current) return;
     let destroyed = false;
     setVideoReady(false);
-    currentSrcRef.current = src;
     const inApp = !!window.ReactNativeWebView;   // בתוך אפליקציית ה-WebView (כולל Smart TV)
     const init = async () => {
       // טוענים *רק* את Shaka. video.js נטען כנגן-גיבוי בלבד ורק אם Shaka נכשל.
@@ -935,7 +900,6 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           setLoading(false);
           setupMediaSession(videoEl, movie);
           postNative({ type: "video_playing", value: true });
-          startRefreshTimer();
         } catch { if (!destroyed) setLoading(false); }
       };
 
@@ -956,7 +920,6 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           setLoading(false);
           setupMediaSession(videoEl, movie);
           postNative({ type: "video_playing", value: true });
-          startRefreshTimer();
           return true;
         } catch { return false; }
       };
@@ -986,7 +949,6 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
           setLoading(false);
           setupMediaSession(videoEl, movie);
           postNative({ type: "video_playing", value: true });
-          startRefreshTimer(); // ← רענון אוטומטי כל 25 דקות
           armStall(async () => {
             if (await startNative()) armStall(() => { if (!destroyed) startFallback(); });
             else if (!destroyed) await startFallback();
@@ -1013,7 +975,6 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     return () => {
       destroyed = true;
       if (reportInterval) clearInterval(reportInterval);
-      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); // ← ניקוי טיימר רענון
       if (stallTimerRef.current) { stallTimerRef.current(); stallTimerRef.current = null; }
       const v = videoElRef.current;
       if (!isLive && v) { const dur = getUsableDuration(v); if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur); }
