@@ -1,22 +1,25 @@
-// ─── constants ────────────────────────────────────────────────
-export const BACKEND_URL = "https://davidhzhdhd-my-telegram-bot.hf.space";
-
 // ─── Backend API helper ──────────────────────────────
+// נתיב יחסי, לא כתובת מוחלטת: זה בדיוק מה ש-SupportModal.jsx כבר עושה
+// (ראה שם למה - בלי CORS, ובלי תלות בכתובת חיצונית שעלולה להתיישן). קודם
+// זה הצביע על https://davidhzhdhd-my-telegram-bot.hf.space - שרת
+// Hugging Face Spaces ישן שהאתר כבר לא רץ עליו - כך שהיסטוריה/המשך צפייה
+// מעולם לא הגיעו לשרת האמיתי, ולא היו משותפים עם האפליקציה (שכבר פונה
+// נכון ל-zovex.duckdns.org).
 export async function apiCall(path, method = "GET", body = null, userId = null) {
   try {
     const headers = { "Content-Type": "application/json" };
     if (userId) headers["x-user-id"] = userId;
-    const res = await fetch(`${BACKEND_URL}${path}`, {
+    const res = await fetch(path, {
       method, headers,
       body: body ? JSON.stringify(body) : undefined
     });
     if (!res.ok) {
-      console.warn(`[zovex] apiCall ${method} ${path} → HTTP ${res.status}. הבקאש (${BACKEND_URL}) לא מחזיר תשובה תקינה — היסטוריה/המשך צפייה לא יישמרו.`);
+      console.warn(`[zovex] apiCall ${method} ${path} → HTTP ${res.status}. השרת לא מחזיר תשובה תקינה — היסטוריה/המשך צפייה לא יישמרו.`);
       return null;
     }
     return await res.json();
   } catch (e) {
-    console.warn(`[zovex] apiCall ${method} ${path} נכשל — הבקאש (${BACKEND_URL}) כנראה לא זמין/ישן/חסום ע"י CORS. שגיאה:`, e);
+    console.warn(`[zovex] apiCall ${method} ${path} נכשל. שגיאה:`, e);
     return null;
   }
 }
