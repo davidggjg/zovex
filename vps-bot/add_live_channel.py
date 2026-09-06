@@ -61,11 +61,32 @@ def get_content():
         sys.exit(1)
 
 
-def check_url(url: str) -> bool:
-    """שהערוץ באמת מחזיר playlist — לא מוסיפים לקטלוג קישור מת."""
+def check_url(url: str):
+    """שהערוץ באמת מחזיר playlist **עם תוכן**. מחזיר (תקין, הסבר).
+
+    לא מספיק לבדוק שהתשובה מתחילה ב-#EXTM3U. ספק שנפל מחזיר 200 עם כותרת
+    תקינה לגמרי ואפס מקטעים:
+
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-MEDIA-SEQUENCE:0
+        #EXT-X-TARGETDURATION:0
+
+    זה נתפס בשטח ב-06/09 — הבדיקה הישנה אישרה את זה בתור "חי", והערוץ היה
+    נכנס לקטלוג מת. הסימן הוא TARGETDURATION:0 ואפס שורות שאינן הערה.
+
+    שורה שאינה מתחילה ב-# היא או מקטע (playlist מדיה) או וריאנט
+    (playlist ראשי) — שניהם תקינים, ולכן מספיק לספור אותן."""
     out = subprocess.run(["curl", "-sS", "--max-time", "40", url],
-                         capture_output=True).stdout[:400]
-    return out.startswith(b"#EXTM3U") and b"\n" in out
+                         capture_output=True).stdout[:20000]
+    if not out.startswith(b"#EXTM3U"):
+        return False, "התשובה אינה playlist כלל"
+    lines = [l.strip() for l in out.splitlines()[1:] if l.strip()]
+    body = [l for l in lines if not l.startswith(b"#")]
+    if not body:
+        return False, ("ה-playlist ריק — כותרת תקינה ואפס מקטעים. "
+                       "זה ספק שנפל, לא קישור שגוי")
+    return True, f"{len(body)} מקטעים"
 
 
 def main():
@@ -75,13 +96,23 @@ def main():
     ap.add_argument("--slug", default="")
     ap.add_argument("--thumb", default="")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="להוסיף גם אם הערוץ ריק כרגע (ספק שנפל זמנית)")
     a = ap.parse_args()
 
     print("── בודקת שהערוץ חי ──")
-    if not check_url(a.url):
-        print("❌ הקישור לא החזיר playlist תקין. לא מוסיפים קישור מת.")
+    ok, why = check_url(a.url)
+    if ok:
+        print(f"   ✓ {why}")
+    elif a.force:
+        print(f"   ⚠ {why}")
+        print("   --force — מוסיפים בכל זאת. הערוץ יהיה מת עד שהספק יחזור.")
+    else:
+        print(f"❌ {why}")
+        print("   הקישור נשמר בקטלוג כפי שהוא, והאתר מנגן דרכו — ערוץ ריק")
+        print("   עכשיו יהיה ערוץ מת לכל הצופים.")
+        print("   אם אתה יודע שזה זמני: להוסיף --force")
         sys.exit(1)
-    print("   ✓ מחזיר #EXTM3U")
 
     movies, ver = get_content()
     live = [m for m in movies if m.get("category") == LIVE_CATEGORY]
