@@ -17,14 +17,27 @@
     python3 stream_probe.py --minutes 90
     python3 stream_probe.py --mbps 8           # קצב צריכה מדומה
     python3 stream_probe.py --url "https://…"  # פריט מסוים
+
+## מה תוקן כאן
+
+באג אמיתי: כשההזרמה מסתיימת (chunk ריק), הגרסה הקודמת לא הבחינה בין "הסרט
+נגמר בהצלחה" ל"נקטע באמצע" — שתיהן דיווחו "⛔ נגמרה מוקדם" ושלפו יומן שרת.
+בהרצה ממושכת ללא השגחה (למשל לילה שלם, סרט אחרי סרט) זה אומר שכל סרט
+שמסתיים באופן תקין *לפני* תקציב הזמן (--minutes) — למשל כי הוא קצר יחסית,
+או שקצב הצריכה המדומה (--mbps) גבוה מקצב הביט האמיתי שלו — נרשם כתקלה,
+למרות שהכל תקין. עכשיו משווים את מספר הבייטים שהתקבלו מול הגודל הכולל
+(מ-Content-Length או Content-Range) ומבחינים באמת בין סיום תקין לקיצור.
 """
-import argparse, json, pathlib, random, subprocess, sys, time
+import argparse, json, pathlib, random, re, subprocess, sys, time
 import urllib.request, urllib.error
 
 DATA = pathlib.Path("/opt/zovex-bot/data")
 CONTENT = DATA / "content.json"
 LOG = pathlib.Path("/opt/zovex-bot/stream_probe.log")
 UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+# כמה בייטים מותר שיחסרו מהסוף ועדיין להיחשב "הכל התקבל" — שרתים/פרוקסי
+# לפעמים לא שולחים את הבייט האחרון הבודד בדיוק, וזה לא צריך להיספר כתקלה.
+COMPLETE_SLACK_BYTES = 65536
 
 
 def say(msg):
@@ -32,6 +45,20 @@ def say(msg):
     print(line, flush=True)
     with LOG.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def total_size(clen, crange):
+    """הגודל הכולל של הקובץ, לא רק של התשובה הנוכחית. Content-Range על בקשת
+    Range פתוחה (bytes=0-) הוא bytes 0-X/TOTAL - ה-TOTAL הוא מה שרוצים,
+    לא X. Content-Length הוא גיבוי אם אין Content-Range."""
+    if crange:
+        m = re.search(r"/(\d+)\s*$", crange)
+        if m:
+            return int(m.group(1))
+    try:
+        return int(clen)
+    except (TypeError, ValueError):
+        return None
 
 
 def dump_server_log(since_epoch):
@@ -50,8 +77,10 @@ def dump_server_log(since_epoch):
                          "session", "Session", "flood", "Flood", "choke",
                          "נחנק", "Error", "error", "Timeout", "timeout",
                          "Traceback", "Exception", "WARNING", "ERROR"))]
+    # 150 ולא 60: ריצה ארוכה (45+ דקות) יכולה להצטבר להרבה שורות רלוונטיות,
+    # ו-60 האחרונות לפעמים לא כללו את הרגע שבו התקלה באמת התחילה.
     say(f"── יומן השרת מאז תחילת הניסוי ({len(keep)} שורות רלוונטיות) ──")
-    for l in keep[-60:]:
+    for l in keep[-150:]:
         say("   " + l[:190])
     if not keep:
         say("   (היומן שקט לגמרי — כלומר השרת לא חשב שקרתה תקלה)")
@@ -120,7 +149,9 @@ def main():
     got = 0
     last_report = t0
     clen = None
+    crange = None
     status = None
+    ended_cleanly = False
     try:
         # נבנה כאן ולא למעלה: חריגה בבניית הבקשה הייתה עוקפת את ה-try
         # ואת ה-finally, והניסוי היה מת בלי להשאיר ולו שורת הסבר אחת.
@@ -132,6 +163,7 @@ def main():
         status = r.status
         clen = r.headers.get("Content-Length")
         crange = r.headers.get("Content-Range")
+        total = total_size(clen, crange)
         say(f"נפתח: HTTP {status} · Content-Length {clen} · Range {crange}")
         say(f"TTFB {time.time()-t0:.2f}ש")
 
@@ -139,6 +171,7 @@ def main():
             now = time.time()
             if now - t0 > budget:
                 say(f"✅ הגיע לסוף הזמן שהוקצב בלי תקלה. התקבלו {got/1048576:.1f}MB")
+                ended_cleanly = True
                 break
             # מווסת: לא מושכים מהר יותר ממה שנגן היה צורך
             allowed = int((now - t0) * rate)
@@ -148,9 +181,16 @@ def main():
             chunk = r.read(min(262144, allowed - got))
             if not chunk:
                 el = now - t0
-                say(f"⛔ ההזרמה נגמרה מוקדם אחרי {el/60:.1f} דקות "
-                    f"({el:.0f}ש), {got/1048576:.1f}MB מתוך {clen}")
-                say("   הגוף נסגר בלי שגיאה — כלומר השרת סיים את התשובה.")
+                if total and got >= total - COMPLETE_SLACK_BYTES:
+                    say(f"✅ הסרט הסתיים בהצלחה אחרי {el/60:.1f} דקות "
+                        f"({got/1048576:.1f}MB מתוך {total/1048576:.1f}MB) — לא תקלה")
+                    ended_cleanly = True
+                else:
+                    got_pct = f"{100*got/total:.0f}%" if total else "?"
+                    say(f"⛔ ההזרמה נקטעה אחרי {el/60:.1f} דקות "
+                        f"({el:.0f}ש), {got/1048576:.1f}MB מתוך "
+                        f"{(total/1048576 if total else '?')}MB ({got_pct})")
+                    say("   הגוף נסגר בלי שגיאה — כלומר השרת סיים את התשובה מוקדם מדי.")
                 break
             got += len(chunk)
             if now - last_report >= a.report:
@@ -167,8 +207,9 @@ def main():
     finally:
         el = time.time() - t0
         say(f"סיום. סה\"כ {got/1048576:.1f}MB ב-{el/60:.1f} דקות")
-        # שולפים את יומן השרת רק כשבאמת נפל — בריצה מוצלחת זה סתם רעש
-        if el < budget - 5:
+        # שולפים את יומן השרת רק כשבאמת נפל — בסיום תקין (בין אם תם הזמן
+        # ובין אם הסרט נגמר בהצלחה) זה סתם רעש.
+        if not ended_cleanly:
             dump_server_log(t0)
         say("")
 
