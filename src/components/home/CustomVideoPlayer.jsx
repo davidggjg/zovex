@@ -47,10 +47,6 @@ const spinStyle = `
 @keyframes livePulseDot { 0%,100%{box-shadow:0 0 0 0 rgba(229,9,20,.6)} 50%{box-shadow:0 0 0 6px rgba(229,9,20,0)} }
 `;
 
-// שמות ערוצי טלגרם → מזהה מספרי (רק לערוצים פרטיים שדורשים בוט-פרוקסי)
-// ערוצים פומביים (כמו ZOVE8) לא נמפים כאן — הם עוברים ישירות לאיפריים של טלגרם
-const TG_CHANNELS = {};
-const TG_PROXY = import.meta.env.VITE_TELEGRAM_PROXY || "https://telegram-bot-8528.onrender.com";
 
 // ─── helpers ────────────────────────────────────────────────
 // שתי צורות שבורות שקיימות בקטלוג בפועל, ושתיהן ניתנות לשחזור ודאי:
@@ -124,24 +120,12 @@ function buildSrc(movie, startTime = 0) {
     return `https://ok.ru/videoembed/${m ? m[1] : vid}`;
   }
   if (type === "telegram" || vid.includes("t.me")) {
-    // כתובת פרוקסי מוכנה כבר — נגן ישירות
+    // כל פריט מסוג telegram בקטלוג כבר מגיע עם video_url פתור-מראש (כתובת
+    // stream חתומה מהשרת), לא קישור t.me גולמי - אז זה כמעט תמיד מה שקורה כאן.
     if (vid.startsWith("http") && !vid.includes("t.me")) return vid;
-    // נרמול: הסרת https://t.me/ אם קיים
+    // קישור t.me גולמי (לא אמור לקרות בקטלוג הנוכחי, אבל נשאר כרשת ביטחון):
+    // אין יותר בוט-פרוקסי חיצוני שפותר אותו, אז מוצג כ-iframe ישיר של טלגרם.
     const tgId = vid.replace(/^https?:\/\/t\.me\//, "");
-    // חילוץ שם ערוץ + מזהה הודעה (תומך ב-CHANNEL/MSG ו-CHANNEL/TOPIC/MSG)
-    const parts = tgId.split("/").filter(Boolean);
-    const chanRaw = parts[0] || "";
-    const msgId   = parts[parts.length - 1]; // המספר האחרון הוא תמיד מזהה ההודעה
-    // ערוץ מספרי ישירות (t.me/1234567/99)
-    if (/^\d+$/.test(chanRaw) && msgId) {
-      return `${TG_PROXY}/stream/${chanRaw}/${msgId}`;
-    }
-    // שם ערוץ → חיפוש במיפוי
-    const numericId = TG_CHANNELS[chanRaw] || TG_CHANNELS[chanRaw.toLowerCase()];
-    if (numericId && msgId) {
-      return `${TG_PROXY}/stream/${numericId}/${msgId}`;
-    }
-    // אין מיפוי — iframe כ-fallback
     return `https://t.me/${tgId}?embed=1&mode=tme`;
   }
   if (type === "jellyfin") {
@@ -654,9 +638,9 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
 // The `src` value is resolved from the movie record in movies.json via buildSrc().
 //
 // URL sources by example:
-//   Direct MP4   → "https://example.com/video.mp4"
-//   Telegram bot → "https://telegram-bot-8528.onrender.com/stream/{channelId}/{msgId}"
-//                  (set VITE_TELEGRAM_PROXY to override the bot base URL)
+//   Direct MP4 → "https://example.com/video.mp4"
+//   Telegram   → "https://zovex.duckdns.org/stream/{channelId}/{msgId}?exp=...&sig=..."
+//                (already resolved by the server - buildSrc() just passes it through)
 function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
