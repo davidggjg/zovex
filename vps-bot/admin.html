@@ -395,10 +395,19 @@ async function loadContent(){
 async function persist(){
   toast(true);
   try{
-    const r=await fetch("/content/save",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({password:PASS, movies,
-        base_version: contentVersion===null?null:Number(contentVersion)})});
-    const d=await r.json().catch(()=>({}));
+    const body={password:PASS, movies,
+      base_version: contentVersion===null?null:Number(contentVersion)};
+    let r=await fetch("/content/save",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)});
+    let d=await r.json().catch(()=>({}));
+    // ── הגנת מחיקה המונית: השרת עצר כי חלק גדול מהקטלוג נעלם. אם זה מכוון
+    // (מוחקים סדרה שלמה וכו') — מציעים לאשר ולשלוח שוב עם confirm_delete. ──
+    if(r.status===409 && /מוחקת .* פריטים/.test(d.detail||"")){
+      if(!confirm((d.detail||"")+"\n\nלאשר את המחיקה ולשמור בכל זאת?")) return false;
+      r=await fetch("/content/save",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({...body, confirm_delete:true})});
+      d=await r.json().catch(()=>({}));
+    }
     // ── הגנת עריכה במקביל: מישהו אחר שמר בזמן שעבדנו → לא דורסים, טוענים מחדש ──
     if(r.status===409){
       alert((d.detail||"מישהו אחר עדכן את התוכן בזמן שעבדת.")+

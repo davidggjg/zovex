@@ -6,13 +6,16 @@ SESSION_STRING, אין copy/forward ל-Saved Messages.
 """
 
 import os
+import random
 import re
 import sys
+import gzip
 import json
 import time
 import hmac
 import asyncio
 import logging
+import itertools
 import httpx
 from urllib.parse import quote, urljoin, urlparse
 from typing import AsyncGenerator, Optional
@@ -87,14 +90,35 @@ bot_client = Client(
 
 api = FastAPI(title="Telegram Stream Server")
 
-# ── CORS — חיוני כדי שהאתר (GitHub Pages) יוכל לשלוח קריאות לשרת ──────────
+# ── CORS ─────────────────────────────────────────────────────────────────
+# היה allow_origins=["*"] עם allow_credentials=True — צירוף ש-FastAPI מממש
+# ע"י החזרת ה-Origin שנשלח + Access-Control-Allow-Credentials:true, כלומר
+# *כל* אתר זר יכול לקרוא תשובות מה-API בשם המבקר. עכשיו רשימה סגורה: האתר
+# עצמו (same-origin ממילא לא צריך CORS) ו-GitHub Pages הישן. האפליקציה
+# היא native — היא לא שולחת Origin ולכן לא מושפעת מכאן כלל.
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get(
+    "CORS_ALLOWED_ORIGINS",
+    "https://zovex.duckdns.org,https://davidggjg.github.io"
+).split(",") if o.strip()]
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# נקודות המדיה (relay/stream) מוגשות מכל מקום, גם מ-origin "null" — זה ה-origin
+# של ה-WebView באפליקציה, שבו נגן ה-HLS (Shaka) מושך את ה-m3u8 והמקטעים דרך
+# fetch. נעילת ה-CORS ל-API היא נכונה (נתוני משתמשים), אבל היא שברה שידורים
+# חיים באפליקציה. מדיה היא תוכן ציבורי בלי הרשאות — לכן ACAO:* לה בטוח. מוסיפים
+# ישירות לתגובות (לא ב-middleware) כדי לא לגעת ב-streaming הרגיש.
+CORS_MEDIA = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Range",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+}
 
 # ── גיבוי קבוע ל-HF Dataset ────────────────────────────────────────────────
 # /tmp נמחק בכל הפעלה-מחדש/התעוררות של ה-Space (זה מה שגרם ל"היסטוריה
@@ -512,9 +536,20 @@ async def stream_session_range(sess: "StreamSession", start: int, end: int) -> A
     # חייבים לשלוח את מספר הבייטים המובטח, אחרת uvicorn קורס עם
     # RuntimeError: Response content shorter than Content-Length.
     if pos <= end:
-        remaining = end - pos + 1
-        log.error("stream_session_range: ממלא %d בייטים ריקים (טלגרם לא הצליח לספק)", remaining)
-        yield b"\x00" * remaining
+        log.error("stream_session_range: חסרים %d בייטים — מנתק כדי שהנגן יבקש שוב",
+                  end - pos + 1)
+        raise StreamGap(f"missing {end - pos + 1} bytes")
+
+class StreamGap(Exception):
+    """משיכה מטלגרם נכשלה ואי אפשר להשלים את הטווח שהובטח.
+
+    זורקים במקום למלא אפסים. מילוי אפסים סיפק ללקוח בדיוק את מספר הבייטים
+    שב-Content-Length, ולכן הנגן כלל לא נכנס למצב טעינה — הוא קיבל "הכל",
+    ניסה לפענח זבל, והתמונה קפאה על הפריים האחרון בלי ספינר ובלי התאוששות.
+    ניתוק באמצע התשובה, לעומת זאת, נראה ללקוח כשגיאת רשת על הטווח הזה — וכל
+    נגן יודע לבקש אותו מחדש.
+    """
+
 
 # ── Stream bot pool: ריבוי בוטים לתוכן בערוץ (רוטציה + זיהוי חניקה) ──────────
 # תובנה מהבדיקות: בוט *טרי* מושך מהערוץ ב-~4.2 MB/s, אבל בוט שנחנק (FLOOD_WAIT
@@ -599,11 +634,76 @@ async def resolve_active_channel():
 async def _pool_noop(client, message):
     pass  # handler ריק — רק כדי שהלקוח יקבל עדכוני ערוץ וישמור את ה-peer
 
+
+# שגיאת הזיהוי האחרונה לכל חבר pool — כדי שהפאנל יוכל להציג *למה* הוא לא
+# מחובר, במקום רק "לא מחובר". בלי זה אין דרך לדעת אם הבוט לא חבר בערוץ,
+# ה-session פג, או שזו סתם תקלת רשת רגעית.
+_peer_errors: dict = {}
+
+
+async def _resolve_peer(client, name) -> bool:
+    """מוודא שהלקוח מזהה את ערוץ התוכן.
+
+    בלי זיהוי, *כל* משיכת מדיה של אותו חבר pool נכשלת ב-'Peer id invalid',
+    הוא נכנס ל-cooldown, יוצא, נכשל שוב — לולאה אינסופית. קודם הכישלון כאן
+    נבלע ב-except: pass בלי שום לוג, ולכן התקלה הייתה בלתי נראית לגמרי
+    והתגלתה רק מתלונות של צופים ("הלייב עובד והסרטים נתקעים").
+    """
+    if not STREAM_CHANNEL_ID:
+        return True
+    try:
+        await asyncio.wait_for(client.get_chat(STREAM_CHANNEL_ID), timeout=20)
+        return True
+    except Exception as e:
+        first = e
+
+    # מעבר על רשימת הצ'אטים ממלא את המטמון המקומי ב-access_hash של כל ערוץ
+    # שהחשבון חבר בו — וזה מה שחסר כדי לפתור מזהה מספרי. עובד רק לחשבון
+    # משתמש; לבוטים טלגרם לא מאפשר get_dialogs, ולכן הם תלויים בכך שתגיע
+    # הודעה חדשה מהערוץ. הרשאות אדמין לא רלוונטיות לשום כיוון כאן.
+    try:
+        n = 0
+        async for _ in client.get_dialogs(limit=500):
+            n += 1
+        if n:
+            await asyncio.wait_for(client.get_chat(STREAM_CHANNEL_ID), timeout=20)
+            log.info("✅ %s זיהה את הערוץ אחרי סריקת %d צ'אטים", name, n)
+            return True
+    except Exception:
+        pass
+
+    log.warning("⚠️ %s לא מזהה את ערוץ התוכן (%s) — ינוסה שוב ברקע", name, first)
+    _peer_errors[name] = f"{type(first).__name__}: {first}"
+    return False
+
+
+async def peer_retry_loop():
+    """ריפוי עצמי לחברי pool שלא זיהו את הערוץ בעלייה.
+
+    קריטי במיוחד ל-userbot: הוא מוגדר no_updates=True + in_memory=True, כלומר
+    לא מקבל עדכונים (אז הודעה חדשה בערוץ *לא* תלמד אותו) ולא שומר כלום לדיסק.
+    get_chat היא הדרך היחידה שלו לזהות את הערוץ — ואם היא נכשלה פעם אחת
+    בעלייה (למשל בגלל תקלת רשת רגעית), הוא נשאר מושבת עד ה-restart הבא.
+    """
+    while True:
+        await asyncio.sleep(60)
+        for b in [x for x in _stream_bots if not x.get("peer_ok")]:
+            if await _resolve_peer(b["client"], b["name"]):
+                b["peer_ok"] = True
+                b["cooldown_until"] = 0.0
+                log.info("✅ %s זיהה את ערוץ התוכן וחזר לפעולה", b["name"])
+
 def _is_bot_token(s: str) -> bool:
     return bool(re.match(r'^\d{5,}:[A-Za-z0-9_-]{20,}$', (s or "").strip()))
 
-async def _start_one_pool_bot(i, tok: str):
+# כמה זמן לתת להתחברות של חבר pool. 40 היה קצר מדי: כשעולים 16 בזה אחר זה
+# טלגרם מאט את ההתחברויות, וחמישה בוטים תקינים לגמרי נפלו על timeout.
+POOL_START_TIMEOUT = float(os.environ.get("POOL_START_TIMEOUT", "75"))
+POOL_START_ATTEMPTS = int(os.environ.get("POOL_START_ATTEMPTS", "3"))
+
+async def _start_one_pool_bot(i, tok: str, timeout: float = None):
     """מעלה חבר pool בודד (טוקן בוט או session string של חשבון) ומוסיף לרשימה."""
+    c = None
     try:
         if _is_bot_token(tok):
             c = Client(f"pool_bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=tok,
@@ -615,17 +715,37 @@ async def _start_one_pool_bot(i, tok: str):
                        session_string=tok, in_memory=True, no_updates=True)
             kind = "user"
         c.add_handler(MessageHandler(_pool_noop, filters.channel))
-        await asyncio.wait_for(c.start(), timeout=40)
+        await asyncio.wait_for(c.start(), timeout=timeout or POOL_START_TIMEOUT)
+        name = f"{kind}_{i}"
+        # שומרים את המזהה פעם אחת בעלייה: בלעדיו הפאנל מציג bot_5/user_8 בלבד
+        # ואי אפשר לדעת איזה בוט זה בפועל (למשל את מי להוסיף לערוץ).
+        who = ""
+        try:
+            me = await asyncio.wait_for(c.get_me(), timeout=15)
+            who = ("@" + me.username) if me.username else (me.first_name or "")
+        except Exception:
+            pass
+        entry = {"client": c, "name": name, "cooldown_until": 0.0,
+                 "token": tok, "kind": kind, "peer_ok": True, "who": who}
         if STREAM_CHANNEL_ID:
-            try:
-                await c.get_chat(STREAM_CHANNEL_ID)
-            except Exception:
-                pass  # יזוהה כשיגיע פוסט חדש לערוץ
-        _stream_bots.append({"client": c, "name": f"{kind}_{i}", "cooldown_until": 0.0,
-                             "token": tok, "kind": kind})
+            entry["peer_ok"] = await _resolve_peer(c, name)
+        _stream_bots.append(entry)
         log.info("✅ pool %s %s עלה (%d פעילים)", kind, i, len(_stream_bots))
+        return None
     except Exception as e:
-        log.warning("⚠️ pool member %s לא עלה: %s", i, e)
+        # שם הטיפוס חייב להיכנס ללוג: str(asyncio.TimeoutError()) הוא מחרוזת
+        # ריקה, ולכן השורה הזו הודפסה כ"לא עלה: " בלי שום סיבה — והכשל הנפוץ
+        # ביותר היה בדיוק זה.
+        log.warning("⚠️ pool member %s לא עלה: %s: %s", i, type(e).__name__, e)
+        if c is not None:
+            # לשחרר את קובץ ה-session, אחרת הניסיון החוזר ייתקל בו נעול
+            try:
+                await c.stop()
+            except Exception:
+                pass
+        # מחזירים את הסיבה האמיתית: הפאנל הציג עד עכשיו ניחוש קבוע על הרשאות
+        # אדמין, גם כשהכשל היה session פגום, טוקן שגוי או תקלת רשת.
+        return f"{type(e).__name__}: {e}"
 
 async def start_stream_pool():
     if not STREAM_BOTS_FILE.exists():
@@ -636,11 +756,36 @@ async def start_stream_pool():
     # (מה שקרה עם BATCH=8) גורמת לחסימת IP → כל הבוטים "לא עלה" ולולאת קריסה.
     # לאט ויציב עדיף. POOL_START_DELAY ניתן לכוונון דרך משתנה סביבה.
     delay = float(os.environ.get("POOL_START_DELAY", "4"))
+    failed = []
     for i, tok in enumerate(tokens):
-        await _start_one_pool_bot(i, tok)
+        if await _start_one_pool_bot(i, tok) is not None:
+            failed.append((i, tok))
         await asyncio.sleep(delay)
     log.info("🚀 stream pool: %d/%d בוטים פעילים", len(_stream_bots), len(tokens))
     asyncio.create_task(warm_stream_pool())
+    if failed:
+        # ניסיון חוזר ברקע. כשל בעלייה הוא כמעט תמיד timeout זמני ולא בוט
+        # פגום, אבל עד עכשיו הוא היה סופי: הבוט נעלם מהבריכה עד ה-restart הבא.
+        # ברקע כדי לא לעכב את עליית השרת.
+        asyncio.create_task(_retry_failed_pool_members(failed, len(tokens), delay))
+
+async def _retry_failed_pool_members(failed, total, delay):
+    for attempt in range(2, POOL_START_ATTEMPTS + 1):
+        await asyncio.sleep(30)
+        log.info("🔁 סבב %d: מנסה שוב %d חברי pool שלא עלו", attempt, len(failed))
+        still = []
+        for i, tok in failed:
+            # תקציב זמן גדל בכל סבב — מי שלא הספיק ב-75 שניות בזמן שכל
+            # הבריכה עלתה יחד, בדרך כלל מספיק כשהעומס הזה כבר מאחורינו.
+            if await _start_one_pool_bot(i, tok, timeout=POOL_START_TIMEOUT * attempt) is not None:
+                still.append((i, tok))
+            await asyncio.sleep(delay)
+        log.info("🚀 stream pool: %d/%d בוטים פעילים", len(_stream_bots), total)
+        if not still:
+            return
+        failed = still
+    log.warning("⚠️ %d חברי pool לא עלו גם אחרי %d סבבים — ראה את השגיאות למעלה",
+                len(failed), POOL_START_ATTEMPTS)
 
 async def warm_stream_pool():
     """מחמם מראש את חיבור-המדיה (DC) של כל בוט ב-pool. בלי זה, הפליי הראשון של
@@ -665,11 +810,280 @@ async def warm_stream_pool():
                 continue
             async for _chunk in b["client"].stream_media(msg, offset=0):
                 break  # חתיכה אחת — רק כדי לפתוח את חיבור ה-DC
+            # גם בריכת החיבורים המקבילים של הבוט. בלי זה היא נבנית אצל הצופה
+            # הראשון שנוחת עליו, וכיוון שהבחירה היא round-robin על כל הבריכה,
+            # כמעט כל בקשה בדקות הראשונות שילמה בניית 4 חיבורים מאפס.
+            if STREAM_MEDIA_CONNS > 0:
+                media = msg.video or msg.audio or msg.document or msg.video_note
+                if media:
+                    dc_id, _loc = _file_location(media)
+                    await get_media_session_pool_gen(
+                        b["client"], b["name"], dc_id, STREAM_MEDIA_CONNS)
             log.info("🔥 חוממה מדיה: %s", b["name"])
         except Exception as e:
             log.warning("⚠️ חימום %s נכשל: %s", b.get("name"), e)
         await asyncio.sleep(0.4)
     log.info("🔥 pool מחומם — פליי ראשון יהיה מהיר")
+
+# כל כמה זמן לנסות להחיות בוטים מודחים. הבדיקה רצה *מחוץ* למסלול הצפייה,
+# כך שהצופה לעולם לא משלם על ניסיון החייאה.
+REVIVE_EVERY = int(os.environ.get("STREAM_REVIVE_EVERY", "120"))
+REVIVE_AFTER_CHOKES = int(os.environ.get("STREAM_REVIVE_AFTER_CHOKES", "2"))
+
+# ── בדיקת בריאות לכל הבריכה ──────────────────────────────────────────────────
+# revive_stream_pool בודק רק בוטים שנחנקו (chokes >= REVIVE_AFTER_CHOKES).
+# אבל חיבור מת אינו חניקה: הבוט לא נכשל באף בקשה, פשוט אף בקשה לא הגיעה
+# אליו. הוא נשאר עם chokes=0, לא נבדק לעולם, ומחכה לצופה שינחת עליו ויספוג
+# timeout מלא. היומן הראה ~105 כתיבות לחיבור סגור בדקה מול אפס בניות מחדש —
+# כלומר אף חיבור מת לא הוקם, אף פעם.
+HEALTH_EVERY = int(os.environ.get("STREAM_HEALTH_EVERY", "300"))
+HEALTH_TIMEOUT = float(os.environ.get("STREAM_HEALTH_TIMEOUT", "8"))
+HEALTH_FAILS = int(os.environ.get("STREAM_HEALTH_FAILS", "2"))
+
+
+async def _probe_bot(b):
+    """True אם הבוט עונה. get_me היא הקריאה הזולה ביותר שדורשת תשובה אמיתית
+    מטלגרם. על חיבור שנסגר היא נכשלת — אבל Pyrogram מנסה עד עשר פעמים לפני
+    שהוא מוותר, ועל חיבור *תקוע* הוא פשוט לא חוזר. לכן תקציב זמן הוא חובה."""
+    try:
+        await asyncio.wait_for(b["client"].get_me(), timeout=HEALTH_TIMEOUT)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # str(asyncio.TimeoutError()) הוא מחרוזת ריקה — לקח שכבר נלמד כאן
+        # פעם אחת, כשהשורה "לא עלה: " הודפסה בלי שום סיבה. חיבור *תקוע*
+        # הוא בדיוק המקרה הזה, והוא הנפוץ ביותר בבדיקה הזאת.
+        b["last_health_err"] = (
+            f"לא הגיב תוך {HEALTH_TIMEOUT:.0f}ש"
+            if isinstance(e, asyncio.TimeoutError)
+            else f"{type(e).__name__}: {e}")
+        return False
+
+
+async def _force_down(client):
+    """מוודא שהלקוח באמת מנותק לפני start(), ולא רק שביקשנו ממנו.
+
+    Pyrogram מחזיק שני דגלים נפרדים: stop() בודק את is_initialized בעוד
+    connect() בודק את is_connected. על חיבור מת אפשר להיתקע ביניהם —
+    stop() נכשל מיד ב"already terminated" בזמן ש-is_connected נשאר True,
+    ומאז כל start() נכשל ב"already connected". זה בדיוק מה שקרה ל-bot_20:
+    18 סבבים, כל אחד נכשל תוך 6 מילישניות, אפס הרמות.
+
+    עצירת ה-session בשלב השלישי אינה ניקיון בעלמא: משימת ה-ping שלו היא
+    שכותבת לשקע המת כל 5 שניות ומייצרת את שורות "Send exception". בלי
+    לעצור אותה היא ממשיכה לרוץ גם אחרי שהלקוח הורם.
+    """
+    for meth, budget in (("stop", 20), ("disconnect", 10)):
+        if not (getattr(client, "is_connected", False)
+                or getattr(client, "is_initialized", False)):
+            return
+        fn = getattr(client, meth, None)
+        if fn is None:
+            continue
+        try:
+            await asyncio.wait_for(fn(), timeout=budget)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+    sess = getattr(client, "session", None)
+    if sess is not None:
+        try:
+            await asyncio.wait_for(sess.stop(), timeout=10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+    # מוצא אחרון. לא אלגנטי, אבל החלופה היא בוט שלא יחזור לעולם — וזה
+    # בדיוק המצב שנמדד לפני התיקון הזה.
+    for flag in ("is_connected", "is_initialized"):
+        if getattr(client, flag, False):
+            try:
+                setattr(client, flag, False)
+            except Exception:
+                pass
+
+
+async def _revive_bot(b):
+    """מפיל ומרים session. True אם הצליח."""
+    name = b.get("name", "?")
+    log.warning("♻️ %s — חיבור מת, מרים session מחדש", name)
+    await _force_down(b["client"])
+    try:
+        await asyncio.wait_for(b["client"].start(), timeout=POOL_START_TIMEOUT)
+        # ה-session החדש אינו מכיר את הערוץ, וה-file_reference הישן שייך
+        # ל-session שמת — שניהם חייבים להיבנות מחדש, אחרת הבוט "עלה" אבל
+        # ייכשל בכל משיכה.
+        b["peer_ok"] = await _resolve_peer(b["client"], name)
+        for k in [k for k in _bot_msg_cache if k[0] == name]:
+            _bot_msg_cache.pop(k, None)
+        b["health_fails"] = 0
+        b["cooldown_until"] = 0.0
+        log.info("✅  %s הורם מחדש", name)
+        return True
+    except Exception as e:
+        log.warning("⚠️ הרמת %s נכשלה: %s: %s", name, type(e).__name__, e)
+        return False
+
+
+async def pool_health_loop():
+    """סורק את כל הבריכה ומקים מחדש בוטים שהחיבור שלהם מת.
+
+    הבדיקות רצות *במקביל* וההרמות בטור, וזה לא שרירותי. חיבור תקוע אינו
+    מחזיר שגיאה אלא פשוט לא חוזר, כלומר עולה HEALTH_TIMEOUT שלם. בדיקה
+    בטור על 22 בוטים שרובם תקועים הייתה נמשכת עד 176 שניות — יותר מחצי
+    מהמרווח בין סבבים, כך שהסבבים היו דורכים זה על זה. במקביל, כל הבדיקה
+    נגמרת תוך HEALTH_TIMEOUT אחד.
+    ההרמות דווקא כן בטור: עשרות התחברויות בו-זמנית לטלגרם הן בדיוק מה
+    שגרם בעבר לחסימת IP ולכל הבוטים "לא עלה".
+    """
+    if not _stream_bots and not STREAM_BOTS_FILE.exists():
+        return
+    while True:
+        await asyncio.sleep(HEALTH_EVERY)
+        bots = list(_stream_bots)
+        if not bots:
+            continue
+        results = await asyncio.gather(*[_probe_bot(b) for b in bots],
+                                       return_exceptions=True)
+        need = []
+        for b, ok in zip(bots, results):
+            if ok is True:
+                if b.get("health_fails"):
+                    log.info("✅  %s ענה שוב — לא צריך הרמה", b.get("name", "?"))
+                b["health_fails"] = 0
+                continue
+            if isinstance(ok, BaseException) and not isinstance(ok, Exception):
+                raise ok                      # CancelledError — לא בולעים
+            b["health_fails"] = b.get("health_fails", 0) + 1
+            log.warning("🩺 %s לא ענה (%d/%d): %s", b.get("name", "?"),
+                        b["health_fails"], HEALTH_FAILS,
+                        b.get("last_health_err", "?"))
+            # כשל בודד אינו הוכחה: רעש רשת חולף נראה בדיוק אותו דבר, והרמת
+            # בוט תקין מנתקת צופה שיושב עליו ברגע זה. עדיף להמתין לסבב הבא.
+            if b["health_fails"] >= HEALTH_FAILS:
+                # מוציאים אותו מהרוטציה *מיד*, לא רק אחרי שההרמה תצליח.
+                # ביומן נראה "בוט bot_20 נכשל (2/3) — עדיין בשירות" תשעים
+                # דקות אחרי שהבדיקה כבר ידעה שהוא מת: צופה אמיתי נחת עליו
+                # ושילם timeout מלא. זיהוי בלי הדחה שווה מעט.
+                b["cooldown_until"] = max(b.get("cooldown_until", 0.0),
+                                          time.time() + HEALTH_EVERY * 2)
+                need.append(b)
+
+        revived = 0
+        for b in need:
+            if await _revive_bot(b):
+                revived += 1
+            await asyncio.sleep(2)   # לא מציפים את טלגרם בהתחברויות
+        if need or revived:
+            log.info("🩺 סבב בריאות: %d לא ענו, %d הורמו, %d בבריכה",
+                     len(need), revived, len(_stream_bots))
+
+
+_probe_msg_id_cache: list = []
+
+
+def _probe_msg_id():
+    """מזהה הודעה כלשהי מהערוץ, לבדיקת משיכה אמיתית. נשלף פעם אחת."""
+    if _probe_msg_id_cache:
+        return _probe_msg_id_cache[0]
+    for e in load_content():
+        m = re.search(r"/stream/-?\d+/(\d+)", str(e.get("video_url") or ""))
+        if m:
+            _probe_msg_id_cache.append(int(m.group(1)))
+            return _probe_msg_id_cache[0]
+    return None
+
+
+async def _bot_can_download(bot) -> bool:
+    """האם הבוט באמת מסוגל למשוך בייטים מטלגרם.
+
+    קריטי: `get_me()` אינו בדיקה מספקת. חשבון שטלגרם חנק *להורדות* עונה
+    ל-get_me מצוין — הוא לא חסום, רק מוגבל. לכן הבדיקה הזולה הכריזה על 12
+    חשבונות חנוקים כ"בריאים" כל שתי דקות, איפסה להם את דרגת העונש והחזירה
+    אותם לרוטציה — והעונש המתגבר (30ש' → 2ד' → 8ד' → 30ד') לא הספיק להתכנס
+    לפני שאופס שוב. התוצאה: רוב הבחירות המשיכו לנחות על בוטים מתים.
+
+    כאן מושכים 64KB אמיתיים. זו בדיוק היכולת שאכפת לנו ממנה.
+    """
+    msg_id = _probe_msg_id()
+    if not STREAM_CHANNEL_ID or msg_id is None:
+        return False
+    try:
+        msg = await asyncio.wait_for(
+            _get_bot_msg(bot, STREAM_CHANNEL_ID, msg_id), timeout=15)
+        media = msg and (msg.video or msg.audio or msg.document or msg.video_note)
+        if not media:
+            return False
+        dc_id, location = _file_location(media)
+        sessions, _gen = await get_media_session_pool_gen(
+            bot["client"], bot["name"], dc_id, 1, block=True)
+        if not sessions:
+            return False
+        want = 64 * 1024
+        data = await asyncio.wait_for(
+            _band_fetch(sessions[0], location, 0, want - 1, bot["name"]),
+            timeout=20)
+        return len(data) >= want
+    except Exception:
+        return False
+
+
+async def revive_stream_pool():
+    """מחזיר לחיים בוטים שה-session שלהם תקוע.
+
+    למה זה נדרש: cooldown (גם מתגבר) רק *מסתיר* בוט מת — הוא לא מתקן אותו.
+    בלי החייאה הבריכה שוחקת מ-21 בוטים ל-12 עד ה-restart הבא, וכל בוט שנשחק
+    מגדיל את העומס על הנותרים. חיבור MTProto תקוע לא מחזיר שגיאה שאפשר לתפוס
+    (הוא פשוט לא חוזר), ולכן אין ל-Pyrogram סיכוי לזהות אותו לבד — הדרך היחידה
+    היא stop()+start() שבונים session טרי.
+    """
+    if not STREAM_CHANNEL_ID:
+        return
+    while True:
+        await asyncio.sleep(REVIVE_EVERY)
+        for b in list(_stream_bots):
+            if b.get("chokes", 0) < REVIVE_AFTER_CHOKES:
+                continue
+            name = b["name"]
+            # קודם: האם הוא כבר מסוגל למשוך? אם כן, חבל להפיל לו session.
+            if await _bot_can_download(b):
+                b["chokes"] = 0
+                b["fails"] = 0
+                b["cooldown_until"] = 0.0
+                log.info("✅ %s מושך בייטים שוב — חזר לרוטציה", name)
+                continue
+            log.warning("♻️ %s לא מושך בייטים — מרים session מחדש", name)
+            try:
+                # stop() על לקוח תקוע עלול להיתקע בעצמו — עוטפים בתקציב.
+                await asyncio.wait_for(b["client"].stop(), timeout=20)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(b["client"].start(), timeout=POOL_START_TIMEOUT)
+                # ה-session החדש לא מכיר את הערוץ, וה-file_reference הישן שייך
+                # ל-session שמת — שניהם חייבים להיבנות מחדש, אחרת הבוט "עלה"
+                # אבל ייכשל בכל משיכה.
+                b["peer_ok"] = await _resolve_peer(b["client"], name)
+                for k in [k for k in _bot_msg_cache if k[0] == name]:
+                    _bot_msg_cache.pop(k, None)
+                # session טרי אינו ערובה למשיכה: חשבון חנוק מתחבר בשמחה
+                # ורק ההורדה שלו חסומה. בלי האימות הזה הוא היה חוזר לרוטציה
+                # וגובה timeout מלא מכל חלון שנוחת עליו, שוב ושוב.
+                if not await _bot_can_download(b):
+                    log.warning("⚠️ %s עלה אבל עדיין לא מושך — נשאר מודח", name)
+                else:
+                    b["chokes"] = 0
+                    b["fails"] = 0
+                    b["speed"] = None
+                    b["cooldown_until"] = 0.0
+                    log.info("✅ %s הורם מחדש ומושך — חזר לרוטציה", name)
+            except Exception as e:
+                # נשאר מודח; הסבב הבא ינסה שוב.
+                log.warning("⚠️ הרמת %s נכשלה: %s: %s", name, type(e).__name__, e)
+            await asyncio.sleep(2)   # לא מציפים את טלגרם בהתחברויות
+
 
 async def stop_stream_pool():
     for b in _stream_bots:
@@ -679,6 +1093,26 @@ async def stop_stream_pool():
             pass
     _stream_bots.clear()
 
+# ── בחירת בוט לפי ביצועים ────────────────────────────────────────────────────
+# נמדד על השרת, אותו קובץ ואותו רגע: bot_7 נתן 6.79 MB/s, bot_3 נתן 0.36,
+# וארבעה מתוך שמונה נכשלו לגמרי. כלומר המגבלה היא לכל חשבון בנפרד ולא על
+# השרת. בחירה round-robin עיוורת ניתבה צופים לבוטים התקועים באותה תדירות
+# כמו לתקינים — ומכאן שאותה בקשה בדיוק לקחה פעם 3 שניות ופעם 59.
+#
+# לכל בוט נשמר ממוצע נע של הקצב שהוא סיפק. הבחירה היא "הטוב מבין שניים
+# אקראיים": מטה את התנועה לבוטים המהירים בלי לרכז את כולם על אחד, ובלי
+# לדרוש דירוג גלובלי שמתיישן.
+BOT_SPEED_ALPHA = 0.3          # משקל המדידה האחרונה בממוצע הנע
+
+def note_bot_speed(bot, mb_per_sec: float):
+    prev = bot.get("speed")
+    bot["speed"] = (mb_per_sec if prev is None
+                    else prev * (1 - BOT_SPEED_ALPHA) + mb_per_sec * BOT_SPEED_ALPHA)
+
+def _bot_score(bot) -> float:
+    # בוט שטרם נמדד מקבל ציון ביניים כדי שייבחר וייבדק, אבל לא יגבר על מוכח
+    return bot["speed"] if bot.get("speed") is not None else 1.0
+
 async def pick_stream_bot():
     now = time.time()
     async with _stream_rr_lock:
@@ -687,13 +1121,95 @@ async def pick_stream_bot():
         pool = healthy or _stream_bots
         if not pool:
             return None
-        b = pool[_stream_rr % len(pool)]
+        if len(pool) == 1:
+            return pool[0]
+        a = pool[_stream_rr % len(pool)]
         _stream_rr += 1
-        return b
+        b = pool[random.randrange(len(pool))]
+        return a if _bot_score(a) >= _bot_score(b) else b
 
-def _mark_choked(bot, seconds):
+
+# באיזו הסתברות להעדיף בוט שההודעה כבר במטמון שלו. לא 100%: בהעדפה מוחלטת
+# הצופה הראשון היה "נועל" את הסרט על בוט אחד למשך 15 דקות, וכל שאר הצופים
+# באותו סרט היו נדחסים לאותו חשבון. הדליפה של ~15% מחממת בוטים נוספים ברקע,
+# כך שקבוצת החמים גדלה מעצמה ככל שהסרט נצפה יותר.
+WARM_BIAS = float(os.environ.get("STREAM_WARM_BIAS", "0.85"))
+
+
+async def pick_stream_bot_for(chat_id, message_id):
+    """כמו pick_stream_bot, אבל מעדיף בוט שכבר משך את ההודעה הזו.
+
+    נמדד על השרת אחרי הדחת הבוטים התקועים: חלק מהבקשות חזרו ב-0.56 שניות
+    (5.4 MB/s) ואחרות ב-8.7 — וההפרש היה בדיוק 8 שניות, כלומר מלוא תקציב
+    שליפת ההודעה שנשרף על בוט תקוע לפני המעבר לבא. בוט "חם" מחזיר את ההודעה
+    מהמטמון בלי קריאת רשת כלל, ולכן הוא לא יכול להיתקע שם — מה שמסלק את
+    מקור השונות האחרון במקום לקצר את העונש עליו.
+    """
+    now = time.time()
+    if random.random() < WARM_BIAS:
+        warm = [b for b in _stream_bots
+                if b["cooldown_until"] < now
+                and (_bot_msg_cache.get((b["name"], chat_id, message_id))
+                     or (None, 0.0))[1] > now]
+        if warm:
+            if len(warm) == 1:
+                return warm[0]
+            a = warm[random.randrange(len(warm))]
+            b = warm[random.randrange(len(warm))]
+            return a if _bot_score(a) >= _bot_score(b) else b
+    return await pick_stream_bot()
+
+# כמה כשלים *רצופים* לפני שמדיחים בוט. כשל בודד הוא בדרך כלל רעש רגעי של
+# טלגרם, לא בוט חולה. הדחה על כשל ראשון יצרה מפל: בוט נחנק ← נשארים פחות ←
+# העומס על הנותרים גדל ← גם הם נחנקים. וזה גם מה שגרם למספר הבוטים ה"בריאים"
+# לקפוץ בין 4 ל-16 כל כמה דקות.
+CHOKE_AFTER_FAILS = int(os.environ.get("STREAM_CHOKE_AFTER_FAILS", "3"))
+
+# עונש מתגבר. cooldown קבוע של 30 שניות נראה הגיוני, אבל מול בוט שה-session
+# שלו *תקוע* הוא אסון: הבוט חוזר לתור כל חצי דקה, כל בחירה בו שורפת את מלוא
+# תקציב שליפת ההודעה, והוא לעולם לא יוצא מהמשחק. נמדד בשרת: 9 מתוך 21 בוטים
+# תקועים ← ~43% מהחלונות שילמו 20 שניות ← 6 MB/s צנחו מתחת ל-0.03.
+# עם הכפלה פי 4 בכל חניקה רצופה (30ש' → 2ד' → 8ד' → 30ד') בוט מת יוצא
+# מהרוטציה תוך כדקתיים, בעוד בוט שנתקל ברעש רגעי חוזר מיד אחרי 30 שניות.
+CHOKE_BACKOFF_MAX = int(os.environ.get("STREAM_CHOKE_BACKOFF_MAX", "1800"))
+
+# מתי בפעם האחרונה בוט כלשהו מהבריכה סיפק בייטים בהצלחה. ה-Watchdog משתמש
+# בזה כעדות חיה לכך שטלגרם מגיב — ראה telegram_watchdog.
+_last_pool_success = 0.0
+
+
+def _mark_ok(bot):
+    """משיכה הצליחה — מאפסים את מונה הכשלים הרצופים ואת דרגת העונש."""
+    global _last_pool_success
+    _last_pool_success = time.time()
+    if bot.get("fails"):
+        bot["fails"] = 0
+    if bot.get("chokes"):
+        bot["chokes"] = 0
+
+def _mark_choked(bot, seconds, err=None, hard=False, escalate=True):
+    # "Peer id invalid" הוא לא חניקה אלא בוט ששכח את הערוץ: cooldown לבדו לא
+    # יעזור לו, הוא פשוט ייכשל שוב בעוד 30 שניות. מסמנים אותו כדי ש-
+    # peer_retry_loop ינסה לזהות עבורו את הערוץ מחדש.
+    peer_bad = err is not None and "peer id invalid" in str(err).lower()
+    if peer_bad:
+        bot["peer_ok"] = False
+    # FloodWait ו-peer פגום הם ודאיים — מדיחים מיד. כל השאר צריך לחזור על עצמו.
+    if not (hard or peer_bad):
+        bot["fails"] = bot.get("fails", 0) + 1
+        if bot["fails"] < CHOKE_AFTER_FAILS:
+            log.info("בוט %s נכשל (%d/%d) — עדיין בשירות",
+                     bot["name"], bot["fails"], CHOKE_AFTER_FAILS)
+            return
+        bot["fails"] = 0
+    # FloodWait מגיע עם זמן ההמתנה שטלגרם עצמו ביקש — אותו לא מכפילים.
+    n = bot.get("chokes", 0)
+    if escalate:
+        bot["chokes"] = n + 1
+        seconds = min(CHOKE_BACKOFF_MAX, int(seconds * (4 ** min(n, 5))))
     bot["cooldown_until"] = time.time() + seconds
-    log.warning("🥵 בוט %s נחנק — cooldown %ds", bot["name"], seconds)
+    log.warning("🥵 בוט %s נחנק (חניקה %d) — cooldown %ds",
+                bot["name"], n + 1 if escalate else n, seconds)
 
 # cache של אובייקט ההודעה — *per-bot*. קריטי: ה-file_reference בתוך ההודעה
 # תקף רק בהקשר של הסשן שששלף אותו. שיתוף בין בוטים גרם ל-FILE_REFERENCE_EXPIRED
@@ -731,21 +1247,56 @@ async def _get_bot_msg(bot, chat_id, message_id, force=False):
         return msg
     return None
 
+
+# תקציב שליפת ההודעה בכל מסלול הזרמה. ל-_get_bot_msg יש timeout של 20 שניות,
+# והוא נספר *מחוץ* לתקציב החלון — כלומר בוט עם session תקוע גבה 20 שניות מלאות
+# לפני שהחלון בכלל התחיל, ובמסלולי הגיבוי (לולאה על 4 בוטים) עד 80 שניות
+# לבקשה אחת. ההודעה שמורה במטמון 15 דקות ובוט בריא מחזיר אותה ממנו מיידית
+# (וגם קר — פחות משתי שניות), ולכן 8 שניות הן מרווח נדיב לכל בוט חי.
+MSG_FETCH_BUDGET = float(os.environ.get("STREAM_MSG_FETCH_BUDGET", "8"))
+
+
+async def _get_bot_msg_fast(bot, chat_id, message_id):
+    """כמו _get_bot_msg אבל עם תקציב קצר, וחניקה מיידית של בוט שנתקע.
+
+    session תקוע לא מחזיר שגיאה — הוא פשוט לא חוזר, ולכן הוא מתחזה ל"בוט איטי"
+    ולא מודח לעולם. נמדד בשרת: 9 מתוך 21 בוטים במצב הזה ניתבו אליהם ~43%
+    מהחלונות, וכל אחד שילם את מלוא ה-timeout. מחזיר None אם הבוט נתקע.
+    """
+    try:
+        return await asyncio.wait_for(
+            _get_bot_msg(bot, chat_id, message_id), timeout=MSG_FETCH_BUDGET)
+    except asyncio.TimeoutError:
+        # חניקה מיידית (hard) בלי לחכות לשלושה כשלים: עם העונש המתגבר, טעות
+        # על בוט בריא עולה 30 שניות בלבד, בעוד ההמתנה לשלוש מכות עלתה יותר
+        # מדקה של צפייה תקועה בכל סיבוב.
+        log.warning("שליפת ההודעה מ-%s נתקעה (%.0fs) — חונק", bot["name"], MSG_FETCH_BUDGET)
+        note_bot_speed(bot, 0.0)
+        _mark_choked(bot, 30, hard=True)
+        return None
+
+
+def _purge_msg_cache(chat_id, message_id):
+    """מנקה את הודעת ה-cache של *כל* הבוטים עבור פריט מסוים (file_reference פג
+    גלובלית)."""
+    for k in [k for k in _bot_msg_cache if k[1] == chat_id and k[2] == message_id]:
+        _bot_msg_cache.pop(k, None)
+
 async def channel_get_media(chat_id, message_id):
     """מחזיר את ה-media של ההודעה מהערוץ (metadata בלבד — אין בעיית reference)."""
     for _ in range(min(max(1, len(_stream_bots)), 5)):
-        bot = await pick_stream_bot()
+        bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             return None
         try:
-            msg = await _get_bot_msg(bot, chat_id, message_id)
+            msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg:
                 return msg.video or msg.audio or msg.document or msg.video_note
         except FloodWait as e:
-            _mark_choked(bot, e.value)
+            _mark_choked(bot, e.value, hard=True, escalate=False)
         except Exception as e:
             log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
-            _mark_choked(bot, 30)
+            _mark_choked(bot, 30, e)
     return None
 
 async def channel_stream_range(chat_id, message_id, start, end):
@@ -754,14 +1305,13 @@ async def channel_stream_range(chat_id, message_id, start, end):
     CHUNK = PYROGRAM_CHUNK_SIZE
     pos = start
     for _ in range(min(max(1, len(_stream_bots)), 4)):
-        bot = await pick_stream_bot()
+        bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             break
         try:
-            msg = await _get_bot_msg(bot, chat_id, message_id)
+            msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg is None:
-                _mark_choked(bot, 15)
-                continue
+                continue          # כבר נחנק בתוך _get_bot_msg_fast אם נתקע
             off_chunks = pos // CHUNK
             produced = off_chunks * CHUNK
             async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
@@ -777,21 +1327,22 @@ async def channel_stream_range(chat_id, message_id, start, end):
                     break
             break  # הצלחה
         except FileReferenceExpired:
-            # ה-reference פג — נזרוק את ה-cache של הבוט ונתן לו סיבוב נוסף
-            _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+            _purge_msg_cache(chat_id, message_id)
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להתחיל מחדש
         except FloodWait as e:
-            _mark_choked(bot, e.value)
+            _mark_choked(bot, e.value, hard=True, escalate=False)
             if pos > start:
                 break   # כבר שלחנו בייטים — אי אפשר להחליף בוט באמצע
         except Exception as e:
             log.warning("channel stream שגיאה: %s", e)
-            _mark_choked(bot, 30)
+            _mark_choked(bot, 30, e)
             if pos > start:
                 break
     if pos <= end:
-        yield b"\x00" * (end - pos + 1)
+        log.error("channel stream: חסרים %d בייטים — מנתק כדי שהנגן יבקש שוב",
+                  end - pos + 1)
+        raise StreamGap(f"missing {end - pos + 1} bytes")
 
 # ── הזרמה מקבילה (FastTelethon-style, בטוח) ─────────────────────────────────
 # במקום צינור אחד ל-~4MB/s, מפצלים כל "חלון" של הסרט לכמה תת-טווחים שנמשכים
@@ -800,6 +1351,17 @@ async def channel_stream_range(chat_id, message_id, start, end):
 # נשלט ע"י STREAM_PARALLEL_PARTS (ברירת מחדל 1 = ההתנהגות הישנה, בלי סיכון).
 STREAM_PARALLEL_PARTS  = int(os.environ.get("STREAM_PARALLEL_PARTS", "1"))
 STREAM_PARALLEL_WINDOW = int(os.environ.get("STREAM_PARALLEL_WINDOW", str(16 * 1024 * 1024)))
+# קריאה-מראש של חלון אחד קדימה. עלות: עוד חלון אחד בזיכרון לכל צופה פעיל
+# (ברירת מחדל 16MB). אפשר לכבות ב-STREAM_READAHEAD=0 אם הזיכרון נהיה צר.
+STREAM_READAHEAD = os.environ.get("STREAM_READAHEAD", "1") not in ("0", "false", "no")
+# כמה זמן מחכים לבוט בודד לפני שמוותרים עליו ועוברים לבא. ניתן לכוונון מ-.env.
+SUBRANGE_TIMEOUT = int(os.environ.get("STREAM_SUBRANGE_TIMEOUT", "25"))
+# ── בקשה מגודרת (hedge) ─────────────────────────────────────────────────
+# כמה שניות ממתינים לניסיון לפני שמשגרים עוד אחד לבוט אחר. קצר בכוונה:
+# המטרה אינה לחכות לכשל אלא לעקוף אותו. 0 מכבה את הגידור לגמרי.
+MEDIA_HEDGE_DELAY = float(os.environ.get("STREAM_HEDGE_DELAY", "4"))
+# מקסימום ניסיונות מקבילים לאותו חלון (כולל הראשון).
+MEDIA_HEDGE_TRIES = int(os.environ.get("STREAM_HEDGE_TRIES", "3"))
 
 async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
     """מושך את הבייטים [lo, hi] (כולל) דרך בוט מה-pool, עם ניסיונות על כמה בוטים.
@@ -807,38 +1369,346 @@ async def _fetch_subrange(chat_id, message_id, lo, hi) -> bytes:
     CHUNK = PYROGRAM_CHUNK_SIZE
     need = hi - lo + 1
     for _ in range(min(max(1, len(_stream_bots)), 4)):
-        bot = await pick_stream_bot()
+        bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             break
         try:
-            msg = await _get_bot_msg(bot, chat_id, message_id)
+            msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg is None:
-                _mark_choked(bot, 15)
-                continue
-            out = bytearray()
-            off_chunks = lo // CHUNK
-            produced = off_chunks * CHUNK
-            async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
-                c_start = produced
-                c_end = produced + len(chunk)
-                a = max(lo, c_start) - c_start
-                b = min(hi + 1, c_end) - c_start
-                if a < b:
-                    out += chunk[a:b]
-                produced = c_end
-                if produced > hi:
-                    break
+                continue          # כבר נחנק בתוך _get_bot_msg_fast אם נתקע
+
+            async def _pull():
+                out = bytearray()
+                off_chunks = lo // CHUNK
+                produced = off_chunks * CHUNK
+                async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
+                    c_start = produced
+                    c_end = produced + len(chunk)
+                    a = max(lo, c_start) - c_start
+                    b = min(hi + 1, c_end) - c_start
+                    if a < b:
+                        out += chunk[a:b]
+                    produced = c_end
+                    if produced > hi:
+                        break
+                return out
+
+            # timeout חובה: ל-stream_media אין מגבלת זמן משלו, וכשהחיבור של הבוט
+            # ל-DC של טלגרם נופל בלולאה (Retrying upload.GetFile) הלולאה תלויה
+            # לנצח. החלון המקבילי מוגש רק כשכל תת-הטווחים הסתיימו, ולכן בוט תקוע
+            # אחד הקפיא את כל הבקשה גם כששאר ה-pool בריא — הצופה קיבל 0 בייטים.
+            out = await asyncio.wait_for(_pull(), timeout=SUBRANGE_TIMEOUT)
             if len(out) >= need:
+                _mark_ok(bot)
                 return bytes(out[:need])
-            return bytes(out) + b"\x00" * (need - len(out))
+            raise StreamGap(f"subrange short: {len(out)}/{need}")
+        except asyncio.TimeoutError:
+            log.warning("subrange: %s לא סיפק בייטים תוך %ds — עובר לבוט אחר",
+                        bot["name"], SUBRANGE_TIMEOUT)
+            _mark_choked(bot, 30)
         except FileReferenceExpired:
-            _bot_msg_cache.pop((bot["name"], chat_id, message_id), None)
+            _purge_msg_cache(chat_id, message_id)
         except FloodWait as e:
-            _mark_choked(bot, e.value)
+            _mark_choked(bot, e.value, hard=True, escalate=False)
         except Exception as e:
             log.warning("subrange שגיאה: %s", e)
-            _mark_choked(bot, 30)
-    return b"\x00" * need
+            _mark_choked(bot, 30, e)
+    raise StreamGap(f"no bot could serve {need} bytes")
+
+# כמה חיבורי media מקבילים לכל משיכה. נמדד על השרת הזה מול DC4:
+#   חיבור אחד → 0.14 MB/s ·  4 חיבורים → 10.5 MB/s ·  8 חיבורים → 0.96 MB/s
+# כלומר 4 הוא האופטימום; מעבר לזה טלגרם מגביל ויצירת החיבורים עולה יותר ממה
+# שהיא מחזירה. 0 מכבה לגמרי וחוזר למסלול הבוטים.
+STREAM_MEDIA_CONNS = int(os.environ.get("STREAM_MEDIA_CONNS", "4"))
+# תקציב הזמן למשיכה במסלול המהיר. הערך הראשון (8 + 2 לכל MB) היה ניחוש בלי
+# מדידה, והתברר כקצר מדי: נמדדו 20 חיתוכים מול נפילה אחת בלבד למסלול האיטי,
+# כלומר כמעט כל בקשה נחתכה באמצע משיכה תקינה, זרקה את מה שכבר נמשך והתחילה
+# מאפס במסלול איטי יותר. הנפילה אחורה יקרה, ולכן עדיף להמתין למשיכה שמתקדמת.
+# 14 + 4/MB נקבע *לפני* שתוקן באג הרצועות, כשכל משיכה הורידה פי 3-4 מהנדרש
+# ולכן באמת הייתה איטית. אחרי התיקון המשיכות מהירות בהרבה והתקציב הפך רחב
+# מדי: הוא הפך לזמן ההמתנה הקבוע שכל חיבור מת גובה לפני הנפילה אחורה.
+MEDIA_BANDS_TIMEOUT = int(os.environ.get("STREAM_MEDIA_BANDS_TIMEOUT", "6"))
+MEDIA_BANDS_PER_MB = float(os.environ.get("STREAM_MEDIA_BANDS_PER_MB", "3"))
+MEDIA_BANDS_MAX = int(os.environ.get("STREAM_MEDIA_BANDS_MAX", "35"))
+
+
+# עד כמה זמן FloodWait כדאי "לרכוב" בתוך רצועה לפני ויתור. FloodWait קצר
+# (טלגרם מבקש להאט לרגע) עדיף לספוג מאשר להפיל את כל החלון; FloodWait ארוך
+# עדיף לזרוק — החלון ייפול אחורה למסלול אחר ולא יחזיק את הצופה תקוע.
+MEDIA_BAND_FLOOD_CAP = int(os.environ.get("STREAM_BAND_FLOOD_CAP", "8"))
+
+
+# מונה timeouts רצופים לכל (בוט, DC). מתאפס בכל הצלחה, כך שרק *רצף* אמיתי
+# נחשב לבריכה מתה — חלון איטי מזדמן לא מפיל כלום.
+_band_timeouts: dict = {}
+BAND_TIMEOUT_LIMIT = int(os.environ.get("STREAM_BAND_TIMEOUT_LIMIT", "2"))
+# חלון הספירה. הסף נשאר כפי שהוא, אבל נספר "N timeouts בתוך X שניות"
+# ולא "N ברצף": הצלחה על חיבור בריא באותה בריכה כבר לא מוחקת את
+# העדות על חיבור מת שיושב לידו.
+BAND_TIMEOUT_WINDOW = float(os.environ.get("STREAM_BAND_TIMEOUT_WINDOW", "600"))
+
+
+def _is_dead_conn(err) -> bool:
+    """האם השגיאה מעידה על *חיבור מת* (ואז כדאי להפיל ולבנות בריכה טרייה),
+    להבדיל מהאטה רגעית (FloodWait/timeout) שבה הבריכה בריאה. הפלת בריכה על
+    כל האטה גרמה ל-thrash מתמיד: כל כמה דקות כל החיבורים נהרסו ונבנו, והסרט
+    נתקע בזמן הבנייה."""
+    return isinstance(err, (ConnectionError, OSError, EOFError, RuntimeError))
+
+
+# ── הגבלת קצב עצמית ─────────────────────────────────────────────────────────
+# טלגרם חונק חשבון סביב 15-20 בקשות בשנייה, וההגבלה היא לכל חשבון בנפרד.
+# עד עכשיו לא הייתה לנו שום בלימה: שלחנו כמה שה-event loop הרשה, ונמדדו 23
+# התחברויות בשנייה ואלפי בקשות — ואז טלגרם עשה לנו את מה שלא עשינו לעצמנו,
+# ו-12 מתוך 21 חשבונות נחנקו לשעות.
+#
+# teldrive, שמשרת הרבה יותר משתמשים מאיתנו, מגביל את עצמו ל-10 בקשות בשנייה
+# לכל בוט (rate.Every(100ms), burst 5) ומדליק את זה כברירת מחדל. הוא פשוט
+# לא מגיע לתקרה, ולכן לא נחנק. זה מה שמיושם כאן.
+#
+# זה לא מזרז את הצופה הבודד — הוא ממילא רחוק מהתקרה. הוא מונע את מחלקת
+# התקלות שהרסה לנו יומיים.
+RATE_PER_SEC = float(os.environ.get("STREAM_RATE_PER_SEC", "10"))
+RATE_BURST = float(os.environ.get("STREAM_RATE_BURST", "5"))
+_rate_buckets: dict = {}          # שם בוט -> [אסימונים, זמן_עדכון_אחרון]
+
+
+async def _rate_gate(owner: str):
+    """דלי אסימונים לכל בוט. מחזיק את הקצב מתחת לתקרה של טלגרם.
+
+    ממומש כדלי דולף ולא כתור: בקשה שמגיעה כשאין אסימון פשוט ישנה בדיוק את
+    הזמן שנחוץ לאסימון הבא. בלי תור אין תור שמתפוצץ תחת עומס, ובלי נעילה
+    גלובלית — כל בוט וקצב משלו, כי גם ההגבלה של טלגרם היא לכל חשבון בנפרד.
+    """
+    if RATE_PER_SEC <= 0:
+        return
+    now = time.monotonic()
+    b = _rate_buckets.get(owner)
+    if b is None:
+        _rate_buckets[owner] = [RATE_BURST - 1.0, now]
+        return
+    tokens, last = b
+    tokens = min(RATE_BURST, tokens + (now - last) * RATE_PER_SEC)
+    if tokens < 1.0:
+        wait = (1.0 - tokens) / RATE_PER_SEC
+        b[0], b[1] = 0.0, now + wait
+        await asyncio.sleep(wait)
+        return
+    b[0], b[1] = tokens - 1.0, now
+
+
+BLOCK_RETRIES = int(os.environ.get("STREAM_BLOCK_RETRIES", "4"))
+BLOCK_BACKOFF_START = float(os.environ.get("STREAM_BLOCK_BACKOFF", "0.1"))
+BLOCK_BACKOFF_MAX = float(os.environ.get("STREAM_BLOCK_BACKOFF_MAX", "8"))
+
+
+async def _get_block(session: Session, location, offset: int, limit: int,
+                     owner: str = None) -> bytes:
+    """מושך בלוק בודד, עם ניסיונות חוזרים והשהיה מכפילה.
+
+    FloodWait קצר: ישנים בדיוק כמה שטלגרם ביקש. שגיאת חיבור רגעית: משהים
+    ומנסים שוב על אותו חיבור. רק אחרי שכל הניסיונות נכשלו הכשל עולה למעלה.
+    """
+    backoff = BLOCK_BACKOFF_START
+    last = None
+    for attempt in range(max(1, BLOCK_RETRIES)):
+        try:
+            if owner:
+                await _rate_gate(owner)
+            r = await session.invoke(functions.upload.GetFile(
+                location=location, offset=offset, limit=limit, precise=False))
+            return getattr(r, "bytes", b"")
+        except FloodWait as e:
+            # FloodWait ארוך אינו האטה רגעית — עדיף לוותר ולתת לחלון ליפול
+            # לבוט אחר מאשר להחזיק את הצופה תקוע.
+            if e.value > MEDIA_BAND_FLOOD_CAP:
+                raise
+            await asyncio.sleep(e.value + 0.5)
+            continue
+        except (OSError, ConnectionError, EOFError, asyncio.TimeoutError) as e:
+            last = e
+            if attempt == BLOCK_RETRIES - 1:
+                raise
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, BLOCK_BACKOFF_MAX)
+    if last is not None:
+        raise last
+    return b""
+
+
+async def _band_fetch(session: Session, location, lo: int, hi: int,
+                      owner: str = None) -> bytes:
+    """מושך בדיוק [lo, hi] דרך חיבור media יחיד ומחזיר את הבייטים."""
+    # בלוק של מגהבייט — המקסימום שהפרוטוקול מרשה. בלוק קטן יותר חוסך בייטים
+    # אבל מכפיל את מספר הבקשות, והמשאב שנגמר לנו הוא בקשות-לשנייה לכל חשבון
+    # (נמדד ~15-20), לא רוחב פס. נבדק: 3MB בבלוקים של 256KB = 13 בקשות מול 4.
+    block = MEDIA_CHUNK
+    out = bytearray()
+    offset = (lo // block) * block
+    produced = offset
+    while produced <= hi:
+        chunk = await _get_block(session, location, offset, block, owner)
+        if not chunk:
+            break
+        c_start, c_end = produced, produced + len(chunk)
+        a = max(lo, c_start) - c_start
+        b = min(hi + 1, c_end) - c_start
+        if a < b:
+            out += chunk[a:b]
+        produced = c_end
+        offset = produced
+        if len(chunk) < block:
+            break
+    return bytes(out)
+
+
+async def _media_bands_fetch(chat_id, message_id, lo, hi):
+    """מושך [lo, hi] דרך כמה חיבורי media של *בוט אחד* מהמאגר, במקביל.
+
+    ההבדל מהמסלול הישן: שם הבוט מושך צ'אנק, ממתין לתשובה, ומושך את הבא —
+    רוב הזמן עובר בהמתנה. כאן כמה חיבורים של אותו בוט מושכים חלקים שונים
+    בו-זמנית.
+
+    קריטי: הבוט נבחר מהמאגר (round-robin), והחיבורים שייכים לו בלבד. גרסה
+    קודמת השתמשה במאגר גלובלי מהבוט הראשי, וכל הצופים נדחסו דרך אותם 4
+    חיבורים — מהיר לצופה בודד, איטי פי 6 בעומס אמיתי.
+
+    כמו כן ה-file_reference תקף רק בהקשר הבוט ששלף אותו, ולכן שולפים את
+    ההודעה דרך אותו בוט (עם המטמון הקיים) ולא דרך הבוט הראשי.
+
+    מחזיר None על כל כשל — והקורא נופל בשקט למסלול הבוטים הוותיק. כשל כאן
+    הוא כמעט תמיד תקלת *חיבור* (טלגרם סגר session לא פעיל), לא תקלת בוט —
+    ולכן מפילים את החיבורים ולא מסמנים את הבוט כחנוק. הגרסה הקודמת ענישה את
+    הבוט על אשמת החיבור, וכך הודחו בזה אחר זה בוטים בריאים לגמרי.
+    """
+    if STREAM_MEDIA_CONNS <= 0:
+        return None
+    bot = await pick_stream_bot_for(chat_id, message_id)
+    if bot is None:
+        return None
+    dc_id = gen = None
+    try:
+        msg = await _get_bot_msg_fast(bot, chat_id, message_id)
+        if msg is None:
+            return None
+        media = msg.video or msg.audio or msg.document or msg.video_note
+        if not media:
+            return None
+        dc_id, location = _file_location(media)
+        sessions, gen = await get_media_session_pool_gen(
+            bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS, block=False)
+        if not sessions:
+            # קר: הבריכה עוד לא מוכנה. הגרסה הקודמת נפלה כאן למסלול הבוטים —
+            # אבל למשיכת *זנב* (moov בסוף קובץ ענק) המסלול הזה נמדד ב-105 שניות
+            # (4 בוטים × 25ש' timeout). לכן בונים את החיבורים המהירים כאן ועכשיו
+            # (~5ש') ומשתמשים במסלול המהיר, שיודע לקפוץ ישר לאופסט הגבוה.
+            sessions, gen = await get_media_session_pool_gen(
+                bot["client"], bot["name"], dc_id, STREAM_MEDIA_CONNS, block=True)
+        if not sessions:
+            return None            # גם הבנייה נכשלה — נופלים למסלול הבוטים
+        total = hi - lo + 1
+        # החלוקה חייבת ליפול על גבולות של MEDIA_CHUNK. טלגרם מגיש רק חתיכות
+        # של 1MB, ו-_band_fetch מיישר כל רצועה למטה לגבול הקרוב — כך שחלוקה
+        # של חלון 1MB לארבע רצועות של 256KB גרמה לארבעתן ליישר חזרה לאפס
+        # ולהוריד *את אותו המגהבייט* ארבע פעמים: פי 4 תעבורה, אפס מקביליות.
+        chunk_lo = (lo // MEDIA_CHUNK) * MEDIA_CHUNK
+        n_chunks = (hi - chunk_lo) // MEDIA_CHUNK + 1
+        n = max(1, min(len(sessions), n_chunks))
+        per_band = -(-n_chunks // n)          # חתיכות שלמות לכל רצועה
+        tasks, s = [], lo
+        for i in range(n):
+            if s > hi:
+                break
+            e = min(hi, chunk_lo + (i + 1) * per_band * MEDIA_CHUNK - 1)
+            tasks.append(_band_fetch(sessions[i], location, s, e, bot["name"]))
+            s = e + 1
+        # התקציב נגזר מגודל *הרצועה* ולא מגודל החלון: הרצועות רצות במקביל,
+        # ולכן מה שקובע הוא האיטית שבהן, לא הסכום. הגרסה הקודמת חישבה לפי
+        # הסכום ונתנה 18 שניות לחלון של מגהבייט אחד — וכל חיבור מת גבה בדיוק
+        # 18.2 שניות של המתנה לפני הנפילה למסלול הגיבוי.
+        band_mb = (per_band * MEDIA_CHUNK) / (1024 * 1024)
+        budget = min(MEDIA_BANDS_MAX,
+                     MEDIA_BANDS_TIMEOUT + band_mb * MEDIA_BANDS_PER_MB)
+        t_start = time.time()
+        parts = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), timeout=budget)
+        elapsed = time.time() - t_start
+        bad = next((p for p in parts if not isinstance(p, (bytes, bytearray))), None)
+        if bad is not None:
+            # לא מגישים חלון חלקי — נופלים למסלול אחר. *אבל* מפילים את בריכת
+            # החיבורים רק אם הכשל הוא חיבור מת. FloodWait/reference-פג הם רגעיים
+            # והבריכה בריאה; הפלה שלה עליהם גרמה ל-thrash והתקיעות "כל כמה דקות".
+            if isinstance(bad, FileReferenceExpired):
+                # קריטי: FileReferenceExpired מגיע *בתוך* תוצאות ה-gather ולכן
+                # ה-except למטה לא תופס אותו. בלי הניקוי ה-reference הפג נשאר
+                # במטמון וכל חלון נכשל שוב → הסרט נתקע עד כניסה מחדש.
+                _purge_msg_cache(chat_id, message_id)
+            elif _is_dead_conn(bad):
+                log.warning("media bands (%s) חיבור מת: %s — מרענן חיבורים",
+                            bot["name"], type(bad).__name__)
+                await drop_media_sessions(bot["name"], dc_id, gen)
+            else:
+                # FloodWait ארוך או שגיאה רגעית אחרת — בריכה בריאה, לא נוגעים.
+                log.info("media bands (%s) חלון נכשל רגעית: %s — fallback",
+                         bot["name"], type(bad).__name__)
+            return None
+        out = bytearray()
+        for p in parts:
+            out += p
+        if len(out) < total:
+            return None
+        _mark_ok(bot)
+        # (בכוונה בלי איפוס: הצלחה כאן היא של חיבור אחר בבריכה, והיא
+        #  שהסתירה עד היום את החיבור המת. הפגיעות פגות לבד לפי הזמן.)
+        if elapsed > 0:
+            note_bot_speed(bot, (total / 1024 / 1024) / elapsed)
+        return bytes(out[:total])
+    except FileReferenceExpired:
+        _purge_msg_cache(chat_id, message_id)
+        return None
+    except asyncio.TimeoutError:
+        # החלון חרג מה-budget. timeout בודד הוא איטיות ולא מוות, והפלת הבריכה
+        # על כל אחד כזה היא ה-thrash שהקפיץ תקיעות כל כמה דקות.
+        #
+        # אבל ההנחה הקודמת — "אם החיבור באמת מת, החלון הבא ייכשל בשגיאת חיבור
+        # וזו תפיל אותו" — פשוט אינה נכונה: חיבור MTProto מת *נתקע*, כלומר
+        # מתבטא כ-timeout ולא כשגיאה. לכן בריכה מתה לא התרפאתה לעולם, כל חלון
+        # עשה timeout, והכל נפל למסלול האיטי (נמדד 3.12MB/s → 0.14MB/s).
+        #
+        # הפשרה: סופרים timeouts רצופים לאותו (בוט, DC). בודד — מתעלמים; רצף
+        # קצר — זו כבר לא איטיות אלא בריכה מתה, ומפילים אותה כדי שתיבנה טרייה.
+        key = (bot["name"], dc_id)
+        _now = time.time()
+        hits = [t for t in _band_timeouts.get(key, [])
+                if _now - t < BAND_TIMEOUT_WINDOW]
+        hits.append(_now)
+        _band_timeouts[key] = hits
+        n = len(hits)
+        note_bot_speed(bot, 0.0)
+        if n >= BAND_TIMEOUT_LIMIT and dc_id is not None and gen is not None:
+            log.warning("media bands (%s) %d timeouts רצופים — מרענן חיבורים",
+                        bot["name"], n)
+            _band_timeouts.pop(key, None)
+            await drop_media_sessions(bot["name"], dc_id, gen)
+        else:
+            log.info("media bands (%s) חלון איטי (timeout %d/%d)",
+                     bot["name"], n, BAND_TIMEOUT_LIMIT)
+        return None
+    except FloodWait as e:
+        log.info("media bands (%s) FloodWait %ss — fallback בלי הפלה", bot["name"], e.value)
+        return None
+    except Exception as e:
+        # שם הטיפוס חובה: str(asyncio.TimeoutError()) ריק, והשורה הזו הודפסה
+        # כ"נכשל: " בלי סיבה — מה שהסתיר בדיוק את הכשל הנפוץ ביותר כאן.
+        log.warning("media bands (%s) נכשל: %s: %s — נופל למסלול הבוטים",
+                    bot["name"], type(e).__name__, e)
+        note_bot_speed(bot, 0.0)      # כשל מוריד את הציון מיד
+        # gen=None פירושו שהכשל קרה עוד לפני שקיבלנו בריכה — אין מה להפיל.
+        # מפילים רק על חיבור מת ממש (לא על שגיאה רגעית) כדי לא ליצור thrash.
+        if dc_id is not None and gen is not None and _is_dead_conn(e):
+            await drop_media_sessions(bot["name"], dc_id, gen)
+        return None
+
 
 async def channel_stream_range_parallel(chat_id, message_id, start, end):
     """גרסה מקבילה עם *התחלה מהירה*: מעבדת חלון-אחר-חלון, וכל חלון נמשך בכמה
@@ -851,27 +1721,237 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
     MIN_PART = 512 * 1024   # לא לפצל לחתיכות קטנות מדי
     # רמפה: 1MB → 4MB → מלא. חלון ראשון קטן = TTFB נמוך; אחר כך מהירות מלאה.
     ramp = [1 * 1024 * 1024, 4 * 1024 * 1024]
-    pos = start
-    idx = 0
-    while pos <= end:
-        window = min(ramp[idx] if idx < len(ramp) else full_window, full_window)
-        idx += 1
-        wend = min(pos + window - 1, end)
-        total = wend - pos + 1
-        n = max(1, min(parts, total // MIN_PART))
-        step = -(-total // n)   # ceil
-        ranges = []
-        s = pos
+    async def _fetch_window(wstart, wend):
+        """מחזיר את כל בייטי החלון. קודם מסלול ה-media bands (חיבורים מקבילים
+        לאותו DC — נמדד פי ~70 ממשיכה בחיבור יחיד), ואם הוא נכשל נופלים בשקט
+        למסלול הבוטים הוותיק."""
+        # ניסיונות מגודרים: מתחילים באחד, וכל MEDIA_HEDGE_DELAY שניות שבהן
+        # איש לא חזר — משגרים עוד אחד לבוט אחר. הראשון שמצליח מנצח והשאר
+        # מבוטלים. כך בוט איטי בודד לא קובע כמה הצופה מחכה, ולא נופלים
+        # למסלול הוותיק (שתולה SUBRANGE_TIMEOUT שניות לכל בוט) על כל עיכוב.
+        _hedge_tasks, _hedge_n = set(), 0
+        try:
+            while True:
+                if _hedge_n < MEDIA_HEDGE_TRIES:
+                    _hedge_tasks.add(asyncio.create_task(
+                        _media_bands_fetch(chat_id, message_id, wstart, wend)))
+                    _hedge_n += 1
+                if not _hedge_tasks:
+                    break
+                # עוד יש ניסיונות במלאי → ממתינים קצר ומשגרים עוד אחד.
+                # נגמרו → ממתינים עד שמישהו יחזור.
+                _hedge_wait = MEDIA_HEDGE_DELAY if (
+                    _hedge_n < MEDIA_HEDGE_TRIES and MEDIA_HEDGE_DELAY > 0) else None
+                _hedge_done, _hedge_tasks = await asyncio.wait(
+                    _hedge_tasks, timeout=_hedge_wait,
+                    return_when=asyncio.FIRST_COMPLETED)
+                for _d in _hedge_done:
+                    try:
+                        fast = _d.result()
+                    except Exception:
+                        fast = None
+                    if fast is not None:
+                        return fast
+                if not _hedge_done and _hedge_n >= MEDIA_HEDGE_TRIES:
+                    break
+        finally:
+            # מבטלים ניסיונות שנותרו — כולל כשיצאנו ב-return עם מנצח.
+            for _t in _hedge_tasks:
+                _t.cancel()
+                _t.add_done_callback(lambda x: x.cancelled() or x.exception())
+        total_w = wend - wstart + 1
+        n = max(1, min(parts, total_w // MIN_PART))
+        step = -(-total_w // n)
+        rngs, s = [], wstart
         while s <= wend:
             e2 = min(s + step - 1, wend)
-            ranges.append((s, e2))
+            rngs.append((s, e2))
             s = e2 + 1
-        # מושכים את כל תת-הטווחים של החלון במקביל, ומגישים לפי הסדר
         results = await asyncio.gather(
-            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in ranges])
-        for r in results:
-            yield r
-        pos = wend + 1
+            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in rngs])
+        return b"".join(results)
+
+    # חלון שנכשל היה מסיים את כל ההזרמה, ולכן נוסף ניסיון חוזר. אבל ניסיון
+    # חוזר בלי גבול זמן החמיר: המסלול שאליו נופלים נותן 25 שניות לכל בוט על
+    # עד ארבעה בוטים, כלומר עד 100 שניות שקטות, וכפול מספר הניסיונות.
+    # לכן התקציב כאן הוא תקציב *קיר* לחלון שלם, כולל כל הניסיונות והנפילה
+    # למסלול הגיבוי. הנגן לא שורד שתיקה ארוכה, אבל כן מתאושש מתשובה קטועה.
+    WINDOW_WALL = float(os.environ.get("STREAM_WINDOW_WALL", "30"))
+    WINDOW_TRIES = 2
+
+    async def _fetch_window_retry(wstart, wend):
+        """מנסה שוב רק אם *נשאר* זמן בתקציב הקיר, ולא מספר קבוע של פעמים."""
+        t0 = time.time()
+        last = None
+        for attempt in range(WINDOW_TRIES):
+            left = WINDOW_WALL - (time.time() - t0)
+            if left <= 1.0:
+                break
+            try:
+                return await asyncio.wait_for(_fetch_window(wstart, wend),
+                                              timeout=left)
+            except asyncio.CancelledError:
+                raise                      # הצופה עזב — לא ניסיון חוזר
+            except Exception as e:
+                last = e
+                log.warning("חלון %s-%s נכשל (%d/%d, נותרו %.0fש): %s: %s",
+                            wstart, wend, attempt + 1, WINDOW_TRIES,
+                            max(0.0, WINDOW_WALL - (time.time() - t0)),
+                            type(e).__name__, e)
+        raise last or asyncio.TimeoutError(
+            f"חלון {wstart}-{wend} חרג מתקציב הקיר ({WINDOW_WALL:.0f}ש)")
+
+    def _window_end(p, i):
+        w = min(ramp[i] if i < len(ramp) else full_window, full_window)
+        return min(p + w - 1, end)
+
+    # קריאה-מראש: עד עכשיו הלולאה הייתה סדרתית לחלוטין — מורידה חלון, מגישה
+    # אותו, ורק *אחרי* שהצופה סיים לצרוך אותו מתחילה להוריד את הבא. כלומר כל
+    # זמן הצפייה הרשת עמדה בטלה, וכשהבאפר של הנגן נגמר הוא נאלץ להמתין להורדה
+    # שלמה — זה בדיוק ה"נתקע באמצע". כאן מתחילים להוריד את החלון הבא *לפני*
+    # שמגישים את הנוכחי, כך שברוב המקרים הוא כבר מוכן כשהנגן מגיע אליו.
+    pos, idx = start, 0
+    ahead = None            # (task, next_pos, next_end)
+    try:
+        while pos <= end:
+            wend = _window_end(pos, idx)
+            idx += 1
+            try:
+                if ahead is not None and ahead[1] == pos:
+                    try:
+                        data = await ahead[0]
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.warning("קריאה-מראש נכשלה ב-%s: %s - מושך ישירות",
+                                    pos, e)
+                        data = await _fetch_window_retry(pos, wend)
+                    ahead = None
+                else:
+                    data = await _fetch_window_retry(pos, wend)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # מסיימים את התשובה במקום להמשיך לשתוק. הנגן מזהה תשובה
+                # קטועה, מבקש את אותו טווח מחדש ומתאושש תוך שנייה — לעומת
+                # דקה וחצי של חיבור פתוח ושותק, שממנה הוא לא חוזר.
+                log.error("חלון %s-%s ויתר אחרי %.0fש — מסיים את התשובה כדי "
+                          "שהנגן יבקש שוב: %s: %s",
+                          pos, wend, WINDOW_WALL, type(e).__name__, e)
+                return
+
+            # מדליקים את החלון הבא לפני ההגשה — ההורדה רצה בזמן הצפייה.
+            npos = wend + 1
+            if npos <= end and STREAM_READAHEAD:
+                nend = _window_end(npos, idx)
+                ahead = (asyncio.create_task(_fetch_window_retry(npos, nend)), npos, nend)
+
+            yield data
+            pos = npos
+    finally:
+        # הצופה עזב באמצע — לא משאירים הורדה מיותרת רצה ברקע.
+        if ahead is not None:
+            ahead[0].cancel()
+            # אם המשימה כבר הספיקה להיכשל, cancel() לא עושה כלום והחריגה נשארת
+            # "לא נאספה" — asyncio מדפיס אז אזהרה מלאה עם traceback, לכל צופה
+            # שעוזב באמצע. הקולבק אוסף אותה ומשתיק את הרעש.
+            ahead[0].add_done_callback(
+                lambda t: t.cancelled() or t.exception())
+
+# ── מטמון קצוות הקובץ ────────────────────────────────────────────────────────
+# ב-MP4 שלא עבר faststart טבלת האינדקס (moov) יושבת ב*סוף* הקובץ. לכן כל נגן,
+# בכל פתיחה, חייב למשוך כמה מגה-בייטים מהקצה לפני שהוא יודע איפה נמצא ולו
+# פריים אחד — ורק אז הוא מתחיל. נמדד על ספיידרמן: moov שוקל 7.7MB, ומשיכתו
+# ארכה 4.9 שניות ברגע טוב ו-71 ברגע רע.
+#
+# הבייטים האלה זהים לכל הצופים ולעולם לא משתנים, ולכן מספיק למשוך אותם פעם
+# אחת ולהגיש מהדיסק. אותו דבר לראש הקובץ. זה חוסך את ההמתנה הזו בכל פתיחה
+# חוזרת של אותו סרט, בלי לגעת באפליקציה.
+EDGE_CACHE_DIR = DATA_DIR / "edge_cache"
+EDGE_TAIL = int(os.environ.get("STREAM_EDGE_TAIL", str(12 * 1024 * 1024)))
+EDGE_HEAD = int(os.environ.get("STREAM_EDGE_HEAD", str(2 * 1024 * 1024)))
+EDGE_CACHE_MAX = int(os.environ.get("STREAM_EDGE_CACHE_MAX", str(3 * 1024 ** 3)))
+_edge_filling: set = set()
+
+def _edge_path(chat_id, message_id, which) -> Path:
+    return EDGE_CACHE_DIR / f"{chat_id}_{message_id}.{which}"
+
+def _edge_region(start, end, file_size):
+    """מחזיר ('head'|'tail', תחילת_האזור) אם הטווח נמצא כולו באחד הקצוות."""
+    if file_size <= EDGE_HEAD + EDGE_TAIL:
+        return None
+    if end < EDGE_HEAD:
+        return "head", 0
+    tail_start = file_size - EDGE_TAIL
+    if start >= tail_start:
+        return "tail", tail_start
+    return None
+
+def _edge_evict():
+    """שומר על תקרת הגודל — מוחק את הקבצים שלא נגענו בהם הכי מזמן."""
+    try:
+        files = [(p.stat().st_atime, p.stat().st_size, p)
+                 for p in EDGE_CACHE_DIR.glob("*.*")]
+    except OSError:
+        return
+    total = sum(s for _, s, _ in files)
+    for _atime, size, p in sorted(files):
+        if total <= EDGE_CACHE_MAX:
+            break
+        try:
+            p.unlink()
+            total -= size
+        except OSError:
+            pass
+
+def _edge_read(chat_id, message_id, which, region_len):
+    """קורא אזור קצה מהדיסק. מחזיר None אם אינו שם או אינו שלם."""
+    path = _edge_path(chat_id, message_id, which)
+    try:
+        if path.exists() and path.stat().st_size == region_len:
+            os.utime(path, None)                      # לצורך ה-LRU
+            return path.read_bytes()
+    except OSError:
+        pass
+    return None
+
+
+async def _edge_fill(chat_id, message_id, which, region_start, region_len):
+    """ממלא אזור קצה *ברקע*. אסור לקרוא לזה בתוך מסלול הבקשה.
+
+    האזור הוא 12MB, והמשיכה שלו מטלגרם לוקחת שניות ולעיתים נתקעת. גרסה
+    קודמת עשתה את זה מול הצופה: הבקשה לא החזירה בייט אחד עד שכל האזור
+    נמשך, וכשהמשיכה נתקעה הצופה קיבל אפס — גרוע יותר מלא לטמון בכלל, ודווקא
+    באזור שכל נגן קורא לפני הפריים הראשון.
+    """
+    key = (chat_id, message_id, which)
+    if key in _edge_filling:
+        return
+    _edge_filling.add(key)
+    try:
+        buf = bytearray()
+        try:
+            async for chunk in _channel_range_gen(chat_id, message_id, region_start,
+                                                  region_start + region_len - 1):
+                buf += chunk
+        except StreamGap:
+            return                                    # ננסה שוב בבקשה הבאה
+        if len(buf) < region_len:
+            return
+        path = _edge_path(chat_id, message_id, which)
+        try:
+            EDGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_bytes(bytes(buf))
+            tmp.replace(path)
+            _edge_evict()
+            log.info("מטמון קצה: נשמר %s של %s/%s (%.1fMB)",
+                     which, chat_id, message_id, region_len / 1024 / 1024)
+        except OSError as e:
+            log.warning("מטמון קצה: שמירה נכשלה — %s", e)
+    finally:
+        _edge_filling.discard(key)
+
 
 def _channel_range_gen(chat_id, message_id, start, end):
     """בורר בין הזרמה מקבילה (אם הופעלה) לרגילה."""
@@ -879,10 +1959,60 @@ def _channel_range_gen(chat_id, message_id, start, end):
         return channel_stream_range_parallel(chat_id, message_id, start, end)
     return channel_stream_range(chat_id, message_id, start, end)
 
+# חימום-מקדים של בריכות ה-media. "המשך צפייה" קופץ לאמצע הקובץ (לא במטמון
+# הקצה) והמסלול המקבילי מסובב בוט אחר לכל חלון — כל בוט קר בונה בריכה מחדש
+# (~5ש) בזה אחר זה, ולכן resume חיכה פי-2. כאן, ברגע שפותחים סרט, מדליקים את
+# הבנייה של כמה בוטים *במקביל* (block=False רק מדליק את המילוי ברקע ולא ממתין),
+# כך שכשהחלונות מסתובבים בין הבוטים הם כבר חמים. ה-cooldown מונע הצפה: אותו DC
+# לא מחומם שוב בתוך כמה שניות, גם אם הנגן שולח עשרות בקשות range.
+PREWARM_BOTS = int(os.environ.get("STREAM_PREWARM_BOTS", "8"))
+PREWARM_COOLDOWN = int(os.environ.get("STREAM_PREWARM_COOLDOWN", "20"))
+_prewarm_seen: dict = {}
+
+def _prewarm_dc(dc_id: int):
+    now = time.time()
+    if now - _prewarm_seen.get(dc_id, 0) < PREWARM_COOLDOWN:
+        return
+    _prewarm_seen[dc_id] = now
+    healthy = [b for b in _stream_bots
+               if b["cooldown_until"] < now and b.get("peer_ok", True)]
+
+    async def _run():
+        await asyncio.gather(*[
+            get_media_session_pool_gen(b["client"], b["name"], dc_id,
+                                       STREAM_MEDIA_CONNS, block=False)
+            for b in healthy[:PREWARM_BOTS]], return_exceptions=True)
+    if healthy:
+        asyncio.create_task(_run())
+
+
+# פיזור פתיחת זרמים חדשים: כשכמה צופים מתחילים סרט כמעט באותה
+# שנייה, פתיחת כל החיבורים החדשים בבת אחת גורמת להתנגשות (נמדד:
+# 3/4 נכשלים כשמתחילים ביחד, 1/4 כשמפוזרים ב-4 שניות). לצופה בודד
+# זה שקוף לגמרי — ה-wait כמעט תמיד 0, כי אין עם מי להתנגש.
+_stream_start_lock = asyncio.Lock()
+_last_stream_start = 0.0
+STREAM_START_STAGGER = float(os.environ.get("STREAM_START_STAGGER", "2.0"))
+
+async def _stagger_new_stream():
+    global _last_stream_start
+    async with _stream_start_lock:
+        now = time.time()
+        wait = (_last_stream_start + STREAM_START_STAGGER) - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_stream_start = time.time()
+
 async def stream_from_channel(chat_id: int, message_id: int, request: Request):
+    await _stagger_new_stream()
     media = await channel_get_media(chat_id, message_id)
     if not media:
         raise HTTPException(status_code=503, detail="No media / no healthy bot")
+    # מחממים את בריכות הבוטים ל-DC של הקובץ ברקע, כדי ש'המשך צפייה' יתחיל מהר
+    try:
+        _prewarm_dc(_file_location(media)[0])
+    except Exception:
+        pass
     file_size = media.file_size
     mime_type = getattr(media, "mime_type", "application/octet-stream")
     file_name = getattr(media, "file_name", None) or f"file_{message_id}"
@@ -896,7 +2026,23 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
             "Accept-Ranges": "bytes",
             "Content-Length": str(end - start + 1),
             "Content-Disposition": disposition,
+            **CORS_MEDIA,
         }
+        # קצוות הקובץ מוגשים מהדיסק: שם יושבת טבלת האינדקס שכל נגן חייב
+        # לקרוא לפני הפריים הראשון, והיא זהה לכל הצופים.
+        region = _edge_region(start, end, file_size)
+        if region is not None:
+            which, region_start = region
+            region_len = EDGE_HEAD if which == "head" else EDGE_TAIL
+            data = _edge_read(chat_id, message_id, which, region_len)
+            if data is not None:
+                off = start - region_start
+                return Response(content=data[off:off + (end - start + 1)],
+                                status_code=206, media_type=mime_type,
+                                headers=headers)
+            # אין במטמון — ממלאים ברקע ומגישים עכשיו כרגיל, בלי להשהות
+            asyncio.create_task(_edge_fill(chat_id, message_id, which,
+                                           region_start, region_len))
         return StreamingResponse(
             _channel_range_gen(chat_id, message_id, start, end),
             status_code=206, media_type=mime_type, headers=headers)
@@ -904,6 +2050,7 @@ async def stream_from_channel(chat_id: int, message_id: int, request: Request):
         "Accept-Ranges": "bytes",
         "Content-Length": str(file_size),
         "Content-Disposition": disposition,
+        **CORS_MEDIA,
     }
     return StreamingResponse(
         _channel_range_gen(chat_id, message_id, 0, file_size - 1),
@@ -1004,7 +2151,7 @@ async def cast_remux(chat_id: int, message_id: int, request: Request,
                 pass
 
     return StreamingResponse(gen(), media_type="video/mp4",
-                             headers={"Content-Disposition": "inline"})
+                             headers={"Content-Disposition": "inline", **CORS_MEDIA})
 
 # ── HLS Relay (עוקף "http משודרג אוטומטית ל-https ושבור" בדפדפן) ────────────
 # חלק מספקי שידור חי (למשל stream.mcquack.net) מגישים רק http:// תקין -
@@ -1173,12 +2320,94 @@ _hls_manifest_cache: dict = {}
 MANIFEST_CACHE_TTL = 1.5
 _hls_segment_inflight: dict = {}
 
+# ── משיכה מקדימה של מקטעי שידור חי ───────────────────────────────────────────
+# נמדד מול הספק: משיכת manifest לוקחת 0.7–3.0ש ומקטע של 6 שניות עוד 1.6–3.7ש,
+# כך שסבב שלם כמעט משתווה לאורך המקטע עצמו. אין מרווח, וכל עיכוב מרוקן את
+# הבאפר של הנגן — זה מה שנראה למשתמש כ"נתקע ומסתובב".
+#
+# הרעיון: ברגע שנגן מבקש את ה-manifest אנחנו כבר יודעים מה המקטעים הבאים.
+# מושכים אותם ברקע מיד, כך שכשהנגן יבקש אותם הם כבר אצלנו וההמתנה לספק
+# יורדת מהנתיב הקריטי. בלי זה כל מקטע נמשך רק כשמבקשים אותו.
+_hls_seg_cache: dict = {}          # upstream_url -> (expires_at, bytes)
+_hls_prefetching: set = set()
+HLS_PREFETCH_COUNT = int(os.environ.get("HLS_PREFETCH_COUNT", "3"))
+HLS_SEG_TTL = float(os.environ.get("HLS_SEG_TTL", "45"))
+HLS_SEG_CACHE_MAX = int(os.environ.get("HLS_SEG_CACHE_MAX", str(250 * 1024 * 1024)))
+
+
+def _seg_cache_bytes() -> int:
+    return sum(len(v[1]) for v in _hls_seg_cache.values())
+
+
+def _seg_cache_evict():
+    """מפנה מקטעים שפגו, ואם עדיין חורגים — את הישנים ביותר."""
+    now = time.time()
+    for k in [k for k, v in _hls_seg_cache.items() if v[0] <= now]:
+        _hls_seg_cache.pop(k, None)
+    if _seg_cache_bytes() <= HLS_SEG_CACHE_MAX:
+        return
+    for k, _ in sorted(_hls_seg_cache.items(), key=lambda kv: kv[1][0]):
+        _hls_seg_cache.pop(k, None)
+        if _seg_cache_bytes() <= HLS_SEG_CACHE_MAX:
+            break
+
+
+async def _prefetch_one(url: str):
+    if url in _hls_prefetching or url in _hls_seg_cache:
+        return
+    _hls_prefetching.add(url)
+    try:
+        r = await _hls_relay_client.get(url, headers=HLS_RELAY_UPSTREAM_HEADERS)
+        if r.status_code == 200 and r.content:
+            _hls_seg_cache[url] = (time.time() + HLS_SEG_TTL, r.content)
+            _seg_cache_evict()
+    except Exception:
+        pass                      # משיכה מקדימה היא בונוס; כשל בה לא מעניין
+    finally:
+        _hls_prefetching.discard(url)
+
+
+def _prefetch_from_manifest(manifest_text: str, base_url: str):
+    """מדליק ברקע משיכה של המקטעים האחרונים ב-playlist (החדשים ביותר)."""
+    if HLS_PREFETCH_COUNT <= 0 or _hls_relay_client is None:
+        return
+    segs = [ln.strip() for ln in manifest_text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    for rel in segs[-HLS_PREFETCH_COUNT:]:
+        try:
+            asyncio.create_task(_prefetch_one(urljoin(base_url, rel)))
+        except Exception:
+            pass
+
 
 def _is_hls_manifest(path: str) -> bool:
     return path.endswith(".m3u8")
 
 
+# ספקים רבים מפזרים את המקטעים על שרתי-קצה בכתובות IP שמתחלפות: המניפסט
+# מגיע מדומיין אחד, אבל כל מקטע מצביע ל-IP אחר, והרשימה משתנה מיום ליום.
+# רשימה לבנה קבועה לא יכולה לעמוד בזה. לכן: מארח שהופיע בתוך מניפסט שאנחנו
+# עצמנו משכנו ממארח מאושר — נרשם אוטומטית לזמן קצוב. זה נשאר סגור (רק
+# כתובות שהמקור המהימן נתן לנו) בלי לדרוש תחזוקה ידנית.
+_relay_learned_hosts: dict = {}          # host -> {"scheme","port","exp"}
+RELAY_LEARNED_TTL = int(os.environ.get("RELAY_LEARNED_TTL", "7200"))
+
+def _relay_origin_for(host: str) -> Optional[dict]:
+    """מחזיר את מוצא ההעברה למארח — מהרשימה הקבועה או מזו שנלמדה."""
+    origin = HLS_RELAY_ALLOWED_HOSTS.get(host)
+    if origin is not None:
+        return origin
+    learned = _relay_learned_hosts.get(host)
+    if learned and learned["exp"] > time.time():
+        return learned
+    if learned:
+        _relay_learned_hosts.pop(host, None)
+    return None
+
+
 def _rewrite_hls_manifest(text: str, base_url: str) -> str:
+    # לומדים מארחים חדשים רק ממניפסט שהגיע ממארח מאושר
+    parent_ok = urlparse(base_url).hostname in HLS_RELAY_ALLOWED_HOSTS
     out_lines = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -1187,23 +2416,265 @@ def _rewrite_hls_manifest(text: str, base_url: str) -> str:
             continue
         absolute = urljoin(base_url, stripped)
         parsed = urlparse(absolute)
-        if parsed.hostname not in HLS_RELAY_ALLOWED_HOSTS:
-            out_lines.append(line)  # לא ידוע לנו - עדיף להשאיר כמו שהוא מלשבור לגמרי
-            continue
-        relayed = f"/hls-relay/{parsed.hostname}/{parsed.path.lstrip('/')}"
+        if parsed.hostname and _relay_origin_for(parsed.hostname) is None:
+            if not parent_ok or parsed.scheme not in ("http", "https"):
+                out_lines.append(line)  # לא ידוע לנו - עדיף להשאיר כמו שהוא מלשבור לגמרי
+                continue
+            _relay_learned_hosts[parsed.hostname] = {
+                "scheme": parsed.scheme,
+                "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+                "exp": time.time() + RELAY_LEARNED_TTL,
+            }
+            log.info("relay: נלמד מארח מקטעים %s (מתוך %s)",
+                     parsed.hostname, urlparse(base_url).hostname)
+        # שומרים את הפורט בנתיב המשוכתב: בלעדיו מקטע שיושב על פורט לא-רגיל
+        # היה נמשך מהפורט הרשום למארח, ומחזיר 404.
+        seg_default = 443 if parsed.scheme == "https" else 80
+        seg_host = parsed.hostname
+        if parsed.port and parsed.port != seg_default:
+            seg_host = f"{seg_host}:{parsed.port}"
+        relayed = f"/hls-relay/{seg_host}/{parsed.path.lstrip('/')}"
         if parsed.query:
             relayed += f"?{parsed.query}"
         out_lines.append(relayed)
     return "\n".join(out_lines)
 
 
+# ── רלֵיי עם המרת מיכל (remux) — לערוצים ש-Shaka נתקע עליהם ──────────────────
+# חלק מהמקודדים (למשל ספורט 5 סטארס ב-tv.embyil.tv) משדרים ב-open-GOP: יש
+# פריימי I אבל אף IDR. VLC/ffmpeg מנגנים את זה מצוין - הם מסמנים כל פריים I
+# כנקודת כניסה. mux.js (שבו Shaka משתמש כדי לפרק MPEG-TS) מחפש אך ורק NAL מסוג
+# IDR ומשליך כל פריים עד שימצא אחד; כשאין - הוא ממתין לנצח, וזה ה"ספינר
+# האינסופי" באפליקציה. הנגן באפליקציה מוטמע ב-APK ולכן אי אפשר לתקן אותו בלי
+# release, אבל אפשר לתקן את *הזרם*: מעבירים אותו דרך ffmpeg ב-copy מוחלט
+# (בלי קידוד מחדש - אפס עומס על ה-CPU) ל-fMP4, ושם ffmpeg מסמן כל פריים I
+# כ-sync sample. נמדד: סגמנט של ערוץ 140 יצא עם 10 sync samples.
+#
+# ffmpeg מושך מה-relay המקומי שלנו (127.0.0.1) ולא ישירות מהמקור, כדי לא לשכפל
+# את הטיפול ב-TLS/allowlist/User-Agent שכבר קיים ב-hls_relay.
+HLS_FIX_DIR = Path("/tmp/zovex-hlsfix")
+HLS_FIX_IDLE_SEC = 90          # ffmpeg נסגר אחרי שאין צופים
+_hls_fix: dict = {}            # key -> {"proc","dir","last","ready"}
+_hls_fix_lock = asyncio.Lock()
+
+
+def _hls_fix_dir_of(path: str) -> str:
+    """התיקייה של הערוץ בתוך הנתיב: live/140/chunks.m3u8 → live/140.
+    המפתח נגזר ממנה (ולא מהנתיב המלא) כדי שבקשת ה-playlist ובקשות הסגמנטים
+    שאחריה (s13.m4s / init.mp4) יפלו על אותו תהליך ffmpeg."""
+    last = path.rsplit("/", 1)[-1]
+    if "." in last and "/" in path:
+        return path.rsplit("/", 1)[0]
+    return path.strip("/")
+
+
+def _hls_fix_key(host: str, path: str) -> str:
+    import hashlib as _h
+    return _h.sha1(f"{host}/{_hls_fix_dir_of(path)}".encode()).hexdigest()[:16]
+
+
+
+# ── בחירת הקודק לערוצים חיים ────────────────────────────────────────────────
+# הצינור הזה עשה `-c copy` על הכול, כלומר החליף מיכל בלי לגעת בזרמים. זה נכון
+# ויעיל לערוץ שמקורו H.264 — אבל ערוץ שמקורו MPEG-4 Part 2 יצא מכאן כ-mp4v,
+# ושום דפדפן אינו מפענח mp4v ב-MSE. התוצאה היא ערוץ שעובד ב-VLC ומסך שחור
+# באתר.
+#
+# הבדיקה נעשית פעם אחת לערוץ ונשמרת לשעה, כי קידוד חי של 56 ערוצים היה מכלה
+# את המעבד. מי שכבר H.264 ממשיך ב-copy ולא עולה כלום.
+_HLS_VCODEC_TTL = 3600
+_hls_vcodec_cache: dict = {}
+
+
+def _hls_probe_vcodec(url: str):
+    """שם קודק הווידאו של המקור, או None אם לא ניתן לברר. חוסם."""
+    import shutil as _sh, subprocess
+    exe = _sh.which("ffprobe")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "default=nw=1:nk=1", "-analyzeduration", "3000000",
+             "-probesize", "3000000", url],
+            capture_output=True, text=True, timeout=25).stdout.strip().splitlines()
+        return out[0].strip() if out else None
+    except Exception as e:
+        log.warning("hls_codec: ffprobe נכשל על %s: %s", url, e)
+        return None
+
+
+async def _hls_codec_args(host: str, path: str, src: str):
+    """הארגומנטים שקובעים איך לטפל בזרמים. copy כברירת מחדל."""
+    key = f"{host}/{path}"
+    now = time.time()
+    ent = _hls_vcodec_cache.get(key)
+    if ent is None or now - ent[0] > _HLS_VCODEC_TTL:
+        loop = asyncio.get_running_loop()
+        codec = await loop.run_in_executor(None, _hls_probe_vcodec, src)
+        _hls_vcodec_cache[key] = (now, codec)
+        ent = _hls_vcodec_cache[key]
+        log.info("hls_codec: %s → קודק מקור %s", key, codec or "לא ידוע")
+    codec = ent[1]
+    # לא ידוע, או כבר H.264 — לא נוגעים. זו ההתנהגות שהייתה כאן תמיד.
+    if not codec or codec == "h264":
+        return ["-c", "copy", "-bsf:a", "aac_adtstoasc"]
+    # קודק שדפדפן לא יפענח: ממירים וידאו בלבד, ומשאירים את האודיו כמו שהוא
+    # (הוא כבר AAC, ולכן גם מסנן ה-ADTS נשאר).
+    return [
+        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+        "-profile:v", "main", "-pix_fmt", "yuv420p",
+        "-g", "48", "-sc_threshold", "0",
+        "-b:v", "2000k", "-maxrate", "2400k", "-bufsize", "4000k",
+        # תקרת רוחב: מגבילה את עלות הקידוד ומונעת מערוץ אחד לחנוק את השרת.
+        "-vf", "scale=min(1280\,iw):-2",
+        "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
+    ]
+
+
+async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
+    """מפעיל (או מחזיר קיים) תהליך ffmpeg שממיר את הערוץ ל-HLS/fMP4 מקומי."""
+    key = _hls_fix_key(host, path)
+    async with _hls_fix_lock:
+        ent = _hls_fix.get(key)
+        if ent and ent["proc"].returncode is None:
+            ent["last"] = time.time()
+            return ent
+        if ent is not None:
+            # אם זה מופיע ביומן — מצאנו את הרגע שהערוץ נתקע אצל הצופה: מכאן
+            # והלאה המספור מתחיל מאפס והנגן מבקש סגמנטים שכבר לא קיימים.
+            log.warning("hls_fix: ffmpeg של %s מת (קוד %s) - מפעיל מחדש, "
+                        "הנגן יראה קפיצה במספור", key, ent["proc"].returncode)
+        outdir = HLS_FIX_DIR / key
+        try:
+            import shutil
+            shutil.rmtree(outdir, ignore_errors=True)
+            outdir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.error("hls_fix: יצירת תיקייה נכשלה - %s", e)
+            return None
+        src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
+        _codec = await _hls_codec_args(host, path, src)
+        args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            # בלי הדגלים האלה כל שיהוק זמני של המקור הורג את ffmpeg,
+            # וההפעלה מחדש מאפסת את המספור — הנגן מבקש סגמנט שכבר לא
+            # קיים ונתקע לתמיד. עדיף שפשוט לא ימות.
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "5xx",
+            "-reconnect_delay_max", "10",
+            "-fflags", "+genpts", "-i", src,
+            *_codec,
+            "-f", "hls", "-hls_time", "4", "-hls_list_size", "6",
+            "-hls_flags", "delete_segments+independent_segments+omit_endlist",
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", str(outdir / "s%d.m4s"),
+            str(outdir / "index.m3u8"),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+        except FileNotFoundError:
+            log.error("hls_fix: ffmpeg לא מותקן בשרת")
+            return None
+        ent = {"proc": proc, "dir": outdir, "last": time.time()}
+        _hls_fix[key] = ent
+        return ent
+
+
+async def _hls_fix_reaper():
+    """סוגר תהליכי ffmpeg של ערוצים שאיש כבר לא צופה בהם."""
+    import shutil
+    while True:
+        await asyncio.sleep(30)
+        now = time.time()
+        for key, ent in list(_hls_fix.items()):
+            if now - ent["last"] < HLS_FIX_IDLE_SEC:
+                continue
+            try:
+                if ent["proc"].returncode is None:
+                    ent["proc"].kill()
+            except Exception:
+                pass
+            shutil.rmtree(ent["dir"], ignore_errors=True)
+            _hls_fix.pop(key, None)
+            log.info("hls_fix: נסגר ערוץ לא פעיל %s", key)
+
+
+# חייב להירשם *לפני* המסלול הכללי /hls-relay/{host}/{path} — אחרת "_fix" ייחשב
+# ל-host. גם חייב לשבת תחת /hls-relay/ כי nginx מעביר רק קידומות מוכרות.
+@api.get("/hls-relay/_fix/{host}/{path:path}")
+async def hls_relay_fixed(host: str, path: str, request: Request):
+    check_hotlink(request)
+    if host not in HLS_RELAY_ALLOWED_HOSTS:
+        raise HTTPException(403, "host not allowed")
+
+    # קבצים שה-ffmpeg כבר מייצר (init.mp4 / s3.m4s) מוגשים ישירות מהדיסק.
+    name = path.rsplit("/", 1)[-1]
+    if name == "init.mp4" or name.endswith(".m4s"):
+        ent = _hls_fix.get(_hls_fix_key(host, path))
+        if not ent:
+            raise HTTPException(404, "stream not active")
+        ent["last"] = time.time()
+        f = ent["dir"] / name
+        if not f.exists():
+            raise HTTPException(404, "segment not ready")
+        return Response(
+            content=f.read_bytes(),
+            media_type="video/mp4" if name == "init.mp4" else "video/iso.segment",
+            headers={"Cache-Control": "public, max-age=60", **CORS_MEDIA},
+        )
+
+    # בקשה ל-playlist: מוודאים שה-ffmpeg רץ, מחכים שייווצר, ומשכתבים נתיבים.
+    ent = await _hls_fix_start(host, path)
+    if ent is None:
+        raise HTTPException(502, "hls_fix: לא ניתן להפעיל את ההמרה")
+    idx = ent["dir"] / "index.m3u8"
+    for _ in range(120):                      # עד ~12 שניות לסגמנטים ראשונים
+        if idx.exists() and idx.read_text(encoding="utf-8", errors="ignore").count(".m4s") >= 1:
+            break
+        if ent["proc"].returncode is not None:
+            raise HTTPException(502, "hls_fix: ffmpeg נכשל")
+        await asyncio.sleep(0.1)
+    else:
+        raise HTTPException(504, "hls_fix: הזרם לא התחיל בזמן")
+
+    base = f"/hls-relay/_fix/{host}/{path.rstrip('/')}"
+    base = base.rsplit("/", 1)[0] if "." in base.rsplit("/", 1)[-1] else base
+    out = []
+    for line in idx.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("#EXT-X-MAP:"):
+            out.append(f'#EXT-X-MAP:URI="{base}/init.mp4"')
+        elif s and not s.startswith("#"):
+            out.append(f"{base}/{s}")
+        else:
+            out.append(line)
+    return Response(content="\n".join(out),
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-cache", **CORS_MEDIA})
+
+
 @api.get("/hls-relay/{host}/{path:path}")
 async def hls_relay(host: str, path: str, request: Request):
     check_hotlink(request)
-    origin = HLS_RELAY_ALLOWED_HOSTS.get(host)
+    # ה-host יכול לכלול פורט מפורש: /hls-relay/tv.embyil.tv:7070/...
+    # ספק אחד יכול לפזר ערוצים על כמה פורטים באותו דומיין (ספורט 6 יושב על
+    # 7070 בעוד השאר על 86), ורשומה אחת למארח לא יכולה לתאר את זה. ההרשאה
+    # עדיין נבדקת מול שם המארח בלבד, כך שזה לא פותח שום מארח חדש.
+    base_host, _, explicit_port = host.partition(":")
+    origin = _relay_origin_for(base_host)
     if origin is None:
         raise HTTPException(403, "host not allowed")
     scheme, port = origin["scheme"], origin["port"]
+    if explicit_port.isdigit():
+        port = int(explicit_port)
+    host = base_host
     default_port = 443 if scheme == "https" else 80
     netloc = host if port == default_port else f"{host}:{port}"
     upstream_url = f"{scheme}://{netloc}/{path}"
@@ -1232,10 +2703,12 @@ async def hls_relay(host: str, path: str, request: Request):
                          f"(status {resp.status_code})")
             rewritten = _rewrite_hls_manifest(resp.text, upstream_url)
             _hls_manifest_cache[upstream_url] = (now + MANIFEST_CACHE_TTL, rewritten)
+            # מדליקים משיכה מקדימה של המקטעים החדשים בעוד הנגן מעכל את ה-manifest
+            _prefetch_from_manifest(resp.text, upstream_url)
         return Response(
             content=rewritten,
             media_type="application/vnd.apple.mpegurl",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "no-cache", **CORS_MEDIA},
         )
 
     # מקטעי וידאו (.ts) - מוזרם (streaming) לצופה שביקש ראשון, כדי שיתחיל
@@ -1243,6 +2716,13 @@ async def hls_relay(host: str, path: str, request: Request):
     # בקשה מקבילה לאותו מקטע בדיוק (כמה צופים על אותו ערוץ) - היא "מצטרפת"
     # לזרימה הקיימת במקום לפתוח עוד בקשה זהה למקור.
     async def _proxy_segment():
+        # אם המשיכה המקדימה כבר הביאה את המקטע — מגישים אותו מיד, בלי לגעת
+        # בספק בכלל. זה מה שמוציא את ההמתנה לספק מהנתיב הקריטי.
+        hit = _hls_seg_cache.get(upstream_url)
+        if hit and hit[0] > time.time():
+            yield hit[1]
+            return
+
         existing = _hls_segment_inflight.get(upstream_url)
         if existing is not None:
             chunks, done_event = existing
@@ -1267,6 +2747,12 @@ async def hls_relay(host: str, path: str, request: Request):
                 async for chunk in resp.aiter_bytes():
                     chunks.append(chunk)
                     yield chunk
+            # שומרים גם מקטע שנמשך רגיל: צופה נוסף שיגיע רגע אחריו (וכל
+            # ניסיון חוזר של אותו נגן) יקבל אותו מיידית במקום למשוך שוב.
+            if chunks:
+                _hls_seg_cache[upstream_url] = (
+                    time.time() + HLS_SEG_TTL, b"".join(chunks))
+                _seg_cache_evict()
         except httpx.HTTPError as e:
             log.error("hls_relay: segment stream failed - %s", e)
         finally:
@@ -1276,7 +2762,7 @@ async def hls_relay(host: str, path: str, request: Request):
     return StreamingResponse(
         _proxy_segment(),
         media_type="video/mp2t",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=86400", **CORS_MEDIA},
     )
 
 # ── Ping & Dashboard ──────────────────────────────────────────────────────────
@@ -1406,14 +2892,29 @@ AUTH_WINDOW = 300              # בחלון של 5 דקות
 AUTH_LOCK = 900               # ואז חסימה של 15 דקות
 
 def _client_ip(request: Request) -> str:
-    # מאחורי nginx/פרוקסי — קח את ה-IP האמיתי אם יש
+    # קריטי לאבטחה: מאחורי nginx (פרוקסי יחיד) יש לקחת את ה-hop *האחרון*
+    # ב-X-Forwarded-For — זה שה-nginx הוסיף ($proxy_add_x_forwarded_for),
+    # והוא ה-IP האמיתי של הלקוח. הגרסה הקודמת לקחה את ה-hop הראשון, שאותו
+    # הלקוח שולט בו לגמרי — כך שאפשר היה לזייף אותו בכל בקשה ולעקוף את חסימת
+    # ה-brute-force על סיסמת הפאנל. X-Real-IP (אם nginx מגדיר) עדיף כי הוא
+    # תמיד ה-IP האמיתי; נופלים אחורה ל-hop האחרון, ואז ל-socket.
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
-        return xff.split(",")[0].strip()
+        return xff.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
-def check_panel_password(request: Request, password: str):
-    """מאמת את סיסמת הפאנל עם הגנת brute-force. זורק HTTPException אם נכשל/חסום."""
+# ── שתי רמות גישה ────────────────────────────────────────────────────────────
+# הסיסמה הראשית = אדמין, גישה מלאה. סיסמת העורך פותחת פאנל מוגבל: מוסיף תוכן
+# ומוחק מעט, ולא יכול לגעת בשידורים חיים ולא למחוק בכמות. האכיפה כאן בשרת
+# ולא בממשק — הסתרת כפתורים לא שווה כלום מול בקשה ישירה.
+EDITOR_PASSWORD = os.environ.get("EDITOR_PASSWORD", "")
+EDITOR_MAX_DELETE = int(os.environ.get("EDITOR_MAX_DELETE", "5"))
+
+def panel_role(request: Request, password: str) -> str:
+    """מאמת סיסמה ומחזיר 'admin' או 'editor'. זורק HTTPException אם נכשל/חסום."""
     ip = _client_ip(request)
     now = time.time()
     fails = [t for t in _auth_fails.get(ip, []) if now - t < AUTH_LOCK]
@@ -1422,13 +2923,30 @@ def check_panel_password(request: Request, password: str):
     if len(recent) >= AUTH_MAX_FAILS:
         _auth_fails[ip] = fails
         raise HTTPException(status_code=429, detail="יותר מדי ניסיונות — נסה שוב בעוד כמה דקות")
-    ok = bool(PANEL_PASSWORD) and hmac.compare_digest(password or "", PANEL_PASSWORD)
-    if not ok:
+    pw = password or ""
+    role = None
+    # השוואה על bytes ולא על str: hmac.compare_digest על מחרוזת עם תווים
+    # לא-ASCII (סיסמה בעברית וכו') זורק TypeError ומפיל את ה-handler במקום
+    # להחזיר "שגוי" — מה שהחזיר תשובה ריקה לכל בקשה עם סיסמה כזו.
+    pw_b = pw.encode("utf-8", "surrogatepass")
+    if PANEL_PASSWORD and hmac.compare_digest(pw_b, PANEL_PASSWORD.encode("utf-8", "surrogatepass")):
+        role = "admin"
+    elif EDITOR_PASSWORD and hmac.compare_digest(pw_b, EDITOR_PASSWORD.encode("utf-8", "surrogatepass")):
+        role = "editor"
+    if role is None:
         fails.append(now)
         _auth_fails[ip] = fails
         raise HTTPException(status_code=401, detail="סיסמה שגויה")
     # הצלחה — נקה כישלונות קודמים מאותו IP
     _auth_fails.pop(ip, None)
+    return role
+
+
+def check_panel_password(request: Request, password: str):
+    """גישת אדמין בלבד. כל מסך ניהול קיים ממשיך לדרוש את הסיסמה הראשית —
+    עורך שינסה להגיע לשם יקבל 403, גם אם הסיסמה שלו תקפה."""
+    if panel_role(request, password) != "admin":
+        raise HTTPException(status_code=403, detail="הפעולה הזו מותרת למנהל הראשי בלבד")
 
 def load_admins() -> list:
     if ADMINS_FILE.exists():
@@ -1622,7 +3140,10 @@ def _load_or_create_sign_secret() -> str:
         pass
     return secret
 SIGN_SECRET = _load_or_create_sign_secret()
-SIGN_TTL = int(os.environ.get("STREAM_SIGN_TTL", "21600"))  # 6 שעות — מספיק לסרט ארוך
+# 24 שעות. 6 שעות הספיקו לסרט בודד, אבל לא לטאב/אפליקציה שנשארים פתוחים
+# ליום שלם — ואז החתימה פגה מתחת לידיים והנגן קיבל 403. יחד עם רענון הקטלוג
+# לפי SIG_EPOCH_WINDOW, לקוח מקבל קישורים טריים הרבה לפני שהישנים פגים.
+SIGN_TTL = int(os.environ.get("STREAM_SIGN_TTL", "86400"))
 _STREAM_PATH_RE = re.compile(r"/stream/(-?\d+)/(\d+)")
 
 def _stream_sig(chat: str, msg: str, exp: int) -> str:
@@ -2043,7 +3564,7 @@ _HE_SEASON_ONLY = re.compile(r'(?:^|\s)ע(?:ונה)?\s*0*(\d{1,2})')
 _SOURCE_TAGS = re.compile(
     r'^(?:(?:'
     r'זירה\s*מדיה|נתי\s*מדיה|נתי\s*מידע|zira\s*media|zira|nati\s*media|'
-    r'חננאל(?:\s*סרטים|\s*ס)?|דב\s*סרטים|השימיה|'
+    r'חננאל(?:\s*סרטים|\s*ס)?|דב\s*סרטים|השימיה|לולו(?:\s*סרטים)?|'
     r'נטפליקס(?:\s*kids)?|netflix(?:\s*kids)?|'
     r'בנק(?:\s*סרטים(?:\s*וסדרות)?)?|כל\s*הסדרות(?:\s*בחיפוש)?|israellasry\w*|'
     r'#\S+|[\U0001F000-\U0001FAFF☀-➿✅❗]+'
@@ -2518,7 +4039,14 @@ async def feedback_mine(user_id: str):
     if th.get("unread_user"):
         th["unread_user"] = False
         save_feedback(d)   # סימון כנקרא כשהמשתמש פותח את הצ'אט
-    return th
+    # מחזירים רק את מה שה-UID של המשתמש עצמו צריך. הנקודה הזו לא מאומתת
+    # (הזהות היא user_id שהלקוח שולח), ולכן אסור להחזיר ממנה שם/אימייל/טוקן
+    # התראות — אלה נשמרים לצד השרת בלבד, לשימוש המנהל והדחיפות.
+    return {
+        "user_id": user_id,
+        "messages": th.get("messages", []),
+        "unread_user": False,
+    }
 
 class FeedbackReplyReq(BaseModel):
     password: str
@@ -2827,18 +4355,47 @@ def _normalize_live_flag(arr: list) -> list:
             e["is_live"] = True
     return arr
 
+# כמה ימים אחורה לשמור גיבוי יומי. "30 הגיבויים האחרונים" נשמע סביר אבל
+# בפועל, עם עשרות שמירות בשעה, הוא כיסה שעתיים בלבד — וכל מחיקה מאתמול כבר
+# נדחקה החוצה. שומרים גם את האחרונים (לשחזור מיידי) וגם אחד ליום (לחקירה).
+CONTENT_BAK_KEEP_RECENT = int(os.environ.get("CONTENT_BAK_KEEP_RECENT", "30"))
+CONTENT_BAK_KEEP_DAYS = int(os.environ.get("CONTENT_BAK_KEEP_DAYS", "45"))
+
+def _prune_content_backups():
+    """משאיר את N האחרונים, ובנוסף את הגיבוי הראשון של כל יום ל-45 ימים."""
+    baks = sorted(CONTENT_BAK_DIR.glob("content_*.json"))
+    if len(baks) <= CONTENT_BAK_KEEP_RECENT:
+        return
+    keep = set(baks[-CONTENT_BAK_KEEP_RECENT:])
+    cutoff = time.time() - CONTENT_BAK_KEEP_DAYS * 86400
+    first_of_day = {}
+    for p in baks:
+        try:
+            ts = int(p.stem.split("_")[1])
+        except (IndexError, ValueError):
+            keep.add(p)          # שם לא צפוי — לא נוגעים
+            continue
+        if ts < cutoff:
+            continue             # ישן מדי — יימחק
+        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        if day not in first_of_day:
+            first_of_day[day] = p
+            keep.add(p)
+    for p in baks:
+        if p not in keep:
+            p.unlink(missing_ok=True)
+
+
 def save_content(arr: list):
     arr = _normalize_live_flag(arr)
     # גיבוי בטיחות לפני דריסה — content.json הוא מקור האמת, ורוצים אפשרות לשחזר
-    # אם מישהו מחק/דרס בטעות. שומרים עד 30 גיבויים אחרונים.
+    # אם מישהו מחק/דרס בטעות.
     try:
         if CONTENT_FILE.exists():
             CONTENT_BAK_DIR.mkdir(parents=True, exist_ok=True)
             bak = CONTENT_BAK_DIR / f"content_{int(time.time())}.json"
             bak.write_text(CONTENT_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-            baks = sorted(CONTENT_BAK_DIR.glob("content_*.json"))
-            for old in baks[:-30]:
-                old.unlink(missing_ok=True)
+            _prune_content_backups()
     except Exception as e:
         log.warning("גיבוי content נכשל (ממשיכים בשמירה): %s", e)
     CONTENT_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2886,10 +4443,10 @@ async def pool_add(req: PoolAddReq, request: Request):
         raise HTTPException(status_code=400, detail="כבר קיים בבריכה")
     before = len(_stream_bots)
     uid = f"live_{int(time.time())}"
-    await _start_one_pool_bot(uid, tok)          # מנסה להעלות אותו מיד
+    err = await _start_one_pool_bot(uid, tok)     # מנסה להעלות אותו מיד
     if len(_stream_bots) <= before:
         raise HTTPException(status_code=400,
-            detail="לא עלה — ודא שהוא חבר/אדמין בערוץ ושהטוקן/session נכון")
+            detail="לא עלה — %s" % (err or "סיבה לא ידועה, ראה journalctl"))
     try:                                          # נשמר לקובץ כדי לשרוד restart
         with open(STREAM_BOTS_FILE, "a", encoding="utf-8") as f:
             f.write(tok + "\n")
@@ -2900,15 +4457,158 @@ async def pool_add(req: PoolAddReq, request: Request):
 class PoolPwReq(BaseModel):
     password: str
 
+@api.get("/stream/tune")
+async def stream_tune(request: Request, media_conns: Optional[int] = None,
+                      parallel_parts: Optional[int] = None,
+                      bands_timeout: Optional[int] = None,
+                      bands_per_mb: Optional[float] = None):
+    """קורא/משנה את פרמטרי ההזרמה *בזמן ריצה*, בלי הפעלה מחדש.
+
+    למה זה קיים: כל השוואה בין תצורות דרשה restart, וכל restart מאפס את בריכת
+    הבוטים ואת חיבורי המדיה — כך שההשוואה מדדה גם את החימום ולא רק את התצורה.
+    בלי זה אי אפשר להשוות שני מסלולים באותם תנאים.
+
+    localhost בלבד. השינוי לא נשמר — .env נשאר מקור האמת אחרי restart.
+    """
+    global STREAM_MEDIA_CONNS, STREAM_PARALLEL_PARTS
+    global MEDIA_BANDS_TIMEOUT, MEDIA_BANDS_PER_MB
+    if not is_local_request(request):
+        raise HTTPException(status_code=403, detail="localhost only")
+    if media_conns is not None:
+        STREAM_MEDIA_CONNS = max(0, media_conns)
+    if parallel_parts is not None:
+        STREAM_PARALLEL_PARTS = max(1, parallel_parts)
+    if bands_timeout is not None:
+        MEDIA_BANDS_TIMEOUT = max(1, bands_timeout)
+    if bands_per_mb is not None:
+        MEDIA_BANDS_PER_MB = max(0.0, bands_per_mb)
+    return {"media_conns": STREAM_MEDIA_CONNS,
+            "parallel_parts": STREAM_PARALLEL_PARTS,
+            "bands_timeout": MEDIA_BANDS_TIMEOUT,
+            "bands_per_mb": MEDIA_BANDS_PER_MB,
+            "bots": len(_stream_bots),
+            "note": "זמני — .env גובר אחרי restart"}
+
+@api.get("/speedtest/bots")
+async def speedtest_bots(request: Request, mb: int = 4, n: int = 0):
+    """מודד את התפוקה של כל בוט *בנפרד*, באותו רגע, על אותו קובץ.
+
+    זו הבדיקה שמכריעה מאיפה מגיעה התנודתיות: אם כל הבוטים איטיים יחד —
+    המגבלה על השרת/ה-IP ואין מה לתקן בקוד. אם חלקם מהירים וחלקם איטיים —
+    המגבלה היא לכל חשבון בנפרד, ואז פיזור חכם יותר בין הבוטים כן יעזור.
+
+    localhost בלבד.  /speedtest/bots?mb=4&n=8
+    """
+    if not is_local_request(request):
+        raise HTTPException(status_code=403, detail="localhost only")
+    if not STREAM_CHANNEL_ID:
+        raise HTTPException(400, "אין ערוץ תוכן מוגדר")
+    msg_id = None
+    for e in load_content():
+        m = re.search(r"/stream/-?\d+/(\d+)", str(e.get("video_url") or ""))
+        if m:
+            msg_id = int(m.group(1))
+            break
+    if msg_id is None:
+        raise HTTPException(400, "לא נמצא פריט עם קישור לערוץ")
+
+    want = mb * 1024 * 1024
+    bots = _stream_bots[:n] if n > 0 else list(_stream_bots)
+    out = []
+    for bot in bots:
+        row = {"bot": bot["name"], "who": bot.get("who", "")}
+        t0 = time.time()
+        try:
+            msg = await _get_bot_msg(bot, STREAM_CHANNEL_ID, msg_id)
+            media = msg and (msg.video or msg.document or msg.audio)
+            if not media:
+                row["error"] = "אין מדיה"
+                out.append(row)
+                continue
+            dc_id, location = _file_location(media)
+            sessions, _gen = await get_media_session_pool_gen(
+                bot["client"], bot["name"], dc_id, max(1, STREAM_MEDIA_CONNS))
+            if not sessions:
+                row["error"] = "אין חיבורים"
+                out.append(row)
+                continue
+            per = -(-want // len(sessions))
+            tasks = [_band_fetch(sessions[i], location, i * per,
+                                 min(want, (i + 1) * per) - 1, bot["name"])
+                     for i in range(len(sessions)) if i * per < want]
+            t0 = time.time()
+            parts = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=60)
+            got = sum(len(p) for p in parts if isinstance(p, (bytes, bytearray)))
+            el = time.time() - t0
+            row.update(mb=round(got / 1024 / 1024, 2), seconds=round(el, 2),
+                       mb_per_sec=round(got / 1024 / 1024 / el, 2) if el else 0)
+        except Exception as e:
+            row["error"] = f"{type(e).__name__}: {e}"[:120]
+            row["seconds"] = round(time.time() - t0, 2)
+        out.append(row)
+    good = [r["mb_per_sec"] for r in out if r.get("mb_per_sec")]
+    return {"message_id": msg_id, "conns_per_bot": STREAM_MEDIA_CONNS,
+            "bots": out,
+            "summary": {"נבדקו": len(out), "הצליחו": len(good),
+                        "הכי מהיר": max(good) if good else 0,
+                        "הכי איטי": min(good) if good else 0,
+                        "חציון": sorted(good)[len(good) // 2] if good else 0}}
+
 @api.post("/pool/list")
 async def pool_list(req: PoolPwReq, request: Request):
     check_panel_password(request, req.password)
     now = time.time()
-    bots = [{"name": b["name"],
-             "status": "פעיל" if b["cooldown_until"] < now else "מתקרר",
-             "kind": b.get("kind", "bot"),
-             "token_tail": (b.get("token") or "")[-6:]} for b in _stream_bots]
-    return {"active": len(_stream_bots), "in_file": len(_pool_tokens_in_file()), "bots": bots}
+    bots = []
+    for b in _stream_bots:
+        cd = max(0, int(b["cooldown_until"] - now))
+        bots.append({
+            "name": b["name"],
+            "who": b.get("who", ""),           # @username — לזיהוי איזה בוט זה
+            "status": "פעיל" if cd == 0 else "מתקרר",
+            "cooldown_left": cd,               # כמה שניות נשארו לעונשין
+            # peer_ok: האם הבוט מזהה את ערוץ התוכן. בלעדיו כל משיכת מדיה שלו
+            # נכשלת ב-'Peer id invalid' והוא חסר תועלת — גם אם הוא "פעיל".
+            "peer_ok": bool(b.get("peer_ok", True)),
+            "kind": b.get("kind", "bot"),
+            "token_tail": (b.get("token") or "")[-6:],
+        })
+    healthy = sum(1 for b in bots if b["status"] == "פעיל" and b["peer_ok"])
+    return {"active": len(_stream_bots), "healthy": healthy,
+            "in_file": len(_pool_tokens_in_file()),
+            "channel": STREAM_CHANNEL_ID, "bots": bots}
+
+class PoolNameReq(BaseModel):
+    password: str
+    name: Optional[str] = None     # ריק = כל מי שלא מזהה את הערוץ
+
+@api.post("/pool/reconnect")
+async def pool_reconnect(req: PoolNameReq, request: Request):
+    """מנסה מחדש לזהות את ערוץ התוכן עבור בוט (או כל מי שנכשל).
+    משמש את הכפתור בפאנל כשבוט מוצג כ'לא מחובר לערוץ'."""
+    check_panel_password(request, req.password)
+    targets = [b for b in _stream_bots
+               if (req.name and b["name"] == req.name) or (not req.name and not b.get("peer_ok", True))]
+    if not targets:
+        raise HTTPException(404, "לא נמצא בוט מתאים")
+    out = []
+    for b in targets:
+        ok = await _resolve_peer(b["client"], b["name"])
+        b["peer_ok"] = ok
+        if ok:
+            b["cooldown_until"] = 0.0          # מזוהה שוב — משחררים מעונשין
+            _peer_errors.pop(b["name"], None)
+        # מזהה הבוט: בלי זה אי אפשר לדעת *את מי* להוסיף לערוץ. בוט חייב להיות
+        # חבר בערוץ כדי לגשת אליו — אין דרך לעקוף את זה בקוד.
+        who = ""
+        try:
+            me = await asyncio.wait_for(b["client"].get_me(), timeout=10)
+            who = ("@" + me.username) if me.username else (me.first_name or "")
+        except Exception:
+            pass
+        out.append({"name": b["name"], "peer_ok": ok, "who": who,
+                    "error": _peer_errors.get(b["name"], "")})
+    return {"ok": True, "results": out}
 
 class PoolRemoveReq(BaseModel):
     password: str
@@ -3259,43 +4959,302 @@ async def channels_list(req: PoolPwReq, request: Request):
 # מה שהאט כל טעינת דף באתר. מוחזק כאן גוף JSON מוכן, שנבנה מחדש רק כשהתוכן משתנה
 # (לפי הגרסה) או כל CONTENT_CACHE_TTL שניות (כדי לרענן את חתימות הקישורים — הן
 # תקפות 6 שעות, אז רענון כל כמה דקות בטוח). כך כמעט כל בקשה מוגשת מיידית.
-_content_resp_cache = {"ver": None, "built": 0.0, "body": None}
 CONTENT_CACHE_TTL = 180
 
-def _cached_content_body():
+# מטמון גופי JSON מוכנים — מקודדים ל-bytes וגם דחוסים מראש.
+# הגרסה הקודמת שמרה מחרוזת בלבד, כך שכל בקשה עדיין עשתה encode של ~12MB
+# ו-nginx דחס אותם מחדש. זה ~1 שנייה של CPU לכל טעינת דף, על אותו תהליך
+# שמזרים את הווידאו — ולכן גם הנגן נתקע כשמישהו נכנס לאתר. כאן הכל נבנה
+# פעם אחת לגרסה, וכל בקשה היא העתקת בייטים.
+_JSON_CACHE: dict = {}
+_JSON_CACHE_MAX = 8          # מגן מפני ?limit= שרירותי שינפח את הזיכרון
+
+
+def _fresh(c, ver, ttl, now=None):
+    return c and c["ver"] == ver and ((now or time.time()) - c["built"]) < ttl
+
+
+# ── רענון כפוי של הקטלוג אצל הלקוח ───────────────────────────────────────────
+# הקישורים בקטלוג חתומים ותקפים SIGN_TTL שניות. ה-ETag היה מבוסס על גרסת
+# התוכן בלבד, ולכן לקוח שלא ראה שינוי תוכן קיבל 304 לנצח והמשיך להחזיק את
+# הקטלוג הישן שלו — עד שהחתימות שבו פגו וכל לחיצה על "נגן" החזירה 403
+# ("הקישור פג תוקף"). זה מה שאילץ מחיקה והתקנה מחדש של האפליקציה.
+#
+# הפתרון: משלבים ב-ETag גם "חלון זמן". כשהחלון מתחלף ה-ETag משתנה, הלקוח
+# מוריד קטלוג טרי עם חתימות חדשות, וזה קורה הרבה לפני שהישנות פגות. החלון
+# הוא שליש מתוקף החתימה — כלומר שני רענונים לפחות בתוך כל חיים של חתימה.
+SIG_EPOCH_WINDOW = max(600, SIGN_TTL // 3)
+
+
+def _sig_epoch() -> int:
+    return int(time.time()) // SIG_EPOCH_WINDOW
+
+
+def _build_payload_entry(ver: int, build) -> dict:
+    """בונה גוף מוכן (טעינה+חתימה+json+gzip). כבד — נועד לרוץ ב-thread."""
+    raw = json.dumps(build(), ensure_ascii=False).encode("utf-8")
+    return {"ver": ver, "built": time.time(), "raw": raw,
+            # רמה 5: כמעט אותו יחס דחיסה כמו 6 בכשליש מהזמן, וזה רץ פעם אחת
+            "gz": gzip.compress(raw, 5) if len(raw) > 4096 else None}
+
+
+def _store_payload(key: str, c: dict) -> dict:
+    if len(_JSON_CACHE) >= _JSON_CACHE_MAX:
+        _JSON_CACHE.pop(next(iter(_JSON_CACHE)), None)
+    _JSON_CACHE[key] = c
+    return c
+
+
+def _cached_payload(key: str, ver: int, build, ttl: float = CONTENT_CACHE_TTL):
+    """גוף מוכן למפתח נתון. build() נקרא רק כשהמטמון פג או שהתוכן השתנה.
+    גרסה סינכרונית — נשמרת לקוראים שאינם על ה-event loop."""
+    c = _JSON_CACHE.get(key)
+    if _fresh(c, ver, ttl):
+        return c
+    return _store_payload(key, _build_payload_entry(ver, build))
+
+
+# נעילה לכל מפתח: כשכמה משתמשים נכנסים יחד ל-cache קר, רק אחד בונה והשאר
+# ממתינים לתוצאה — במקום שכל אחד יריץ בנייה מלאה במקביל וכולם ייתקעו.
+_payload_locks: dict = {}
+
+
+def _payload_lock(key: str) -> asyncio.Lock:
+    lk = _payload_locks.get(key)
+    if lk is None:
+        lk = _payload_locks[key] = asyncio.Lock()
+    return lk
+
+
+async def _cached_payload_async(key: str, ver: int, build, ttl: float = CONTENT_CACHE_TTL):
+    """כמו _cached_payload, אבל הבנייה הכבדה רצה ב-thread (asyncio.to_thread)
+    כדי לא לחסום את ה-event loop — עליו רצה גם הזרמת הווידאו. בלי זה כל בקשת
+    /content ראשונה-לגרסה הקפיאה את השרת ל~1-2ש והנגן נתקע."""
+    c = _JSON_CACHE.get(key)
+    if _fresh(c, ver, ttl):
+        return c
+    async with _payload_lock(key):
+        c = _JSON_CACHE.get(key)              # אולי כבר נבנה בזמן ההמתנה
+        if _fresh(c, ver, ttl):
+            return c
+        entry = await asyncio.to_thread(_build_payload_entry, ver, build)
+        return _store_payload(key, entry)
+
+
+def _serve_cached(request: Request, c: dict, etag: str, extra: dict = None) -> Response:
+    """מגיש גוף מהמטמון, דחוס אם הלקוח תומך, עם ETag ל-304."""
+    headers = {"ETag": etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if extra:
+        headers.update(extra)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    body = c["raw"]
+    if c["gz"] and "gzip" in (request.headers.get("accept-encoding") or ""):
+        body, headers["Content-Encoding"] = c["gz"], "gzip"
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+
+# ── קטלוג רזה לאתר ────────────────────────────────────────────────────────────
+# מדידה: האתר הוריד ופרסר את כל 10,472 הפריטים לפני שצייר פיקסל אחד — 1MB
+# דחוס ברשת ועוד ~4 שניות פרסור על שרת חזק (בטלפון: 10-30 שניות, ובזמן הזה
+# המסך תקוע והנגן לא מצליח למלא באפר). הכל כדי להציג כ-100 כרטיסיות.
+# הפתרון: מסירים את description (32% מהמשקל, מוצג רק כשפותחים פריט) ואת
+# video_id הכפול (זהה ל-video_url ב-6709 פריטים; הפרונט ממילא נופל אחורה
+# ל-video_url). video_url נשאר — בלעדיו אי אפשר לנגן.
+_LITE_DROP = ("description",)
+# ה-limit-ים שנשמרים במטמון. כל ערך אחר מוגש מהרשימה בלי גוף שמור, כדי
+# ש-?limit=123 מכל מיני מקורות לא ימלא את הזיכרון בגרסאות של אותו קטלוג.
+_LITE_LIMITS = (0, 800)
+
+
+def _lite_items():
+    items = []
+    for e in _expand_urls(load_content()):
+        d = {k: v for k, v in e.items() if k not in _LITE_DROP}
+        if d.get("video_id") and d.get("video_id") == d.get("video_url"):
+            d.pop("video_id", None)
+        items.append(d)
+    return items
+
+
+@api.get("/content/lite")
+async def content_lite(request: Request, limit: int = 0):
+    """קטלוג לתצוגה. limit>0 מחזיר רק את ה-N הראשונים (ציור מהיר של מסך הבית),
+    ואז האתר מושך את השאר ברקע.
+
+    ה-TTL כאן חיוני ולא רק לביצועים: הקישורים חתומים ותקפים 6 שעות, וגרסה
+    קודמת רעננה רק כשהתוכן השתנה — כך שיממה בלי עריכה הגישה חתימות פגות.
+    """
     ver = get_content_version()
-    now = time.time()
-    c = _content_resp_cache
-    if c["body"] is not None and c["ver"] == ver and (now - c["built"]) < CONTENT_CACHE_TTL:
-        return c["body"], ver
-    body = json.dumps(_expand_urls(load_content()), ensure_ascii=False)
-    c.update(ver=ver, built=now, body=body)
-    return body, ver
+    limit = max(0, limit)
+    key = f"lite:{limit}" if limit in _LITE_LIMITS else None
+    if key:
+        c = await _cached_payload_async(key, ver,
+                            lambda: _lite_items()[:limit] if limit else _lite_items())
+        etag = f'W/"l{ver}-{limit}-{_sig_epoch()}"'
+        return _serve_cached(request, c, etag, {"X-Content-Version": str(ver)})
+    # limit חריג — נבנה בלי לשמור (עדיין ב-thread כדי לא לחסום את ה-loop)
+    items = await asyncio.to_thread(lambda: _lite_items()[:limit])
+    return Response(content=json.dumps(items, ensure_ascii=False),
+                    media_type="application/json",
+                    headers={"X-Content-Version": str(ver), "Cache-Control": "no-cache"})
+
+
+@api.get("/content/live")
+async def content_live(request: Request):
+    """רק השידורים החיים (~230 פריטים, עשרות KB).
+
+    האתר מרענן שידורים חיים כל 5 דקות, וקודם הוריד לשם כך את כל הקטלוג —
+    כלומר מגה-בייטים כל רבע שעה לכל לשונית פתוחה, רק כדי לבדוק אם ערוץ אחד
+    השתנה.
+    """
+    ver = get_content_version()
+    c = await _cached_payload_async("live", ver,
+                        lambda: [e for e in _lite_items() if e.get("is_live")])
+    return _serve_cached(request, c, f'W/"v{ver}-{_sig_epoch()}"', {"X-Content-Version": str(ver)})
+
+
+# אינדקס לפי מזהה. קודם כל בקשה לתיאור סרקה את כל 11,747 הפריטים ובנתה
+# מחדש את כל הקישורים החתומים — כלומר פתיחת כרטיסייה עלתה כמו טעינת קטלוג.
+_item_index: dict = {"ver": None, "built": 0.0, "by_id": {}}
+
+
+def _item_index_fresh(ver: int) -> bool:
+    return (_item_index["ver"] == ver
+            and (time.time() - _item_index["built"]) < CONTENT_CACHE_TTL)
+
+
+def _build_item_index(ver: int) -> dict:
+    """בונה אינדקס id→פריט (חתימת ~11k קישורים). כבד — רץ ב-thread."""
+    by_id = {str(e.get("id")): e for e in _expand_urls(load_content())}
+    _item_index.update(ver=ver, built=time.time(), by_id=by_id)
+    return by_id
+
+
+_item_index_lock = None
+
+
+async def _items_by_id_async(ver: int) -> dict:
+    if _item_index_fresh(ver):
+        return _item_index["by_id"]
+    global _item_index_lock
+    if _item_index_lock is None:
+        _item_index_lock = asyncio.Lock()
+    async with _item_index_lock:
+        if _item_index_fresh(ver):        # אולי נבנה בזמן ההמתנה
+            return _item_index["by_id"]
+        return await asyncio.to_thread(_build_item_index, ver)
+
+
+@api.get("/content/item/{item_id}")
+async def content_item(item_id: str):
+    """פריט בודד עם כל השדות — משמש למשיכת התיאור כשפותחים סרט/סדרה."""
+    e = (await _items_by_id_async(get_content_version())).get(item_id)
+    if e is None:
+        raise HTTPException(404, "not found")
+    return JSONResponse(e, headers={"Cache-Control": "public, max-age=300"})
+
+
+async def _content_response(request: Request) -> Response:
+    """מחזיר את התוכן עם ETag לפי מונה הגרסה.
+
+    התוכן הוא ~10MB (כמגה אחרי gzip) ונשלח בכל טעינת עמוד מחדש, כי לא היו לו
+    שום כותרות caching. עם ETag הדפדפן שולח If-None-Match ומקבל 304 ריק כשאין
+    שינוי — במקום מגה שלם. Cache-Control: no-cache פירושו "שמור אבל תמיד אמת",
+    כך שעדכון תוכן מגיע מיד ואין סכנה שמישהו יראה קטלוג ישן.
+    """
+    ver = get_content_version()
+    c = await _cached_payload_async("full", ver, lambda: _expand_urls(load_content()))
+    return _serve_cached(request, c, f'W/"c{ver}-{_sig_epoch()}"', {"X-Content-Version": str(ver)})
 
 @api.get("/content")
-async def content_get():
+async def content_get(request: Request):
     """קריאה פומבית — האתר/הפאנל מושכים מכאן את כל התוכן (עם הכתובת האמיתית).
     כותרת X-Content-Version מאפשרת לפאנל לדעת על איזו גרסה הוא עורך (optimistic lock)."""
-    body, ver = _cached_content_body()
-    return Response(content=body, media_type="application/json",
-                    headers={"X-Content-Version": str(ver)})
+    return await _content_response(request)
 
 @api.get("/movies.json")
-async def content_movies_alias():
+async def content_movies_alias(request: Request):
     """כינוי ל-/content בשם הקובץ שהאתר רגיל אליו (לקראת מעבר האתר לשרת)."""
-    body, ver = _cached_content_body()
-    return Response(content=body, media_type="application/json",
-                    headers={"X-Content-Version": str(ver)})
+    return await _content_response(request)
 
 class ContentSaveReq(BaseModel):
     password: str
     movies: list
     base_version: Optional[int] = None
+    confirm_delete: bool = False     # אישור מפורש למחיקה המונית
+
+
+# כמה פריטים מותר שיעלמו בשמירה אחת בלי אישור מפורש. שמירה מהפאנל שולחת את
+# *כל* המערך, ולכן טעינה חלקית, טאב ישן או לחיצה לפני שהכל נטען מוחקים את כל
+# מה שלא היה ברשימה — וזה בדיוק "כל יום נמחק תוכן". גרסה קודמת רק גיבתה את
+# התוצאה; כאן עוצרים אותה מראש.
+CONTENT_DELETE_GUARD = int(os.environ.get("CONTENT_DELETE_GUARD", "50"))
+
+def _content_key(e) -> str:
+    return str(e.get("id") or f"{e.get('title')}|{e.get('video_url')}")
+
+def _is_live_item(e) -> bool:
+    return e.get("category") == LIVE_CATEGORY or bool(e.get("is_live"))
+
+
+def _apply_editor_policy(before: list, after: list) -> list:
+    """מחזיר את המערך שיישמר בפועל עבור עורך מוגבל.
+
+    שידורים חיים נלקחים תמיד מהמאגר, ומה שהעורך שלח עבורם מתעלמים ממנו.
+    זה עדיף על בדיקה שמשווה ערכים: הפאנל נטען פעם אחת ונשאר פתוח, ואם משהו
+    השתנה בינתיים העותק שלו מיושן — אז השוואה הייתה חוסמת אותו על פריטים
+    שהוא לא נגע בהם. כך הוא לא יכול לשנות שידור חי, וגם לא נחסם בטעות.
+
+    מחיקות מוגבלות למכסה, ורק בתוכן שאינו שידור חי.
+    """
+    stored_live = {_content_key(e): e for e in before if _is_live_item(e)}
+    stored_rest = {_content_key(e): e for e in before if not _is_live_item(e)}
+
+    result, seen_live = [], set()
+    for e in after:
+        k = _content_key(e)
+        if k in stored_live:                 # שידור חי קיים — הגרסה מהמאגר
+            result.append(stored_live[k])
+            seen_live.add(k)
+        elif _is_live_item(e):               # ניסיון להוסיף שידור חי — לא מורשה
+            continue
+        else:
+            result.append(e)
+    # שידורים חיים שהעורך השמיט — מוחזרים למקומם
+    for k, e in stored_live.items():
+        if k not in seen_live:
+            result.append(e)
+
+    kept = {_content_key(e) for e in result}
+    removed = [e for k, e in stored_rest.items() if k not in kept]
+    if len(removed) > EDITOR_MAX_DELETE:
+        raise HTTPException(status_code=403, detail=(
+            f"⛔ השמירה מוחקת {len(removed)} פריטים, והמותר הוא "
+            f"{EDITOR_MAX_DELETE} בכל שמירה. הפעולה בוטלה.\n\n"
+            "אם התכוונת למחוק פריט אחד — כנראה הרשימה נטענה חלקית. "
+            "רענן את הפאנל ונסה שוב."))
+    if removed:
+        log.info("עורך מוגבל מחק %d פריטים: %s", len(removed),
+                 ", ".join(str(e.get("title"))[:30] for e in removed[:5]))
+    return result
+
+
+class PanelRoleReq(BaseModel):
+    password: str
+
+@api.post("/panel/role")
+async def panel_role_get(req: PanelRoleReq, request: Request):
+    """מזהה את רמת הגישה של הסיסמה. הפאנל קורא לזה בכניסה כדי לדעת מה להציג.
+    ההגבלות עצמן נאכפות בשרת בכל פעולה — זה רק כדי לא להציג מסכים חסומים."""
+    role = panel_role(request, req.password)
+    return {"role": role, "max_delete": EDITOR_MAX_DELETE if role == "editor" else None}
 
 @api.post("/content/save")
 async def content_save(req: ContentSaveReq, request: Request):
     """שמירת המערך המלא (list/create/update/delete/saveAll כולם עוברים דרך זה)."""
-    check_panel_password(request, req.password)
+    role = panel_role(request, req.password)
     if not isinstance(req.movies, list):
         raise HTTPException(status_code=400, detail="movies חייב להיות מערך")
     # ── הגנת עריכה במקביל (optimistic lock) ──────────────────────────────────
@@ -3307,9 +5266,30 @@ async def content_save(req: ContentSaveReq, request: Request):
             f"⚠️ התוכן עודכן על ידי מישהו אחר בזמן שערכת (גרסה בשרת {cur_ver}, "
             f"אצלך {req.base_version}). התוכן נטען מחדש — אנא בצע את השינוי שוב "
             "כדי לא לדרוס עבודה של אחרים."))
-    # מכווצים את הכתובת שלנו חזרה ל-%BASE% כדי שהקישורים יישארו ניידים
-    save_content(_collapse_urls(req.movies))
-    return {"ok": True, "count": len(req.movies), "version": get_content_version()}
+    # ── הגנת מחיקה המונית ────────────────────────────────────────────────────
+    # השמירה דורסת את כל הקטלוג. אם פתאום חסרים עשרות פריטים, כמעט תמיד מדובר
+    # בתקלה (רשימה שנטענה חלקית) ולא בכוונה — עוצרים ומבקשים אישור מפורש.
+    prev = load_content()
+    # מכווצים *לפני* ההשוואה. הקטלוג נשמר עם %BASE% בעוד הפאנל מקבל ושולח
+    # כתובת מלאה, ולכן השוואה על הצורה הגולמית הציגה כל שידור חי כאילו
+    # השתנה — ועורך נחסם על פריטים שלא נגע בהם בכלל.
+    incoming = _collapse_urls(req.movies)
+    if role == "editor":
+        incoming = _apply_editor_policy(prev, incoming)
+    before = len(prev)
+    gone = before - len(incoming)
+    if gone > CONTENT_DELETE_GUARD and not req.confirm_delete:
+        raise HTTPException(status_code=409, detail=(
+            f"⛔ השמירה הזו מוחקת {gone} פריטים ({before} → {len(incoming)}) ולכן נעצרה.\n\n"
+            "זה קורה כשהרשימה נטענה חלקית — למשל טאב ישן, או שמירה לפני שהתוכן "
+            "סיים להיטען. רענן את הפאנל, ודא שכל התוכן מוצג, ובצע את השינוי שוב.\n\n"
+            "אם המחיקה מכוונת — שלח שוב עם confirm_delete."))
+    if gone > 0:
+        log.warning("שמירת תוכן מסירה %d פריטים (%d → %d)%s",
+                    gone, before, len(incoming),
+                    " — באישור מפורש" if req.confirm_delete else "")
+    save_content(incoming)
+    return {"ok": True, "count": len(incoming), "version": get_content_version()}
 
 @api.get("/content/relink")
 async def content_relink(request: Request, dry: int = 1):
@@ -3665,8 +5645,53 @@ WATCHDOG_TIMEOUT_SECS = 25
 WATCHDOG_MAX_CONSECUTIVE_FAILURES = 3
 # המתנה ארוכה לפני הבדיקה הראשונה — נותנת לכל הבוטים לעלות בהדרגה קודם
 WATCHDOG_INITIAL_DELAY_SECS = 120
+# תוך כמה שניות אחורה משיכה מוצלחת של בוט מהבריכה נחשבת עדות שטלגרם מגיב.
+WATCHDOG_POOL_GRACE = int(os.environ.get("WATCHDOG_POOL_GRACE", "120"))
+
+
+async def _restart_main_client() -> bool:
+    """מרים את הלקוח הראשי מחדש. מחזיר True אם הוא עונה אחרי זה.
+
+    זו הפעולה שה-Watchdog צריך לעשות *לפני* שהוא שוקל להפיל את השירות: אם רק
+    ה-session של הבוט הראשי תקוע, בניית אחד חדשה לוקחת שניות ולא נוגעת ב-21
+    בוטי הבריכה ולא בצופים שמנגנים באותו רגע.
+    """
+    try:
+        await asyncio.wait_for(bot_client.stop(), timeout=20)
+    except Exception:
+        pass          # לקוח תקוע עלול להיתקע גם ב-stop; ממשיכים ל-start
+    try:
+        await asyncio.wait_for(bot_client.start(), timeout=60)
+        await asyncio.wait_for(bot_client.get_me(), timeout=WATCHDOG_TIMEOUT_SECS)
+        log.info("✅ Watchdog: הלקוח הראשי הורם מחדש ועונה — השירות ממשיך לרוץ")
+        return True
+    except Exception as e:
+        log.error("⚠️ Watchdog: הרמת הלקוח הראשי נכשלה: %s: %s", type(e).__name__, e)
+        return False
+
 
 async def telegram_watchdog():
+    """שומר על החיבור לטלגרם — אבל בלי להרוג את השירות על סמך בדיקה אחת.
+
+    הגרסה הקודמת בדקה רק את `bot_client.get_me()`, ואחרי שלושה פספוסים הריצה
+    `os._exit(1)`. היא נכתבה ל-Hugging Face Spaces, שם restart של הקונטיינר
+    היה הדרך היחידה להתאושש. על ה-VPS, עם `Restart=always`, התוצאה היא שכל
+    השירות נהרג — וכל 21 הבוטים צריכים לעלות מחדש, ~90 שניות שבהן הצופה מקבל
+    אפס בייטים.
+
+    נמדד בשרת ב-24/08 בשעה 21:25: שלושה פספוסים ב-25 שניות, `os._exit(1)`,
+    `Scheduled restart job` — ובדיוק אז הצופה דיווח על תקיעה של חצי דקה עד
+    דקה. כלומר "נתקע כל כמה דקות, צריך לצאת ולהיכנס" היה השירות שמפיל את
+    עצמו, לא טלגרם ולא הבוטים.
+
+    שני תיקונים:
+
+    1. משיכה מוצלחת של *כל* בוט מהבריכה היא הוכחה שטלגרם מגיב. אם היא קרתה
+       בדקותיים האחרונות, ה-ping של הבוט הראשי נתקע מסיבה מקומית (ה-session
+       שלו, או event loop עמוס תחת הזרמה) — ואין שום סיבה להפיל את השירות.
+    2. גם כשאין הוכחה כזו, קודם מרימים מחדש רק את הלקוח הראשי. הפלת התהליך
+       נשארת המוצא האחרון, אחרי שגם זה נכשל.
+    """
     consecutive_failures = 0
     await asyncio.sleep(WATCHDOG_INITIAL_DELAY_SECS)
     while True:
@@ -3682,8 +5707,20 @@ async def telegram_watchdog():
                 WATCHDOG_TIMEOUT_SECS, consecutive_failures, WATCHDOG_MAX_CONSECUTIVE_FAILURES, e,
             )
             if consecutive_failures >= WATCHDOG_MAX_CONSECUTIVE_FAILURES:
-                log.critical("💥 Watchdog: החיבור לטלגרם תקוע - מפעיל restart אוטומטי לתהליך")
-                os._exit(1)
+                idle = time.time() - _last_pool_success
+                if idle < WATCHDOG_POOL_GRACE:
+                    log.warning(
+                        "⚠️ Watchdog: הבוט הראשי לא עונה, אבל הבריכה סיפקה "
+                        "בייטים לפני %.0f שניות — טלגרם מגיב, לא מפילים את "
+                        "השירות. מרים רק את הלקוח הראשי.", idle)
+                    await _restart_main_client()
+                    consecutive_failures = 0
+                elif await _restart_main_client():
+                    consecutive_failures = 0
+                else:
+                    log.critical("💥 Watchdog: החיבור לטלגרם תקוע וגם הרמת הלקוח "
+                                 "הראשי נכשלה - מפעיל restart אוטומטי לתהליך")
+                    os._exit(1)
         await asyncio.sleep(WATCHDOG_CHECK_INTERVAL_SECS)
 
 # ── Parallel download workers ────────────────────────────────────────────────
@@ -3869,41 +5906,182 @@ async def pool_stream_window(msg: Message, start_byte: int, end_byte: int) -> As
 # כל חיבור מושך חלק אחר של הקובץ ב-upload.GetFile במקביל. פותרים את החיבורים
 # פעם אחת ושומרים ב-pool לפי DC.
 MEDIA_CHUNK = 1024 * 1024
-_media_sessions: dict = {}          # dc_id -> list[Session]
-_media_sessions_lock = asyncio.Lock()
+_media_sessions: dict = {}          # (bot_name, dc_id) -> {"born", "gen", "pool"}
+# טלגרם סוגר חיבורים לא פעילים; מחזירים אותם לפני שהם מתים עלינו. זו רשת
+# ביטחון בלבד — חיבור מת מתגלה ומוחלף דרך הכשל עצמו — ולכן הערך גבוה: מחזור
+# תכוף מדי (240 שניות) ביטל את החימום, וכל צופה שנחת אחרי מחזור שילם בנייה
+# מחדש של 4 חיבורים.
+MEDIA_SESSION_TTL = int(os.environ.get("MEDIA_SESSION_TTL", "1800"))
+# כמה זמן להשאיר בריכה שהוחלפה בחיים לפני סגירה, כדי לא לנתק משיכות שרצות
+# עליה ברגע ההחלפה.
+MEDIA_SESSION_GRACE = int(os.environ.get("MEDIA_SESSION_GRACE", "30"))
+# נעילה *פר-בוט* ולא גלובלית: בניית חיבורים לוקחת כמה סבבי רשת, ונעילה אחת
+# לכולם הפכה כל בנייה לתור שכל הצופים תקועים בו.
+_media_sessions_locks: dict = {}
+_media_gen_counter = itertools.count(1)
 
-async def _make_media_session(dc_id: int) -> Session:
-    test_mode = await bot_client.storage.test_mode()
-    home_dc = await bot_client.storage.dc_id()
+def _media_lock(key):
+    lk = _media_sessions_locks.get(key)
+    if lk is None:
+        lk = _media_sessions_locks[key] = asyncio.Lock()
+    return lk
+
+async def _make_media_session(client, dc_id: int) -> Session:
+    """חיבור media נוסף *לאותו לקוח* — עם ה-auth_key שכבר יש לו, בלי אימות מחדש."""
+    test_mode = await client.storage.test_mode()
+    home_dc = await client.storage.dc_id()
     if dc_id == home_dc:
-        auth_key = await bot_client.storage.auth_key()
+        auth_key = await client.storage.auth_key()
     else:
-        auth_key = await Auth(bot_client, dc_id, test_mode).create()
-    session = Session(bot_client, dc_id, auth_key, test_mode, is_media=True)
+        auth_key = await Auth(client, dc_id, test_mode).create()
+    session = Session(client, dc_id, auth_key, test_mode, is_media=True)
     await session.start()
     if dc_id != home_dc:
         for _ in range(3):
-            exported = await bot_client.invoke(functions.auth.ExportAuthorization(dc_id=dc_id))
+            exported = await client.invoke(functions.auth.ExportAuthorization(dc_id=dc_id))
             try:
                 await session.invoke(functions.auth.ImportAuthorization(
                     id=exported.id, bytes=exported.bytes))
                 break
             except Exception as e:
                 log.warning("ImportAuthorization ל-DC %d נכשל, מנסה שוב: %s", dc_id, e)
-    log.info("✅ נוצר media session ל-DC %d", dc_id)
     return session
 
-async def get_media_session_pool(dc_id: int, n: int) -> list:
-    async with _media_sessions_lock:
-        pool = _media_sessions.get(dc_id, [])
+async def _stop_pool(pool):
+    for sess in pool:
+        try:
+            await sess.stop()
+        except Exception:
+            pass
+
+
+async def _retire_pool(pool):
+    """סוגר בריכה שהוחלפה, אבל רק אחרי שהות. סגירה מיידית מנתקת משיכות שרצות
+    עליה בדיוק ברגע ההחלפה — ואז הצופה מקבל כשל בגלל פעולת תחזוקה."""
+    await asyncio.sleep(MEDIA_SESSION_GRACE)
+    await _stop_pool(pool)
+
+
+_media_building: set = set()
+
+async def _fill_pool_bg(client, owner: str, dc_id: int, n: int):
+    """משלים בריכה ברקע. הצופה לא ממתין לזה."""
+    key = (owner, dc_id)
+    try:
+        async with _media_lock(key):
+            ent = _media_sessions.get(key)
+            if ent is None:
+                ent = {"born": time.time(), "gen": next(_media_gen_counter), "pool": []}
+                _media_sessions[key] = ent
+            while len(ent["pool"]) < n:
+                try:
+                    ent["pool"].append(await _make_media_session(client, dc_id))
+                except Exception as e:
+                    log.error("יצירת media session ל-%s נכשלה: %s", owner, e)
+                    break
+    finally:
+        _media_building.discard(key)
+
+
+async def _refresh_pool_bg(client, owner: str, dc_id: int, n: int, old_ent: dict):
+    """בונה דור חדש של חיבורים ברקע ומחליף את הישן, ואז מוציא את הישן לגמלאות.
+    מתקן את הבאג שבו בריכה שפג תוקפה לא התחדשה ב-block=False (נתקע אחרי 30 דק')."""
+    key = (owner, dc_id)
+    try:
+        fresh = []
+        for _ in range(n):
+            try:
+                fresh.append(await _make_media_session(client, dc_id))
+            except Exception as e:
+                log.error("רענון media session ל-%s נכשל: %s", owner, e)
+                break
+        if fresh:
+            async with _media_lock(key):
+                _media_sessions[key] = {"born": time.time(),
+                                        "gen": next(_media_gen_counter),
+                                        "pool": fresh}
+            asyncio.create_task(_retire_pool(old_ent["pool"]))
+            log.info("media pool ל-%s רוענן (%d חיבורים טריים)", owner, len(fresh))
+    finally:
+        _media_building.discard(key)
+
+
+async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int,
+                                     block: bool = True):
+    """חיבורי media *פר-בוט*, עם מחזור לפי גיל. מחזיר (pool, gen).
+
+    טלגרם סוגר חיבורים שלא בשימוש. גרסה קודמת שמרה אותם לנצח, ואז כל בקשה
+    שנחתה על חיבור מת נתלתה עד ה-timeout והצופה קיבל אפס בייטים.
+
+    ה-gen הוא מזהה הדור של הבריכה. הקורא מחזיר אותו ל-drop_media_sessions
+    בזמן כשל, וכך רק *הראשון* שגילה את התקלה מחליף את החיבורים; מי שנכשל
+    אחריו על אותו דור מקבל את הבריכה החדשה במקום להרוג גם אותה. בלי זה
+    ארבעה צופים במקביל נכנסו ללולאת מוות — כל אחד הרג את החיבורים הטריים
+    של האחרים ואף אחד לא סיים למשוך.
+    """
+    key = (owner, dc_id)
+    now = time.time()
+    old = None
+    # block=False: לא בונים מול הצופה. בנייה של 4 חיבורים לוקחת שניות ארוכות,
+    # והיא קרתה *לפני* הבייט הראשון — נמדד זמן-התחלה של 21 שניות ברגע שהבריכה
+    # גדלה ל-16 בוטים והבקשות נחתו על בוטים שעוד לא נבנו. הבנייה עוברת לרקע
+    # והבקשה הנוכחית נופלת למסלול הבוטים, שמגיש תוך שניות בודדות.
+    if not block:
+        ent = _media_sessions.get(key)
+        if ent is not None and len(ent["pool"]) >= n:
+            if (now - ent["born"]) <= MEDIA_SESSION_TTL:
+                return ent["pool"][:n], ent["gen"]
+            # פג תוקף (מעל 30 דק') — בונים דור חדש ברקע, אבל *עדיין מגישים את
+            # הישן* (חי בגרייס) כדי לא ליצור תקיעה באמצע צפייה. הבקשה הבאה כבר
+            # תקבל את החדש. בלי זה הזרמה של סרט ארוך נתקעה בדיוק אחרי חצי שעה.
+            if key not in _media_building:
+                _media_building.add(key)
+                asyncio.create_task(_refresh_pool_bg(client, owner, dc_id, n, ent))
+            return ent["pool"][:n], ent["gen"]
+        if key not in _media_building:
+            _media_building.add(key)
+            asyncio.create_task(_fill_pool_bg(client, owner, dc_id, n))
+        return [], None
+    async with _media_lock(key):
+        ent = _media_sessions.get(key)
+        if ent and (now - ent["born"]) > MEDIA_SESSION_TTL:
+            old, ent = ent["pool"], None
+            _media_sessions.pop(key, None)
+        if ent is None:
+            ent = {"born": now, "gen": next(_media_gen_counter), "pool": []}
+            _media_sessions[key] = ent
+        pool = ent["pool"]
         while len(pool) < n:
             try:
-                pool.append(await _make_media_session(dc_id))
+                pool.append(await _make_media_session(client, dc_id))
             except Exception as e:
-                log.error("יצירת media session נכשלה: %s", e)
+                log.error("יצירת media session ל-%s נכשלה: %s", owner, e)
                 break
-        _media_sessions[dc_id] = pool
-    return pool[:n]
+        result = (pool[:n], ent["gen"])
+    if old:
+        asyncio.create_task(_retire_pool(old))
+    return result
+
+
+async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list:
+    pool, _gen = await get_media_session_pool_gen(client, owner, dc_id, n)
+    return pool
+
+
+async def drop_media_sessions(owner: str, dc_id: int, gen=None):
+    """מפיל את חיבורי ה-media של בוט מסוים — הבא בתור ייצור טריים.
+
+    gen: הדור שהקורא עבד מולו. אם הבריכה כבר הוחלפה בינתיים (דור אחר) לא
+    נוגעים בה — היא של מישהו אחר וכנראה תקינה.
+    """
+    key = (owner, dc_id)
+    async with _media_lock(key):
+        ent = _media_sessions.get(key)
+        if ent is None or (gen is not None and ent["gen"] != gen):
+            return
+        _media_sessions.pop(key, None)
+    asyncio.create_task(_retire_pool(ent["pool"]))
+
 
 def _file_location(media):
     f = FileId.decode(media.file_id)
@@ -3944,7 +6122,7 @@ async def speedtest2(chat_id: int, message_id: int, mb: int = 24, conn: int = 4)
         if not media:
             raise HTTPException(404, "no media")
         dc_id, location = _file_location(media)
-        sessions = await get_media_session_pool(dc_id, conn)
+        sessions = await get_media_session_pool(bot_client, "main", dc_id, conn)
         if not sessions:
             return JSONResponse({"error": "no media sessions could be created", "dc_id": dc_id})
         n = len(sessions)
@@ -3996,6 +6174,10 @@ async def startup():
     # שגרם לחסימת IP: כל הבוטים "לא עלה", Watchdog הרג את התהליך, ולולאת קריסה).
     asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
+    asyncio.create_task(_hls_fix_reaper())   # סוגר ffmpeg של ערוצים ללא צופים
+    asyncio.create_task(peer_retry_loop())   # מחזיר לפעולה בוטים ששכחו את הערוץ
+    asyncio.create_task(revive_stream_pool())  # מרים מחדש בוטים עם session תקוע
+    asyncio.create_task(pool_health_loop())    # בודק *כל* בוט, גם מי שלא נחנק
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
     asyncio.create_task(staged_bot_startup())
@@ -4043,5 +6225,1519 @@ async def shutdown():
     except Exception as e:
         log.warning("shutdown: גיבוי אחרון נכשל: %s", e)
 
+# ── העלאה ל"הודעות שמורות" מהאפליקציה ────────────────────────────────────────
+# הייבואים מפורשים כאן ולא מנוחשים מהקובץ. הגרסה הראשונה הניחה שמה שהקוד
+# הזה צריך כבר מיובא, ונפלה על NameError: pathlib — כי בקובץ היעד יש
+# "from pathlib import Path", כלומר Path מוגדר אבל pathlib לא. השירות נכנס
+# ללולאת קריסה והאתר ירד. ייבוא חוזר של מודול שכבר יובא הוא זול וחסר תופעות
+# לוואי, ולכן עדיף על כל ניסיון לזהות מה קיים.
+import asyncio, hmac, os, pathlib, re, shutil, subprocess, time, uuid
+from urllib.parse import unquote
+
+# ראה add_saved_upload.py להסבר מלא. בקצרה: הטלפון מעלה לשרת, השרת מעלה
+# לטלגרם דרך היוזרבוט, והקובץ הזמני נמחק בסיום — גם כשההעלאה נכשלת.
+UPLOAD_PANEL_CODE = os.environ.get("UPLOAD_PANEL_CODE", "").strip()
+SAVED_UPLOAD_USER = os.environ.get("SAVED_UPLOAD_USER", "").strip().lstrip("@").lower()
+SAVED_TMP_DIR = DATA_DIR / "saved_uploads"
+SAVED_JOB_TTL = 3600          # רשומת התקדמות נשמרת שעה אחרי הסיום
+SAVED_STALE_SEC = 6 * 3600    # קובץ זמני ישן מזה — שריד מהעלאה שנפלה
+
+_saved_jobs: dict = {}        # job_id -> {stage, pct, ...}
+# החזקת הפניה חזקה למשימות הרקע. asyncio.create_task מחזיר משימה שאם אף אחד
+# אינו מחזיק אליה הפניה, אספן הזבל רשאי לאסוף אותה באמצע הריצה — מלכודת
+# מתועדת, ובהעלאה שנמשכת דקות היא בדיוק הדבר שיקרה.
+_saved_tasks: set = set()
+
+
+def _saved_prune_jobs():
+    now = time.time()
+    for k in [k for k, v in _saved_jobs.items()
+              if v.get("done_at") and now - v["done_at"] > SAVED_JOB_TTL]:
+        _saved_jobs.pop(k, None)
+
+
+def _pick_userbot():
+    """חבר פוּל מסוג user. בוט לא יכול לשלוח ל'הודעות שמורות' של חשבון."""
+    users = [b for b in _stream_bots if b.get("kind") == "user"]
+    if not users:
+        return None
+    if SAVED_UPLOAD_USER:
+        for b in users:
+            if (b.get("who") or "").lstrip("@").lower() == SAVED_UPLOAD_USER:
+                return b
+        return None           # ביקשו חשבון מסוים והוא לא בפוּל — לא מנחשים
+    return users[0]
+
+
+def _check_upload_code(request: Request, code: str):
+    """מאמת את קוד ההעלאה עם אותה הגנת ניחוש של סיסמת הפאנל.
+
+    משתמש ב-_auth_fails וב-_client_ip הקיימים, כלומר ניסיונות ניחוש בשני
+    השערים נספרים יחד — מי שמנסה לנחש את קוד ההעלאה נחסם גם מהפאנל.
+    ההשוואה ב-hmac.compare_digest (זמן קבוע), כדי לא לדלוף מידע דרך תזמון.
+    """
+    if not UPLOAD_PANEL_CODE:
+        raise HTTPException(status_code=503, detail="פאנל ההעלאה לא מוגדר בשרת")
+    ip = _client_ip(request)
+    now = time.time()
+    fails = [t for t in _auth_fails.get(ip, []) if now - t < AUTH_LOCK]
+    if len([t for t in fails if now - t < AUTH_WINDOW]) >= AUTH_MAX_FAILS:
+        _auth_fails[ip] = fails
+        raise HTTPException(status_code=429,
+                            detail="יותר מדי ניסיונות — נסה שוב בעוד כמה דקות")
+    if not hmac.compare_digest(code or "", UPLOAD_PANEL_CODE):
+        fails.append(now)
+        _auth_fails[ip] = fails
+        raise HTTPException(status_code=403, detail="קוד שגוי")
+    _auth_fails.pop(ip, None)
+
+
+# מגבלת טלגרם לפי סוג החשבון. נשמרת לשעה: is_premium אינו משתנה בתדירות
+# שמצדיקה קריאת רשת בכל בקשה.
+_saved_premium = {"at": 0.0, "premium": None}
+SAVED_LIMIT_FREE = 2 * 1024 ** 3
+SAVED_LIMIT_PREMIUM = 4 * 1024 ** 3
+
+
+async def _saved_max_size():
+    """הגודל המרבי שהחשבון המחובר יכול לשלוח, או 0 אם אין חשבון."""
+    bot = _pick_userbot()
+    if bot is None:
+        return 0
+    now = time.time()
+    if _saved_premium["premium"] is None or now - _saved_premium["at"] > 3600:
+        try:
+            me = await bot["client"].get_me()
+            _saved_premium["premium"] = bool(getattr(me, "is_premium", False))
+            _saved_premium["at"] = now
+        except Exception as e:
+            # לא הצלחנו לברר. לא חוסמים על סמך ניחוש — מחזירים את התקרה
+            # הגבוהה ונותנים לטלגרם עצמו לומר לא, אם בכלל.
+            log.warning("בדיקת Premium נכשלה: %s", e)
+            return SAVED_LIMIT_PREMIUM
+    return SAVED_LIMIT_PREMIUM if _saved_premium["premium"] else SAVED_LIMIT_FREE
+
+
+def _saved_free_disk():
+    """מקום פנוי בדיסק שאליו נכתב הקובץ הזמני."""
+    import shutil as _sh
+    try:
+        SAVED_TMP_DIR.mkdir(parents=True, exist_ok=True)
+        return _sh.disk_usage(str(SAVED_TMP_DIR)).free
+    except Exception:
+        return 0
+
+
+@api.post("/panel/entry-code")
+async def panel_entry_code(req: Request):
+    """אימות קוד הכניסה לפאנל. הקוד יושב כאן ולא באפליקציה."""
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    _check_upload_code(req, str(body.get("code") or ""))
+    bot = _pick_userbot()
+    _max = await _saved_max_size()
+    return {"ok": True, "account": (bot or {}).get("who") or "",
+            "ready": bot is not None,
+            "premium": bool(_saved_premium.get("premium")),
+            "max_size": _max,
+            "free_disk": _saved_free_disk()}
+
+
+def _saved_probe(path):
+    """אורך ומידות מהקובץ עצמו. חוסם — להריץ רק בתוך executor.
+
+    גיבוי בלבד: הערכים מגיעים מהאפליקציה. אם ffprobe אינו מותקן מחזירים
+    מילון ריק, וההעלאה ממשיכה בדיוק כמו קודם.
+    """
+    exe = shutil.which("ffprobe")
+    if not exe:
+        return {}
+    try:
+        out = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height:format=duration", "-of", "default=nw=1:nk=1",
+             str(path)],
+            capture_output=True, text=True, timeout=90).stdout.split()
+        w, h, d = int(float(out[0])), int(float(out[1])), int(float(out[2]))
+        return {"width": w, "height": h, "duration": d}
+    except Exception:
+        return {}
+
+
+def _saved_thumb(path, when):
+    """תמונה ממוזערת. בלעדיה טלגרם מציג ריבוע שחור. חוסם — בתוך executor."""
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return ""
+    out = pathlib.Path(str(path) + ".thumb.jpg")
+    try:
+        subprocess.run(
+            [exe, "-y", "-v", "error", "-ss", str(max(0, int(when))), "-i",
+             str(path), "-frames:v", "1", "-vf", "scale=320:-2", str(out)],
+            capture_output=True, timeout=120)
+        if out.exists() and out.stat().st_size > 0:
+            return str(out)
+    except Exception:
+        pass
+    try:
+        out.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return ""
+
+
+async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: str):
+    """שלב ②: מעלה מהשרת לטלגרם, ומוחק את הקובץ הזמני בכל מקרה."""
+    job = _saved_jobs[job_id]
+    thumb = ""          # מוגדר לפני try כדי שגם ה-finally יוכל למחוק אותו
+    try:
+        bot = _pick_userbot()
+        if bot is None:
+            raise RuntimeError("אין חשבון משתמש מחובר בשרת "
+                               "(רק חשבון יכול לשלוח ל'הודעות שמורות')")
+        total = path.stat().st_size
+        job.update(stage="telegram", pct=0, sent=0, total=total,
+                   started_tg=time.time())
+
+        def _progress(current, _total):
+            el = max(0.001, time.time() - job["started_tg"])
+            job["sent"] = current
+            job["pct"] = round(100 * current / max(1, _total or total), 1)
+            job["speed"] = current / el
+            left = max(0, (_total or total) - current)
+            job["eta"] = int(left / job["speed"]) if job["speed"] > 0 else None
+
+        # המטא־דאטה שנשלחת לטלגרם. בלעדיה ההודעה מציגה 0:00 ותצוגה מקדימה
+        # שחורה — טלגרם שומר בדיוק את מה שנמסר לו, ולא בודק את הקובץ.
+        meta = dict(job.get("meta") or {})
+        _loop = asyncio.get_running_loop()
+        if not all(meta.get(k) for k in ("duration", "width", "height")):
+            for k, v in (await _loop.run_in_executor(
+                    None, _saved_probe, path)).items():
+                if not meta.get(k):
+                    meta[k] = v
+        _dur = int(meta.get("duration") or 0)
+        thumb = await _loop.run_in_executor(
+            None, _saved_thumb, path, min(10, max(1, _dur // 10)) if _dur else 1)
+
+        await bot["client"].send_video(
+            "me", str(path), caption=caption or filename,
+            file_name=filename, duration=_dur,
+            width=int(meta.get("width") or 0),
+            height=int(meta.get("height") or 0),
+            thumb=thumb or None, supports_streaming=True,
+            progress=_progress)
+        job.update(stage="done", pct=100, done_at=time.time())
+        log.info("📤 הועלה ל'הודעות שמורות': %s (%.1fMB)", filename, total / 1048576)
+    except asyncio.CancelledError:
+        job.update(stage="error", error="בוטל", done_at=time.time())
+        raise
+    except Exception as e:
+        job.update(stage="error", error=f"{type(e).__name__}: {e}",
+                   done_at=time.time())
+        log.warning("📤 העלאה ל'הודעות שמורות' נכשלה: %s: %s", type(e).__name__, e)
+    finally:
+        # נמחק גם בכישלון: אחרת כל ניסיון שנפל משאיר גיגה־בייטים על הדיסק.
+        try:
+            path.unlink(missing_ok=True)
+            if thumb:
+                pathlib.Path(thumb).unlink(missing_ok=True)
+        except Exception as e:
+            log.warning("מחיקת קובץ זמני נכשלה: %s", e)
+
+
+@api.post("/panel/saved-upload")
+async def saved_upload(request: Request):
+    """גוף גולמי, לא multipart.
+
+    UploadFile/Form של FastAPI דורשים את החבילה python-multipart, ואם היא
+    חסרה בשרת האפליקציה כולה לא עולה — כלומר האתר יורד בגלל פיצ'ר צדדי.
+    גוף גולמי לא דורש דבר, וגם חוסך את קידוד ופענוח ה-multipart על קובץ של
+    גיגה־בייטים. המטא־דאטה עוברת בפרמטרים: הקוד בכותרת (ASCII, ולא בכתובת
+    שנכתבת ליומני הגישה), והשם והכיתוב בשאילתה כי הם עברית ואי אפשר לשים
+    עברית בכותרת HTTP.
+    """
+    _check_upload_code(request, request.headers.get("x-upload-code", ""))
+    if _pick_userbot() is None:
+        raise HTTPException(status_code=503,
+                            detail="אין חשבון משתמש מחובר בשרת")
+
+    # ── שני קירות שנבדקים כאן ולא בסוף ──────────────────────────────────
+    # שניהם היו מתגלים רק אחרי שהקובץ כולו עבר מהטלפון — שעה על רשת
+    # סלולרית — ולכן הם נבדקים מול Content-Length ברגע שהכותרות מגיעות.
+    _declared = int(request.headers.get("content-length") or 0)
+    if _declared:
+        _gb = 1073741824
+        _max = await _saved_max_size()
+        if _max and _declared > _max:
+            raise HTTPException(status_code=413, detail=(
+                f"הקובץ {_declared / _gb:.2f}GB, וטלגרם מגביל את החשבון הזה "
+                f"ל-{_max // _gb}GB. חשבון Premium מגיע ל-4GB."))
+        _free = _saved_free_disk()
+        # שוליים של חצי ג'יגה: הקובץ אינו הדבר היחיד שכותב לדיסק הזה.
+        if _free and _free < _declared + 512 * 1024 * 1024:
+            raise HTTPException(status_code=507, detail=(
+                f"אין מספיק מקום בשרת: פנויים {_free / _gb:.1f}GB "
+                f"והקובץ {_declared / _gb:.2f}GB"))
+
+    qp = request.query_params
+    raw_name = unquote(qp.get("name") or "video.mp4")
+    caption = unquote(qp.get("caption") or "")
+
+    # אורך ומידות מהאפליקציה, שיודעת אותם מבורר הגלריה. ערך לא סביר נזרק
+    # ומטופל כחסר, ואז השרת ינסה להוציא אותו מהקובץ בעצמו.
+    def _qint(key, cap):
+        try:
+            v = int(float(qp.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+        return v if 0 < v <= cap else 0
+    meta = {"duration": _qint("duration", 86400),
+            "width": _qint("width", 16384),
+            "height": _qint("height", 16384)}
+
+    SAVED_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for old in SAVED_TMP_DIR.glob("*"):
+        try:
+            if now - old.stat().st_mtime > SAVED_STALE_SEC:
+                old.unlink()
+                log.info("נמחקה שארית העלאה ישנה: %s", old.name)
+        except Exception:
+            pass
+
+    job_id = uuid.uuid4().hex[:12]
+    safe = re.sub(r"[^\w.\-]+", "_", raw_name)[-80:] or "video.mp4"
+    path = SAVED_TMP_DIR / f"{job_id}_{safe}"
+    declared = int(request.headers.get("content-length") or 0)
+    _saved_jobs[job_id] = {"stage": "receiving", "pct": 0, "received": 0,
+                           "total": declared, "name": safe, "started": time.time(),
+                           "meta": meta}
+    job = _saved_jobs[job_id]
+
+    try:
+        with path.open("wb", buffering=1024 * 1024) as f:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                f.write(chunk)
+                job["received"] += len(chunk)
+                if declared:
+                    job["pct"] = round(100 * job["received"] / declared, 1)
+    except Exception as e:
+        path.unlink(missing_ok=True)
+        _saved_jobs.pop(job_id, None)
+        raise HTTPException(status_code=400, detail=f"קליטת הקובץ נכשלה: {e}")
+
+    size = path.stat().st_size
+    if size == 0:
+        path.unlink(missing_ok=True)
+        _saved_jobs.pop(job_id, None)
+        raise HTTPException(status_code=400, detail="התקבל קובץ ריק")
+
+    job.update(stage="queued", size=size, pct=100)
+    _t = asyncio.create_task(_saved_send(job_id, path, safe, caption))
+    _saved_tasks.add(_t)
+    _t.add_done_callback(_saved_tasks.discard)
+    _saved_prune_jobs()
+    return {"ok": True, "job": job_id, "size": size}
+
+
+SAVED_PART_SIZE = 8 * 1024 * 1024     # גודל חלק. גם יחידת הניסיון־מחדש.
+
+
+def _saved_new_job(total, safe, caption, meta):
+    """מקצה קובץ בגודל הסופי ורושם משימה. מחזיר (job_id, path)."""
+    SAVED_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for old in SAVED_TMP_DIR.glob("*"):
+        try:
+            if now - old.stat().st_mtime > SAVED_STALE_SEC:
+                old.unlink()
+                log.info("נמחקה שארית העלאה ישנה: %s", old.name)
+        except Exception:
+            pass
+    job_id = uuid.uuid4().hex[:12]
+    path = SAVED_TMP_DIR / f"{job_id}_{safe}"
+    # הקצאה מראש: כל חלק נכתב להיסט שלו, ולכן הקובץ חייב להיות בגודלו הסופי
+    # עוד לפני שהחלק האחרון הגיע.
+    with path.open("wb") as f:
+        f.truncate(total)
+    _saved_jobs[job_id] = {
+        "stage": "receiving", "pct": 0, "received": 0, "total": total,
+        "name": safe, "caption": caption, "meta": meta,
+        "started": time.time(), "path": str(path),
+        "part_size": SAVED_PART_SIZE,
+        "n_parts": max(1, -(-total // SAVED_PART_SIZE)),
+        "parts": set(),
+    }
+    return job_id, path
+
+
+def _saved_pwrite(path, offset, data):
+    """כתיבה להיסט מוחלט. חוסמת — להריץ רק בתוך executor."""
+    fd = os.open(str(path), os.O_WRONLY)
+    try:
+        written = 0
+        while written < len(data):
+            written += os.pwrite(fd, data[written:], offset + written)
+        return written
+    finally:
+        os.close(fd)
+
+
+def _saved_public(job):
+    """רשומת המשימה בלי השדות הפנימיים — set אינו ניתן להמרה ל-JSON."""
+    return {k: v for k, v in job.items() if k not in ("parts", "path")}
+
+
+@api.post("/panel/saved-upload/begin")
+async def saved_upload_begin(request: Request):
+    body = await request.json()
+    _check_upload_code(request, str(body.get("code") or ""))
+    if _pick_userbot() is None:
+        raise HTTPException(status_code=503,
+                            detail="אין חשבון משתמש מחובר בשרת")
+
+    total = int(body.get("size") or 0)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="חסר גודל הקובץ")
+
+    _gb = 1073741824
+    _max = await _saved_max_size()
+    if _max and total > _max:
+        raise HTTPException(status_code=413, detail=(
+            f"הקובץ {total / _gb:.2f}GB, וטלגרם מגביל את החשבון הזה "
+            f"ל-{_max / _gb:.2f}GB. חשבון Premium מגיע ל-3.91GB."))
+    _free = _saved_free_disk()
+    if _free and _free < total + 512 * 1024 * 1024:
+        raise HTTPException(status_code=507, detail=(
+            f"אין מספיק מקום בשרת: פנויים {_free / _gb:.1f}GB "
+            f"והקובץ {total / _gb:.2f}GB"))
+
+    raw_name = str(body.get("name") or "video.mp4")
+    safe = re.sub(r"[^\w.\-]+", "_", raw_name)[-80:] or "video.mp4"
+
+    def _int(key, cap):
+        try:
+            v = int(float(body.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+        return v if 0 < v <= cap else 0
+    meta = {"duration": _int("duration", 86400),
+            "width": _int("width", 16384),
+            "height": _int("height", 16384)}
+
+    job_id, _ = _saved_new_job(total, safe, str(body.get("caption") or ""), meta)
+    _saved_prune_jobs()
+    job = _saved_jobs[job_id]
+    return {"ok": True, "job": job_id, "part_size": job["part_size"],
+            "n_parts": job["n_parts"]}
+
+
+@api.post("/panel/saved-upload/part")
+async def saved_upload_part(request: Request, job: str = "", index: int = -1):
+    _check_upload_code(request, request.headers.get("x-upload-code", ""))
+    j = _saved_jobs.get(job)
+    if not j or "path" not in j:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    if j.get("stage") not in ("receiving",):
+        raise HTTPException(status_code=409, detail="המשימה כבר אינה בקליטה")
+    if index < 0 or index >= j["n_parts"]:
+        raise HTTPException(status_code=400, detail="מספר חלק שגוי")
+
+    part_size = j["part_size"]
+    offset = index * part_size
+    expect = min(part_size, j["total"] - offset)
+    path = pathlib.Path(j["path"])
+    loop = asyncio.get_running_loop()
+
+    got = 0
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            if got + len(chunk) > expect:
+                raise HTTPException(status_code=400, detail="החלק ארוך מהצפוי")
+            await loop.run_in_executor(
+                None, _saved_pwrite, path, offset + got, chunk)
+            got += len(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"קליטת החלק נכשלה: {e}")
+
+    if got != expect:
+        # חלק חלקי אינו נרשם, ולכן הוא פשוט יישלח שוב.
+        raise HTTPException(status_code=400,
+                            detail=f"התקבלו {got} בייטים מתוך {expect}")
+
+    if index not in j["parts"]:
+        j["parts"].add(index)
+        j["received"] += got
+        if j["total"]:
+            j["pct"] = round(100 * j["received"] / j["total"], 1)
+    return {"ok": True, "index": index, "received": j["received"],
+            "parts_done": len(j["parts"]), "n_parts": j["n_parts"]}
+
+
+@api.get("/panel/saved-upload/parts")
+async def saved_upload_parts(job: str = ""):
+    """אילו חלקים כבר הגיעו — כדי לשלוח מחדש רק את החסרים."""
+    j = _saved_jobs.get(job)
+    if not j or "parts" not in j:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    return {"ok": True, "n_parts": j["n_parts"],
+            "missing": sorted(set(range(j["n_parts"])) - j["parts"]),
+            "received": j["received"], "total": j["total"]}
+
+
+@api.post("/panel/saved-upload/finish")
+async def saved_upload_finish(request: Request, job: str = ""):
+    _check_upload_code(request, request.headers.get("x-upload-code", ""))
+    j = _saved_jobs.get(job)
+    if not j or "path" not in j:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    missing = sorted(set(range(j["n_parts"])) - j["parts"])
+    if missing:
+        raise HTTPException(status_code=409, detail=(
+            f"חסרים {len(missing)} חלקים מתוך {j['n_parts']}"))
+
+    path = pathlib.Path(j["path"])
+    size = path.stat().st_size if path.exists() else 0
+    if size != j["total"]:
+        path.unlink(missing_ok=True)
+        _saved_jobs.pop(job, None)
+        raise HTTPException(status_code=400, detail=(
+            f"גודל הקובץ בשרת {size} במקום {j['total']}"))
+
+    j.update(stage="queued", size=size, pct=100)
+    _t = asyncio.create_task(
+        _saved_send(job, path, j["name"], j.get("caption") or ""))
+    _saved_tasks.add(_t)
+    _t.add_done_callback(_saved_tasks.discard)
+    return {"ok": True, "job": job, "size": size}
+
+
+@api.get("/panel/saved-upload/status")
+async def saved_upload_status(job: str = ""):
+    j = _saved_jobs.get(job)
+    if not j:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    return _saved_public(j)
+
+
+
 if __name__ == "__main__":
     uvicorn.run("main:api", host="0.0.0.0", port=PORT, log_level="info")
+
+
+# ── החלפת הקובץ של פריט קיים ────────────────────────────────────────────────
+# נועד לתיקון קבצים שהועלו עם פס קול שדפדפן אינו מפענח (ec-3/ac-3/DTS). ההמרה
+# נעשית מחוץ לתהליך, וכאן רק ההעלאה מחדש ועדכון הקטלוג — כי להעלאה נדרש קליינט
+# מחובר, ופתיחת קליינט שני על אותו session מתנגשת עם הבוט הרץ.
+#
+# הקובץ החדש חייב לשבת בתיקייה מוגדרת אחת. אחרת מסלול מוגן-סיסמה היה הופך
+# לקריאה של כל קובץ בשרת.
+AUDIOFIX_DIR = Path(os.environ.get("AUDIOFIX_DIR", "/opt/zovex-bot/audiofix"))
+
+
+def _rv_probe(path: str) -> dict:
+    """אורך/רוחב/גובה מהקובץ עצמו. בלעדיהם טלגרם מציג 0:00 ותצוגה שבורה."""
+    import subprocess
+    import shutil as _sh
+    out = {"duration": 0, "width": 0, "height": 0}
+    exe = _sh.which("ffprobe")
+    if not exe:
+        log.warning("replace-video: ffprobe אינו מותקן — טלגרם יציג 0:00")
+        return out
+    try:
+        r = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height:format=duration", "-of",
+             "default=nw=1:nk=0", path],
+            capture_output=True, text=True, timeout=90).stdout
+        for line in r.splitlines():
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            try:
+                if k == "width":
+                    out["width"] = int(float(v))
+                elif k == "height":
+                    out["height"] = int(float(v))
+                elif k == "duration":
+                    out["duration"] = int(float(v))
+            except ValueError:
+                pass
+        # סרטון מסובב: טלגרם מצפה למידות התצוגה
+        rot = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream_side_data=rotation:stream_tags=rotate", "-of",
+             "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=60).stdout
+        nums = [abs(int(float(x))) % 360 for x in rot.split() if x.strip("-").replace(".", "").isdigit()]
+        if any(n in (90, 270) for n in nums):
+            out["width"], out["height"] = out["height"], out["width"]
+    except Exception as e:
+        log.warning("replace-video: ffprobe נכשל על %s: %s", path, e)
+    return out
+
+
+def _rv_thumb(path: str, at: int) -> str:
+    """תמונה ממוזערת. בלעדיה טלגרם מציג מלבן שחור."""
+    import subprocess
+    import shutil as _sh
+    exe = _sh.which("ffmpeg")
+    if not exe:
+        return ""
+    dst = str(Path(path).with_suffix(".thumb.jpg"))
+    try:
+        subprocess.run(
+            [exe, "-nostdin", "-y", "-ss", str(max(1, at)), "-i", path,
+             "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4", dst],
+            capture_output=True, timeout=120)
+        return dst if os.path.exists(dst) and os.path.getsize(dst) > 0 else ""
+    except Exception:
+        return ""
+
+
+def _rv_swap_msg_id(url: str, old_id, new_id: int) -> str:
+    """מחליף את מזהה ההודעה בקישור, ומשאיר את שאר המבנה בדיוק כמו שהוא.
+    בונים מחדש רק את החלק שאחרי /stream/<chat>/ כדי לא להסתמך על צורת הבסיס
+    (יש כניסות עם טוקן בסיס ולא עם דומיין מלא)."""
+    if not isinstance(url, str):
+        return url
+    m = re.search(r"(/stream/-?\d+/)(\d+)", url)
+    if m:
+        return url[:m.start(2)] + str(new_id) + url[m.end(2):]
+    if old_id is not None and str(old_id) in url:
+        return url.replace(str(old_id), str(new_id), 1)
+    return url
+
+
+class ReplaceVideoReq(BaseModel):
+    password: str
+    item_id: str
+    path: str
+    caption: str = ""
+    delete_old: bool = False
+
+
+@api.post("/panel/replace-video")
+async def panel_replace_video(req: ReplaceVideoReq, request: Request):
+    check_panel_password(request, req.password)
+
+    p = Path(req.path).resolve()
+    root = AUDIOFIX_DIR.resolve()
+    if root not in p.parents:
+        raise HTTPException(400, f"הקובץ חייב לשבת תחת {root}")
+    if not p.exists() or p.stat().st_size < 1000:
+        raise HTTPException(400, "הקובץ אינו קיים או ריק")
+
+    arr = load_content()
+    idx = next((i for i, e in enumerate(arr)
+                if str(e.get("id")) == str(req.item_id)), None)
+    if idx is None:
+        raise HTTPException(404, "הפריט לא נמצא בקטלוג")
+    item = arr[idx]
+
+    chat = item.get("channel_id") or STREAM_CHANNEL_ID
+    if not chat:
+        raise HTTPException(400, "לפריט אין channel_id ואין ערוץ ברירת מחדל")
+    old_msg = item.get("channel_msg_id")
+
+    meta = _rv_probe(str(p))
+    thumb = _rv_thumb(str(p), max(1, (meta["duration"] or 60) // 10))
+    cap = req.caption or (f"{item.get('series_name') or item.get('title')} "
+                          f"S{item.get('season_number')}E{item.get('episode_number')}"
+                          if item.get("series_name") else str(item.get("title") or ""))
+
+    if bot_client is None:
+        raise HTTPException(503, "הבוט אינו מחובר")
+    try:
+        msg = await bot_client.send_video(
+            chat, str(p), caption=cap[:1000],
+            duration=meta["duration"] or None,
+            width=meta["width"] or None, height=meta["height"] or None,
+            thumb=thumb or None, supports_streaming=True)
+    except Exception as e:
+        log.warning("replace-video: העלאה נכשלה: %s", e)
+        raise HTTPException(502, f"העלאה לטלגרם נכשלה: {e}")
+    finally:
+        if thumb:
+            try:
+                os.unlink(thumb)
+            except OSError:
+                pass
+
+    vid = getattr(msg, "video", None) or getattr(msg, "document", None)
+    new_item = dict(item)
+    new_item["channel_msg_id"] = msg.id
+    new_item["channel_id"] = chat
+    new_item["video_url"] = _rv_swap_msg_id(item.get("video_url", ""),
+                                            old_msg, msg.id)
+    if vid is not None and getattr(vid, "file_unique_id", None):
+        new_item["file_unique_id"] = vid.file_unique_id
+    new_item["audio_fixed_at"] = datetime.utcnow().isoformat()
+
+    arr[idx] = new_item
+    save_content(arr)     # save_content מגבה את content.json לפני הדריסה
+
+    deleted = False
+    if req.delete_old and old_msg:
+        try:
+            await bot_client.delete_messages(chat, int(old_msg))
+            deleted = True
+        except Exception as e:
+            log.warning("replace-video: מחיקת ההודעה הישנה נכשלה: %s", e)
+
+    log.info("replace-video: %s  %s → %s%s", req.item_id, old_msg, msg.id,
+             "  (הישנה נמחקה)" if deleted else "")
+    return {"ok": True, "item_id": req.item_id, "old_msg_id": old_msg,
+            "new_msg_id": msg.id, "video_url": new_item["video_url"],
+            "duration": meta["duration"], "width": meta["width"],
+            "height": meta["height"], "old_deleted": deleted}
+
+
+# ── מטמון מפתחות הצפנה לחיבורי מדיה ─────────────────────────────────────────
+# ההגדרה הקודמת של _make_media_session הריצה Auth(...).create() — חילופי
+# מפתחות Diffie-Hellman מלאים מול טלגרם — בכל בנייה של חיבור ל-DC שאינו
+# ה-DC הביתי. נמדדו 8,917 חיבורי מדיה שנבנו בשעה, מתוכם כחמישית מול DC אחר,
+# כלומר בערך 2,000 חילופי מפתחות בשעה מאותו חשבון.
+#
+# מפתח שאושר פעם אחת נשאר מאושר. לכן הוא נשמר לפי (בוט, DC): הראשון משלם
+# DH ואישור, וכל השאר משלמים חיבור TCP בלבד.
+#
+# ההגדרה הזאת דורסת את הקודמת בכוונה — פייתון מחפש שמות גלובליים בזמן
+# הקריאה, ולכן כל מי שקורא ל-_make_media_session יקבל מכאן והלאה את זו.
+_MEDIA_AUTH_KEYS: dict = {}
+_media_authkey_stats = {"dh": 0, "reused": 0, "recovered": 0}
+
+
+def _media_auth_owner(client) -> str:
+    return getattr(client, "name", None) or f"client-{id(client)}"
+
+
+async def _make_media_session(client, dc_id: int, _retry: bool = True):
+    """חיבור media לאותו לקוח, עם מפתח שמור במקום DH בכל פעם."""
+    test_mode = await client.storage.test_mode()
+    home_dc = await client.storage.dc_id()
+
+    # ה-DC הביתי כבר משתמש במפתח השמור של הלקוח — שם לא היה מה לתקן.
+    if dc_id == home_dc:
+        session = Session(client, dc_id, await client.storage.auth_key(),
+                          test_mode, is_media=True)
+        await session.start()
+        return session
+
+    key = (_media_auth_owner(client), dc_id)
+    auth_key = _MEDIA_AUTH_KEYS.get(key)
+    fresh = auth_key is None
+    if fresh:
+        auth_key = await Auth(client, dc_id, test_mode).create()
+        _media_authkey_stats["dh"] += 1
+
+    session = Session(client, dc_id, auth_key, test_mode, is_media=True)
+    try:
+        await session.start()
+    except Exception:
+        # מפתח שמור שטלגרם כבר לא מכיר. מוחקים ובונים טרי — פעם אחת בלבד,
+        # כדי שלא תיווצר לולאה כשהתקלה אינה במפתח.
+        if not fresh and _retry:
+            _MEDIA_AUTH_KEYS.pop(key, None)
+            _media_authkey_stats["recovered"] += 1
+            log.info("media auth: המפתח השמור ל-%s/DC%s נדחה — בונה טרי",
+                     key[0], dc_id)
+            return await _make_media_session(client, dc_id, _retry=False)
+        raise
+
+    if not fresh:
+        _media_authkey_stats["reused"] += 1
+        return session
+
+    # רק מפתח חדש צריך אישור. אחרי שאושר, הוא נשמר ומשמש את כל הבאים.
+    last = None
+    for _ in range(3):
+        try:
+            exported = await client.invoke(
+                functions.auth.ExportAuthorization(dc_id=dc_id))
+            await session.invoke(functions.auth.ImportAuthorization(
+                id=exported.id, bytes=exported.bytes))
+            _MEDIA_AUTH_KEYS[key] = auth_key
+            return session
+        except Exception as e:
+            last = e
+            log.warning("ImportAuthorization ל-DC %d נכשל, מנסה שוב: %s",
+                        dc_id, e)
+    # לא אושר — לא שומרים מפתח שלא עובד, ולא מחזירים חיבור שיתלה בקשות.
+    try:
+        await session.stop()
+    except Exception:
+        pass
+    raise last if last else RuntimeError(
+        f"ImportAuthorization ל-DC {dc_id} נכשל")
+
+
+@api.get("/media-auth/stats")
+async def media_auth_stats():
+    """כמה DH נחסכו בפועל. זו הבדיקה שאומרת אם התיקון עובד."""
+    s = dict(_media_authkey_stats)
+    s["cached_keys"] = len(_MEDIA_AUTH_KEYS)
+    total = s["dh"] + s["reused"]
+    s["reuse_pct"] = round(s["reused"] * 100 / total, 1) if total else 0.0
+    return s
+
+
+# ── חשיפת גודל מטמונים גלובליים (קריאה בלבד) ────────────────────────────────
+# נמדד: RSS עלה ב-250MB בין שני מדדים באותו תהליך בלי restart, בזמן שמספר
+# ה-sockets הפתוחים כמעט לא זז — כלומר זו הצטברות בזיכרון פייתון, לא דליפת
+# חיבורי רשת. אין endpoint קיים שמראה את הגודל של כל אחד מ-27 מבני הנתונים
+# הגלובליים בקובץ, אז אי אפשר לדעת איזה מהם אשם בלי לנחש. זה מוסיף רק
+# תצפית — לא נוגע בשום התנהגות קיימת.
+_MEM_DEBUG_INSTALLED = True
+
+
+@api.get("/debug/caches")
+async def debug_caches():
+    """גודל כל מטמון/בריכה גלובלית בתהליך, לאבחון דליפות זיכרון."""
+    media_conns = 0
+    try:
+        media_conns = sum(len(v.get("pool", [])) for v in _media_sessions.values())
+    except Exception:
+        pass
+    return {
+        "stream_bots": len(_stream_bots),
+        "peer_errors": len(_peer_errors),
+        "bot_msg_cache": len(_bot_msg_cache),
+        "band_timeouts": len(_band_timeouts),
+        "rate_buckets": len(_rate_buckets),
+        "edge_filling": len(_edge_filling),
+        "prewarm_seen": len(_prewarm_seen),
+        "hls_manifest_cache": len(_hls_manifest_cache),
+        "hls_segment_inflight": len(_hls_segment_inflight),
+        "hls_seg_cache_entries": len(_hls_seg_cache),
+        "hls_seg_cache_bytes": _seg_cache_bytes(),
+        "hls_seg_cache_max_bytes": HLS_SEG_CACHE_MAX,
+        "hls_prefetching": len(_hls_prefetching),
+        "relay_learned_hosts": len(_relay_learned_hosts),
+        "hls_fix": len(_hls_fix),
+        "hls_vcodec_cache": len(_hls_vcodec_cache),
+        "auth_fails": len(_auth_fails),
+        "pending_uploads": len(_pending_uploads),
+        "awaiting_name": len(_awaiting_name),
+        "json_cache": len(_JSON_CACHE),
+        "payload_locks": len(_payload_locks),
+        "media_sessions_pools": len(_media_sessions),
+        "media_sessions_locks": len(_media_sessions_locks),
+        "media_sessions_total_conns": media_conns,
+        "media_building": len(_media_building),
+        "saved_jobs": len(_saved_jobs),
+        "saved_tasks": len(_saved_tasks),
+    }
+
+
+# ── מעקב אחרי משימות asyncio "ירה ותשכח" ────────────────────────────────────
+# 28 קריאות ל-asyncio.create_task בקובץ, אף אחת לא שומרת/מנקה reference.
+# תבנית מתועדת (PrefectHQ/fastmcp #1349): בלי מעקב+add_done_callback,
+# asyncio עצמו צובר כ-48 בייט למשימה במבנים הפנימיים שלו, שלא משתחררים
+# מיד גם אחרי שהמשימה מסתיימת ונאספת. ב-102 ערוצי HLS עם prefetch כל
+# כמה שניות זה מגיע למאות אלפי-מיליוני משימות ביום.
+#
+# עוטפים את asyncio.create_task גלובלית: פייתון מחפש שמות בזמן הקריאה,
+# ולכן כל קריאה קיימת ל-asyncio.create_task(...) עוברת דרך זה אוטומטית,
+# בלי לגעת באף אחת מ-28 נקודות הקריאה. לא מכסה קריאות pyrogram פנימיות
+# דרך self.loop.create_task(...) - נתיב שונה.
+_bg_tasks: set = set()
+_bg_tasks_created_total = 0
+_TASK_TRACKING_INSTALLED = True
+
+_orig_create_task = asyncio.create_task
+
+
+def _tracked_create_task(coro, *args, **kwargs):
+    global _bg_tasks_created_total
+    task = _orig_create_task(coro, *args, **kwargs)
+    _bg_tasks.add(task)
+    _bg_tasks_created_total += 1
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
+asyncio.create_task = _tracked_create_task
+
+
+@api.get("/debug/tasks")
+async def debug_tasks():
+    """כמה משימות "ירה ותשכח" ממתינות עכשיו, וכמה נוצרו סה"כ מאז ההפעלה."""
+    return {
+        "pending_tracked": len(_bg_tasks),
+        "created_total": _bg_tasks_created_total,
+    }
+
+
+# ── ניקוי עצמאי של saved_uploads, לא תלוי בהעלאה הבאה ───────────────────────
+# נמצאו בפועל שני קבצים ~4GB (דלילים) מהעלאה שנתקעה - request.stream() בלי
+# timeout, שאריה נשארת עד שמישהו מעלה קובץ חדש (הניקוי היחיד היה בתוך
+# /panel/saved-upload עצמו). דורסים את reap_idle_sessions (פונקציה רגילה,
+# לא route - דריסה בטוחה) כדי שסבב שכבר רץ כל 30 שניות ינקה גם את זה,
+# פעם ב-~30 דקות, בלי לחכות להעלאה הבאה.
+_SAVED_SWEEP_INSTALLED = True
+_saved_sweep_counter = 0
+SAVED_SWEEP_EVERY = 60  # כל 60 סבבים של 30ש' = פעם ב-30 דקות בערך
+
+
+def _saved_sweep_once():
+    now = time.time()
+    try:
+        for old in SAVED_TMP_DIR.glob("*"):
+            try:
+                if now - old.stat().st_mtime > SAVED_STALE_SEC:
+                    old.unlink()
+                    log.info("saved_uploads: נמחקה שארית ישנה: %s", old.name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for k in [k for k, v in _saved_jobs.items()
+              if not v.get("done_at") and now - v.get("started", now) > SAVED_STALE_SEC]:
+        _saved_jobs.pop(k, None)
+
+
+async def reap_idle_sessions():
+    """מנקה sessions שלא נעשה בהם שימוש זמן מה, כדי לא לצבור זיכרון/חיבורים.
+    כולל גם סריקת saved_uploads פעם ב-SAVED_SWEEP_EVERY סבבים."""
+    global _saved_sweep_counter
+    while True:
+        await asyncio.sleep(30)
+        now = time.time()
+        async with STREAM_SESSIONS_LOCK:
+            dead = [k for k, s in STREAM_SESSIONS.items() if now - s.last_used > SESSION_IDLE_SECS]
+            for k in dead:
+                del STREAM_SESSIONS[k]
+        _saved_sweep_counter += 1
+        if _saved_sweep_counter >= SAVED_SWEEP_EVERY:
+            _saved_sweep_counter = 0
+            _saved_sweep_once()
+
+
+
+# ── קריאת מבנה MP4 ──────────────────────────────────────────────
+# נבדק מול הקובץ שבשרת לפני שנכתב לכאן: 174,892 היסטים תוקנו, גודל הקובץ
+# החדש זהה למקורי, ו-ffprobe קרא ממנו avc1 1920x1080 ואורך 3647.552 שניות,
+# ופענוח וקפיצה לדקה 0:20 עברו.
+import struct
+
+_MP4_CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"mvex"}
+
+
+def _mp4_boxes(buf, start=0, end=None):
+    """(סוג, היסט, אורך כותרת, אורך כולל) לכל קופסה בטווח."""
+    end = len(buf) if end is None else end
+    o, out = start, []
+    while o + 8 <= end:
+        size = struct.unpack_from(">I", buf, o)[0]
+        typ = bytes(buf[o + 4:o + 8])   # bytes תמיד — גם כשהחוצץ bytearray
+        hdr = 8
+        if size == 1:
+            if o + 16 > end:
+                break
+            size = struct.unpack_from(">Q", buf, o + 8)[0]
+            hdr = 16
+        elif size == 0:
+            size = end - o
+        if size < hdr or o + size > end:
+            # קופסה שחורגת מהחוצץ — החלון קצר מדי, לא ממציאים
+            if size < hdr:
+                break
+            out.append((typ, o, hdr, size))
+            break
+        out.append((typ, o, hdr, size))
+        o += size
+    return out
+
+
+def _mp4_offset_tables(moov, base=0, end=None):
+    """מיקומי כל טבלאות ההיסטים בתוך moov: (סוג, היסט_בטבלה, מספר_רשומות)."""
+    end = len(moov) if end is None else end
+    found = []
+    for typ, o, hdr, size in _mp4_boxes(moov, base, end):
+        if typ in _MP4_CONTAINERS:
+            found += _mp4_offset_tables(moov, o + hdr, min(o + size, end))
+        elif typ in (b"stco", b"co64"):
+            # FullBox: 1 בייט גרסה + 3 דגלים, ואז מספר הרשומות
+            n = struct.unpack_from(">I", moov, o + hdr + 4)[0]
+            found.append((typ, o + hdr + 8, n))
+    return found
+
+
+def _mp4_shift_offsets(moov: bytearray, delta: int) -> int:
+    """מוסיף delta לכל היסט נתונים בתוך moov. מחזיר כמה היסטים שונו.
+
+    `stco` הוא 32 סיביות. אם היסט כלשהו יחרוג מ-4GB אחרי ההזזה, הטבלה כבר
+    לא יכולה להכיל אותו — במקרה כזה עוצרים ולא מייצרים קובץ פגום.
+    """
+    n_changed = 0
+    for typ, pos, count in _mp4_offset_tables(moov):
+        if typ == b"stco":
+            for i in range(count):
+                p = pos + i * 4
+                if p + 4 > len(moov):
+                    raise ValueError("stco חורג מגבולות moov")
+                v = struct.unpack_from(">I", moov, p)[0] + delta
+                if v > 0xFFFFFFFF:
+                    raise ValueError("ההיסט חורג מ-4GB; צריך co64")
+                struct.pack_into(">I", moov, p, v)
+                n_changed += 1
+        else:
+            for i in range(count):
+                p = pos + i * 8
+                if p + 8 > len(moov):
+                    raise ValueError("co64 חורג מגבולות moov")
+                v = struct.unpack_from(">Q", moov, p)[0] + delta
+                struct.pack_into(">Q", moov, p, v)
+                n_changed += 1
+    return n_changed
+
+
+def _mp4_first_chunk(moov):
+    """ההיסט הקטן ביותר בטבלאות — לבדיקת שפיות מול הקובץ המקורי."""
+    best = None
+    for typ, pos, count in _mp4_offset_tables(moov):
+        for i in range(min(count, 4)):
+            if typ == b"stco":
+                v = struct.unpack_from(">I", moov, pos + i * 4)[0]
+            else:
+                v = struct.unpack_from(">Q", moov, pos + i * 8)[0]
+            best = v if best is None else min(best, v)
+    return best
+
+
+def _mp4_build_header(ftyp: bytes, moov: bytes, moov_start: int, file_size: int):
+    """הכותרת החדשה ומפת המיפוי חזרה לקובץ המקורי.
+
+    מחזיר (header_bytes, body_src_start, body_len) כאשר:
+        קובץ חדש = header_bytes + מקורי[body_src_start : body_src_start+body_len]
+
+    דורש ש-moov יהיה הקופסה האחרונה. אם יש משהו אחריו, המיפוי אינו רציף
+    ואז מוותרים — עדיף להגיש את הקובץ כמו שהוא מאשר להגיש קובץ שגוי.
+    """
+    if moov_start + len(moov) != file_size:
+        raise ValueError("moov אינו הקופסה האחרונה בקובץ")
+    if ftyp[4:8] != b"ftyp":
+        raise ValueError("לא נמצא ftyp בתחילת הקובץ")
+
+    patched = bytearray(moov)
+    n = _mp4_shift_offsets(patched, len(moov))
+
+    header = ftyp + bytes(patched)
+    body_start = len(ftyp)
+    body_len = moov_start - len(ftyp)
+    if body_len < 0:
+        raise ValueError("ftyp ארוך מ-moov_start")
+    return header, body_start, body_len, n
+
+
+def _mp4_map_range(pos: int, header_len: int, body_start: int) -> int:
+    """מיקום בקובץ החדש → מיקום בקובץ המקורי (רק לאזור שאחרי הכותרת)."""
+    return pos - header_len + body_start
+
+
+# ── נקודות חיתוך לפי פריימי מפתח ────────────────────────────────────────────
+# כדי להגיש HLS בלי לקודד וידאו מחדש, כל סגמנט חייב להתחיל בפריים מפתח. אם
+# חותכים באמצע, ffmpeg ב-`-c:v copy` מוציא סגמנט שמתחיל בפריים שאי אפשר
+# לפענח בלי הקודם — והנגן מראה ריבועים או מסך שחור עד הפריים הבא.
+#
+# הזמנים האלה כבר יושבים בתוך ה-moov שכבר משכנו: `stss` מחזיק את מספרי
+# פריימי המפתח, ו-`stts` את משך כל פריים. אין צורך לקרוא אף בייט נוסף.
+
+def _mp4_trak_tables(moov):
+    """לכל trak: (סוג המסלול, timescale, stts, stss) — מהקופסאות שבתוכו בלבד."""
+    out = []
+    for typ, o, hdr, size in _mp4_boxes(moov):
+        if typ != b"moov":
+            continue
+        for t2, o2, h2, s2 in _mp4_boxes(moov, o + hdr, o + size):
+            if t2 != b"trak":
+                continue
+            info = {"kind": None, "timescale": 0, "stts": None, "stss": None}
+            _mp4_scan_trak(moov, o2 + h2, o2 + s2, info)
+            out.append(info)
+    return out
+
+
+def _mp4_scan_trak(buf, s, e, info):
+    for typ, o, hdr, size in _mp4_boxes(buf, s, e):
+        end = min(o + size, e)
+        if typ in _MP4_CONTAINERS:
+            _mp4_scan_trak(buf, o + hdr, end, info)
+        elif typ == b"hdlr":
+            info["kind"] = bytes(buf[o + hdr + 8:o + hdr + 12])
+        elif typ == b"mdhd":
+            ver = buf[o + hdr]
+            p = o + hdr + 4 + (16 if ver == 1 else 8)
+            info["timescale"] = struct.unpack_from(">I", buf, p)[0]
+        elif typ == b"stts":
+            n = struct.unpack_from(">I", buf, o + hdr + 4)[0]
+            info["stts"] = (o + hdr + 8, n)
+        elif typ == b"stss":
+            n = struct.unpack_from(">I", buf, o + hdr + 4)[0]
+            info["stss"] = (o + hdr + 8, n)
+
+
+def _mp4_keyframes(moov):
+    """זמני פריימי המפתח של מסלול הווידאו, בשניות. [] אם אי אפשר לחשב.
+
+    מסלול בלי `stss` פירושו שכל פריים הוא פריים מפתח — אפשר לחתוך בכל מקום.
+    מסלול תמונת שער (PNG) מסונן החוצה לפי מספר הפריימים.
+    """
+    best = None
+    for info in _mp4_trak_tables(moov):
+        if info["kind"] != b"vide" or not info["timescale"] or not info["stts"]:
+            continue
+        pos, n = info["stts"]
+        total = 0
+        for i in range(n):
+            total += struct.unpack_from(">I", moov, pos + i * 8)[0]
+        # תמונת שער היא מסלול וידאו עם פריים אחד; המסלול האמיתי ארוך ממנו
+        if best is None or total > best[0]:
+            best = (total, info)
+    if best is None:
+        return []
+    info = best[1]
+    ts = info["timescale"]
+
+    # זמן ההתחלה של כל פריים, מתוך טבלת המשכים הדחוסה
+    starts, t = [], 0
+    pos, n = info["stts"]
+    for i in range(n):
+        cnt = struct.unpack_from(">I", moov, pos + i * 8)[0]
+        dur = struct.unpack_from(">I", moov, pos + i * 8 + 4)[0]
+        for _ in range(cnt):
+            starts.append(t)
+            t += dur
+
+    if not info["stss"]:
+        return [s / ts for s in starts]      # כל פריים הוא פריים מפתח
+    pos, n = info["stss"]
+    out = []
+    for i in range(n):
+        num = struct.unpack_from(">I", moov, pos + i * 4)[0]   # 1-based
+        if 1 <= num <= len(starts):
+            out.append(starts[num - 1] / ts)
+    return out
+
+
+def _mp4_segment_plan(moov, target=10.0):
+    """גבולות סגמנטים בשניות, כל אחד מתחיל בפריים מפתח.
+
+    מחזיר (רשימת (התחלה, משך), משך כולל). מאחד פריימי מפתח צפופים כדי לא
+    לייצר אלפי סגמנטים, ומפצל רק היכן שיש פריים מפתח באמת.
+    """
+    kf = _mp4_keyframes(moov)
+    total = _mp4_duration(moov)
+    if not kf or not total:
+        return [], total
+    kf = sorted(set(round(k, 3) for k in kf if k < total))
+    if not kf or kf[0] > 0.001:
+        kf = [0.0] + kf
+    bounds = [kf[0]]
+    for k in kf[1:]:
+        if k - bounds[-1] >= target:
+            bounds.append(k)
+    segs = []
+    for i, s in enumerate(bounds):
+        e = bounds[i + 1] if i + 1 < len(bounds) else total
+        if e - s > 0.05:
+            segs.append((s, e - s))
+    return segs, total
+
+
+def _mp4_duration(moov):
+    """אורך הסרט מ-mvhd."""
+    for typ, o, hdr, size in _mp4_boxes(moov):
+        if typ != b"moov":
+            continue
+        for t2, o2, h2, s2 in _mp4_boxes(moov, o + hdr, o + size):
+            if t2 == b"mvhd":
+                ver = moov[o2 + h2]
+                p = o2 + h2 + 4 + (16 if ver == 1 else 8)
+                ts = struct.unpack_from(">I", moov, p)[0]
+                if ver == 1:
+                    dur = struct.unpack_from(">Q", moov, p + 4)[0]
+                else:
+                    dur = struct.unpack_from(">I", moov, p + 4)[0]
+                return dur / ts if ts else 0.0
+    return 0.0
+
+
+# ── תיקון VOD בזמן אמת ──────────────────────────────────────────────────────
+# ראה add_vodfix.py לנימוק המלא. בקצרה: קובץ עם moov בסוף נטען 12 שניות
+# ונתקע בקפיצה, וקובץ עם אודיו ec-3/ac-3/DTS מתנגן בדפדפן בלי קול בכלל
+# (התמיכה ב-Dolby מושבתת ב-Chromium מסיבות רישוי). שניהם מתוקנים כאן בזמן
+# אמת, בלי לגעת בקובץ שבטלגרם.
+
+_VF_TTL = 6 * 3600
+_vf_cache: dict = {}          # (chat,msg) -> (זמן, מידע)
+_VF_CACHE_MAX = 40            # כל כותרת ~2MB; תקרה כדי לא לנפח את הזיכרון
+_VF_SEG_TARGET = float(os.environ.get("VODFIX_SEG", "10"))
+_VF_ABR = os.environ.get("VODFIX_AUDIO_BITRATE", "192k")
+_VF_BROWSER_AUDIO = {"mp4a", ".mp3", "Opus", "opus", "fLaC"}
+
+
+def _vf_local_url(chat: int, msg: int) -> str:
+    exp = int(time.time()) + SIGN_TTL
+    sig = _stream_sig(str(chat), str(msg), exp) if SIGN_SECRET else ""
+    q = f"?exp={exp}&sig={sig}" if SIGN_SECRET else ""
+    # שרת ה-Go (8099) מגיש את אותם בייטים פי 5.5 מהר מהפייתון — נמדד על
+    # אותו קובץ: 4MB ב-0.73 שניות מול 3.98. כל מקטע HLS מושך ~6.5MB, ולכן
+    # ההפרש הזה הוא כמעט כל זמן ההמתנה של הנגן. החתימה זהה בשני השרתים,
+    # ולכן הקישור עובר כמו שהוא.
+    #
+    # בלי VODFIX_SRC_PORT ההתנהגות נשארת בדיוק כפי שהייתה.
+    _src_port = int(os.environ.get("VODFIX_SRC_PORT", PORT))
+    return f"http://127.0.0.1:{_src_port}/stream/{chat}/{msg}{q}"
+
+
+async def _vf_fetch(url: str, a: int, b: int) -> bytes:
+    async with httpx.AsyncClient(timeout=180) as cx:
+        r = await cx.get(url, headers={"Range": f"bytes={a}-{b}"})
+        if r.status_code not in (200, 206):
+            raise HTTPException(502, f"המקור החזיר {r.status_code}")
+        return r.content
+
+
+async def _vf_size(url: str):
+    async with httpx.AsyncClient(timeout=60) as cx:
+        r = await cx.get(url, headers={"Range": "bytes=0-1"})
+        cr = r.headers.get("content-range", "")
+        if "/" in cr:
+            try:
+                return int(cr.rsplit("/", 1)[1])
+            except ValueError:
+                pass
+    return None
+
+
+def _vf_audio_codecs(moov: bytes):
+    """שמות קודקי האודיו, מתוך טבלאות ה-stsd."""
+    out = []
+
+    def walk(s, e):
+        for typ, o, hdr, size in _mp4_boxes(moov, s, e):
+            end = min(o + size, e)
+            if typ in _MP4_CONTAINERS:
+                walk(o + hdr, end)
+            elif typ == b"stsd":
+                cnt = struct.unpack_from(">I", moov, o + hdr + 4)[0]
+                p = o + hdr + 8
+                for _ in range(min(cnt, 8)):
+                    if p + 8 > end:
+                        break
+                    esz = struct.unpack_from(">I", moov, p)[0]
+                    if esz < 8:
+                        break
+                    fmt = bytes(moov[p + 4:p + 8]).decode("latin1", "replace")
+                    if fmt.startswith(("mp4a", "ec-3", "ac-3", "ac-4", "dts",
+                                       "mlpa", "Opus", "alac", "sowt", "twos",
+                                       "lpcm", ".mp3", "fLaC")):
+                        out.append(fmt)
+                    p += esz
+    walk(0, len(moov))
+    return out
+
+
+async def _vf_header_for(chat: int, msg: int):
+    """הכותרת המתוקנת והמידע על הקובץ. נבנה פעם אחת ונשמר.
+
+    זו הפעולה היחידה שמושכת בייטים שלא לצורך צפייה — 2MB פעם אחת לקובץ.
+    """
+    key = (int(chat), int(msg))
+    now = time.time()
+    ent = _vf_cache.get(key)
+    if ent and now - ent[0] < _VF_TTL:
+        return ent[1]
+
+    url = _vf_local_url(chat, msg)
+    n = await _vf_size(url)
+    if not n:
+        raise HTTPException(502, "לא הצלחתי לקבל את גודל הקובץ")
+
+    head = await _vf_fetch(url, 0, 4095)
+    tb = _mp4_boxes(head)
+    ftyp = None
+    for typ, o, hdr, size in tb:
+        if typ == b"ftyp":
+            ftyp = bytes(head[o:o + size])
+            break
+    if ftyp is None:
+        raise HTTPException(415, "אין ftyp — לא קובץ MP4")
+
+    moov = None
+    moov_start = None
+    if any(t == b"moov" for t, _, _, _ in tb):
+        for typ, o, hdr, size in tb:
+            if typ == b"moov":
+                moov_start = o
+                moov = await _vf_fetch(url, o, o + size - 1)
+                break
+    else:
+        for win in (6_000_000, 20_000_000, 48_000_000):
+            win = min(win, n)
+            buf = await _vf_fetch(url, n - win, n - 1)
+            i = -1
+            while True:
+                i = buf.find(b"moov", i + 1)
+                if i < 0:
+                    break
+                if i >= 4:
+                    sz = struct.unpack_from(">I", buf, i - 4)[0]
+                    if 100 < sz < 80_000_000 and i - 4 + sz <= len(buf):
+                        moov = bytes(buf[i - 4:i - 4 + sz])
+                        moov_start = n - win + i - 4
+            if moov is not None:
+                break
+            if win >= n:
+                break
+    if moov is None:
+        raise HTTPException(415, "לא נמצא moov")
+
+    info = {"size": n, "moov_at_end": moov_start + len(moov) == n,
+            "moov_start": moov_start, "moov_len": len(moov),
+            "duration": _mp4_duration(moov),
+            "audio": _vf_audio_codecs(moov), "header": None,
+            "body_start": 0, "body_len": 0, "segments": None}
+    info["audio_ok"] = any(c in _VF_BROWSER_AUDIO for c in info["audio"])
+
+    if info["moov_at_end"]:
+        try:
+            hdr_b, bs, bl, cnt = _mp4_build_header(ftyp, moov, moov_start, n)
+            info["header"], info["body_start"], info["body_len"] = hdr_b, bs, bl
+            log.info("vodfix: %s/%s — moov הוזז להתחלה (%d היסטים)",
+                     chat, msg, cnt)
+        except Exception as e:
+            # לא מייצרים קובץ שגוי. בלי כותרת, /fs פשוט לא זמין לקובץ הזה.
+            log.warning("vodfix: %s/%s — בניית כותרת נכשלה: %s", chat, msg, e)
+
+    if len(_vf_cache) >= _VF_CACHE_MAX:
+        for k in sorted(_vf_cache, key=lambda k: _vf_cache[k][0])[:10]:
+            _vf_cache.pop(k, None)
+    _vf_cache[key] = (now, info)
+    return info
+
+
+def _vf_check_sig(chat: int, msg: int, exp: int, sig: str):
+    if not SIGN_SECRET:
+        return
+    if not exp or exp < int(time.time()):
+        raise HTTPException(403, "הקישור פג תוקף")
+    if not hmac.compare_digest(sig, _stream_sig(str(chat), str(msg), exp)):
+        raise HTTPException(403, "חתימה שגויה")
+
+
+@api.get("/fs/{chat_id}/{message_id}")
+async def vodfix_faststart(chat_id: int, message_id: int, request: Request,
+                           exp: int = 0, sig: str = ""):
+    """אותו קובץ, עם ה-moov בהתחלה. תומך בטווחי בייטים במלואם."""
+    check_hotlink(request)
+    _vf_check_sig(chat_id, message_id, exp, sig)
+    info = await _vf_header_for(chat_id, message_id)
+    # כשה-moov כבר בהתחלה אין כותרת לבנות, ואז המסלול פשוט מעביר את הקובץ
+    # כמו שהוא. כך גם נגן שביקש /fs בטעות ממשיך לעבוד.
+    hdr = info["header"] or b""
+    total = info["size"]
+    H = len(hdr)
+    bs = info["body_start"] if info["header"] else 0
+    src = _vf_local_url(chat_id, message_id)
+
+    rng = request.headers.get("range", "")
+    start, end = 0, total - 1
+    partial = False
+    m = re.match(r"bytes=(\d*)-(\d*)", rng or "")
+    if m and (m.group(1) or m.group(2)):
+        partial = True
+        if m.group(1):
+            start = int(m.group(1))
+            if m.group(2):
+                end = min(int(m.group(2)), total - 1)
+        else:                       # bytes=-N — N הבייטים האחרונים
+            start = max(0, total - int(m.group(2)))
+    if start >= total or start > end:
+        return Response(status_code=416,
+                        headers={"Content-Range": f"bytes */{total}"})
+
+    async def gen():
+        pos = start
+        if pos < H:                             # החלק שמגיע מהכותרת שבזיכרון
+            stop = min(end, H - 1)
+            yield hdr[pos:stop + 1]
+            pos = stop + 1
+        if pos <= end:                          # והשאר מהקובץ המקורי
+            a = pos - H + bs
+            b = end - H + bs
+            async with httpx.AsyncClient(timeout=None) as cx:
+                async with cx.stream("GET", src,
+                                     headers={"Range": f"bytes={a}-{b}"}) as r:
+                    if r.status_code not in (200, 206):
+                        log.warning("vodfix: המקור החזיר %s", r.status_code)
+                        return
+                    async for chunk in r.aiter_bytes(65536):
+                        yield chunk
+
+    headers = {"Accept-Ranges": "bytes",
+               "Content-Length": str(end - start + 1),
+               "Cache-Control": "no-store"}
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return StreamingResponse(gen(), status_code=206 if partial else 200,
+                             media_type="video/mp4", headers=headers)
+
+
+@api.get("/vh/{chat_id}/{message_id}/index.m3u8")
+async def vodfix_playlist(chat_id: int, message_id: int, request: Request,
+                          exp: int = 0, sig: str = ""):
+    """רשימת HLS שלמה, בנויה מפריימי המפתח שב-moov."""
+    check_hotlink(request)
+    _vf_check_sig(chat_id, message_id, exp, sig)
+    info = await _vf_header_for(chat_id, message_id)
+    if info["segments"] is None:
+        url = _vf_local_url(chat_id, message_id)
+        # בדיוק אורך ה-moov. בלי זה, קובץ שה-moov שלו בהתחלה היה גורר
+        # משיכה של עשרות MB מיותרים מטלגרם בכל בניית רשימה.
+        moov = await _vf_fetch(url, info["moov_start"],
+                               info["moov_start"] + info["moov_len"] - 1)
+        segs, total = _mp4_segment_plan(moov, _VF_SEG_TARGET)
+        info["segments"] = segs
+        log.info("vodfix: %s/%s — %d סגמנטים, %.0f שניות",
+                 chat_id, message_id, len(segs), total)
+    segs = info["segments"]
+    if not segs:
+        raise HTTPException(415, "לא הצלחתי לחשב נקודות חיתוך")
+
+    q = f"?exp={exp}&sig={sig}" if SIGN_SECRET else ""
+    longest = max(d for _, d in segs)
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3",
+             f"#EXT-X-TARGETDURATION:{int(longest) + 1}",
+             "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-MEDIA-SEQUENCE:0"]
+    for i, (_, d) in enumerate(segs):
+        lines.append(f"#EXTINF:{d:.3f},")
+        lines.append(f"s{i}.ts{q}")
+    lines.append("#EXT-X-ENDLIST")
+    return Response("\n".join(lines) + "\n",
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store"})
+
+
+@api.get("/vh/{chat_id}/{message_id}/s{seg}.ts")
+async def vodfix_segment(chat_id: int, message_id: int, seg: int,
+                         request: Request, exp: int = 0, sig: str = ""):
+    """סגמנט אחד. הווידאו מועתק כמו שהוא; רק האודיו מומר."""
+    check_hotlink(request)
+    _vf_check_sig(chat_id, message_id, exp, sig)
+    info = await _vf_header_for(chat_id, message_id)
+    # בונים את התוכנית אם היא חסרה, במקום לדחות.
+    #
+    # התוכנית נשמרת בזיכרון התהליך בלבד, ולכן כל restart מוחק אותה וכל
+    # בקשת מקטע חזרה 409 — בזמן שהנגן כבר ניגן. הצופה ראה את הסרט נעצר
+    # יבש, בלי ספינר ובלי שגיאה. נתפס בייצור: s1 ב-1.6 שניות, s2 ב-0.002.
+    #
+    # אי אפשר להסתמך על כך שנתיב הפלייליסט יחמם את המטמון: הנגן כבר
+    # מחזיק את הפלייליסט ולא מבקש אותו שוב.
+    if info["segments"] is None:
+        moov = await _vf_fetch(_vf_local_url(chat_id, message_id),
+                               info["moov_start"],
+                               info["moov_start"] + info["moov_len"] - 1)
+        plan, total = _mp4_segment_plan(moov, _VF_SEG_TARGET)
+        info["segments"] = plan
+        log.info("vodfix: %s/%s — נבנה מבקשת מקטע: %d סגמנטים, %.0f שניות",
+                 chat_id, message_id, len(plan), total)
+    segs = info["segments"]
+    if not segs:
+        raise HTTPException(415, "לא הצלחתי לחשב נקודות חיתוך")
+    if seg < 0 or seg >= len(segs):
+        raise HTTPException(404, "אין סגמנט כזה")
+    start, dur = segs[seg]
+
+    # קלט: /fs אם ה-moov הוזז (הכותרת בזיכרון, ולכן ffmpeg לא מושך את הקצה
+    # מטלגרם בכל סגמנט), אחרת הזרם הרגיל.
+    iexp = int(time.time()) + SIGN_TTL
+    isig = _stream_sig(str(chat_id), str(message_id), iexp) if SIGN_SECRET else ""
+    q = f"?exp={iexp}&sig={isig}" if SIGN_SECRET else ""
+    route = "fs" if info["header"] else "stream"
+    src = f"http://127.0.0.1:{PORT}/{route}/{chat_id}/{message_id}{q}"
+
+    args = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        # -ss ו--to שניהם לפני הקלט: ffmpeg קופץ ישר לנקודה בבקשת טווח
+        # וקורא רק עד הסוף הדרוש. `-to` ולא `-t`, כי מול -copyts המשך נמדד
+        # על ציר הזמן המקורי — `-t` היה מסיים לפני נקודת ההתחלה ומוציא
+        # קובץ ריק (נבדק: "Output file is empty, nothing was encoded").
+        "-ss", f"{start:.3f}", "-to", f"{start + dur:.3f}", "-i", src,
+        "-map", "0:v:0", "-map", "0:a:0?",   # מסלול תמונת השער נשאר בחוץ
+        "-c:v", "copy",
+        "-c:a", "aac", "-ac", "2", "-b:a", _VF_ABR, "-ar", "48000",
+        # -copyts שומר את חותמות הזמן המקוריות, ולכן הסגמנטים מתחברים
+        # ברצף אצל הנגן. תוספת -output_ts_offset כאן הייתה מוסיפה את ההיסט
+        # פעם שנייה ומזיזה כל סגמנט קדימה פי שתיים.
+        "-copyts", "-avoid_negative_ts", "disabled",
+        "-muxdelay", "0", "-muxpreload", "0",
+        "-f", "mpegts", "pipe:1",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+    except FileNotFoundError:
+        raise HTTPException(500, "ffmpeg לא מותקן בשרת")
+
+    async def gen():
+        try:
+            while True:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                err = (await proc.stderr.read())[-300:]
+                if err and proc.returncode not in (0, None):
+                    log.warning("vodfix: סגמנט %s של %s/%s: %s",
+                                seg, chat_id, message_id,
+                                err.decode("utf-8", "replace").strip())
+            except Exception:
+                pass
+
+    return StreamingResponse(gen(), media_type="video/mp2t",
+                             headers={"Cache-Control": "no-store"})
+
+
+@api.get("/vodinfo/{chat_id}/{message_id}")
+async def vodfix_info(chat_id: int, message_id: int, request: Request,
+                      exp: int = 0, sig: str = ""):
+    """מה מצב הקובץ ואיזה קישור כדאי לנגן."""
+    check_hotlink(request)
+    _vf_check_sig(chat_id, message_id, exp, sig)
+    info = await _vf_header_for(chat_id, message_id)
+    q = f"?exp={exp}&sig={sig}" if SIGN_SECRET else ""
+    base = STREAM_PUBLIC_BASE.rstrip("/") if "STREAM_PUBLIC_BASE" in globals() else ""
+    if info["audio_ok"]:
+        # הקול תקין; רק ה-moov אולי צריך הזזה. שני המקרים מוגשים כ-MP4 רגיל
+        # ולכן הקפיצה בסרט נשארת מדויקת ולא עולה כלום במעבד.
+        play = (f"{base}/fs/{chat_id}/{message_id}{q}" if info["header"]
+                else f"{base}/stream/{chat_id}/{message_id}{q}")
+        kind = "mp4"
+    else:
+        play = f"{base}/vh/{chat_id}/{message_id}/index.m3u8{q}"
+        kind = "hls"
+    return {"audio": info["audio"], "audio_ok": info["audio_ok"],
+            "moov_at_end": info["moov_at_end"],
+            "faststart_ready": bool(info["header"]),
+            "duration": round(info["duration"], 3),
+            "size": info["size"], "kind": kind, "url": play}
