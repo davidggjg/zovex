@@ -7588,7 +7588,7 @@ async def vodfix_faststart(chat_id: int, message_id: int, request: Request,
 
     headers = {"Accept-Ranges": "bytes",
                "Content-Length": str(end - start + 1),
-               "Cache-Control": "no-store"}
+               "Cache-Control": "no-store", **CORS_MEDIA}
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end}/{total}"
     return StreamingResponse(gen(), status_code=206 if partial else 200,
@@ -7625,9 +7625,13 @@ async def vodfix_playlist(chat_id: int, message_id: int, request: Request,
         lines.append(f"#EXTINF:{d:.3f},")
         lines.append(f"s{i}.ts{q}")
     lines.append("#EXT-X-ENDLIST")
+    # CORS_MEDIA: ה-WebView באפליקציה מריץ את הנגן מ-HTML בלי baseUrl,
+    # ולכן ה-origin שלו הוא "null" וכל משיכת m3u8/מקטע היא cross-origin.
+    # בלי ACAO היא נחסמת, Shaka ו-hls.js נכשלים, והצופה רואה ספינר אינסופי.
+    # באתר זה לא נראה כי שם הדף והמדיה על אותו מקור.
     return Response("\n".join(lines) + "\n",
                     media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-store"})
+                    headers={"Cache-Control": "no-store", **CORS_MEDIA})
 
 
 @api.get("/vh/{chat_id}/{message_id}/s{seg}.ts")
@@ -7681,7 +7685,18 @@ async def vodfix_segment(chat_id: int, message_id: int, seg: int,
         # -copyts שומר את חותמות הזמן המקוריות, ולכן הסגמנטים מתחברים
         # ברצף אצל הנגן. תוספת -output_ts_offset כאן הייתה מוסיפה את ההיסט
         # פעם שנייה ומזיזה כל סגמנט קדימה פי שתיים.
-        "-copyts", "-avoid_negative_ts", "disabled",
+        #
+        # make_non_negative ולא disabled: מקודד ה-AAC מוסיף priming של
+        # ~21ms, ולכן החבילה הראשונה של המקטע הראשון יוצאת עם חותמת זמן
+        # שלילית. שדה ה-PTS ב-MPEG-TS הוא 33 סיביות בלי סימן, אז המינוס
+        # נעטף ונכתב כ-95443.696 (‎2**33/90000). הנגן ראה וידאו ב-0 וקול
+        # ב-95,443, לא הצליח ליישר, ונתקע בטעינה אחרי כשתי שניות — כך
+        # נראתה התקלה בונסדיי באפליקציה.
+        #
+        # make_non_negative מזיז את כל הרצועות באותו דלתא ורק כשיש חותמת
+        # שלילית, ולכן יחס קול/תמונה נשמר. נמדד: s1 ו-s2 יוצאים זהים
+        # בייט-בבייט לפני ואחרי — רק המקטע הראשון משתנה.
+        "-copyts", "-avoid_negative_ts", "make_non_negative",
         "-muxdelay", "0", "-muxpreload", "0",
         "-f", "mpegts", "pipe:1",
     ]
@@ -7715,7 +7730,8 @@ async def vodfix_segment(chat_id: int, message_id: int, seg: int,
                 pass
 
     return StreamingResponse(gen(), media_type="video/mp2t",
-                             headers={"Cache-Control": "no-store"})
+                             headers={"Cache-Control": "no-store",
+                                      **CORS_MEDIA})
 
 
 @api.get("/vodinfo/{chat_id}/{message_id}")
