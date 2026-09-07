@@ -4,16 +4,21 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>בדיקת קול</title>
 <!--
-  דף בדיקה זמני. מנגן נתיב /vh/ (HLS עם אודיו מומר ל-AAC) בדיוק כמו
-  שהנגן של האתר יעשה — עם hls.js, כי כרום לא מנגן m3u8 בעצמו.
+  דף בדיקה זמני. מנגן נתיב /vh/ (HLS עם אודיו מומר ל-AAC) עם **אותו
+  נגן שהאתר עצמו משתמש בו** — shaka-player מ-/zovex/vendor/.
+//
+  הגרסה הקודמת משכה hls.js מ-jsdelivr והוא לא נטען ברשת של דוד, אז הדף
+  נפל אחורה לנגן המובנה של הדפדפן וקיבל DEMUXER_ERROR_COULD_NOT_PARSE.
+  זה בדיוק הכשל שהקוד של האתר כבר מתעד ומונע:
 
-  קיים אך ורק כדי לענות על שאלה אחת: האם יוצא קול **בדפדפן**. בדיקה
-  ב-VLC אינה קבילה — יש לו מפענח Dolby משלו, והוא ניגן את ונסדיי כל
-  הזמן גם לפני התיקון.
+      "video.js ו-shaka-player מוגשים כקבצים סטטיים מהאתר שלנו עצמו
+       ולא מ-CDN חיצוני - כי אם ה-CDN חסום ברשת של המשתמש, הנגן היה
+       נתקע על 'טוען...' לנצח בלי שום הודעת שגיאה"
 
-  מקבל את הכתובת מ-?u=, ומקבל **רק נתיב יחסי** שמתחיל ב-/vh/ — לא
-  כתובת מלאה, כדי שהדף לא יהפוך לנגן של כל דבר ברשת.
+  קיים כדי לענות על שאלה אחת: האם יוצא קול **בדפדפן**. בדיקה ב-VLC
+  אינה קבילה — יש לו מפענח Dolby משלו, והוא ניגן את ונסדיי כל הזמן.
 
+  מקבל רק נתיב יחסי שמתחיל ב-/vh/, לא כתובת מלאה.
   למחוק אחרי הבדיקה:  rm /opt/zovex-site/audiotest.html
 -->
 <style>
@@ -27,8 +32,7 @@
 </style>
 <h1>בדיקת קול — ‏HLS עם אודיו מומר</h1>
 <video id="v" controls playsinline></video>
-<div id="log">טוען…</div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<div id="log"></div>
 <script>
 const log = (m, c) => {
   const d = document.createElement("div");
@@ -36,49 +40,70 @@ const log = (m, c) => {
   d.textContent = m;
   document.getElementById("log").appendChild(d);
 };
-document.getElementById("log").textContent = "";
 
 const raw = new URLSearchParams(location.search).get("u") || "";
-// רק נתיב יחסי משלנו. "//host" נפסל גם הוא — הוא כתובת מלאה בתחפושת.
 const src = /^\/vh\/[^?#]*\.m3u8(\?.*)?$/.test(raw) && !raw.startsWith("//")
           ? raw : "";
 const v = document.getElementById("v");
 
-// hls.js קודם, תמיד. כרום באנדרואיד מחזיר "maybe" על ה-mime של HLS
-// ובפועל לא מצליח לפרסר — נתפס בשטח כ-DEMUXER_ERROR_COULD_NOT_PARSE.
-// canPlayType אינו הבטחה, ולכן הנגן המובנה הוא רק נפילה אחורה.
-if (!src) {
-  log("חסר ?u= עם נתיב /vh/…/index.m3u8", "bad");
-} else if (window.Hls && Hls.isSupported()) {
-  const hls = new Hls({ enableWorker: true });
-  hls.loadSource(src);
-  hls.attachMedia(v);
-  hls.on(Hls.Events.MANIFEST_PARSED, (_, d) =>
-    log(`הפלייליסט נטען · ${d.levels.length} איכות · מוכן לנגן`, "ok"));
-  hls.on(Hls.Events.ERROR, (_, d) =>
-    log(`שגיאה: ${d.type} / ${d.details}${d.fatal ? " (קטלנית)" : ""}`, "bad"));
-} else if (v.canPlayType("application/vnd.apple.mpegurl")) {
-  v.src = src;                      // ספארי — מנגן HLS בעצמו
-  log("נגן מובנה (ספארי)");
-} else {
-  log("hls.js לא נטען — אין חיבור ל-CDN?", "bad");
+// אותו קובץ שהאתר טוען, מהשרת שלנו. אין CDN חיצוני בשום שלב.
+const VENDOR = "/zovex/vendor/shaka-player.compiled.js";
+
+function loadScript(url) {
+  return new Promise((res, rej) => {
+    const s = document.createElement("script");
+    const t = setTimeout(() => rej(new Error("timeout")), 8000);
+    s.src = url;
+    s.onload = () => { clearTimeout(t); res(); };
+    s.onerror = () => { clearTimeout(t); rej(new Error("load failed")); };
+    document.head.appendChild(s);
+  });
 }
 
-// זו התשובה שאנחנו מחפשים: כמה ערוצי אודיו הדפדפן באמת פענח.
-// עם ec-3 המספר הוא 0 — כרום זורק את הרצועה בשקט, בלי שום שגיאה.
-v.addEventListener("loadedmetadata", () => {
-  const n = v.webkitAudioDecodedByteCount !== undefined ? "נתמך" : "לא ידוע";
-  log(`מטא-דאטה נטענה · אורך ${Math.round(v.duration)} שניות`);
-  log("לחץ נגן והקשב. אם יש קול — התיקון עובד.", "hint");
-});
+(async () => {
+  if (!src) { log("חסר ?u= עם נתיב /vh/…/index.m3u8", "bad"); return; }
+  log("טוען את shaka-player מהשרת שלנו…");
+  try {
+    await loadScript(VENDOR);
+  } catch (e) {
+    log(`✗ shaka לא נטען מ-${VENDOR} — ${e.message}`, "bad");
+    log("כלומר הקובץ לא נפרס לאתר. זו בעיה נפרדת מהקול.", "hint");
+    return;
+  }
+  if (!window.shaka) { log("✗ הקובץ נטען אבל shaka לא הוגדר", "bad"); return; }
+  log(`✓ shaka ${shaka.Player.version} נטען`, "ok");
+
+  shaka.polyfill.installAll();
+  if (!shaka.Player.isBrowserSupported()) {
+    log("✗ הדפדפן לא נתמך ע\"י shaka", "bad");
+    return;
+  }
+  const player = new shaka.Player(v);
+  player.addEventListener("error", e =>
+    log(`שגיאת shaka: code ${e.detail.code} — ${e.detail.message || ""}`, "bad"));
+  try {
+    await player.load(src);
+    log("✓ הפלייליסט נטען. לחץ נגן והקשב.", "ok");
+  } catch (e) {
+    log(`✗ טעינה נכשלה: code ${e.code} ${e.message || ""}`, "bad");
+  }
+})();
+
+// זו התשובה שאנחנו מחפשים: כמה אודיו הדפדפן באמת פענח.
+// עם ec-3 המספר נשאר 0 — כרום זורק את הרצועה בשקט, בלי שום שגיאה.
 v.addEventListener("playing", () => {
+  log(`מנגן · אורך ${Math.round(v.duration)} שניות`);
   setTimeout(() => {
     const b = v.webkitAudioDecodedByteCount;
-    if (b === undefined) { log("הדפדפן לא מדווח על פענוח אודיו — תסמוך על האוזניים", "hint"); return; }
-    log(b > 0 ? `✓ הדפדפן פענח ${b.toLocaleString()} בייט אודיו — יש קול`
-              : "✗ אפס בייט אודיו פוענחו — הרצועה נזרקה", b > 0 ? "ok" : "bad");
+    if (b === undefined) {
+      log("הדפדפן לא מדווח על פענוח אודיו — תסמוך על האוזניים", "hint");
+      return;
+    }
+    log(b > 0 ? `✓ פוענחו ${b.toLocaleString()} בייט אודיו — יש קול`
+              : "✗ אפס בייט אודיו — הרצועה נזרקה", b > 0 ? "ok" : "bad");
   }, 3000);
 });
-v.addEventListener("error", () => log("שגיאת וידאו: " + (v.error && v.error.message), "bad"));
+v.addEventListener("error", () =>
+  log("שגיאת וידאו: " + (v.error && v.error.message), "bad"));
 </script>
 </html>
