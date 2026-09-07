@@ -73,11 +73,7 @@ export default function LiveTV({ channel, onPlay, onClose }) {
   const title = channel?.title || channel?.name || "שידור חי";
 
   return (
-    // שכבה קבועה מעל הדף, כמו הנגן. בלי זה הרכיב נדחף לסוף הזרימה של מסך
-    // הבית ויוצא מתחת לכל התוכן — נראה כמו דף ריק עם כפתור סגירה בלבד,
-    // כי רק הוא position:fixed. overflowY כדי שהלוח עצמו ייגלל.
-    <div style={{ position: "fixed", inset: 0, zIndex: 9998, overflowY: "auto",
-                  background: "#111", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
+    <div style={{ background: "#111", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
       <button onClick={onClose} aria-label="חזרה"
         style={{ position: "fixed", top: 15, right: 15, zIndex: 100, background: "rgba(0,0,0,.7)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
         <ArrowRight size={22} />

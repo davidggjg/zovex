@@ -278,6 +278,22 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     />
   );
 
+  // ── דף ערוץ חי: פוסטר, כפתור צפייה, ומתחתיו לוח השידורים ──
+  //
+  // early return כמו SeriesView ו-MovieDetail, ולא שכבה בתוך ה-return
+  // הראשי: הרכיב מצייר עמוד שלם, וכשהוא רונדר לצד מסך הבית הוא נדחף לסוף
+  // הזרימה ונחת מתחת לכל התוכן — הדף נראה ריק עם כפתור סגירה בלבד.
+  //
+  // התנאי כולל !showLivePlayer כדי שלחיצה על "צפה" תמשיך ל-return הראשי,
+  // ששם הנגן מרונדר.
+  if (liveChannel && !showLivePlayer) return (
+    <LiveTV
+      channel={liveChannel}
+      onPlay={(ch) => setShowLivePlayer(ch)}
+      onClose={() => { setLiveChannel(null); window.history.replaceState(null, "", "/zovex/"); }}
+    />
+  );
+
   // ── Movie page ──
   if (selectedMovie) return (
     <MovieDetail
@@ -294,17 +310,6 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     <>
       {donationModal}
       <AdBanner />
-
-      {/* ── דף הערוץ החי: פוסטר, כפתור צפייה, ומתחתיו לוח השידורים ──
-          מוצג לפני הנגן, כמו LiveChannelModal באפליקציה. הרכיב מצייר מסך
-          מלא משלו ולכן אינו נוגע בעיצוב של מסך הבית. */}
-      {liveChannel && !showLivePlayer && (
-        <LiveTV
-          channel={liveChannel}
-          onPlay={(ch) => setShowLivePlayer(ch)}
-          onClose={() => { setLiveChannel(null); window.history.replaceState(null, "", "/zovex/"); }}
-        />
-      )}
 
       {/* ── Live Player — נפתח מתוך קטגוריית "שידורים חיים", דרך אותו נגן מאוחד כמו כל שאר התוכן ── */}
       {showLivePlayer && (
