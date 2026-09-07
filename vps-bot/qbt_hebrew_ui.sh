@@ -353,8 +353,12 @@ location /files/ {
     autoindex_localtime on;
     charset utf-8;
 
-    auth_basic "ZOVEX";
-    auth_basic_user_file $PASSFILE;
+    # בלי סיסמה, לבקשת דוד — לחיצה אחת מהדף והקובץ יורד.
+    # המחיר: כל מי שמגיע לכתובת רואה את הרשימה ויכול להוריד. הכתובת אינה
+    # מפורסמת בשום מקום ו-X-Robots-Tag מונע אינדוקס, אבל זו הסתרה ולא הגנה.
+    # להחזיר סיסמה: לבטל את ההערה בשתי השורות הבאות ולהריץ שוב.
+    # auth_basic "ZOVEX";
+    # auth_basic_user_file $PASSFILE;
 
     # קבצי וידאו גדולים: בלי זה nginx מנסה להגיש בכמות ומעמיס זיכרון.
     sendfile on;
