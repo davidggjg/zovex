@@ -21,7 +21,7 @@
     python3 check_vh_ts.py --title "שם"      # פריט אחר
     python3 check_vh_ts.py --segs 5
 """
-import argparse, collections, json, subprocess, sys, urllib.request
+import argparse, collections, json, subprocess, sys, time, urllib.request
 
 LOCAL = "http://127.0.0.1:8000"
 
@@ -77,19 +77,42 @@ def fetch(url, timeout=180):
         return r.read()
 
 
+def read_catalog(tries=12, gap=5):
+    """הקטלוג, עם המתנה לשרת.
+
+    הריצה הטבעית של הסקריפט הזה היא מיד אחרי `systemctl restart zovex-bot`,
+    והבוט לא עונה בשנייה הראשונה — הוא טוען 11,932 פריטים ומתחבר לטלגרם.
+    הגרסה הראשונה פשוט קרסה שם עם "Expecting value: line 1 column 1", שזו
+    הודעה על JSON ריק ולא על מה שבאמת קרה. עכשיו מחכים ואומרים למה.
+    """
+    last = ""
+    for i in range(tries):
+        p = subprocess.run(["curl", "-sS", "--noproxy", "127.0.0.1",
+                            "--max-time", "120", f"{LOCAL}/movies.json"],
+                           capture_output=True)
+        if p.stdout[:1] in (b"[", b"{"):
+            try:
+                return json.loads(p.stdout)
+            except Exception as e:
+                last = str(e)
+        else:
+            last = (p.stderr.decode("utf-8", "replace").strip()
+                    or f"תשובה שאינה JSON ({len(p.stdout)} בייט)")
+        if i == 0:
+            print(f"השרת עדיין לא עונה על {LOCAL}/movies.json — מחכה…",
+                  flush=True)
+        time.sleep(gap)
+    sys.exit(f"❌ השרת לא ענה אחרי {tries * gap} שניות: {last}\n"
+             f"   בדוק:  systemctl status zovex-bot")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--title", default="ונסדיי")
     ap.add_argument("--segs", type=int, default=3)
     a = ap.parse_args()
 
-    raw = subprocess.run(["curl", "-sS", "--noproxy", "127.0.0.1",
-                          "--max-time", "120", f"{LOCAL}/movies.json"],
-                         capture_output=True).stdout
-    try:
-        cat = json.loads(raw)
-    except Exception as e:
-        sys.exit(f"❌ לא הצלחתי לקרוא את הקטלוג: {e}")
+    cat = read_catalog()
 
     hit = None
     for m in cat:
