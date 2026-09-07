@@ -73,6 +73,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   // live streams — מערך של כמה שידורים חיים במקביל, כל אחד עם שם וקישור
   // נשמרים ב-movies.json כתכנים עם category: "שידורים חיים" ו-is_live: true
   const [showLivePlayer, setShowLivePlayer] = useState(null); // האובייקט של הלייב שנפתח, או null
+  const [liveChannel, setLiveChannel] = useState(null);       // דף הערוץ (לוח שידורים), לפני הנגן
   const liveActive = liveChannels.length > 0;
 
   const { playerMovie, setPlayerMovie, resumeSeconds, kalturaRefreshing, openWithKalturaRefresh } =
@@ -164,7 +165,12 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
       if (item.is_live) {
         const slug = item.custom_slug || encodeURIComponent((item.title || item.name || "").replace(/ /g, "-"));
         navigate(`/live/${slug}`);
-        setShowLivePlayer(item);
+        // דף הערוץ, לא הנגן. LiveTV.jsx קיים מאז שהוא נכתב אבל מעולם לא
+        // רונדר בשום מקום (נבדק בכל ההיסטוריה שלו) — הקומיט שיצר אותו
+        // מסומן WIP. לכן באתר לחיצה על ערוץ קפצה ישר לנגן, בעוד שבאפליקציה
+        // LiveChannelModal הראה לוח שידורים. הנגן נפתח עכשיו רק מהכפתור
+        // שבתוך הדף.
+        setLiveChannel(item);
         return;
       }
       if (isSer) {
@@ -193,13 +199,18 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   // מזהה איזה סרט/סדרה לפתוח לפי ה-slug שבכתובת
   useSlugRouting(movies, slug, episode, setSelectedSeries, setSelectedMovie, openWithKalturaRefresh);
 
-  // כתובת מהצורה /live/שם-הערוץ — פותחת ישירות את הנגן של השידור החי המתאים
+  // כתובת מהצורה /live/שם-הערוץ — פותחת את **דף הערוץ**, לא את הנגן.
+  //
+  // קודם זה קרא ל-setShowLivePlayer, וזה גם מה שביטל בפועל את דף הערוץ:
+  // לחיצה על ערוץ במסך הבית עושה navigate ל-/live/<slug>, האפקט הזה נדלק
+  // מיד, והנגן נפתח מעל הדף לפני שהצופה ראה משהו. עכשיו שני המסלולים —
+  // לחיצה וקישור ישיר — מגיעים לאותו מקום, והנגן נפתח רק מהכפתור.
   useEffect(() => {
     if (slug !== "live" || !episode || !liveChannels.length) return;
     const found = liveChannels.find(ch =>
       ch.custom_slug === episode || encodeURIComponent((ch.title || "").replace(/ /g, "-")) === episode
     );
-    if (found) setShowLivePlayer(found);
+    if (found) setLiveChannel(found);
   }, [slug, episode, liveChannels]);
 
   // ── early returns ──
@@ -284,11 +295,28 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
       {donationModal}
       <AdBanner />
 
+      {/* ── דף הערוץ החי: פוסטר, כפתור צפייה, ומתחתיו לוח השידורים ──
+          מוצג לפני הנגן, כמו LiveChannelModal באפליקציה. הרכיב מצייר מסך
+          מלא משלו ולכן אינו נוגע בעיצוב של מסך הבית. */}
+      {liveChannel && !showLivePlayer && (
+        <LiveTV
+          channel={liveChannel}
+          onPlay={(ch) => setShowLivePlayer(ch)}
+          onClose={() => { setLiveChannel(null); window.history.replaceState(null, "", "/zovex/"); }}
+        />
+      )}
+
       {/* ── Live Player — נפתח מתוך קטגוריית "שידורים חיים", דרך אותו נגן מאוחד כמו כל שאר התוכן ── */}
       {showLivePlayer && (
         <CustomVideoPlayer
           movie={{ ...showLivePlayer, is_live: true }}
-          onClose={() => { setShowLivePlayer(null); window.history.replaceState(null, "", "/zovex/"); }}
+          // סגירת הנגן מחזירה לדף הערוץ, לא למסך הבית — הצופה בא משם
+          // ורוצה לראות מה משודר בהמשך. רק אם הגיע לנגן בלי לעבור בדף
+          // (למשל מקישור ישיר) חוזרים הביתה.
+          onClose={() => {
+            setShowLivePlayer(null);
+            if (!liveChannel) window.history.replaceState(null, "", "/zovex/");
+          }}
         />
       )}
 

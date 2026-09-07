@@ -39,14 +39,24 @@ export default function LiveTV({ channel, onPlay, onClose }) {
 
   useEffect(() => {
     let alive = true;
-    fetch("/epg.json")
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => {
-        if (!alive) return;
-        const entry = d && d.channels && d.channels[chSlug(channel)];
-        setPrograms((entry && entry.programs) || []);
-      })
-      .catch(() => alive && setPrograms([]));
+    const slug = chSlug(channel);
+    // הקובץ לערוץ בודד הוא ~3KB; epg.json המלא הוא 2.4MB — פי 800. השרת
+    // כותב את שניהם (ר' write_per_channel ב-epg_build.py), וזו בדיוק
+    // הסיבה שהוא עושה זאת. הקובץ המלא נשאר כנפילה אחורה, למקרה ש-slug
+    // מכיל תווים שלא שרדו את סינון שם הקובץ בשרת.
+    const small = `/epg/${encodeURIComponent(slug)}.json`;
+    fetch(small)
+      .then(r => (r.ok ? r.json() : Promise.reject()))
+      .then(d => { if (alive) setPrograms(d.programs || []); })
+      .catch(() =>
+        fetch("/epg.json")
+          .then(r => (r.ok ? r.json() : null))
+          .then(d => {
+            if (!alive) return;
+            const entry = d && d.channels && d.channels[slug];
+            setPrograms((entry && entry.programs) || []);
+          })
+          .catch(() => alive && setPrograms([])));
     return () => { alive = false; };
   }, [channel]);
 
