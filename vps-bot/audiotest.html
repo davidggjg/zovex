@@ -44,11 +44,11 @@ const src = /^\/vh\/[^?#]*\.m3u8(\?.*)?$/.test(raw) && !raw.startsWith("//")
           ? raw : "";
 const v = document.getElementById("v");
 
+// hls.js קודם, תמיד. כרום באנדרואיד מחזיר "maybe" על ה-mime של HLS
+// ובפועל לא מצליח לפרסר — נתפס בשטח כ-DEMUXER_ERROR_COULD_NOT_PARSE.
+// canPlayType אינו הבטחה, ולכן הנגן המובנה הוא רק נפילה אחורה.
 if (!src) {
   log("חסר ?u= עם נתיב /vh/…/index.m3u8", "bad");
-} else if (v.canPlayType("application/vnd.apple.mpegurl")) {
-  v.src = src;                      // ספארי מנגן HLS בעצמו
-  log("נגן מובנה (ספארי)");
 } else if (window.Hls && Hls.isSupported()) {
   const hls = new Hls({ enableWorker: true });
   hls.loadSource(src);
@@ -57,6 +57,9 @@ if (!src) {
     log(`הפלייליסט נטען · ${d.levels.length} איכות · מוכן לנגן`, "ok"));
   hls.on(Hls.Events.ERROR, (_, d) =>
     log(`שגיאה: ${d.type} / ${d.details}${d.fatal ? " (קטלנית)" : ""}`, "bad"));
+} else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+  v.src = src;                      // ספארי — מנגן HLS בעצמו
+  log("נגן מובנה (ספארי)");
 } else {
   log("hls.js לא נטען — אין חיבור ל-CDN?", "bad");
 }
