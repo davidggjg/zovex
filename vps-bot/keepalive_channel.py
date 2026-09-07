@@ -65,9 +65,15 @@ def provider_base():
             tail = u.split("/hls-relay/", 1)[1]
             if tail.startswith("_fix/"):
                 tail = tail[5:]
-            parts = tail.rstrip("/").split("/")
-            # host/iptv/key — הספק מגיש ב-http; https אינו נענה כלל אצלו.
-            return "http://" + "/".join(parts[:-1])
+            # הכתובות בקטלוג הן host/iptv/<key>/<ערוץ>/index.m3u8, ולעיתים
+            # host/iptv/<key>/<ערוץ>/ בלבד. חותכים במפורש אחרי המפתח ולא
+            # לפי מיקום מהסוף — ספירה מהסוף השאירה את מספר הערוץ הישן בתוך
+            # הבסיס והפיקה ‎…/KEY/2341/12255/index.m3u8. הספק בלע את זה
+            # בשקט והחזיר מקטעים, וזה בדיוק סוג הטעות שנשארת שנים.
+            parts = tail.strip("/").split("/")
+            if len(parts) >= 3 and parts[1] == "iptv":
+                # host/iptv/key — הספק מגיש ב-http; https אינו נענה אצלו.
+                return "http://" + "/".join(parts[:3])
     sys.exit("❌ לא נמצא ספק ה-pw בקטלוג")
 
 
