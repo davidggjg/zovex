@@ -15,12 +15,16 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -102,20 +106,26 @@ type MediaInfo struct {
 	FileName string
 }
 
+// MediaFetcher פותח קובץ. Open עושה את הפתירה מול טלגרם **פעם אחת**
+// ומחזיר ידית — בגרסה הראשונה handleStream קרא ל-GetInfo ואז ל-Stream,
+// וכל אחד מהם פתר את ההודעה בנפרד: קריאת RPC כפולה בכל בקשה, ובנוסף
+// כל אחת קיבלה בוט אחר מהרוטציה.
 type MediaFetcher interface {
-	GetInfo(chatID, messageID int64) (*MediaInfo, error)
+	Open(ctx context.Context, chatID, messageID int64) (Media, error)
+}
+
+// Media הוא קובץ שכבר נפתר ומוכן למשיכה.
+type Media interface {
+	Info() MediaInfo
 	// Stream כותב את הבייטים [r.start, r.end] (כולל) אל w.
-	Stream(chatID, messageID int64, r byteRange, w http.ResponseWriter) error
+	// ctx חייב להיות זה של הבקשה, כדי שעזיבת הצופה תעצור את המשיכה.
+	Stream(ctx context.Context, r byteRange, w io.Writer) error
 }
 
 type stubFetcher struct{}
 
-func (stubFetcher) GetInfo(chatID, messageID int64) (*MediaInfo, error) {
-	return nil, fmt.Errorf("MediaFetcher לא מחובר עדיין לטלגרם — שלב הבא")
-}
-
-func (stubFetcher) Stream(chatID, messageID int64, r byteRange, w http.ResponseWriter) error {
-	return fmt.Errorf("MediaFetcher לא מחובר עדיין לטלגרם — שלב הבא")
+func (stubFetcher) Open(ctx context.Context, chatID, messageID int64) (Media, error) {
+	return nil, fmt.Errorf("MediaFetcher לא מחובר לטלגרם — חסרים BOT_TOKENS/API_ID/API_HASH")
 }
 
 // ── /stream/{chat_id}/{message_id} ──────────────────────────────────────────
@@ -148,40 +158,55 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := s.fetcher.GetInfo(chatID, messageID)
+	// ctx של הבקשה: כשהצופה סוגר טאב או קופץ קדימה, הוא נסגר וכל המשיכה
+	// מטלגרם נעצרת. בלי זה הלולאה המשיכה למשוך לחינם — וזה בדיוק סוג
+	// הדבר שמצטבר לאורך ימי ריצה.
+	ctx := r.Context()
+
+	media, err := s.fetcher.Open(ctx, chatID, messageID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	info := media.Info()
 
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader == "" {
+	// HEAD: הנגן שואל רק על הגודל לפני שהוא מתחיל. אין טעם למשוך בייטים.
+	if r.Method == http.MethodHead {
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Length", strconv.FormatInt(info.FileSize, 10))
 		w.Header().Set("Content-Type", info.MimeType)
 		w.WriteHeader(http.StatusOK)
-		if err := s.fetcher.Stream(chatID, messageID, byteRange{0, info.FileSize - 1}, w); err != nil {
-			log.Printf("⛔  Stream נכשל באמצע (chat=%d msg=%d): %v", chatID, messageID, err)
-		}
 		return
 	}
 
-	rng, ok := parseRange(rangeHeader, info.FileSize)
-	if !ok {
-		http.Error(w, "טווח לא תקין", http.StatusRequestedRangeNotSatisfiable)
-		return
+	rng := byteRange{0, info.FileSize - 1}
+	status := http.StatusOK
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		parsed, ok := parseRange(rangeHeader, info.FileSize)
+		if !ok {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.FileSize))
+			http.Error(w, "טווח לא תקין", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		rng, status = parsed, http.StatusPartialContent
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, info.FileSize))
 	}
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, info.FileSize))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.FormatInt(rng.end-rng.start+1, 10))
 	w.Header().Set("Content-Type", info.MimeType)
-	w.WriteHeader(http.StatusPartialContent)
-	if err := s.fetcher.Stream(chatID, messageID, rng, w); err != nil {
-		log.Printf("⛔  Stream נכשל באמצע (chat=%d msg=%d, range=%d-%d): %v", chatID, messageID, rng.start, rng.end, err)
+	w.WriteHeader(status)
+
+	if err := media.Stream(ctx, rng, w); err != nil {
+		// עזיבת הצופה היא המקרה השכיח ביותר, ואינה תקלה — לא מרעישים עליה.
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		log.Printf("⛔  Stream נכשל באמצע (chat=%d msg=%d, range=%d-%d): %v",
+			chatID, messageID, rng.start, rng.end, err)
 	}
 }
 
-func buildFetcher(ctx context.Context) MediaFetcher {
+func buildFetcher(ctx context.Context) (MediaFetcher, *Pool) {
 	tokens := strings.Split(os.Getenv("BOT_TOKENS"), ",")
 	apiID, _ := strconv.Atoi(os.Getenv("API_ID"))
 	apiHash := os.Getenv("API_HASH")
@@ -193,7 +218,7 @@ func buildFetcher(ctx context.Context) MediaFetcher {
 
 	if apiID == 0 || apiHash == "" || tokens[0] == "" || channelID == 0 {
 		log.Println("⚠️  BOT_TOKENS/API_ID/API_HASH/STREAM_CHANNEL_ID לא מוגדרים — רץ עם stub (בלי טלגרם אמיתי)")
-		return stubFetcher{}
+		return stubFetcher{}, nil
 	}
 	if len(hashStrs) != len(tokens) {
 		log.Fatalf("STREAM_CHANNEL_ACCESS_HASHES (%d ערכים) לא תואם ל-BOT_TOKENS (%d ערכים)",
@@ -212,22 +237,62 @@ func buildFetcher(ctx context.Context) MediaFetcher {
 		log.Fatalf("בניית בריכת בוטים נכשלה: %v", err)
 	}
 	log.Printf("בריכת בוטים חיה: %d בוטים", pool.Len())
-	return NewTelegramFetcher(pool)
+	return NewTelegramFetcher(pool), pool
 }
 
 func main() {
-	ctx := context.Background()
+	// ctx נסגר ב-SIGTERM (מה ש-systemd שולח), וזה מה שסוגר את חיבורי
+	// הבוטים. בגרסה הראשונה ה-ctx היה Background שלא נסגר לעולם, ולכן
+	// ה-goroutines של הבריכה נשארו תלויות עד להרג התהליך.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	fetcher, pool := buildFetcher(ctx)
 	s := &server{
 		signSecret: os.Getenv("STREAM_SIGN_SECRET"),
-		fetcher:    buildFetcher(ctx),
+		fetcher:    fetcher,
 	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream/", s.handleStream)
+	// בדיקת חיות ל-systemd/nginx: עולה רק אחרי שהבריכה באמת התחברה.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		n := 0
+		if pool != nil {
+			n = pool.Len()
+		}
+		if n == 0 {
+			http.Error(w, "אין בוטים מחוברים", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintf(w, "ok %d bots\n", n)
+	})
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
-	log.Printf("zovex-server-next (שלב 1: שלד + חתימות) מאזין על %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	// בלי timeout כתיבה: סרט שלם דרך חיבור אחד לוקח שעה ויותר, וכל תקרה
+	// כאן הייתה חותכת אותו באמצע. קריאת הכותרות כן מוגבלת.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		log.Println("מקבל סיגנל עצירה — סוגר בעדינות")
+		shutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx) // נותן לסטרימים פעילים לסיים
+	}()
+
+	log.Printf("zovex-server-next מאזין על %s (prefetch=%d, retries=%d)",
+		addr, prefetchDepth, maxChunkRetries)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+	log.Println("נסגר.")
 }

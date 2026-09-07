@@ -1,3 +1,4 @@
 zovex-server-next
 *.log
 *.bin
+.env
