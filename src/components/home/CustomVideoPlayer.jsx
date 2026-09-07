@@ -140,6 +140,46 @@ function isHlsUrl(src) {
   return src?.includes(".m3u8") || src?.includes("Manifest.ism");
 }
 
+// ── קבצים שהדפדפן לא יודע לפענח את הקול שלהם ────────────────────────────────
+//
+// חלק מהתוכן מקודד ב-Dolby Digital Plus (ec-3). דפדפנים מסירים בכוונה את
+// המפענח של AC-3/E-AC-3 מטעמי רישוי — והם **זורקים את הרצועה בשקט**: הווידאו
+// מנגן, אין קול, ואין שום שגיאה. נמדד: 16 מתוך 16 פרקי ונסדיי כאלה.
+//
+// VLC מנגן אותם כי הוא מביא מפענח Dolby משלו, ולכן בדיקה שם מטעה — הוא ניגן
+// אותם כל הזמן, גם כשבאתר לא נשמע כלום.
+//
+// הפתרון: נתיב /vh/ בשרת, שמגיש HLS עם הווידאו כמו שהוא (`-c:v copy`, אפס
+// עומס) והאודיו מומר ל-AAC תוך כדי. אותה גישה שבה נוקטים Jellyfin ו-Plex.
+// החתימה זהה (_stream_sig על אותם chat/msg/exp), ולכן ה-?exp=&sig= שכבר
+// יש בקישור עובר כמו שהוא.
+function audioFixSrc(src) {
+  if (!src) return null;
+  const m = String(src).match(/^(.*)\/stream\/(-?\d+)\/(\d+)(\?.*)?$/);
+  if (!m) return null;                       // לא קישור /stream שלנו
+  return `${m[1]}/vh/${m[2]}/${m[3]}/index.m3u8${m[4] || ""}`;
+}
+
+// זוכרים לכל פריט שהתגלה כאילם, כדי שבצפייה הבאה נלך ישר ל-HLS ולא נשלם
+// שוב את שלוש השניות של הזיהוי.
+const SILENT_KEY = "zovex_silent_items";
+
+function loadSilentSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(SILENT_KEY) || "[]")); }
+  catch { return new Set(); }
+}
+
+function rememberSilent(id) {
+  if (!id) return;
+  try {
+    const s = loadSilentSet();
+    if (s.has(id)) return;
+    s.add(id);
+    // תקרה, כדי שהרשימה לא תתפח לאורך שנים
+    localStorage.setItem(SILENT_KEY, JSON.stringify([...s].slice(-500)));
+  } catch {}
+}
+
 function isIframeUrl(src, type) {
   if (!src) return false;
   // "telegram" is intentionally absent: buildSrc routes telegram URLs to either
@@ -641,7 +681,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
 //   Direct MP4 → "https://example.com/video.mp4"
 //   Telegram   → "https://zovex.duckdns.org/stream/{channelId}/{msgId}?exp=...&sig=..."
 //                (already resolved by the server - buildSrc() just passes it through)
-function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel }) {
+function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel, onSilent }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -677,10 +717,33 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
       setLoading(false);
     };
     const onWaiting = () => setLoading(true);
+
+    // ── זיהוי קול שנזרק ────────────────────────────────────────────────────
+    // כשהדפדפן לא יודע לפענח את רצועת הקול (ec-3 / Dolby) הוא משמיט אותה
+    // בשקט — בלי אירוע error ובלי שום סימן אחר. webkitAudioDecodedByteCount
+    // הוא הדרך היחידה לדעת: הוא נשאר 0 בזמן שהווידאו מתקדם.
+    //
+    // בודקים פעם אחת בלבד, ורק אחרי שהניגון באמת התקדם, כדי לא לבלבל
+    // "עוד לא התחיל" עם "אין קול". דפדפן שלא מדווח על השדה הזה (פיירפוקס)
+    // פשוט לא מפעיל את המסלול — עדיף לא לגעת מאשר לנחש.
+    let audioProbe = null, probed = false;
+    const probeAudio = () => {
+      if (probed || !onSilent) return;
+      probed = true;
+      audioProbe = setTimeout(() => {
+        if (destroyed) return;
+        const decoded = video.webkitAudioDecodedByteCount;
+        if (decoded === 0 && video.currentTime > 1 && !video.paused) {
+          onSilent(video.currentTime);
+        }
+      }, 3500);
+    };
+
     const onPlaying = () => {
       setLoading(false);
       setupMediaSession(video, movie);
       postNative({ type: "video_playing", value: true });
+      probeAudio();
     };
     const onPause = () => postNative({ type: "video_playing", value: false });
     const onEnded = () => postNative({ type: "video_playing", value: false });
@@ -776,6 +839,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
       destroyed = true;
       clearInterval(reportInterval);
       clearInterval(stallWatch);
+      clearTimeout(audioProbe);
       { const dur = getUsableDuration(video); if (dur > 0) reportProgress(onProgressRef, video.currentTime, dur); }
       video.removeEventListener("error", onError);
       video.removeEventListener("loadedmetadata", onLoaded);
@@ -1059,8 +1123,25 @@ function IframePlayer({ src, movie, onClose }) {
 // ─── Main export ──────────────────────────────────────────────
 export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel }) {
   const isLive = !!movie.is_live;
-  const src = buildSrc(movie, isLive ? 0 : startTime);
+  const rawSrc = buildSrc(movie, isLive ? 0 : startTime);
   const type = movie.type || "direct";
+
+  // מסלול תיקון-הקול. מתחילים בו מיד אם כבר גילינו בעבר שהפריט הזה אילם;
+  // אחרת מנגנים רגיל, ועוברים רק אם הדפדפן באמת לא פענח אודיו. כך שאר
+  // הקטלוג — שרובו תקין — לא משלם שום מחיר.
+  const fixedSrc = isLive ? null : audioFixSrc(rawSrc);
+  const [useAudioFix, setUseAudioFix] = useState(
+    () => !!fixedSrc && loadSilentSet().has(movie.id));
+  const [resumeAt, setResumeAt] = useState(startTime);
+
+  const src = useAudioFix && fixedSrc ? fixedSrc : rawSrc;
+
+  // מעבר למסלול המתוקן, מהמקום שבו הצופה נמצא — לא מתחילת הפרק.
+  const switchToAudioFix = (at) => {
+    rememberSilent(movie.id);
+    setResumeAt(Math.max(0, at || 0));
+    setUseAudioFix(true);
+  };
 
   useEffect(() => {
     postNative({ type: "player_open", value: true });
@@ -1079,11 +1160,11 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
           <p style={{ color: "#888", fontSize: 15, fontFamily: "Arial" }}>אין קישור וידאו זמין</p>
         </div>
       ) : isHlsUrl(src) ? (
-        <HlsPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
+        <HlsPlayer key={src} src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
-        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={startTime} onProgress={onProgress} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
+        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} onSilent={fixedSrc ? switchToAudioFix : null} />
       )}
     </div>
   );
