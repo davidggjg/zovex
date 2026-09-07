@@ -33,6 +33,13 @@ set -uo pipefail
 UI_DIR=/opt/qbt-ui
 NGINX_SNIP=/etc/nginx/snippets/qbt-ui.conf
 PORT=8080
+# חייב להיות מוגדר כאן ולא רק ב-setup_qbittorrent.sh: ההיירדוק שכותב את
+# תצורת nginx משתמש בו, ועם set -u משתנה לא מוגדר מפיל את cat באמצע
+# ומשאיר קובץ באורך אפס — שעובר את nginx -t בשקט ומפיל את הדף.
+DL_ROOT=/home/torrents
+# גיבויים לא נשמרים בתוך sites-enabled: nginx טוען משם *כל* קובץ, וגיבוי
+# שיושב שם נטען כבלוק שרת נוסף וגורם ל-conflicting server name.
+BAK_DIR=/root/nginx-backups
 
 ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad() { printf '  \033[31m✗\033[0m %s\n' "$*"; }
@@ -382,28 +389,51 @@ EOF
 ok "נכתב $NGINX_SNIP"
 
 # מכניסים את ה-include לתוך בלוק ה-server של 443, אם עוד לא שם
-SITE=$(grep -rl "listen.*443" /etc/nginx/sites-enabled/ 2>/dev/null | head -1)
+# ניקוי שאריות מגרסה קודמת שהניחה גיבויים בתוך sites-enabled. nginx טוען
+# משם כל קובץ, ולכן כל גיבוי כזה הפך לבלוק שרת כפול.
+mkdir -p "$BAK_DIR"
+for stray in /etc/nginx/sites-enabled/*.bak-qbt*; do
+  [[ -e "$stray" ]] || continue
+  mv -- "$stray" "$BAK_DIR/"
+  ok "הוצא מ-sites-enabled: $(basename "$stray")"
+done
+
+# רק קבצים אמיתיים, לא גיבויים
+SITE=""
+for f in /etc/nginx/sites-enabled/*; do
+  [[ -f "$f" && "$f" != *.bak* ]] || continue
+  grep -q "listen.*443" "$f" && { SITE="$f"; break; }
+done
 [[ -n "$SITE" ]] || die "לא נמצא בלוק server עם 443 ב-sites-enabled"
+
+# גיבוי של המצב הנוכחי, לפני כל שינוי בהרצה הזאת. הגרסה הקודמת שמרה גיבוי
+# רק בהרצה הראשונה, ואז בכשל שחזרה את המצב מלפני ההתקנה — כלומר מחקה את
+# ה-include ושברה דף שעבד.
+NOW_BAK="$BAK_DIR/$(basename "$SITE").$(date +%Y%m%d-%H%M%S)"
+cp "$SITE" "$NOW_BAK"
+
 if grep -q "qbt-ui.conf" "$SITE"; then
   ok "ה-include כבר קיים ב-$(basename "$SITE")"
 else
-  cp "$SITE" "$SITE.bak-qbt"
-  # אחרי ההופעה הראשונה של server_name בבלוק של 443
   awk -v snip="$NGINX_SNIP" '
     /listen.*443/ { in443=1 }
     { print }
     in443 && /server_name/ && !done { print "    include " snip ";"; done=1 }
-  ' "$SITE.bak-qbt" > "$SITE"
-  ok "נוסף include ל-$(basename "$SITE")  (גיבוי: $(basename "$SITE").bak-qbt)"
+  ' "$NOW_BAK" > "$SITE"
+  ok "נוסף include ל-$(basename "$SITE")"
 fi
+
+# הקובץ חייב להכיל תוכן. קובץ ריק עובר את nginx -t בשקט ומפיל את הדף —
+# בדיוק מה שקרה כשמשתנה לא מוגדר הפיל את ההיירדוק באמצע.
+[[ -s "$NGINX_SNIP" ]] || die "$NGINX_SNIP יצא ריק — לא טוענים מחדש"
 
 if nginx -t >/dev/null 2>&1; then
   nginx -s reload
   ok "nginx נטען מחדש (reload, לא restart — בקשות שרצות לא נקטעות)"
 else
-  cp "$SITE.bak-qbt" "$SITE" 2>/dev/null
+  cp "$NOW_BAK" "$SITE"
   nginx -t
-  die "תצורת nginx לא תקינה — שוחזר הגיבוי ולא בוצע reload"
+  die "תצורת nginx לא תקינה — שוחזר המצב מלפני ההרצה הזאת, בלי reload"
 fi
 
 # ── אימות ─────────────────────────────────────────────────────────────────
