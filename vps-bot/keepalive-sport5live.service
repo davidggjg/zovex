@@ -1,0 +1,20 @@
+[Unit]
+Description=צופה קבוע על ספורט 5 לייב אצל הספק (באישור בעל המערכת)
+After=network-online.target zovex-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/keepalive_channel.py --channel 12255
+Restart=always
+RestartSec=30
+
+# עדיפות נמוכה: זה לא צופה אמיתי, ואסור שיתחרה בהם על מעבד או על רשת.
+Nice=15
+IOSchedulingClass=idle
+
+# תקרת זיכרון — הסקריפט זעיר, וזה בולם דליפה אם בכל זאת תהיה.
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
