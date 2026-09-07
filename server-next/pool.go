@@ -28,11 +28,12 @@ type botClient struct {
 }
 
 type Pool struct {
-	apiID   int
-	apiHash string
-	bots    []*botClient
-	idx     uint64 // round-robin counter, נגיש אטומית
-	mu      sync.RWMutex
+	apiID     int
+	apiHash   string
+	channelID int64 // הערוץ היחיד שהבריכה הזאת יודעת לשרת
+	bots      []*botClient
+	idx       uint64 // round-robin counter, נגיש אטומית
+	mu        sync.RWMutex
 }
 
 // NewPool בונה בריכה מרשימת טוקני בוטים. כל בוט מתחבר ומתאמת בנפרד
@@ -48,7 +49,10 @@ func NewPool(ctx context.Context, apiID int, apiHash string, tokens []string, ch
 		return nil, fmt.Errorf("מספר ה-access_hash-ים (%d) לא תואם למספר הטוקנים (%d)",
 			len(accessHashes), len(tokens))
 	}
-	p := &Pool{apiID: apiID, apiHash: apiHash}
+	// מקבלים גם את צורת ה-Bot API (-100…) וגם את הגולמית. בלי זה, הגדרה
+	// בצורה הראשונה הייתה נשלחת כך לטלגרם ומחזירה CHANNEL_INVALID.
+	channelID = normalizeChannelID(channelID)
+	p := &Pool{apiID: apiID, apiHash: apiHash, channelID: channelID}
 	for i, tok := range tokens {
 		name := fmt.Sprintf("bot_%d", i)
 		c := telegram.NewClient(apiID, apiHash, telegram.Options{Logger: debugLogger})

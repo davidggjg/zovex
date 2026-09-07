@@ -13,7 +13,7 @@ ExecStart=/root/zovex-server-next/zovex-server-next
 # STREAM_SIGN_SECRET חייב להיות **זהה** ל-SIGN_SECRET שב-/opt/zovex-bot/.env,
 # אחרת כל הקישורים החתומים שבקטלוג ייכשלו באימות.
 EnvironmentFile=/root/zovex-server-next/.env
-Environment=LISTEN_ADDR=:8098
+Environment=LISTEN_ADDR=127.0.0.1:8099
 
 Restart=always
 RestartSec=5

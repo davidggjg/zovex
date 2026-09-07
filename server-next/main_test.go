@@ -74,6 +74,23 @@ func TestParseRange(t *testing.T) {
 	}
 }
 
+// הקטלוג שומר chat_id בצורת Bot API (-100 ואז מזהה הערוץ), ואילו
+// tg.InputChannel רוצה את המזהה הגולמי. טעות כאן פירושה CHANNEL_INVALID
+// על כל בקשה, או גרוע מזה — הגשת קובץ מערוץ אחר.
+func TestNormalizeChannelID(t *testing.T) {
+	cases := []struct{ in, want int64 }{
+		{-1003936100530, 3936100530}, // הצורה שבקטלוג שלנו
+		{3936100530, 3936100530},     // כבר גולמי
+		{-12345, 12345},              // צ'אט רגיל שלילי
+		{6837333844, 6837333844},     // צ'אט פרטי, חיובי
+	}
+	for _, c := range cases {
+		if got := normalizeChannelID(c.in); got != c.want {
+			t.Errorf("normalizeChannelID(%d) = %d, ציפינו %d", c.in, got, c.want)
+		}
+	}
+}
+
 // ── בדיקת המשיכה המקדימה ────────────────────────────────────────────────
 
 // fakeMedia מחקה קובץ בגודל ידוע שבו כל בייט הוא (offset mod 251). זה

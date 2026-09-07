@@ -165,6 +165,12 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	media, err := s.fetcher.Open(ctx, chatID, messageID)
 	if err != nil {
+		// צ'אט שאיננו הערוץ שלנו הוא 404 ולא 503: אין טעם שהלקוח ינסה שוב,
+		// והתשובה הזאת גם מאפשרת ל-nginx להעביר את המקרה הזה לפייתון.
+		if errors.Is(err, ErrWrongChannel) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}

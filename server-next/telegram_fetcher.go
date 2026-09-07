@@ -61,6 +61,21 @@ func envInt(name string, def int) int {
 // כדי שנזהה בלוג אם זה כן קורה בייצור, במקום להתבלבל עם שגיאה אחרת.
 var errCDNRedirect = errors.New("טלגרם הפנתה ל-CDN — לא ממומש")
 
+// normalizeChannelID ממיר את צורת ה-Bot API (-100 ואז מזהה הערוץ) למזהה
+// ה-MTProto הגולמי. הקטלוג שלנו שומר את הצורה הראשונה — למשל
+// -1003936100530 עבור הערוץ 3936100530 — ואילו tg.InputChannel רוצה
+// את השנייה. גם צורה גולמית מתקבלת, כדי שהגדרה ידנית לא תישבר.
+func normalizeChannelID(chatID int64) int64 {
+	const botAPIPrefix = -1000000000000
+	if chatID < botAPIPrefix {
+		return botAPIPrefix - chatID
+	}
+	if chatID < 0 {
+		return -chatID
+	}
+	return chatID
+}
+
 type TelegramFetcher struct {
 	pool *Pool
 }
@@ -82,8 +97,21 @@ type telegramMedia struct {
 
 func (m *telegramMedia) Info() MediaInfo { return m.info }
 
+// ErrWrongChannel — הבקשה מבקשת צ'אט שהשרת הזה לא משרת.
+//
+// חובה לבדוק את זה: resolveDocument משתמש ב-channel שמוגדר ב-env ומתעלם
+// לגמרי מה-chatID שבכתובת. בלי הבדיקה, בקשה ל-/stream/123/456 הייתה
+// מחזירה את הודעה 456 **מהערוץ שלנו** — כלומר קובץ אחר לגמרי, בשקט
+// ובקוד 200. בקטלוג יש 8,682 פריטים בערוץ הזה ועוד שניים בצ'אטים
+// פרטיים, ואלה השניים שהיו נשברים כך.
+var ErrWrongChannel = errors.New("הצ'אט המבוקש אינו הערוץ שהשרת הזה משרת")
+
 // Open פותר את ההודעה **פעם אחת** ומחזיר ידית לשימוש חוזר.
 func (f *TelegramFetcher) Open(ctx context.Context, chatID, messageID int64) (Media, error) {
+	// בקטלוג ה-chat_id מופיע בצורת -100<channelID>, שזו הצורה של Bot API.
+	if normalizeChannelID(chatID) != f.pool.channelID {
+		return nil, ErrWrongChannel
+	}
 	doc, bc, err := f.resolveDocument(ctx, messageID)
 	if err != nil {
 		return nil, err
