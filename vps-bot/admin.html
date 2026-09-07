@@ -421,6 +421,24 @@ async function persist(){
   }catch(e){ alert("שמירה נכשלה: "+e.message); return false; }
   finally{ toast(false); }
 }
+// שינוי כירורגי לפי מזהה: מוחק/מעדכן/מוסיף פריטים בודדים על גבי המצב הנוכחי
+// בשרת, בלי לשלוח את כל הקטלוג ובלי base_version. זה עוקף את התנגשות הגרסה
+// שבוט ההעלאות גרם לה — כל מחיקה נפלה עליה והפריט "המחוק" חזר. אחרי הצלחה
+// טוענים מחדש מהשרת, כך שרואים גם את מה שהבוט הוסיף בינתיים.
+async function mutate(ops){
+  const delete_ids=(ops&&ops.delete_ids)||[], upsert=(ops&&ops.upsert)||[];
+  toast(true);
+  try{
+    const r=await fetch("/content/mutate",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS, delete_ids, upsert})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ alert(d.detail||("שגיאה "+r.status)); return false; }
+    await loadContent();   // אמת מהשרת, כולל העלאות חדשות של הבוט
+    return true;
+  }catch(e){ alert("הפעולה נכשלה: "+e.message); return false; }
+  finally{ toast(false); }
+}
 function seriesMap(){
   const m={}; movies.forEach(x=>{ if(x.series_name){ (m[x.series_name]=m[x.series_name]||[]).push(x); } }); return m;
 }
@@ -515,10 +533,10 @@ async function saveItem(){
   if(!e.title){ $("addMsg").innerHTML='<span class="err">חסר שם</span>'; return; }
   if(!e.video_url){ $("addMsg").innerHTML='<span class="err">חסר קישור וידאו</span>'; return; }
   const wasEditing=!!editingId;
-  if(editingId){ movies=movies.map(m=>m.id===editingId?{...m,...e}:m); }
-  else { movies=[{...e,id:crypto.randomUUID(),created_date:new Date().toISOString()}, ...movies]; }
-  if(await persist()){
-    refreshDerived();
+  const item = editingId
+    ? {...e, id:editingId}
+    : {...e, id:crypto.randomUUID(), created_date:new Date().toISOString()};
+  if(await mutate({upsert:[item]})){
     if(_fromUploadCmid!=null){
       try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({password:PASS, channel_msg_ids:[_fromUploadCmid]})}); }catch{}
@@ -535,15 +553,14 @@ async function saveItem(){
 }
 async function delItem(){
   if(!editingId||!confirm("למחוק?")) return;
-  movies=movies.filter(m=>m.id!==editingId);
-  if(await persist()){ refreshDerived(); openAdd(); }
+  if(await mutate({delete_ids:[editingId]})){ openAdd(); }
 }
 async function applyToSeries(field){
   const n=$("f_series").value.trim(); if(!n) return;
   const val = field==="thumbnail_url"?$("f_thumb").value.trim():$("f_desc").value.trim();
   if(!confirm(`לעדכן ${field==="thumbnail_url"?"פוסטר":"תקציר"} לכל הפרקים של «${n}»?`)) return;
-  movies=movies.map(m=>m.series_name===n?{...m,[field]:val}:m);
-  if(await persist()){ $("addMsg").innerHTML='<span class="ok">עודכן לכל הסדרה ✓</span>'; }
+  const ups=movies.filter(m=>m.series_name===n).map(m=>({id:m.id,[field]:val}));
+  if(await mutate({upsert:ups})){ $("addMsg").innerHTML='<span class="ok">עודכן לכל הסדרה ✓</span>'; }
 }
 
 // ── TMDB דרך השרת (המפתח בשרת) ──
@@ -596,8 +613,8 @@ function renderManage(){
       <button class="mini gray" onclick="quickDel('${m.id}')">🗑</button></div>`).join(""); }
   el.innerHTML = html || '<div class="muted" style="padding:10px">לא נמצא.</div>';
 }
-async function quickDel(id){ if(!confirm("למחוק פריט?")) return; movies=movies.filter(m=>m.id!==id); if(await persist()){refreshDerived();renderManage();} }
-async function delSeries(n){ if(!confirm(`למחוק את כל הסדרה «${n}»?`)) return; movies=movies.filter(m=>m.series_name!==n); if(await persist()){refreshDerived();renderManage();} }
+async function quickDel(id){ if(!confirm("למחוק פריט?")) return; if(await mutate({delete_ids:[id]})){ renderManage(); } }
+async function delSeries(n){ if(!confirm(`למחוק את כל הסדרה «${n}»?`)) return; const ids=movies.filter(m=>m.series_name===n).map(m=>m.id).filter(Boolean); if(await mutate({delete_ids:ids})){ renderManage(); } }
 
 // ── קטגוריות ──
 function renderCats(){

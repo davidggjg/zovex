@@ -5078,6 +5078,22 @@ def _lite_items():
     return items
 
 
+@api.get("/content/version")
+async def content_version_only():
+    """מונה גרסת התוכן בלבד — כמה עשרות בתים, בלי לגעת ב-content.json.
+
+    נועד לתשאול תכוף מהאפליקציה: היא מחזיקה את הקטלוג בזיכרון ומרעננת אותו
+    רק כשהמספר הזה משתנה. בלי זה פריט שנמחק בפאנל נשאר על המסך עד שהאפליקציה
+    יוצאת לרקע וחוזרת (ואם היא נשארת פתוחה — לא נעלם בכלל).
+
+    get_content_version() קורא קובץ טקסט אחד בן ספרות בודדות. במכוון *לא*
+    מוחזר count: הוא היה מחייב load_content() — פרסור של ~11 אלף פריטים בכל
+    תשאול.
+    """
+    return JSONResponse({"version": get_content_version()},
+                        headers={"Cache-Control": "no-store"})
+
+
 @api.get("/content/lite")
 async def content_lite(request: Request, limit: int = 0):
     """קטלוג לתצוגה. limit>0 מחזיר רק את ה-N הראשונים (ציור מהיר של מסך הבית),
@@ -5290,6 +5306,86 @@ async def content_save(req: ContentSaveReq, request: Request):
                     " — באישור מפורש" if req.confirm_delete else "")
     save_content(incoming)
     return {"ok": True, "count": len(incoming), "version": get_content_version()}
+
+class ContentMutateReq(BaseModel):
+    password: str
+    delete_ids: list = []
+    upsert: list = []
+
+
+@api.post("/content/mutate")
+async def content_mutate(req: ContentMutateReq, request: Request):
+    """שינוי כירורגי לפי מזהה, על גבי המצב הנוכחי בשרת — בלי לשלוח את כל
+    הקטלוג ובלי base_version.
+
+    /content/save שולח את כל המערך ונדחה (409) אם התוכן השתנה מאז שהפאנל
+    נטען. אבל בוט ההעלאות מוסיף פריטים כל היום ומקפיץ את מונה הגרסה, ולכן
+    כמעט כל מחיקה מהפאנל נפלה על הנעילה, הפאנל טען מחדש, והפריט "המחוק" חזר.
+    כאן הפעולה חלה על מה שיש עכשיו לפי id, ולכן לא נוגעת בפריטים שהבוט הוסיף
+    בינתיים ולא יכולה להתנגש איתם.
+    """
+    role = panel_role(request, req.password)
+    prev = load_content()
+    by_id = {str(e.get("id")): e for e in prev}
+    del_ids = {str(x) for x in (req.delete_ids or []) if x is not None}
+    ups = _collapse_urls([dict(u) for u in (req.upsert or []) if isinstance(u, dict)])
+
+    # מגבלות עורך: אין נגיעה בשידורים חיים, ותקרת מחיקה. למנהל — חופש מלא.
+    if role == "editor":
+        if any(i in by_id and _is_live_item(by_id[i]) for i in del_ids):
+            raise HTTPException(status_code=403,
+                detail="עריכת שידורים חיים מותרת למנהל הראשי בלבד.")
+        if any(_is_live_item(u) for u in ups):
+            raise HTTPException(status_code=403,
+                detail="הוספת או עריכת שידור חי מותרת למנהל הראשי בלבד.")
+        real_del = [i for i in del_ids if i in by_id]
+        if len(real_del) > EDITOR_MAX_DELETE:
+            raise HTTPException(status_code=403, detail=(
+                f"\u26d4 \u05de\u05d7\u05d9\u05e7\u05ea {len(real_del)} "
+                f"\u05e4\u05e8\u05d9\u05d8\u05d9\u05dd \u05d7\u05d5\u05e8\u05d2\u05ea "
+                f"\u05de\u05d4\u05de\u05d5\u05ea\u05e8 ({EDITOR_MAX_DELETE}) "
+                f"\u05dc\u05e2\u05d5\u05e8\u05da."))
+
+    # מחיקה
+    result = [e for e in prev if str(e.get("id")) not in del_ids]
+    deleted = len(prev) - len(result)
+
+    # עדכון/הוספה לפי id (upsert עם id שמחוק — מדולג)
+    result_ids = {str(e.get("id")) for e in result}
+    to_update, to_add = {}, []
+    for u in ups:
+        uid = str(u.get("id")) if u.get("id") not in (None, "") else None
+        if uid and uid in del_ids:
+            continue
+        if uid and uid in result_ids:
+            to_update[uid] = u
+        else:
+            to_add.append(u)
+
+    updated = 0
+    for i, e in enumerate(result):
+        k = str(e.get("id"))
+        if k in to_update:
+            result[i] = {**e, **to_update[k]}
+            updated += 1
+
+    added = 0
+    prepend = []
+    for u in to_add:
+        if not u.get("id"):
+            u["id"] = str(uuid.uuid4())
+        if not u.get("created_date"):
+            u["created_date"] = datetime.utcnow().isoformat() + "Z"
+        prepend.append(u)
+        added += 1
+    result = prepend + result
+
+    if deleted or updated or added:
+        log.info("mutate: -%d ~%d +%d (role=%s)", deleted, updated, added, role)
+    save_content(result)
+    return {"ok": True, "deleted": deleted, "updated": updated, "added": added,
+            "count": len(result), "version": get_content_version()}
+
 
 @api.get("/content/relink")
 async def content_relink(request: Request, dry: int = 1):
