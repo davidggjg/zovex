@@ -90,7 +90,18 @@ cat > "$UI_DIR/index.html" <<'HTML'
   .meta { color:var(--dim); font-size:13px; display:flex; justify-content:space-between;
           gap:10px; flex-wrap:wrap; }
   .x { background:none; color:var(--dim); font-size:20px; padding:4px 8px; }
+  .dl { color:var(--ok); font-size:13px; font-weight:600; text-decoration:none;
+        white-space:nowrap; padding:4px 8px; }
   .empty { color:var(--dim); text-align:center; padding:28px 0; }
+  .sum { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; }
+  .sum div { font-size:13px; color:var(--dim); }
+  .sum b { display:block; color:var(--txt); font-size:17px; font-weight:700;
+           margin-top:2px; }
+  .sum b.up { color:var(--ok); }
+  .note { color:var(--dim); font-size:11px; margin-top:10px; line-height:1.4; }
+  .stats { color:var(--dim); font-size:12px; margin-top:4px; }
+  .stats .u { color:var(--ok); font-weight:600; }
+  .live { color:var(--pink); font-weight:600; }
   .msg { padding:12px; border-radius:10px; margin-bottom:12px; font-size:14px; display:none; }
   .msg.err { background:#3a1520; color:#ff9aa8; display:block; }
   .msg.good { background:#122a1a; color:#8ef0ab; display:block; }
@@ -118,6 +129,14 @@ cat > "$UI_DIR/index.html" <<'HTML'
   <div class="card">
     <input type="text" id="magnet" placeholder="או הדבק כאן קישור מגנט">
     <button class="big ghost" onclick="addMagnet()">הוספה</button>
+  </div>
+
+  <div class="card">
+    <div class="sum" id="sum"></div>
+    <div class="note">
+      המספרים כאן הם של qBittorrent בשרת בלבד, מאז ההתקנה. הטראקר מנהל
+      ספירה משלו שכוללת גם מה שהורדת פעם מהטלפון — שני המספרים לא יהיו זהים.
+    </div>
   </div>
 
   <div class="card" id="list"><div class="empty">טוען…</div></div>
@@ -211,12 +230,29 @@ function eta(s) {
 }
 
 async function refresh() {
-  let list;
+  let list, srv;
   try {
-    const r = await fetch(API + '/torrents/info');
+    // sync/maindata מחזיר גם את הטורנטים וגם את מצב השרת בבקשה אחת,
+    // במקום שתי קריאות נפרדות כל שתי שניות.
+    const r = await fetch(API + '/sync/maindata?rid=0');
     if (r.status === 403) { location.reload(); return; }
-    list = await r.json();
+    const d = await r.json();
+    srv = d.server_state || {};
+    list = Object.entries(d.torrents || {}).map(([h, t]) => ({...t, hash: h}));
   } catch (e) { return; }
+
+  // ── סיכום למעלה ────────────────────────────────────────────────────
+  const active = list.filter(t => (t.num_leechs || 0) > 0).length;
+  document.getElementById('sum').innerHTML = `
+    <div>העלית מהשרת<b class="up">${size(srv.alltime_ul)}</b></div>
+    <div>הורדת לשרת<b>${size(srv.alltime_dl)}</b></div>
+    <div>יחס בשרת<b>${srv.global_ratio || '—'}</b></div>
+    <div>מעלה עכשיו<b class="up">${size(srv.up_info_speed)} לשנייה</b></div>
+    <div>מושכים ממך כרגע<b>${
+      active === 0 ? 'אף אחד'
+      : `<span class="live">${active === 1 ? 'טורנט אחד' : active + ' טורנטים'}</span>`
+    }</b></div>
+    <div>מקום פנוי<b>${size(srv.free_space_on_disk)}</b></div>`;
 
   const box = document.getElementById('list');
   if (!list.length) {
@@ -229,9 +265,15 @@ async function refresh() {
     const done = pct >= 100;
     const st = STATE[t.state] || t.state;
     const e = eta(t.eta);
+    // קישור הורדה רק למה שהושלם. הקובץ ממשיך לזרוע בזמן ההורדה, וההורדה
+    // הזאת אינה עוברת דרך הטראקר ולכן אינה נספרת אצלו בשום צורה.
+    const dl = done
+      ? `<a class="dl" href="/files/${encodeURIComponent(t.name)}">⬇ הורדה</a>`
+      : '';
     return `<div class="t">
       <div class="row">
         <div class="name" style="flex:1">${esc(t.name)}</div>
+        ${dl}
         <button class="x" onclick="del('${t.hash}')" title="הסרה">✕</button>
       </div>
       <div class="bar"><div class="fill ${done ? 'done' : ''}" style="width:${pct}%"></div></div>
@@ -240,6 +282,14 @@ async function refresh() {
         <span><bdi>${size(t.size)}</bdi>${
           t.dlspeed > 0 ? ' · <bdi>' + size(t.dlspeed) + '</bdi> לשנייה' : ''}${
           e ? ' · נותרו <bdi>' + e + '</bdi>' : ''}</span>
+      </div>
+      <div class="stats">
+        אנשים לקחו ממנו <span class="u"><bdi>${size(t.uploaded)}</bdi></span>
+        · יחס <bdi>${(t.ratio || 0).toFixed(2)}</bdi>
+        ${t.num_leechs > 0
+          ? ` · <span class="live">${t.num_leechs} מושכים עכשיו</span>`
+          : ''}
+        ${t.upspeed > 0 ? ` · <bdi>${size(t.upspeed)}</bdi> לשנייה` : ''}
       </div>
     </div>`;
   }).join('');
@@ -263,8 +313,48 @@ HTML
 ok "נכתב $UI_DIR/index.html"
 
 # ── nginx ─────────────────────────────────────────────────────────────────
+# ── סיסמה לתיקיית הקבצים ─────────────────────────────────────────────────
+# אותה סיסמה של דף הטורנטים, כדי שלא יהיו שתיים לזכור. openssl קיים בכל
+# התקנה; אין צורך להתקין apache2-utils בשביל htpasswd אחד.
+PASSFILE=/etc/nginx/.qbt-files
+if [[ -f /etc/qbt-webui.pass ]]; then
+  P=$(cat /etc/qbt-webui.pass)
+  if command -v openssl >/dev/null; then
+    printf 'admin:%s\n' "$(openssl passwd -apr1 "$P")" > "$PASSFILE"
+  else
+    printf 'admin:{SHA}%s\n' \
+      "$(printf '%s' "$P" | openssl dgst -binary -sha1 | base64)" > "$PASSFILE"
+  fi
+  chmod 640 "$PASSFILE"; chown root:www-data "$PASSFILE" 2>/dev/null
+  ok "נוצרה סיסמה לתיקיית הקבצים (זהה לזו של הדף)"
+else
+  bad "לא נמצא /etc/qbt-webui.pass — תיקיית הקבצים לא תוגן!"
+fi
+
 cat > "$NGINX_SNIP" <<EOF
 # דף הטורנטים בעברית + פרוקסי ל-API של qBittorrent.
+
+# הקבצים שהורדו, להורדה ישירה מהדפדפן.
+#
+# למה זה בטוח מבחינת הטראקר: ההורדה הזאת היא HTTP רגיל מהשרת שלך אל
+# המכשיר שלך. היא אינה עוברת דרך הטורנט, ולכן הטראקר לא רואה אותה ולא
+# סופר אותה בשום עמודה. הטורנט ממשיך לזרוע במקביל, בלי הפרעה.
+location /files/ {
+    alias $DL_ROOT/complete/;
+    autoindex on;
+    autoindex_exact_size off;
+    autoindex_localtime on;
+    charset utf-8;
+
+    auth_basic "ZOVEX";
+    auth_basic_user_file $PASSFILE;
+
+    # קבצי וידאו גדולים: בלי זה nginx מנסה להגיש בכמות ומעמיס זיכרון.
+    sendfile on;
+    tcp_nopush on;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+}
+
 location /torrent/ {
     alias $UI_DIR/;
     index index.html;
