@@ -94,6 +94,16 @@ set_key 'Session\\MaxActiveTorrents'        '32'
 # טורנט שאיש לא מושך ממנו לא ייחשב פעיל, ולכן לא יחסום את המכסה
 set_key 'Session\\IgnoreSlowTorrentsInQueueing' 'true'
 
+# אותם ערכים גם בצורה הישנה, תחת [Preferences]. בהתקנה כתבתי את שתיהן כדי
+# לשרוד שדרוג גרסה, והגרסה הראשונה של הסקריפט הזה עדכנה רק אחת — כך שנשארו
+# בקובץ Queueing\MaxActiveUploads=2 לצד Session\MaxActiveUploads=30. אין לי
+# דרך לדעת בוודאות איזו מהן 4.4.1 קוראת, ולכן שתיהן זהות.
+set_key 'Queueing\\QueueingEnabled'         'true'
+set_key 'Queueing\\MaxActiveDownloads'      '2'
+set_key 'Queueing\\MaxActiveUploads'        '30'
+set_key 'Queueing\\MaxActiveTorrents'       '32'
+set_key 'Queueing\\IgnoreSlowTorrents'      'true'
+
 # ── כמה עמיתים להגיש ─────────────────────────────────────────────────────
 set_key 'Session\\MaxUploads'               '40'
 set_key 'Session\\MaxUploadsPerTorrent'     '8'
