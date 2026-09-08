@@ -34,9 +34,12 @@ MARK = '@api.post("/maketorrent")'
 
 BLOCK = '''# ── יצירת קובץ .torrent מפריט שכבר על השרת (mktorrent) ────────────────────────
 # qBittorrent 4.4.1 לא חושף API ליצירת טורנט. לתוכן שהמשתמש מחזיק בזכויות עליו.
-QBT_DL_ROOT = pathlib.Path(os.environ.get("QBT_DL_ROOT", "/home/torrents"))
+# Path (לא pathlib.Path): מיובא כ-from pathlib import Path בראש הקובץ, בעוד
+# שהמודול pathlib מיובא רק בהמשך. שימוש ב-pathlib.Path כאן, ברמת המודול,
+# היה נתקל בשם לא-מוגדר בזמן הטעינה ומפיל את השירות.
+QBT_DL_ROOT = Path(os.environ.get("QBT_DL_ROOT", "/home/torrents"))
 QBT_WEBUI_HOST = os.environ.get("QBT_WEBUI_HOST", "127.0.0.1:8080")
-QBT_WEBUI_PASS_FILE = pathlib.Path("/etc/qbt-webui.pass")
+QBT_WEBUI_PASS_FILE = Path("/etc/qbt-webui.pass")
 
 
 async def _qbt_cookie_ok(request: Request) -> bool:
@@ -101,7 +104,7 @@ async def make_torrent(req: MakeTorrentReq, request: Request):
 
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", name.split("/")[-1]) or "download"
     tmpdir = tempfile.mkdtemp()
-    out = pathlib.Path(tmpdir) / (safe + ".torrent")
+    out = Path(tmpdir) / (safe + ".torrent")
     cmd = ["mktorrent", "-a", ann, "-o", str(out)]
     if req.private:
         cmd.append("-p")
@@ -154,6 +157,7 @@ def main():
         print("✓ הנקודה כבר קיימת. לא שונה כלום.")
         return
     for tok in ("import httpx", "import hmac", "import subprocess",
+                "from pathlib import Path",
                 "from pydantic import BaseModel", "Optional"):
         if tok not in src:
             _fail(f"main.py חסר {tok} — הקובץ לא מה שציפינו לו.")
