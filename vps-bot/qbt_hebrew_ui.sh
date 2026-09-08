@@ -99,6 +99,9 @@ cat > "$UI_DIR/index.html" <<'HTML'
   .x { background:none; color:var(--dim); font-size:20px; padding:4px 8px; }
   .dl { color:var(--ok); font-size:13px; font-weight:600; text-decoration:none;
         white-space:nowrap; padding:4px 8px; }
+  .mk { background:none; color:var(--pink); border:1px solid var(--pink);
+        font-size:12px; font-weight:600; padding:4px 10px; border-radius:8px;
+        white-space:nowrap; cursor:pointer; }
   .empty { color:var(--dim); text-align:center; padding:28px 0; }
   .sum { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; }
   .sum div { font-size:13px; color:var(--dim); }
@@ -267,6 +270,8 @@ async function refresh() {
     return;
   }
   list.sort((a, b) => b.added_on - a.added_on);
+  window._byHash = {};
+  list.forEach(t => { window._byHash[t.hash] = t; });
   box.innerHTML = list.map(t => {
     const pct = Math.round(t.progress * 100);
     const done = pct >= 100;
@@ -277,10 +282,14 @@ async function refresh() {
     const dl = done
       ? `<a class="dl" href="/files/${encodeURIComponent(t.name)}">⬇ הורדה</a>`
       : '';
+    // יצירת .torrent לתוכן שהמשתמש מחזיק בזכויות עליו — רק אחרי שהושלם.
+    const mk = done
+      ? `<button class="mk" onclick="makeTorrent('${t.hash}')">✚ צור טורנט</button>`
+      : '';
     return `<div class="t">
       <div class="row">
         <div class="name" style="flex:1">${esc(t.name)}</div>
-        ${dl}
+        ${mk}${dl}
         <button class="x" onclick="del('${t.hash}')" title="הסרה">✕</button>
       </div>
       <div class="bar"><div class="fill ${done ? 'done' : ''}" style="width:${pct}%"></div></div>
@@ -312,6 +321,35 @@ async function del(hash) {
   const b = new URLSearchParams({hashes: hash, deleteFiles: 'true'});
   await fetch(API + '/torrents/delete', {method: 'POST', body: b});
   refresh();
+}
+
+// יצירת .torrent מהקובץ שכבר על השרת. השרת מריץ mktorrent ומחזיר את הקובץ
+// להורדה. אחר כך מעלים אותו לטרקר ומוסיפים אותו כאן בחזרה — הזריעה נשארת
+// מהשרת. לתוכן שאתה מחזיק בזכויות עליו בלבד.
+async function makeTorrent(hash) {
+  const t = (window._byHash || {})[hash];
+  if (!t) return;
+  const ann = prompt('הדבק את ה-announce URL של הטרקר (מדף ההעלאה שלך).\n\nהכתובת נשלחת ישירות לשרת שלך בלבד:');
+  if (!ann || !ann.trim()) return;
+  show('יוצר טורנט… כמה שניות', true);
+  try {
+    const r = await fetch('/maketorrent', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: t.name, announce: ann.trim(), private: true})
+    });
+    if (!r.ok) {
+      let d = {}; try { d = await r.json(); } catch (e) {}
+      return show(d.detail || ('שגיאה ' + r.status));
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = t.name.replace(/[^\w.-]+/g, '_') + '.torrent';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    show('הטורנט נוצר והורד. העלה אותו לטרקר, ואז הוסף אותו כאן בחזרה כדי לזרוע מהשרת.', true);
+  } catch (e) { show('היצירה נכשלה: ' + e.message); }
 }
 </script>
 </body>
