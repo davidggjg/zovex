@@ -107,8 +107,13 @@ def _extract_drive_link(text: str):
 
 
 def _blocking_drive_download(url: str, outdir: str):
-    import gdown
-    return gdown.download(url, output=outdir + "/", fuzzy=True, quiet=True)
+    import re as _re, gdown
+    # מחלצים את מזהה הקובץ מכל צורה נפוצה של קישור Drive ומשתמשים ב-uc?id=,
+    # במקום פרמטר שלא קיים בכל גרסת gdown. gdown מטפל באישור של קבצים גדולים.
+    m = (_re.search(r"/d/([A-Za-z0-9_-]{20,})", url)
+         or _re.search(r"[?&]id=([A-Za-z0-9_-]{20,})", url))
+    src = f"https://drive.google.com/uc?id={m.group(1)}" if m else url
+    return gdown.download(src, output=outdir + "/", quiet=True)
 
 
 async def _handle_drive_upload(client, message, uid, text):
