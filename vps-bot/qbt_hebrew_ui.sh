@@ -333,7 +333,7 @@ async function makeTorrent(hash) {
   if (!ann || !ann.trim()) return;
   show('יוצר טורנט… כמה שניות', true);
   try {
-    const r = await fetch('/maketorrent', {
+    const r = await fetch('/api/maketorrent', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: t.name, announce: ann.trim(), private: true})
     });

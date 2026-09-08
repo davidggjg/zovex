@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-מוסיף ל-main.py נקודת קצה POST /maketorrent — יוצרת קובץ .torrent מפריט
+מוסיף ל-main.py נקודת קצה POST /api/maketorrent — יוצרת קובץ .torrent מפריט
 שכבר הושלם בשרת, ומחזירה אותו להורדה.
 
 ## למה
@@ -30,7 +30,7 @@ import argparse, datetime, glob, os, pathlib, shutil, sys
 TARGET = pathlib.Path(os.environ.get("MAIN_PY", "/opt/zovex-bot/main.py"))
 
 ANCHOR = '@api.get("/content/relink")'
-MARK = '@api.post("/maketorrent")'
+MARK = '@api.post("/api/maketorrent")'
 
 BLOCK = '''# ── יצירת קובץ .torrent מפריט שכבר על השרת (mktorrent) ────────────────────────
 # qBittorrent 4.4.1 לא חושף API ליצירת טורנט. לתוכן שהמשתמש מחזיק בזכויות עליו.
@@ -75,7 +75,7 @@ class MakeTorrentReq(BaseModel):
     password: Optional[str] = None
 
 
-@api.post("/maketorrent")
+@api.post("/api/maketorrent")
 async def make_torrent(req: MakeTorrentReq, request: Request):
     """יוצר .torrent מפריט שהושלם ב-DL_ROOT/complete ומחזיר אותו להורדה.
     הזריעה נשארת מהשרת: מוסיפים את ה-.torrent חזרה ל-qBittorrent על אותו קובץ."""
