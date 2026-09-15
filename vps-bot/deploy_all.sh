@@ -20,7 +20,8 @@ DRY=0; [ "${1:-}" = "--check" ] && DRY=1
 
 # קריטי = כישלון שלו עוצר הכל.  רשות = מדלגים עליו בשקט אם אינו מתאים.
 CRITICAL=(fix_pool_session_leak.py fix_add_favorites.py fix_add_trailers.py fix_content_lang.py)
-OPTIONAL=(fix_panel_series_category.py fix_drive_gdown.py fix_drive_progress.py)
+CRITICAL+=(fix_manual_trailer.py)
+OPTIONAL=(fix_panel_series_category.py fix_panel_trailer.py fix_drive_gdown.py fix_drive_progress.py)
 
 echo "════════ 1/5 · מוריד את הסקריפטים ════════"
 for f in "${CRITICAL[@]}" "${OPTIONAL[@]}"; do
@@ -81,6 +82,7 @@ chk "גרסת אפליקציה"  "http://127.0.0.1:8000/app/version"      200
 chk "קטלוג מקוצר"    "http://127.0.0.1:8000/content/lite?limit=5" 200
 # 422 ולא 404: הנתיב קיים ורק חסרה כותרת המשתמש. 404 = הפאץ' לא נכנס.
 chk "מועדפים"        "http://127.0.0.1:8000/api/favorites"    422
+chk "רשימת חסרי טריילר" "http://127.0.0.1:8000/panel/no-trailer" 403
 ITEM=$(curl -s -m 15 "http://127.0.0.1:8000/content/lite?limit=1" | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])" 2>/dev/null)
 [ -n "$ITEM" ] && chk "טריילר" "http://127.0.0.1:8000/content/trailer/$ITEM" 200
 [ -n "$ITEM" ] && chk "פריט באנגלית" "http://127.0.0.1:8000/content/item/$ITEM?lang=en" 200
