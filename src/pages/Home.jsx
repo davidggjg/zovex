@@ -12,6 +12,7 @@ import AdBanner from "@/components/home/AdBanner.jsx";
 import AdminLoginScreen from "@/components/home/AdminLoginScreen.jsx";
 import DonationModalView from "@/components/home/DonationModalView.jsx";
 import { useWatchHistory } from "@/components/home/useWatchHistory";
+import { useFavorites } from "@/components/home/useFavorites";
 import { useApiKeyEndpoint } from "@/components/home/useApiKeyEndpoint";
 import { useSlugRouting } from "@/components/home/useSlugRouting";
 import { usePlayback } from "@/components/home/usePlayback";
@@ -43,6 +44,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   const navigate = useNavigate();
 
   const { history, saveProgress, loadProgress, saveHistory, refreshHistory } = useWatchHistory(user);
+  const { isFavorite, toggleFavorite } = useFavorites(user);
 
   // ── API endpoint: /zovex/api?key=XXX ──
   const apiMode = slug === "api";
@@ -302,6 +304,8 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
       onPlay={() => openWithKalturaRefresh(selectedMovie)}
       onClose={() => { setSelectedMovie(null); window.history.replaceState(null, "", "/zovex/"); }}
       onSelectMovie={setSelectedMovie}
+      isFavorite={isFavorite(selectedMovie.id)}
+      onToggleFavorite={user?.id ? toggleFavorite : null}
     />
   );
 

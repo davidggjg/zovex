@@ -1,4 +1,4 @@
-import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2, SkipForward } from "lucide-react";
+import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2, SkipForward, Settings} from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
 
 // ──────────────────────────────────────────────────────────────
@@ -457,6 +457,18 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
     } catch {}
   };
 
+  // ── מהירות הפעלה ──────────────────────────────────────────────────────
+  // מוחלת ישירות על אלמנט הווידאו. נשמרת ב-state כדי שהחלון יסמן את
+  // הנבחרת, ומוחלת מחדש כש-videoReady משתנה — מעבר לפרק הבא יוצר אלמנט
+  // חדש שה-playbackRate שלו מתאפס לאחד.
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+  const [rate, setRate] = useState(1);
+  const [rateOpen, setRateOpen] = useState(false);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) { try { v.playbackRate = rate; } catch {} }
+  }, [rate, videoRef, videoReady]);
+
   const progress = duration ? (currentTime / duration) * 100 : 0;
 
   return (
@@ -505,7 +517,38 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
             </span>
           )}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, position: "relative" }}>
+          {!isLive && (
+            <button onClick={() => setRateOpen(o => !o)} style={iconBtn} title="מהירות הפעלה">
+              <Settings size={19} />
+              {rate !== 1 && (
+                <span style={{ position: "absolute", bottom: 1, left: "50%", transform: "translateX(-50%)",
+                               fontSize: 9, fontWeight: 800, color: "#8db4ff", letterSpacing: -0.3 }}>
+                  {rate}x
+                </span>
+              )}
+            </button>
+          )}
+          {rateOpen && !isLive && (
+            <div style={{ position: "absolute", bottom: 50, right: 0, zIndex: 60, minWidth: 170,
+                          background: "rgba(22,24,30,0.97)", borderRadius: 14, padding: "10px 8px",
+                          boxShadow: "0 10px 30px rgba(0,0,0,.5)", direction: "rtl" }}>
+              <div style={{ color: "#9aa0a6", fontSize: 12, padding: "2px 10px 8px", textAlign: "right" }}>
+                מהירות הפעלה
+              </div>
+              {RATES.map(r => (
+                <div key={r} onClick={() => { setRate(r); setRateOpen(false); }}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                           gap: 10, padding: "9px 12px", borderRadius: 9, cursor: "pointer",
+                           fontSize: 15, color: r === rate ? "#8db4ff" : "#e8eaed",
+                           fontWeight: r === rate ? 700 : 400,
+                           background: r === rate ? "rgba(47,109,246,.22)" : "transparent" }}>
+                  <span>{r === 1 ? "רגיל" : r + "x"}</span>
+                  <span>{r === rate ? "✓" : ""}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {pipSupported && (
             <button onClick={goPip} style={iconBtn} title="Picture in Picture">
               <PictureInPicture2 size={19} />

@@ -1,4 +1,7 @@
-import { ArrowRight, Play } from "lucide-react";
+import { useState } from "react";
+import { ArrowRight, Play, Heart, X } from "lucide-react";
+import { useTrailer } from "./home/useFavorites";
+import { t } from "../i18n";
 
 // מזהה "שם בסיס" של סרט כדי לאתר סרטי המשך - מסיר מספר עוקב בסוף השם, כולל
 // כשהוא מגיע אחרי מילת חיבור כמו "חלק"/"פרק"/"Part" (לדוגמה "המדרון 1" ו"המדרון
@@ -8,7 +11,12 @@ function baseTitle(title) {
 }
 
 // מסך הפרטים של סרט בודד — פוסטר, תיאור, כפתור צפייה וסרטי המשך
-export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMovie }) {
+export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMovie,
+                                     isFavorite, onToggleFavorite }) {
+  // הטריילר מחליף את הפוסטר כשיש. הפוסטר נשאר ברירת המחדל ולא מוחלף עד
+  // שהמפתח חוזר בפועל — פריט בלי טריילר נראה בדיוק כמו קודם, בלי הבהוב.
+  const trailerKey = useTrailer(movie);
+  const [trailerOff, setTrailerOff] = useState(false);
   const baseName = baseTitle(movie.title);
   // חלק מסרטי ההמשך לא נקראים "שם 2" (למשל "ראלף ההורס" -> "ראלף שובר את
   // האינטרנט") - אז אי אפשר לזהות אותם לפי מספר בסוף השם. במקרים כאלה
@@ -25,7 +33,26 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
         <ArrowRight size={22} />
       </button>
       <div style={{ position: "relative" }}>
-        {movie.thumbnail_url && <img src={movie.thumbnail_url} alt="" style={{ width: "100%", height: "55vw", maxHeight: 380, objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />}
+        {trailerKey && !trailerOff ? (
+          <div style={{ position: "relative", width: "100%", height: "55vw", maxHeight: 380, background: "#000" }}>
+            <iframe
+              src={`https://www.youtube.com/embed/${trailerKey}?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1`}
+              title={t("detail.trailer")}
+              allow="autoplay; encrypted-media; picture-in-picture"
+              allowFullScreen
+              style={{ width: "100%", height: "100%", border: "none", display: "block" }}
+            />
+            <button onClick={() => setTrailerOff(true)}
+              title={t("common.close")}
+              style={{ position: "absolute", top: 8, left: 8, width: 30, height: 30, borderRadius: 15,
+                       background: "rgba(0,0,0,.55)", border: "none", color: "#fff", cursor: "pointer",
+                       display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <X size={15} />
+            </button>
+          </div>
+        ) : movie.thumbnail_url ? (
+          <img src={movie.thumbnail_url} alt="" style={{ width: "100%", height: "55vw", maxHeight: 380, objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
+        ) : null}
         <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 130, background: "linear-gradient(transparent,#111)" }} />
       </div>
       <div style={{ padding: 20 }}>
@@ -35,9 +62,22 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
           {movie.year && <span style={{ background: "#222", color: "#888", padding: "4px 12px", borderRadius: 20, fontSize: 12 }}>{movie.year}</span>}
         </div>
         {movie.description && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסרט 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#bbb", margin: 0 }}>{movie.description}</p></div>}
-        <button onClick={onPlay} style={{ width: "100%", background: "#e50914", color: "#fff", border: "none", padding: 16, fontSize: 17, fontWeight: "bold", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer" }}>
-          <Play fill="white" size={20} /> לצפייה עכשיו
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={onPlay} style={{ flex: 1, background: "#e50914", color: "#fff", border: "none", padding: 16, fontSize: 17, fontWeight: "bold", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer" }}>
+            <Play fill="white" size={20} /> לצפייה עכשיו
+          </button>
+          {onToggleFavorite && (
+            <button onClick={() => onToggleFavorite(movie)}
+              title={isFavorite ? "הסר מהמועדפים" : "הוסף למועדפים"}
+              style={{ width: 58, borderRadius: 12, cursor: "pointer",
+                       border: "1px solid rgba(255,255,255,.12)",
+                       background: isFavorite ? "rgba(229,9,20,.18)" : "rgba(255,255,255,.06)",
+                       color: isFavorite ? "#ff4d5e" : "#e8eaed",
+                       display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Heart size={22} fill={isFavorite ? "#ff4d5e" : "none"} />
+            </button>
+          )}
+        </div>
         {sequels.length > 0 && (
           <div style={{ marginTop: 24 }}>
             <div style={{ fontSize: 14, fontWeight: 900, color: "#fff", marginBottom: 12 }}>סרטי המשך</div>
