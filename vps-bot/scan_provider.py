@@ -111,7 +111,8 @@ def main() -> None:
     ap.add_argument("--from", dest="lo", type=int, default=1)
     ap.add_argument("--to", dest="hi", type=int, default=400)
     ap.add_argument("--workers", type=int, default=3)
-    ap.add_argument("--filter", default="", help="הצג רק ערוצים ששמם מכיל")
+    ap.add_argument("--filter", default="",
+                    help="הצג רק ערוצים ששמם מכיל (לא תלוי רישיות)")
     ap.add_argument("--fast", action="store_true",
                     help="רק מי עונה, בלי זיהוי שם (מהיר בהרבה)")
     ap.add_argument("--out", default="", help="שמור את התוצאה כ-JSON")
@@ -148,7 +149,9 @@ def main() -> None:
 
     def show(rows, title):
         if a.filter:
-            rows = [r for r in rows if a.filter in (r.get("name") or "")]
+            # לא תלוי רישיות: שם הערוץ במטא-דאטה יכול להיות SPORT או Sport
+            f = a.filter.lower()
+            rows = [r for r in rows if f in (r.get("name") or "").lower()]
         print(f"\n{title}: {len(rows)}")
         for r in rows:
             nm = r.get("name") or "(בלי שם במטא-דאטה)"
