@@ -21,9 +21,10 @@ vod_watch — מדמה צופים אמיתיים בסרטים/סדרות ותו�
     python3 vod_watch.py --minutes 5 --streams 2 --bitrate 2.5
     python3 vod_watch.py --minutes 40 --streams 3 --public     # דרך הכתובת הציבורית
 """
-import argparse, json, random, re, signal, sys, threading, time
+import argparse, json, os, random, re, signal, sys, threading, time
 import urllib.request, urllib.error
 from urllib.parse import urlsplit, urlunsplit
+from concurrent.futures import ThreadPoolExecutor
 
 STOP = threading.Event()
 
@@ -176,6 +177,85 @@ class Watch:
                 self.note_error("קפיצה: " + _classify(e))
 
 
+def probe_size(url, timeout=25):
+    """גודל הקובץ, בבקשת Range זעירה (בייט אחד). לא מוריד את הקובץ."""
+    req = urllib.request.Request(url, headers={"User-Agent": "zovex-vodwatch/1",
+                                               "Range": "bytes=0-0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        cr = r.headers.get("Content-Range", "")
+        r.read(8)
+        m = re.search(r"/(\d+)$", cr)
+        if m:
+            return int(m.group(1))
+        cl = r.headers.get("Content-Length")
+        return int(cl) if cl and not cr else None
+
+
+def find_heaviest(catalog, origin, want, scan, cache_path, workers=3):
+    """מוצא את הכותרים הכבדים ביותר.
+
+    הקטלוג לא מחזיק גודל, אז צריך למדוד. שני צמצומים שומרים על זה זול:
+    בודקים רק סרטים (פרק של סדרה לעולם לא יהיה הקובץ הכי כבד), ושומרים
+    את מה שנמדד לקובץ מטמון, כך שהרצה חוזרת כמעט לא עולה כלום.
+    המקביליות נמוכה בכוונה — כל בדיקה נוגעת בפול של טלגרם, ובדיקה
+    שמציפה את השרת מייצרת בדיוק את התקלה שהיא אמורה למדוד.
+    """
+    try:
+        cache = json.load(open(cache_path, encoding="utf-8"))
+    except Exception:
+        cache = {}
+
+    movies = [m for m in catalog
+              if not m.get("is_live") and not m.get("series_name")
+              and "/stream/" in str(m.get("video_url") or "")]
+    print(f"{len(movies)} סרטים בקטלוג. {len(cache)} גדלים כבר במטמון.")
+
+    todo = [m for m in movies if str(m.get("id")) not in cache]
+    random.shuffle(todo)
+    if scan > 0:
+        todo = todo[:scan]
+    if todo:
+        print(f"מודד גודל של {len(todo)} סרטים (בקשה של בייט אחד לכל אחד)...")
+
+    lock = threading.Lock()
+    done = [0]
+
+    def one(m):
+        mid = str(m.get("id"))
+        url = rewrite_origin((m.get("video_url") or "").strip(), origin)
+        try:
+            sz = probe_size(url)
+        except Exception:
+            sz = None
+        with lock:
+            cache[mid] = sz
+            done[0] += 1
+            if done[0] % 25 == 0:
+                print(f"   ... {done[0]}/{len(todo)}", flush=True)
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(one, todo))
+        try:
+            json.dump(cache, open(cache_path, "w"), ensure_ascii=False)
+        except Exception:
+            pass
+
+    ranked = []
+    for m in movies:
+        sz = cache.get(str(m.get("id")))
+        if sz:
+            ranked.append((sz, str(m.get("title") or "?"),
+                           rewrite_origin((m.get("video_url") or "").strip(), origin)))
+    ranked.sort(reverse=True)
+    if not ranked:
+        return []
+    print("\nהכבדים ביותר שנמצאו:")
+    for sz, t, _ in ranked[:10]:
+        print(f"   {human(sz):>9}   {t}")
+    return [(t, u, sz) for sz, t, u in ranked[:want]]
+
+
 def pick_items(catalog, n, origin, seed):
     """בוחר כותרים עם קישור /stream ישיר. מדלג על חי ועל מוטמעים (יוטיוב וכו')."""
     cands = []
@@ -209,6 +289,12 @@ def main():
                     help="כמה שניות של באפר ריק נחשבות תקיעה")
     ap.add_argument("--public", action="store_true",
                     help="לבדוק דרך הכתובת הציבורית במקום 127.0.0.1")
+    ap.add_argument("--heaviest", action="store_true",
+                    help="לבחור את הסרטים הכבדים ביותר במקום אקראיים")
+    ap.add_argument("--scan", type=int, default=250,
+                    help="כמה סרטים למדוד בחיפוש הכבדים (0 = כולם)")
+    ap.add_argument("--assume-minutes", type=float, default=120,
+                    help="אורך משוער של סרט, לגזירת קצב הווידאו מהגודל")
     ap.add_argument("--seed", type=int, default=0, help="0 = אקראי בכל הרצה")
     ap.add_argument("--out", default="vod_watch_report.json")
     a = ap.parse_args()
@@ -221,22 +307,35 @@ def main():
         catalog = json.loads(r.read().decode("utf-8", "replace"))
 
     seed = a.seed or random.randrange(1 << 30)
-    items = pick_items(catalog, a.streams, origin, seed)
+    if a.heaviest:
+        cache_path = os.path.join(os.path.dirname(os.path.abspath(a.out)),
+                                  "vod_sizes.json")
+        chosen = find_heaviest(catalog, origin, a.streams, a.scan, cache_path)
+        if not chosen:
+            print("לא הצלחתי למדוד גודל של אף סרט."); sys.exit(1)
+        # קצב הווידאו נגזר מהגודל: קובץ של 4 ג'יגה לשעתיים הוא ~4.7 מגהביט,
+        # ולנגן אותו ב-3 זה לא לבדוק אותו. מוגבל לטווח שפוי.
+        items = []
+        for t, u, sz in chosen:
+            br = (sz * 8) / (a.assume_minutes * 60) / 1e6
+            items.append((t, u, max(1.0, min(15.0, br))))
+    else:
+        items = [(t, u, a.bitrate) for t, u in
+                 pick_items(catalog, a.streams, origin, seed)]
     if not items:
         print("לא נמצאו כותרים עם קישור /stream ישיר."); sys.exit(1)
 
-    bps = a.bitrate * 1_000_000 / 8
-    est = bps * a.streams * a.minutes * 60
+    est = sum(br * 1e6 / 8 for _, _, br in items) * a.minutes * 60
     print(f"\nזרע אקראי: {seed}   (--seed {seed} כדי לחזור על אותם כותרים)")
-    print(f"{len(items)} צופים מדומים · {a.minutes:g} דקות · {a.bitrate:g} מגהביט כל אחד")
+    print(f"{len(items)} צופים מדומים · {a.minutes:g} דקות")
     print(f"תעבורה צפויה: ~{human(est)} סה\"כ"
           + ("  (פנימית, לא יוצאת החוצה)" if not a.public else "  (יוצאת החוצה!)"))
-    for t, _ in items:
-        print(f"   • {t}")
+    for t, _, br in items:
+        print(f"   • {t}   ({br:.1f} מגהביט)")
     print()
 
-    watches = [Watch(t, u, bps, a.buffer, a.stall_after, a.prebuffer)
-               for t, u in items]
+    watches = [Watch(t, u, br * 1e6 / 8, a.buffer, a.stall_after, a.prebuffer)
+               for t, u, br in items]
     deadline = time.monotonic() + a.minutes * 60
 
     def on_sig(*_):
