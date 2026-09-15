@@ -308,8 +308,11 @@ def main():
 
     seed = a.seed or random.randrange(1 << 30)
     if a.heaviest:
-        cache_path = os.path.join(os.path.dirname(os.path.abspath(a.out)),
-                                  "vod_sizes.json")
+        # מטמון הגדלים יושב ליד הסקריפט, ולא ליד קובץ הדוח. קודם הוא נגזר
+        # מ---out, כך ש-"--out /tmp/x.json" לא מצא מטמון שנבנה בהרצה קודמת
+        # והתחיל למדוד 909 סרטים מחדש — רבע שעה על לא כלום.
+        cache_path = os.environ.get("VOD_SIZES_CACHE") or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "vod_sizes.json")
         chosen = find_heaviest(catalog, origin, a.streams, a.scan, cache_path)
         if not chosen:
             print("לא הצלחתי למדוד גודל של אף סרט."); sys.exit(1)
