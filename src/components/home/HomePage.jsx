@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { t, getLanguage, setLanguage } from '../../i18n';
 import { Search, Send, Eye, ChevronDown, X, Download } from "lucide-react";
 import { SPIN, ls, lsSet } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
@@ -48,9 +49,23 @@ export default function HomePage({
             style={{ color: "#e50914", fontSize: 26, fontWeight: 900, letterSpacing: 4, margin: 0, flexShrink: 0, cursor: "pointer" }}>ZOVEX</h1>
           <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", padding: "10px 15px", borderRadius: 50 }}>
             <Search size={16} color="#888" />
-            <input type="text" placeholder="חפש סרט או סדרה..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} style={{ background: "none", border: "none", outline: "none", width: "100%", fontSize: 15, color: "#fff" }} />
+            <input type="text" placeholder={t("common.search")} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} style={{ background: "none", border: "none", outline: "none", width: "100%", fontSize: 15, color: "#fff" }} />
             {searchTerm && <span onClick={() => setSearchTerm("")} style={{ cursor: "pointer", color: "#888", fontSize: 18 }}>×</span>}
           </div>
+          {/* בורר שפה. כפתור אחד שמתחלף, ולא תפריט: יש שתי שפות בלבד,
+              ותפריט נפתח בשביל שתי אפשרויות הוא רעש. */}
+          <button
+            onClick={() => setLanguage(getLanguage() === "he" ? "en" : "he")}
+            title={t("common.language")}
+            style={{
+              flexShrink: 0, background: "rgba(255,255,255,0.055)",
+              border: "1px solid rgba(255,255,255,0.11)", color: "#e8eaed",
+              borderRadius: 50, padding: "9px 13px", fontSize: 13, fontWeight: 700,
+              cursor: "pointer", letterSpacing: 0.5,
+            }}>
+            {getLanguage() === "he" ? "EN" : "עב"}
+          </button>
+
           {/* אזור משתמש */}
           <div ref={userMenuRef} style={{ position: "relative", flexShrink: 0 }}>
             {user ? (
@@ -212,6 +227,27 @@ export default function HomePage({
         </button>
       </div>
       <SupportModal open={supportOpen} onClose={() => setSupportOpen(false)} user={user} loginWithGoogle={loginWithGoogle} />
+
+      {/* כותרת תחתונה. דפי המידע היו קיימים רק באפליקציה, ולאתר לא היה
+          אליהם אפילו קישור — כלומר המבקר הראשי לא יכול היה להגיע לתנאי
+          השימוש, למדיניות הפרטיות או לדרך להגיש בקשת הסרה. */}
+      <footer style={{
+        marginTop: 48, padding: "26px 16px 34px",
+        borderTop: "1px solid rgba(255,255,255,0.07)",
+        display: "flex", flexWrap: "wrap", gap: "10px 18px",
+        alignItems: "center", justifyContent: "center",
+      }}>
+        {[["about", "אודות", "About"],
+          ["terms", "תנאי שימוש", "Terms"],
+          ["privacy", "פרטיות", "Privacy"],
+          ["copyright", "זכויות יוצרים", "Copyright"]].map(([k, he, en]) => (
+          <a key={k} href={`${import.meta.env.BASE_URL}legal?doc=${k}`}
+            style={{ color: "#8a9096", fontSize: 13, textDecoration: "none" }}>
+            {getLanguage() === "he" ? he : en}
+          </a>
+        ))}
+        <span style={{ color: "#4a4f54", fontSize: 12 }}>© ZOVEX</span>
+      </footer>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import Home from './pages/Home';
+import Legal from './pages/Legal';
 
 export default function App() {
   // ה-basename נגזר מ-base של הבנייה: ב-GitHub Pages בונים עם base=/zovex/
@@ -9,6 +10,7 @@ export default function App() {
     <Router basename={import.meta.env.BASE_URL}>
       <Routes>
         <Route path="/" element={<Home />} />
+        <Route path="/legal" element={<Legal />} />
         <Route path="/:slug" element={<Home />} />
         <Route path="/:slug/:episode" element={<Home />} />
       </Routes>
