@@ -388,19 +388,29 @@ def main():
                 print(f"                    בדקה {at/60:.1f} — {d:.1f} שנ'")
             if len(w.stalls) > 6:
                 print(f"                    ... ועוד {len(w.stalls)-6}")
+        elif w.startup_s is None:
+            # בלי "אין תקיעות ✅" כאן: הניגון לא התחיל, ולכן גלאי התקיעות
+            # מעולם לא נדרך. דיווח "תקין" על זרם שלא זרם הוא שקר.
+            print("   תקיעות         — הניגון לא התחיל, אין מה למדוד")
         else:
             print("   תקיעות         אין ✅")
+        if got < need * 0.9:
+            print(f"   ⚠️  אספקה       {got*8/1e6:.2f} מתוך {need*8/1e6:.2f} מגהביט —"
+                  f" פי {need/max(got,1):.0f} איטי מהנדרש")
         if w.seek_ms:
             print(f"   קפיצה בזמן     {', '.join(str(x) for x in w.seek_ms)} מ\"ש")
         if w.errors:
             print("   שגיאות         " + ", ".join(f"{k}×{v}" for k, v in w.errors.items()))
         print(f"   סיום           {w.ended_reason}")
 
+    never = [w for w in watches if w.startup_s is None]
     bad = [w for w in watches if w.stalls or w.errors]
     print("\n" + "-" * 62)
+    if never:
+        print(f"🔴 {len(never)} מתוך {len(watches)} כותרים לא התחילו לנגן כלל.")
     if bad:
         print(f"⚠️  {len(bad)} מתוך {len(watches)} כותרים עם תקיעות או שגיאות.")
-    else:
+    if not bad and not never:
         print(f"✅ כל {len(watches)} הכותרים זרמו נקי, בלי תקיעה אחת.")
 
     json.dump({
