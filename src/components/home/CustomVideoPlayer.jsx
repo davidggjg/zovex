@@ -441,7 +441,18 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
         // Using documentElement or the video element directly can cause the
         // browser to show its native player instead of our custom overlay.
         const el = videoRef.current?.closest("[data-cvp]") || document.documentElement;
-        (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+        const req = el.requestFullscreen || el.webkitRequestFullscreen;
+        if (req) {
+          req.call(el);
+        } else if (v && typeof v.webkitEnterFullscreen === "function") {
+          // אייפון: ל-Safari באייפון אין Fullscreen API בכלל — requestFullscreen
+          // אינו קיים, וגם לא webkitRequestFullscreen (באייפד כן). הדרך היחידה
+          // היא webkitEnterFullscreen על אלמנט הווידאו עצמו, שפותח את הנגן
+          // המובנה של iOS. מאבדים את הפקדים שלנו ומקבלים את של אפל — אבל
+          // מקבלים מסך מלא, סיבוב מסך ו-AirPlay, במקום כפתור שלא עושה כלום.
+          try { v.webkitEnterFullscreen(); } catch {}
+          setIsFullscreen(false);   // המצב מנוהל ע"י iOS, לא על ידינו
+        }
       }
     }
   };
