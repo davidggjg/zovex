@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fix_sonic_boom.py — מסדר את פרקי "סוניק בום" לסדרה אחת מסודרת.
+organize_series.py — מסדר פרקים שהועלו לפי שם הקובץ לסדרה אחת מסודרת.
 
-הקבצים הועלו בשמות כמו:
+קבצים שמועלים לטלגרם נושאים שמות כמו:
     מ T.S סוניק בום ע1 פ2+1.mp4
-    מ T.S סוניק בום ע1 פ4+3.mp4
+    עתירון ע1 פ3.mp4
 
-כלומר כל קובץ מכיל *שני* פרקים, והמספרים כתובים **מהגבוה לנמוך**:
-"פ2+1" הוא פרקים 1 ו-2, לא 2 ו-1. מי שיקרא את המספר הראשון כפרק ההתחלה
-יקבל סדרה שמוצגת הפוך. לכן הסקריפט לוקח min/max ולא ראשון/שני.
+הסקריפט מוציא מהשם את מספר העונה והפרק, וקובע series_name אחיד כך
+שכל הפרקים מופיעים כסדרה אחת באתר ובאפליקציה.
 
-    python3 fix_sonic_boom.py --check                 # רק מראה, לא נוגע
-    python3 fix_sonic_boom.py --merge-from "אחד"      # ממזג סדרה קיימת
-    python3 fix_sonic_boom.py                         # מחיל
-    python3 fix_sonic_boom.py --revert
+שים לב לדבר אחד: "פ2+1" הוא פרקים 1 ו-2, לא 2 ו-1 — המספרים כתובים
+מהגבוה לנמוך. קריאה של המספר הראשון כפרק ההתחלה הייתה מציגה את
+הסדרה הפוך, ולכן נלקחים min/max ולא ראשון/שני.
+
+    python3 organize_series.py --series "עתירון" --check
+    python3 organize_series.py --series "עתירון"
+    python3 organize_series.py --series "סוניק בום" --merge-from "אחד"
+    python3 organize_series.py --series "עתירון" --revert
+
+--match הוא הטקסט שמחפשים בכותרת; אם לא נתון, מחפשים את --series עצמו.
 
 בסוף מעדכן content_version.txt — האתר והאפליקציה מרעננים לבד,
 בלי restart ובלי לנתק צופים.
@@ -25,9 +30,7 @@ from pathlib import Path
 DATA = Path(os.environ.get("ZOVEX_DATA", "/opt/zovex-bot/data"))
 CONTENT = DATA / "content.json"
 VERSION = DATA / "content_version.txt"
-BACKUP = CONTENT.with_name("content.json.bak_sonic")
-
-SERIES = "סוניק בום"
+BACKUP = CONTENT.with_name("content.json.bak_organize")
 
 # "סוניק בום ע1 פ2+1"  → עונה 1, פרקים 1-2
 # "סוניק בום ע1 פ7"    → עונה 1, פרק 7
@@ -65,11 +68,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--revert", action="store_true")
+    ap.add_argument("--series", required=True,
+                    help="שם הסדרה שייקבע לכל הפריטים")
     ap.add_argument("--merge-from", default="",
-                    help="שם סדרה קיימת שתמוזג לתוך 'סוניק בום'")
-    ap.add_argument("--match", default="סוניק בום",
-                    help="הטקסט שמזהה את הפריטים בכותרת")
+                    help="שם סדרה קיימת שתמוזג לתוך --series")
+    ap.add_argument("--match", default="",
+                    help="הטקסט שמזהה את הפריטים בכותרת (ברירת מחדל: --series)")
     a = ap.parse_args()
+    SERIES = a.series
+    match = a.match or a.series
 
     if a.revert:
         if not BACKUP.exists():
@@ -88,15 +95,15 @@ def main() -> None:
 
     # ── 1. מה קיים כרגע ───────────────────────────────────────────────
     hits = [i for i in items
-            if a.match in ((g(i, "title") or "") + " " + (g(i, "series_name") or ""))]
-    print(f"=== פריטים שמכילים {a.match!r}: {len(hits)} ===")
+            if match in ((g(i, "title") or "") + " " + (g(i, "series_name") or ""))]
+    print(f"=== פריטים שמכילים {match!r}: {len(hits)} ===")
     for i in hits:
         print(f"  [{str(i.get('id'))[:8]}] series={g(i,'series_name')!r} "
               f"ע{i.get('season_number')} פ{i.get('episode_number')}"
               f"-{i.get('episode_number_end')} | {(g(i,'title') or '')[:60]}")
     if not hits:
         print("  (אין. ייתכן שההעלאה עוד לא הסתיימה, או שהשם בכותרת שונה.)")
-        print(f"  נסה:  python3 {Path(__file__).name} --check --match 'סוניק'")
+        print(f"  נסה עם --match קצר יותר, למשל חצי מהשם.")
 
     merged = []
     if a.merge_from:
