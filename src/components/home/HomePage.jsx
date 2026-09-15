@@ -143,8 +143,12 @@ export default function HomePage({
             )}
           </div>
         </div>
+        {/* התג latest במפורש, ולא /releases/latest/ — גיטהאב מחשב "latest"
+            לפי תאריך הפרסום ולא לפי שם התג, ולכן כל שחרור חדש חוטף את
+            הקישור. זה בדיוק מה שקרה: שחרור בדיקה בשם Tv הפך לחדש יותר,
+            ולא היה בו APK, וכפתור ההורדה החזיר 404 לכל מי שלחץ. */}
         <a
-          href="https://github.com/davidggjg/zovex-android/releases/latest/download/zovex.apk"
+          href="https://github.com/davidggjg/zovex-android/releases/download/latest/zovex.apk"
           download
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
