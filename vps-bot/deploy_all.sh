@@ -35,25 +35,41 @@ done
 
 echo
 echo "════════ 2/5 · בדיקה יבשה ════════"
-FAILED=0; APPLY=()
+# APPLY = מה שנחיל בהרצה הזו.  ALREADY = מה שכבר מוחל מקודם.
+# ההפרדה קריטית: --revert של פאץ' משחזר גיבוי מלפניו, כלומר מוחק גם את כל
+# מה שהוחל אחריו. החזרה על פאץ' שלא נגענו בו בהרצה הזו מוחקת עבודה של
+# פריסות קודמות — וזה בדיוק מה שקרה ב-15.09: הרצה שנייה שנכשלה באימות
+# החזירה פאצ'ים שכבר היו מוחלים, ומחקה את כל הפריסה.
+FAILED=0; APPLY=(); ALREADY=()
+classify() {   # $1=קובץ  $2="קריטי"|"רשות"
+  local f="$1" kind="$2" out
+  if out=$(python3 "$f" --check 2>&1); then
+    if echo "$out" | grep -q "כבר"; then
+      echo "  ● $f — כבר מוחל, לא ניגע"; ALREADY+=("$f")
+    else
+      echo "  ✓ $f"; APPLY+=("$f")
+    fi
+  else
+    if [ "$kind" = "קריטי" ]; then echo "  ✗ $f — $out"; FAILED=1
+    else echo "  ⊘ $f — מדולג: $(echo "$out" | head -1)"; fi
+  fi
+}
 for f in "${CRITICAL[@]}"; do
   [ -f "$f" ] || { echo "  ✗ $f חסר (קריטי)"; FAILED=1; continue; }
-  if out=$(python3 "$f" --check 2>&1); then
-    echo "  ✓ $f"; APPLY+=("$f")
-  else
-    echo "  ✗ $f — $out"; FAILED=1
-  fi
+  classify "$f" "קריטי"
 done
 for f in "${OPTIONAL[@]}"; do
   [ -f "$f" ] || continue
-  if out=$(python3 "$f" --check 2>&1); then
-    echo "  ✓ $f (רשות)"; APPLY+=("$f")
-  else
-    echo "  ⊘ $f — מדולג: $(echo "$out" | head -1)"
-  fi
+  classify "$f" "רשות"
 done
 [ "$FAILED" -eq 1 ] && { echo; echo "❌ פאץ' קריטי לא עבר. לא שונה כלום."; exit 1; }
+
+echo
+echo "  להחלה עכשיו: ${#APPLY[@]}   ·   כבר מוחלים: ${#ALREADY[@]}"
 [ "$DRY" -eq 1 ] && { echo; echo "✓ הכל עבר בדיקה יבשה. לא שונה כלום (--check)."; exit 0; }
+if [ ${#APPLY[@]} -eq 0 ]; then
+  echo; echo "✓ הכל כבר מוחל. אין מה לעשות."; exit 0
+fi
 
 echo
 echo "════════ 3/5 · מחיל ════════"
@@ -107,9 +123,15 @@ else
   echo "════════════════════════════════════════"
   echo "🔴 האימות נכשל — מחזיר הכל אחורה"
   echo "════════════════════════════════════════"
-  for ((i=${#APPLY[@]}-1; i>=0; i--)); do
-    python3 "${APPLY[$i]}" --revert 2>&1 | head -1
-  done
+  if [ ${#APPLY[@]} -eq 0 ]; then
+    echo "לא הוחל דבר בהרצה הזו — אין מה להחזיר. הכישלון קדם לפריסה."
+  else
+    # רק מה שהוחל *כאן*. ALREADY לא נוגעים בו: החזרה שלו הייתה מוחקת
+    # פריסות קודמות שלא קשורות לכישלון הנוכחי.
+    for ((i=${#APPLY[@]}-1; i>=0; i--)); do
+      python3 "${APPLY[$i]}" --revert 2>&1 | head -1
+    done
+  fi
   systemctl restart zovex-bot
   sleep 10
   c=$(curl -s -o /dev/null -m 10 -w "%{http_code}" http://127.0.0.1:8000/content/version)
