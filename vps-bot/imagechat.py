@@ -347,8 +347,17 @@ def main() -> None:
             "  export CF_ACCOUNT=...\n  export CF_TOKEN=...\n  export IMG_PASS=...")
     OUTDIR.mkdir(parents=True, exist_ok=True)
     print(f"חשבון {ACCOUNT[:8]}… · טוקן {TOKEN[:9]}… · תמונות ב-{OUTDIR}")
+    try:
+        srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
+    except OSError as e:
+        if e.errno == 98:
+            raise SystemExit(
+                f"פורט {PORT} כבר תפוס. מי מחזיק אותו:\n"
+                f"   ss -lptn | grep {PORT}\n"
+                f"בחר פורט אחר:  IMG_PORT=8099 python3 {Path(__file__).name}")
+        raise SystemExit(f"לא ניתן להאזין על פורט {PORT}: {e}")
     print(f"מאזין על פורט {PORT}\n")
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    srv.serve_forever()
 
 
 if __name__ == "__main__":
