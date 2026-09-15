@@ -99,6 +99,30 @@ print("  ✓ לא נמצא שום סוד" if not hits else f"  ✓ {hits} ערכ
 PY
 
 echo
+echo "════ 3.5/5 · אורז זיפ ════"
+# נבנה *אחרי* סריקת הסודות, כדי שהארכיון יכיל את הגרסה המנוקה ולא את המקור.
+# zipfile של פייתון ולא הפקודה zip — היא לא תמיד מותקנת.
+python3 - "$DST" <<'PYZIP'
+import os, sys, zipfile, datetime
+root = sys.argv[1]; fdir = os.path.join(root, "files")
+out = os.path.join(root, "zovex-code.zip")
+files = sorted(os.listdir(fdir))
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    for f in files:
+        z.write(os.path.join(fdir, f), f"zovex-code/{f}")
+    z.writestr("zovex-code/README.txt",
+        "ZOVEX — קוד השרת\n"
+        f"נוצר: {datetime.datetime.now():%d/%m/%Y %H:%M}\n"
+        f"{len(files)} קבצים\n\n"
+        "זהו הקוד שרץ בפועל על השרת, ולא מה שנמצא במאגר —\n"
+        "main.py ו-admin.html מתעדכנים דרך סקריפטי פאץ' שרצים בשרת.\n\n"
+        "טוקנים, סיסמאות וקבצי session אינם כאן: הם מוחרגים באיסוף,\n"
+        "וכל ערך שנראה כמו מפתח הוסתר אוטומטית.\n")
+mb = os.path.getsize(out) / 1048576
+print(f"  ✓ {len(files)} קבצים · {mb:.1f} MB")
+PYZIP
+
+echo
 echo "════ 4/5 · בונה דפים ════"
 python3 - "$DST" <<'PY'
 import html, os, sys
@@ -124,6 +148,11 @@ pre{background:#0b0d12;border:1px solid #252a34;border-radius:10px;padding:16px;
 .bar{display:flex;gap:14px;align-items:baseline;margin-bottom:14px;flex-wrap:wrap}
 .note{background:#1a1420;border:1px solid #3a2a44;border-radius:10px;padding:12px 15px;
  font-size:13.5px;color:#d8c8e4;margin-bottom:20px}
+.dl{display:inline-flex;align-items:center;gap:9px;background:#2f6df6;color:#fff;
+ padding:12px 20px;border-radius:10px;font-size:15px;font-weight:600;
+ margin-bottom:22px}
+.dl:hover{background:#4680ff;text-decoration:none}
+.dl small{opacity:.75;font-weight:400;font-size:13px}
 """
 def page(title, body):
     return ("<!doctype html><html lang=he dir=rtl><meta charset=utf-8>"
@@ -138,6 +167,8 @@ GROUPS = [
     ("כלים",          lambda f: True),
 ]
 files = sorted(os.listdir(fdir))
+zpath = os.path.join(root, "zovex-code.zip")
+zmb = os.path.getsize(zpath) / 1048576 if os.path.exists(zpath) else 0
 used, rows = set(), []
 for gname, pred in GROUPS:
     grp = [f for f in files if f not in used and pred(f)]
@@ -157,6 +188,8 @@ open(os.path.join(root, "index.html"), "w", encoding="utf-8").write(page(
     f"<p class=sub>{len(files)} קבצים · הקוד האמיתי שרץ על השרת ברגע זה</p>"
     "<div class=note>טוקנים, סיסמאות וקבצי session אינם כאן — הם מוחרגים "
     "בעת האיסוף, וכל ערך שנראה כמו מפתח מוסתר אוטומטית.</div>"
+    + (f"<a class=dl href='zovex-code.zip' download>⬇ הורדת הכל בזיפ"
+       f"<small>{len(files)} קבצים · {zmb:.1f} MB</small></a>" if zmb else "")
     + "".join(rows)))
 
 os.makedirs(os.path.join(root, "v"), exist_ok=True)
@@ -190,6 +223,17 @@ location /code/ {
 
 # הקבצים הגולמיים מוגשים תמיד כטקסט. בלי זה admin.html היה *נפתח* כפאנל
 # ניהול אמיתי במקום להציג את הקוד שלו — מבלבל, ומנסה לדבר עם /panel/api.
+# הזיפ יושב תחת /code/ ולכן כבר מוגן; נשאר רק לוודא שהוא יורד כקובץ
+# ולא נפתח בדפדפן.
+location = /code/zovex-code.zip {
+    alias /opt/zovex-code/zovex-code.zip;
+    auth_basic           "ZOVEX code";
+    auth_basic_user_file /etc/nginx/.zovex_code;
+    default_type application/zip;
+    add_header Content-Disposition 'attachment; filename="zovex-code.zip"' always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+}
+
 location /code/files/ {
     alias /opt/zovex-code/files/;
     auth_basic           "ZOVEX code";
