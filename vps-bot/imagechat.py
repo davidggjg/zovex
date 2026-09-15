@@ -217,7 +217,7 @@ $('#go').onclick=async()=>{
   btn.innerHTML='יוצר<span class="spin"></span>';
   const holder=card('', '<div class="p">'+esc(prompt)+'</div><div class="f"><span>ממתין לתשובה…</span></div>');
   try{
-    const r=await fetch('/api/gen',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('api/gen',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({password:PW,prompt,model:$('#model').value,
         steps:+$('#steps').value||null,width:+$('#w').value||null,height:+$('#h').value||null,
         negative_prompt:$('#neg').value.trim()||null})});
@@ -334,7 +334,7 @@ class H(BaseHTTPRequestHandler):
         (OUTDIR / name).write_bytes(data)
         prune()
         self.log_message("ok %s %.1fs %dKB", model, time.time() - t0, len(data) // 1024)
-        return self._json(200, {"url": f"/img/{name}", "model": model,
+        return self._json(200, {"url": f"img/{name}", "model": model,
                                 "bytes": len(data), "seconds": round(time.time() - t0, 1)})
 
 
