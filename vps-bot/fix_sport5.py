@@ -29,7 +29,10 @@ DATA = Path(os.environ.get("ZOVEX_DATA", "/opt/zovex-bot/data"))
 CONTENT = DATA / "content.json"
 VERSION = DATA / "content_version.txt"
 BACKUP = CONTENT.with_name("content.json.bak_sport5")
-SITE = os.environ.get("ZOVEX_URL", "https://zovex.duckdns.org")
+# הקטלוג שומר %BASE% ולא דומיין מלא — main.py:3115 מחליף אותו ב-
+# STREAM_PUBLIC_BASE בזמן ההגשה. כתיבת דומיין קשיח הייתה עובדת היום
+# ונשברת ביום שהדומיין משתנה, בעוד שאר הקטלוג מתעדכן לבד.
+BASE = "%BASE%"
 
 # הפורמט :7070/playlist.m3u8 מוגש ישירות, בלי _fix — כך כבר עובדים
 # אצלך ספורט 6 (s/103) וספורט 2 (s/118) מאותו שער בדיוק.
@@ -38,7 +41,7 @@ G86 = "tv.embyil.tv:86/live/{n}/chunks.m3u8"
 
 
 def url(tmpl: str, n: int) -> str:
-    return f"{SITE}/hls-relay/" + tmpl.format(n=n)
+    return f"{BASE}/hls-relay/" + tmpl.format(n=n)
 
 
 # (שם בקטלוג, כתובת חדשה)
