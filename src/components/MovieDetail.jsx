@@ -33,26 +33,7 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
         <ArrowRight size={22} />
       </button>
       <div style={{ position: "relative" }}>
-        {trailerKey && !trailerOff ? (
-          <div style={{ position: "relative", width: "100%", height: "55vw", maxHeight: 380, background: "#000" }}>
-            <iframe
-              src={`https://www.youtube.com/embed/${trailerKey}?autoplay=1&mute=1&playsinline=1&rel=0&modestbranding=1`}
-              title={t("detail.trailer")}
-              allow="autoplay; encrypted-media; picture-in-picture"
-              allowFullScreen
-              style={{ width: "100%", height: "100%", border: "none", display: "block" }}
-            />
-            <button onClick={() => setTrailerOff(true)}
-              title={t("common.close")}
-              style={{ position: "absolute", top: 8, left: 8, width: 30, height: 30, borderRadius: 15,
-                       background: "rgba(0,0,0,.55)", border: "none", color: "#fff", cursor: "pointer",
-                       display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <X size={15} />
-            </button>
-          </div>
-        ) : movie.thumbnail_url ? (
-          <img src={movie.thumbnail_url} alt="" style={{ width: "100%", height: "55vw", maxHeight: 380, objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />
-        ) : null}
+        {movie.thumbnail_url && <img src={movie.thumbnail_url} alt="" style={{ width: "100%", height: "55vw", maxHeight: 380, objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />}
         <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 130, background: "linear-gradient(transparent,#111)" }} />
       </div>
       <div style={{ padding: 20 }}>
@@ -78,6 +59,33 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
             </button>
           )}
         </div>
+        {trailerKey && !trailerOff && (
+          <div style={{ marginTop: 22 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 14, fontWeight: 900, color: "#fff" }}>🎬 {t("detail.trailer")}</div>
+              <button onClick={() => setTrailerOff(true)}
+                style={{ background: "none", border: "none", color: "#888", fontSize: 12,
+                         cursor: "pointer", padding: 4 }}>
+                {t("common.close")}
+              </button>
+            </div>
+            {/* נגן יוטיוב מלא ולא תצוגה מקדימה: בלי autoplay ובלי mute, עם
+                הפקדים המקוריים ועם הרשאת מסך מלא. כך אפשר להשהות, להגביר,
+                להשתיק ולהגדיל — קודם זה היה סרטון מושתק שלא הגיב לכלום. */}
+            <div style={{ position: "relative", width: "100%", paddingTop: "56.25%",
+                          borderRadius: 12, overflow: "hidden", background: "#000" }}>
+              <iframe
+                src={`https://www.youtube-nocookie.com/embed/${trailerKey}?playsinline=1&rel=0&modestbranding=1&fs=1`}
+                title={t("detail.trailer")}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                allowFullScreen
+                referrerPolicy="strict-origin-when-cross-origin"
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+              />
+            </div>
+          </div>
+        )}
+
         {sequels.length > 0 && (
           <div style={{ marginTop: 24 }}>
             <div style={{ fontSize: 14, fontWeight: 900, color: "#fff", marginBottom: 12 }}>סרטי המשך</div>

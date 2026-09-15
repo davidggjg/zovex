@@ -44,7 +44,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   const navigate = useNavigate();
 
   const { history, saveProgress, loadProgress, saveHistory, refreshHistory } = useWatchHistory(user);
-  const { isFavorite, toggleFavorite } = useFavorites(user);
+  const { favIds, isFavorite, toggleFavorite } = useFavorites(user);
 
   // ── API endpoint: /zovex/api?key=XXX ──
   const apiMode = slug === "api";
@@ -343,6 +343,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
         movies={movies}
         seriesMap={seriesMap}
         liveChannels={liveChannels}
+        favIds={favIds}
         isDesktop={isDesktop}
         handleItemClick={handleItemClick}
         handleContinueWatchingClick={handleContinueWatchingClick}

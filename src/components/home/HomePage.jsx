@@ -1,5 +1,11 @@
 import { useState, useRef, useEffect } from "react";
 import { t, getLanguage, setLanguage } from '../../i18n';
+
+// סגנון אחיד לפריטי תפריט הפרופיל — נוסף כשהתפריט גדל מפריט אחד לארבעה.
+const menuItemStyle = {
+  padding: "11px 14px", fontSize: 13, color: "#e5e5e5",
+  cursor: "pointer", fontWeight: 600,
+};
 import { Search, Send, Eye, ChevronDown, X, Download } from "lucide-react";
 import { SPIN, ls, lsSet } from "./helpers";
 import { NetflixRows, RecentlyAddedBanner } from "./ContentRows";
@@ -11,6 +17,7 @@ export default function HomePage({
   user, onLogout, loginWithGoogle, searchTerm, setSearchTerm, selectedCategory, setSelectedCategory,
   allCategories, refreshHistory, onLogoClick,
   movies, seriesMap, liveChannels, isDesktop, handleItemClick, handleContinueWatchingClick, history,
+  favIds,
 }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showCatModal, setShowCatModal] = useState(false);
@@ -105,14 +112,39 @@ export default function HomePage({
                     </div>
                     <div
                       onClick={() => { setSelectedCategory("היסטוריה"); setUserMenuOpen(false); refreshHistory(); }}
-                      style={{ padding: "11px 14px", fontSize: 13, color: "#e5e5e5", cursor: "pointer", fontWeight: 600 }}
+                      style={menuItemStyle}
                       onMouseEnter={e => e.currentTarget.style.background = "#262626"}
                       onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                     >
-                      📋 היסטוריית צפייה
+                      📋 {getLanguage() === "he" ? "היסטוריית צפייה" : "Watch history"}
+                    </div>
+                    <div
+                      onClick={() => { setSelectedCategory("מועדפים"); setUserMenuOpen(false); }}
+                      style={menuItemStyle}
+                      onMouseEnter={e => e.currentTarget.style.background = "#262626"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                    >
+                      ❤️ {t("common.favorites")}
                     </div>
                   </>
                 )}
+                {/* הגדרות בתוך תפריט הפרופיל — שם מחפשים אותן. */}
+                <div
+                  onClick={() => setLanguage(getLanguage() === "he" ? "en" : "he")}
+                  style={{ ...menuItemStyle, borderTop: "1px solid #2a2a2a" }}
+                  onMouseEnter={e => e.currentTarget.style.background = "#262626"}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                >
+                  ⚙️ {t("common.language")}: {getLanguage() === "he" ? "עברית → English" : "English → עברית"}
+                </div>
+                <a
+                  href={`${import.meta.env.BASE_URL}legal/`}
+                  style={{ ...menuItemStyle, display: "block", textDecoration: "none" }}
+                  onMouseEnter={e => e.currentTarget.style.background = "#262626"}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                >
+                  📄 {getLanguage() === "he" ? "מידע ותנאים" : "Info & terms"}
+                </a>
                 <div
                   onClick={() => { setUserMenuOpen(false); onLogout(); }}
                   style={{ padding: "11px 14px", fontSize: 13, color: "#e50914", cursor: "pointer", fontWeight: 700, borderTop: user ? "1px solid #2a2a2a" : "none" }}
@@ -136,7 +168,7 @@ export default function HomePage({
           }}
         >
           <Download size={14} color="#e50914" />
-          הורידו את אפליקציית ZOVEX לאנדרואיד
+          {t("home.downloadApp")}
         </a>
         <div style={{ paddingBottom: 11 }}>
           <button
@@ -199,6 +231,7 @@ export default function HomePage({
           onContinueWatchingClick={handleContinueWatchingClick}
           history={history}
           user={user}
+          favIds={favIds}
         />
       </main>
       {/* Telegram bubble — bottom מוגבה כדי לא להיחסם ע"י באנר הפרסומת הקבוע בתחתית */}

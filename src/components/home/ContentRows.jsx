@@ -67,7 +67,7 @@ function CardGrid({ title, items, isDesktop, handleItemClick }) {
   );
 }
 
-function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user }) {
+function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user, favIds }) {
   const q = searchTerm.toLowerCase();
 
   // בנה map: קטגוריה → פריטים
@@ -117,6 +117,27 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
   // למטה — כי "היסטוריה" היא טאב וירטואלי, לא קטגוריית תוכן אמיתית, אז
   // rowsToShow תמיד ריק בשבילה ובלי הסדר הזה היינו נתקעים תמיד ב"לא נמצאו
   // תוצאות" בלי להגיע לקוד שמטפל בהיסטוריה בפועל (זה בדיוק מה שקרה).
+  // "מועדפים" הוא טאב וירטואלי כמו "היסטוריה" — הבדיקה חייבת להיות לפני
+  // ה-early-return של "לא נמצאו תוצאות", אחרת rowsToShow הריק היה תופס.
+  if (selectedCategory === "מועדפים") {
+    const favItems = (movies || []).filter(m => favIds && favIds.has(String(m.id)));
+    return (
+      <div style={{ paddingTop: 8 }}>
+        {favItems.length > 0 ? (
+          <NetflixRow title="❤️ המועדפים שלי" items={favItems} isDesktop={isDesktop}
+                      handleItemClick={handleItemClick} isLiveRow={false} />
+        ) : (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "#aaa" }}>
+            <p style={{ fontSize: 18 }}>אין עדיין מועדפים</p>
+            <p style={{ fontSize: 13, marginTop: 8 }}>
+              פתחו סרט ולחצו על הלב — הוא יופיע כאן, וגם באפליקציה
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (selectedCategory === "היסטוריה") {
     return (
       <div style={{ paddingTop: 8 }}>
