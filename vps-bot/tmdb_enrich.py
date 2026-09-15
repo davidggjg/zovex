@@ -77,8 +77,16 @@ def atomic_write(path: Path, text: str) -> None:
         tmp.unlink(missing_ok=True); raise
 
 
+# Cloudflare יושב לפני Groq וחוסם את ה-User-Agent שברירת המחדל של urllib
+# שולחת ("Python-urllib/3.x"). זה חוזר כ-403 עם "error code: 1010", שנראה
+# כמו מפתח פסול אבל אינו: אותה בקשה בדיוק עם UA רגיל מחזירה 200. נמדד
+# בשלושה ניסיונות — ברירת מחדל נכשלת, curl/8.5.0 ו-zovex-bot/1.0 עוברים.
+UA = "zovex-bot/1.0"
+
+
 def get(url: str, timeout=40):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 

@@ -123,8 +123,16 @@ def clean(name: str):
     return s, yr
 
 
+# Cloudflare יושב לפני Groq וחוסם את ה-User-Agent שברירת המחדל של urllib
+# שולחת ("Python-urllib/3.x"). זה חוזר כ-403 עם "error code: 1010", שנראה
+# כמו מפתח פסול אבל אינו: אותה בקשה בדיוק עם UA רגיל מחזירה 200. נמדד
+# בשלושה ניסיונות — ברירת מחדל נכשלת, curl/8.5.0 ו-zovex-bot/1.0 עוברים.
+UA = "zovex-bot/1.0"
+
+
 def http_json(url: str, headers=None, data=None, timeout=45):
     req = urllib.request.Request(url, data=data, headers=headers or {})
+    req.add_header("User-Agent", UA)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=timeout) as r:
