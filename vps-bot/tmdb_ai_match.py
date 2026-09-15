@@ -130,13 +130,37 @@ def clean(name: str):
 UA = "zovex-bot/1.0"
 
 
-def http_json(url: str, headers=None, data=None, timeout=45):
-    req = urllib.request.Request(url, data=data, headers=headers or {})
-    req.add_header("User-Agent", UA)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+def http_json(url: str, headers=None, data=None, timeout=45, retries=6):
+    """429 הוא מצב רגיל ולא תקלה.
+
+    המכסה החינמית של Groq היא 8,000 טוקנים לדקה, וכל בקשה כאן שולחת
+    רשימת מועמדים — כלומר הגבלה אמיתית תוך דקות. גרסה קודמת פשוט מתה
+    על 429, מה שהיה הורג ריצה לילית באמצע. עכשיו ממתינים לפי Retry-After
+    שהשרת מחזיר, ואם אין — נסיגה מעריכית."""
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, headers=dict(headers or {}))
+        req.add_header("User-Agent", UA)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or attempt == retries:
+                raise
+            ra = e.headers.get("retry-after") if e.headers else None
+            try:
+                wait = float(ra)
+            except (TypeError, ValueError):
+                wait = min(60.0, 2.0 * (2 ** attempt))
+            print(f"\r  ⏸ {e.code} — ממתין {wait:.0f}s".ljust(40),
+                  end="", flush=True)
+            time.sleep(wait)
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == retries:
+                raise
+            time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+    raise RuntimeError("לא אמור להגיע לכאן")
 
 
 # ── TMDB ─────────────────────────────────────────────────────────────────────
@@ -339,6 +363,15 @@ def main() -> None:
             rec["correct"] = (str(ans["tmdb_id"]) == str(u["known"]))
             mark = "✓" if rec["correct"] else "✗"
         print(f"\r  {n}/{len(rows)} {mark} {u['name'][:34]:<36}", end="", flush=True)
+        # שמירה כל 25 יחידות: ריצה לילית שנופלת בסוף לא צריכה למחוק
+        # את כל מה שכבר נמדד.
+        if n % 25 == 0:
+            try:
+                with open(a.out + ".partial", "w", encoding="utf-8") as fh:
+                    json.dump({"done": n, "of": len(rows), "rows": out},
+                              fh, ensure_ascii=False)
+            except Exception:
+                pass
         if a.sleep:
             time.sleep(a.sleep)
     print(f"\n\nלקח {time.time()-t0:.0f} שניות\n" + "=" * 62)
