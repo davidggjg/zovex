@@ -35,22 +35,29 @@ done
 
 echo
 echo "════════ 2/5 · בדיקה יבשה ════════"
-# APPLY = מה שנחיל בהרצה הזו.  ALREADY = מה שכבר מוחל מקודם.
-# ההפרדה קריטית: --revert של פאץ' משחזר גיבוי מלפניו, כלומר מוחק גם את כל
-# מה שהוחל אחריו. החזרה על פאץ' שלא נגענו בו בהרצה הזו מוחקת עבודה של
-# פריסות קודמות — וזה בדיוק מה שקרה ב-15.09: הרצה שנייה שנכשלה באימות
-# החזירה פאצ'ים שכבר היו מוחלים, ומחקה את כל הפריסה.
+# הבדיקה רצה על *עותקים*, ומחילה את הפאצ'ים עליהם לפי הסדר.
+# בדיקה של כל פאץ' בבידוד אינה אפשרית: פאץ' שתלוי בקודמו בודק מול הקובץ
+# כמו שהוא, שבו התלות עוד לא הוחלה — ולכן הוא נכשל תמיד, גם כשהרצף תקין.
+# כאן נבדק מה שבאמת יקרה: הרצף כולו, מתחילתו ועד סופו.
+SIM=$(mktemp -d); cp main.py "$SIM/main.py"; cp admin.html "$SIM/admin.html"
+trap 'rm -rf "$SIM"' EXIT
+
 FAILED=0; APPLY=(); ALREADY=()
-classify() {   # $1=קובץ  $2="קריטי"|"רשות"
-  local f="$1" kind="$2" out
-  if out=$(python3 "$f" --check 2>&1); then
+target_env() {   # איזה קובץ הפאץ' עורך
+  grep -q 'ADMIN_HTML' "$1" && echo "ADMIN_HTML=$SIM/admin.html" || echo "BOT_PY=$SIM/main.py"
+}
+classify() {     # $1=קובץ  $2="קריטי"|"רשות"
+  local f="$1" kind="$2" out ev
+  ev=$(target_env "$f")
+  # מריצים בפועל על העותק: כך הפאץ' הבא רואה את התוצאה של הקודם.
+  if out=$(env "$ev" python3 "$f" 2>&1); then
     if echo "$out" | grep -q "כבר"; then
       echo "  ● $f — כבר מוחל, לא ניגע"; ALREADY+=("$f")
     else
       echo "  ✓ $f"; APPLY+=("$f")
     fi
   else
-    if [ "$kind" = "קריטי" ]; then echo "  ✗ $f — $out"; FAILED=1
+    if [ "$kind" = "קריטי" ]; then echo "  ✗ $f — $(echo "$out" | head -1)"; FAILED=1
     else echo "  ⊘ $f — מדולג: $(echo "$out" | head -1)"; fi
   fi
 }
@@ -62,11 +69,15 @@ for f in "${OPTIONAL[@]}"; do
   [ -f "$f" ] || continue
   classify "$f" "רשות"
 done
-[ "$FAILED" -eq 1 ] && { echo; echo "❌ פאץ' קריטי לא עבר. לא שונה כלום."; exit 1; }
+# התוצאה הסופית חייבת לעבור קומפילציה — לא רק כל פאץ' בנפרד.
+if ! python3 -c "import ast,sys;ast.parse(open('$SIM/main.py',encoding='utf-8').read())" 2>/dev/null; then
+  echo "  ✗ התוצאה המשולבת אינה עוברת קומפילציה"; FAILED=1
+fi
+[ "$FAILED" -eq 1 ] && { echo; echo "❌ הרצף לא עבר. לא שונה כלום."; exit 1; }
 
 echo
 echo "  להחלה עכשיו: ${#APPLY[@]}   ·   כבר מוחלים: ${#ALREADY[@]}"
-[ "$DRY" -eq 1 ] && { echo; echo "✓ הכל עבר בדיקה יבשה. לא שונה כלום (--check)."; exit 0; }
+[ "$DRY" -eq 1 ] && { echo; echo "✓ הרצף כולו עבר על עותקים. לא שונה כלום (--check)."; exit 0; }
 if [ ${#APPLY[@]} -eq 0 ]; then
   echo; echo "✓ הכל כבר מוחל. אין מה לעשות."; exit 0
 fi
