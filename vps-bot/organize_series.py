@@ -119,10 +119,16 @@ def main() -> None:
 
     # ── 2. מה ישתנה ───────────────────────────────────────────────────
     changes = []
+    already = 0
     for i in hits:
         p = parse(g(i, "title") or "")
         if not p:
-            print(f"\n⚠ לא הצלחתי לפענח עונה/פרק מ: {g(i,'title')!r} — מדלג")
+            # פריט שכבר נושא עונה ופרק תקינים אינו בעיה — בוט ההעלאה כבר
+            # פירק את שם הקובץ. רק חוסר מידע אמיתי שווה אזהרה.
+            if i.get("season_number") is not None and i.get("episode_number") is not None:
+                already += 1
+            else:
+                print(f"⚠ אין עונה/פרק ואי אפשר לפענח מהכותרת: {g(i,'title')!r}")
             continue
         season, ep, ep_end = p
         new = {"series_name": SERIES, "season_number": season,
@@ -141,6 +147,8 @@ def main() -> None:
         מיזוג משנה רק את שם הסדרה, ולכן חייבים ליפול חזרה לערך הקיים."""
         return new[k] if k in new else i.get(k)
 
+    if already:
+        print(f"\n✓ {already} פריטים כבר נושאים עונה ופרק תקינים — לא נוגעים בהם")
     print(f"\n{'='*62}\n{len(changes)} פריטים ישתנו\n{'='*62}")
     for i, old, new in changes:
         t = (g(i, "title") or "")[:44]
