@@ -36,13 +36,17 @@ MAX_IMAGES = int(os.environ.get("IMG_KEEP", "300"))
 CF_TIMEOUT = 120
 
 # מודלים שעובדים עם JSON פשוט. flux-2 דורש multipart ולכן אינו כאן.
+# העלות בנוירונים שונה בסדרי גודל בין המודלים, והמכסה החינמית היא
+# 10,000 נוירונים ליום לכל החשבון. תמונה אחת ב-Leonardo שקולה לכ-110
+# תמונות ב-flux, ולכן העלות מופיעה בממשק — בחירה לא מודעת שורפת את
+# המכסה של היום בחמש תמונות.
 MODELS = [
-    ("@cf/black-forest-labs/flux-1-schnell", "FLUX.1 Schnell — מהיר, ברירת מחדל"),
-    ("@cf/leonardo/phoenix-1.0", "Leonardo Phoenix — איכות גבוהה"),
-    ("@cf/leonardo/lucid-origin", "Leonardo Lucid Origin"),
-    ("@cf/stabilityai/stable-diffusion-xl-base-1.0", "Stable Diffusion XL"),
+    ("@cf/black-forest-labs/flux-1-schnell", "FLUX.1 Schnell — מהיר וזול (4.8)"),
     ("@cf/bytedance/stable-diffusion-xl-lightning", "SDXL Lightning — מהיר"),
     ("@cf/lykon/dreamshaper-8-lcm", "DreamShaper 8"),
+    ("@cf/stabilityai/stable-diffusion-xl-base-1.0", "Stable Diffusion XL"),
+    ("@cf/leonardo/phoenix-1.0", "Leonardo Phoenix — איכותי אך יקר (530)"),
+    ("@cf/leonardo/lucid-origin", "Leonardo Lucid Origin — יקר מאוד (636)"),
 ]
 MODEL_IDS = {m for m, _ in MODELS}
 
@@ -100,6 +104,11 @@ def generate(model: str, prompt: str, opts: dict):
                 detail = "; ".join(str(x.get("message", x)) for x in errs)
         except Exception:
             pass
+        if e.code == 429 or "daily free allocation" in detail:
+            raise RuntimeError(
+                "נגמרה המכסה החינמית היומית של Cloudflare (10,000 נוירונים). "
+                "היא מתאפסת ב-00:00 UTC, כלומר 03:00 שעון ישראל. "
+                "אפשר גם לעבור ל-Workers Paid ב-5$ לחודש.")
         raise RuntimeError(f"Cloudflare החזיר {e.code}: {detail}")
     except Exception as e:
         raise RuntimeError(f"שגיאת רשת מול Cloudflare: {type(e).__name__}: {e}")
