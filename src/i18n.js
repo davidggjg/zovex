@@ -111,3 +111,30 @@ export function t(key, vars) {
 }
 
 applyDir();
+
+// ── שמות קטגוריות ────────────────────────────────────────────────────────────
+// הקטגוריות הן נתונים ולא ממשק — הן מגיעות מהקטלוג בעברית. במקום לשנות את
+// הנתונים (מה שהיה שובר את הסינון בכל מקום), מתרגמים אותן רק לתצוגה.
+// קטגוריה שאינה במפה מוצגת כמו שהיא, כך שקטגוריה חדשה לא שוברת כלום.
+const CATEGORIES_EN = {
+  'הכל': 'All',
+  'שידורים חיים': 'Live TV',
+  'היסטוריה': 'History',
+  'מועדפים': 'Favorites',
+  'הורדות': 'Downloads',
+  'סרטים': 'Movies',
+  'סדרות': 'Series',
+  'אנימה': 'Anime',
+  'אימה': 'Horror',
+  'מארוול': 'Marvel',
+  'סרטים ישראלים': 'Israeli Movies',
+  'סדרות ישראליות': 'Israeli Series',
+  'סדרות טורקיות': 'Turkish Series',
+  'סרטים לילדים (מתאים גם למשפחה)': 'Kids & Family',
+  'סדרות לילדים': 'Kids Series',
+};
+
+export function catName(cat) {
+  if (current !== 'en') return cat;
+  return CATEGORIES_EN[cat] || cat;
+}

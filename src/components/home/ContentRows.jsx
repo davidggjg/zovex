@@ -1,3 +1,4 @@
+import { catName } from "../../i18n";
 import { useState, useEffect, useMemo } from "react";
 import { NetflixRow, buildCardHref } from "./NetflixCard";
 import LiveBanner from "../LiveBanner";
@@ -191,7 +192,7 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
     if (items.length === 0) return empty;
     return (
       <div style={{ paddingTop: 8 }}>
-        <CardGrid title={selectedCategory} items={items} isDesktop={isDesktop} handleItemClick={handleItemClick} />
+        <CardGrid title={catName(selectedCategory)} items={items} isDesktop={isDesktop} handleItemClick={handleItemClick} />
       </div>
     );
   }

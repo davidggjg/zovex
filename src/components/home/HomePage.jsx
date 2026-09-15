@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { t, getLanguage, setLanguage } from '../../i18n';
+import { t, getLanguage, setLanguage, catName } from '../../i18n';
 
 // סגנון אחיד לפריטי תפריט הפרופיל — נוסף כשהתפריט גדל מפריט אחד לארבעה.
 const menuItemStyle = {
@@ -59,20 +59,6 @@ export default function HomePage({
             <input type="text" placeholder={t("common.search")} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} style={{ background: "none", border: "none", outline: "none", width: "100%", fontSize: 15, color: "#fff" }} />
             {searchTerm && <span onClick={() => setSearchTerm("")} style={{ cursor: "pointer", color: "#888", fontSize: 18 }}>×</span>}
           </div>
-          {/* בורר שפה. כפתור אחד שמתחלף, ולא תפריט: יש שתי שפות בלבד,
-              ותפריט נפתח בשביל שתי אפשרויות הוא רעש. */}
-          <button
-            onClick={() => setLanguage(getLanguage() === "he" ? "en" : "he")}
-            title={t("common.language")}
-            style={{
-              flexShrink: 0, background: "rgba(255,255,255,0.055)",
-              border: "1px solid rgba(255,255,255,0.11)", color: "#e8eaed",
-              borderRadius: 50, padding: "9px 13px", fontSize: 13, fontWeight: 700,
-              cursor: "pointer", letterSpacing: 0.5,
-            }}>
-            {getLanguage() === "he" ? "EN" : "עב"}
-          </button>
-
           {/* אזור משתמש */}
           <div ref={userMenuRef} style={{ position: "relative", flexShrink: 0 }}>
             {user ? (
@@ -200,7 +186,7 @@ export default function HomePage({
                 style={{ padding: "14px 20px", width: "100%", maxWidth: 480, textAlign: "center", cursor: "pointer", fontSize: isActive ? 26 : 21, fontWeight: isActive ? 900 : 400, color: isActive ? "#fff" : (isLiveCat ? "#e50914" : "rgba(255,255,255,0.45)"), display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
               >
                 {isLiveCat && <Eye size={isActive ? 22 : 18} />}
-                {cat}
+                {catName(cat)}
               </div>
             );
           })}

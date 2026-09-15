@@ -1,5 +1,6 @@
 import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2, SkipForward, Settings} from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { t } from "../../i18n";
 
 // ──────────────────────────────────────────────────────────────
 // Native bridge helpers (used when running inside the Android app)
@@ -339,7 +340,7 @@ function TopBar({ title, episode, onClose, visible }) {
 }
 
 // ─── Bottom controls bar ──────────────────────────────────────
-function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
+function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menuOpen, setMenuOpen }) {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -463,7 +464,9 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
   // חדש שה-playbackRate שלו מתאפס לאחד.
   const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
   const [rate, setRate] = useState(1);
-  const [rateOpen, setRateOpen] = useState(false);
+  // מצב התפריט מוחזק בשכבת הפקדים, כדי שהיא תדע לא להסתיר את הסרגל.
+  const rateOpen = !!menuOpen;
+  const setRateOpen = v => setMenuOpen(typeof v === 'function' ? v(rateOpen) : v);
   useEffect(() => {
     const v = videoRef.current;
     if (v) { try { v.playbackRate = rate; } catch {} }
@@ -479,6 +482,8 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
       transition: "opacity 0.3s",
       opacity: visible ? 1 : 0,
       pointerEvents: visible ? "auto" : "none",
+      // כיוון קבוע ולא יורש מהדף: מעבר לאנגלית הופך את כיוון הפריסה
+      // ומזיז פקדים שמוקמו בהנחת ימין-לשמאל. הנגן לא אמור להשתנות עם השפה.
       direction: "ltr",
     }}>
       {/* progress bar — לא רלוונטי בשידור חי */}
@@ -519,7 +524,7 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, position: "relative" }}>
           {!isLive && (
-            <button onClick={() => setRateOpen(o => !o)} style={iconBtn} title="מהירות הפעלה">
+            <button onClick={e => { e.stopPropagation(); setRateOpen(o => !o); }} style={iconBtn} title={t("player.speed")}>
               <Settings size={19} />
               {rate !== 1 && (
                 <span style={{ position: "absolute", bottom: 1, left: "50%", transform: "translateX(-50%)",
@@ -534,16 +539,16 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady }) {
                           background: "rgba(22,24,30,0.97)", borderRadius: 14, padding: "10px 8px",
                           boxShadow: "0 10px 30px rgba(0,0,0,.5)", direction: "rtl" }}>
               <div style={{ color: "#9aa0a6", fontSize: 12, padding: "2px 10px 8px", textAlign: "right" }}>
-                מהירות הפעלה
+                {t("player.speed")}
               </div>
               {RATES.map(r => (
-                <div key={r} onClick={() => { setRate(r); setRateOpen(false); }}
+                <div key={r} onClick={e => { e.stopPropagation(); setRate(r); setRateOpen(false); }}
                   style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
                            gap: 10, padding: "9px 12px", borderRadius: 9, cursor: "pointer",
                            fontSize: 15, color: r === rate ? "#8db4ff" : "#e8eaed",
                            fontWeight: r === rate ? 700 : 400,
                            background: r === rate ? "rgba(47,109,246,.22)" : "transparent" }}>
-                  <span>{r === 1 ? "רגיל" : r + "x"}</span>
+                  <span>{r === 1 ? t("player.speedNormal") : r + "x"}</span>
                   <span>{r === rate ? "✓" : ""}</span>
                 </div>
               ))}
@@ -626,13 +631,23 @@ function NextEpisodeButton({ videoRef, onNext, label, videoReady }) {
 // FIX: לחיצה על כל מקום במסך (לא רק ה-div) מפעילה/מעצירה + מציגה כפתורים
 function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false, videoReady, onNextEpisode, nextEpisodeLabel }) {
   const [visible, setVisible] = useState(true);
+  // תפריט פתוח (מהירות הפעלה) מחזיק את הפקדים על המסך. בלעדיו הטיימר
+  // של 3.5 שניות היה מכבה את הסרגל בדיוק כשפותחים את ההגדרות, והיה צריך
+  // ללחוץ שוב על המסך רק כדי לראות אותן.
+  const [menuOpen, setMenuOpen] = useState(false);
   const timer = useRef(null);
 
-  const show = useCallback(() => {
+  const show = useCallback((hold = false) => {
     setVisible(true);
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => setVisible(false), 3500);
+    if (!hold) timer.current = setTimeout(() => setVisible(false), 3500);
   }, []);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    clearTimeout(timer.current);
+    setVisible(true);
+  }, [menuOpen]);
 
   useEffect(() => { show(); return () => clearTimeout(timer.current); }, [show]);
 
@@ -657,13 +672,15 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
 
   // לחיצה בכל מקום על המסך — Toggle: אם מוצג מסתיר, אם מוסתר מציג
   const handleOverlayClick = useCallback((e) => {
+    // תפריט פתוח: הלחיצה סוגרת אותו ולא מכבה את הפקדים.
+    if (menuOpen) { setMenuOpen(false); show(); return; }
     if (visible) {
       clearTimeout(timer.current);
       setVisible(false);
     } else {
       show();
     }
-  }, [visible, show]);
+  }, [visible, show, menuOpen]);
 
   return (
     <div
@@ -707,7 +724,8 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
         )}
       </div>
 
-      <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} videoReady={videoReady} />
+      <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} videoReady={videoReady}
+        menuOpen={menuOpen} setMenuOpen={setMenuOpen} />
       {!isLive && <NextEpisodeButton videoRef={videoRef} onNext={onNextEpisode} label={nextEpisodeLabel} videoReady={videoReady} />}
       <SkipAnim side={skipAnim} />
     </div>
