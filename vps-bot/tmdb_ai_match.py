@@ -47,13 +47,30 @@ TMDB = "https://api.themoviedb.org/3"
 ENV_PATHS = ["/opt/zovex-bot/.env", ".env"]
 
 # שני הספקים תואמי-OpenAI, ולכן זה הבדל של כתובת ושם דגם בלבד.
+#
+# ברירת המחדל נבחרה במדידה ולא בהנחה. דוד העיר שגרוק מחליפה מודלים, וצדק:
+# llama-3.3-70b-versatile שהגדרתי קודם כבר לא קיים, וכל שורת ה-Llama לצ'אט
+# הוסרה. מתוך מה שנותר הרצתי מבחן על שש דוגמאות אמיתיות מהקטלוג, כולל שתי
+# מלכודות — מועמד מזויף בתרגום מילולי ("הרעשנים" מול The Noisy Ones), ומקרה
+# שבו התשובה הנכונה כלל לא ברשימה ("הטירון") וצריך להחזיר null:
+#
+#     qwen/qwen3.8-27b      6/6   0.4 שניות לפריט
+#     openai/gpt-oss-120b   5/6   0.9
+#     openai/gpt-oss-20b    4/6   0.8   ← ענה בביטחון 0.9 על מלכודת ה-null
+#
+# ההפרש הזה הוא בדיוק ההבדל בין מיפוי שאפשר לסמוך עליו לבין מיפוי שמכניס
+# שטויות לקטלוג. 0.4 שניות ליחידה = כשש דקות לכל 924 היחידות.
 PROVIDERS = {
-    "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile",
+    "groq": ("https://api.groq.com/openai/v1", "qwen/qwen3.8-27b",
              ("LLM_API_KEY", "GROQ_API_KEY")),
     "xai":  ("https://api.x.ai/v1", "grok-2-latest",
              ("LLM_API_KEY", "XAI_API_KEY")),
     "mock": ("", "mock", ()),
 }
+
+# תרגום ביטחון מספרי לתוויות ש-tmdb_apply.py כבר יודע לקרוא.
+def _conf_label(c: float) -> str:
+    return "ודאי" if c >= 0.9 else ("סביר" if c >= 0.75 else "ספק")
 
 # מילים שמודבקות לשמות אצלנו ואינן חלק מהכותר. הסרתן לפני החיפוש
 # היא מה שהופך "דרגון בול קאי לעברית" לשאילתה שמחזירה מועמדים.
@@ -363,6 +380,25 @@ def main() -> None:
                    "accepted": accepted, "review": review},
                   fh, ensure_ascii=False, indent=1)
     print(f"\nנשמר: {a.out}")
+
+    # ובנוסף, קובץ בפורמט של tmdb_backfill — כדי ש-tmdb_apply.py יוכל להחיל
+    # אותו בלי לשנות בו שורה. המפתח הוא שם הסדרה לסדרות ו-id לפריט בודד,
+    # בדיוק כמו ש-tmdb_apply מחפש (by_series מול by_id).
+    if a.run:
+        compat = {}
+        for r in out:
+            if not r["tmdb_id"]:
+                continue
+            key = r["name"] if r["kind"] == "series" else str(r.get("id") or r["name"])
+            compat[key] = {"kind": "tv" if r["kind"] == "series" else "movie",
+                           "query": r["query"], "tmdb_id": r["tmdb_id"],
+                           "confidence": _conf_label(r["confidence"])}
+        cpath = a.out.replace(".json", "") + "_apply.json"
+        with open(cpath, "w", encoding="utf-8") as fh:
+            json.dump(compat, fh, ensure_ascii=False, indent=1)
+        lab = Counter(v["confidence"] for v in compat.values())
+        print(f"נשמר גם: {cpath}  ({len(compat)} רשומות · {dict(lab)})")
+        print(f"  להחלה:  python3 tmdb_apply.py --map {cpath} --check")
     print("שום דבר לא נכתב לקטלוג. ההחלה היא שלב נפרד ומאוחר יותר.")
     print(f"התפלגות ביטחון: "
           f"{dict(Counter(round(r['confidence'], 1) for r in out).most_common())}")
