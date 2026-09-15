@@ -44,7 +44,13 @@ VERSION = DATA / "content_version.txt"
 BACKUP = CONTENT.with_name("content.json.bak_vidshadow")
 
 # כתובת של השרת שלנו, בכל אחד משלושת נתיבי ההגשה.
-OURS = re.compile(r"^https?://[^/]+/(?:stream|fs|vh)/(-?\d+)/(\d+)")
+#
+# ‎%BASE% הוא מציין מיקום שהקטלוג שומר במקום הדומיין, ו-expand_base מחליף
+# אותו ב-STREAM_PUBLIC_BASE בזמן ההגשה. לכן ב-content.json הערך נראה
+# "%BASE%/stream/…" ורק ב-/content/lite הוא נראה כדומיין מלא. הגרסה
+# הראשונה שלי בדקה רק את הצורה המורחבת ולכן מצאה אפס — דוד הריץ --check
+# וקיבל "אין מה לתקן", וזה מה שחשף את זה.
+OURS = re.compile(r"^(?:https?://[^/]+|%BASE%)/(?:stream|fs|vh)/(-?\d+)/(\d+)")
 
 
 def atomic_write(path: Path, text: str) -> None:
