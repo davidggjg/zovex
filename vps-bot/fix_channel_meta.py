@@ -12,8 +12,8 @@ fix_channel_meta.py — לוגו ו-slug לערוצים החדשים, וחיפו
            (tv-logo/tv-logos) ומאומתים ב-HTTP לפני הכתיבה.
 
 --epg-scan שואל את וואלה אילו ערוצים קיימים ומדפיס מזהה לכל שם שמתאים.
-           חייב לרוץ **מהשרת**: וואלה חוסם לפי מדינה, ומחוץ לישראל
-           הבקשה חוזרת 400. זה מה שחסם אותי מלעשות את זה מרחוק.
+           הפרמטר provider הוא מספר (3=yes, 2=hot). שליחת "yes"/"hot"
+           מחזירה 400 — זו הייתה הטעות שלי, לא חסימה גיאוגרפית.
            הפלט נועד להשלמה ל-MAP ב-epg_build.py.
 
     python3 fix_channel_meta.py --epg-scan
@@ -39,7 +39,12 @@ META = [
     ("ספורט 5 מקס", "5max", "/zovex/live-logos/sport5.png?v=2"),
 ]
 
+# provider הוא מספר ולא מילה: 3=yes, 2=hot. שליחת "yes"/"hot" מחזירה 400,
+# וזו הייתה הטעות בגרסה הראשונה — לא חסימה גיאוגרפית כפי שהנחתי.
+# מועתק מ-fetch_walla ב-epg_build.py, שעובד בפועל.
 WALLA = "https://dal.walla.co.il/tv/list?provider={p}"
+PROVIDERS = {3: "yes", 2: "hot"}
+UA_STR = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 
 
 def http_ok(url: str) -> bool:
@@ -61,50 +66,85 @@ def atomic_write(path: Path, text: str) -> None:
 
 
 def epg_scan(pattern: str) -> None:
+    """מדפיס channel_code לכל ערוץ ששמו מתאים, להשלמה ל-MAP."""
     import urllib.request
-    found = {}
-    for prov in ("yes", "hot"):
-        req = urllib.request.Request(
-            WALLA.format(p=prov),
-            headers={"Referer": "https://tv-guide.walla.co.il/",
-                     "User-Agent": "Mozilla/5.0"})
+    rx = re.compile(pattern, re.I)
+    found = []
+    for code, label in PROVIDERS.items():
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                raw = r.read().decode("utf-8", "replace")
+            req = urllib.request.Request(
+                WALLA.format(p=code),
+                headers={"User-Agent": UA_STR,
+                         "Referer": "https://tv-guide.walla.co.il/"})
+            with urllib.request.urlopen(req, timeout=40) as r:
+                data = json.loads(r.read()).get("data", [])
         except Exception as e:
-            print(f"  {prov}: נכשל — {type(e).__name__}: {e}")
+            print(f"  {label} (provider={code}): נכשל — {type(e).__name__}: {e}")
             continue
-        try:
-            data = json.loads(raw)
-        except Exception:
-            print(f"  {prov}: תשובה לא JSON — {raw[:120]}")
-            continue
-        if isinstance(data, dict) and data.get("code") == 400:
-            print(f"  {prov}: וואלה החזיר 400. אם זה קורה על השרת — "
-                  f"ייתכן ששינו את הכתובת או דורשים כותרת נוספת.")
-            continue
-
-        rx = re.compile(pattern, re.I)
-        def walk(o):
-            if isinstance(o, dict):
-                nm = o.get("name") or o.get("title") or o.get("channel_name") or ""
-                cid = o.get("id") or o.get("channel_id") or o.get("channelId")
-                if nm and cid is not None and rx.search(str(nm)):
-                    found[(str(cid), str(nm))] = prov
-                for v in o.values():
-                    walk(v)
-            elif isinstance(o, list):
-                for v in o:
-                    walk(v)
-        walk(data)
+        print(f"  {label} (provider={code}): {len(data)} ערוצים")
+        for ch in data:
+            if not isinstance(ch, dict):
+                continue
+            cc = ch.get("channel_code")
+            nm = (ch.get("channel_name") or ch.get("name")
+                  or ch.get("title") or "").strip()
+            if cc is None or not nm:
+                continue
+            if rx.search(nm):
+                n = len(ch.get("schedule") or [])
+                found.append((nm, cc, label, n))
 
     if not found:
-        print("\nלא נמצא אף ערוץ מתאים. נסה תבנית רחבה יותר עם --pattern")
+        print("\nאין התאמה. הרחב עם --pattern, למשל --pattern '5|ספורט'")
         return
-    print(f"\n{len(found)} התאמות — להשלמה ל-MAP ב-epg_build.py:\n")
-    for (cid, nm), prov in sorted(found.items(), key=lambda x: x[0][1]):
-        src = "w"
-        print(f'    "<slug>": ("{src}", {cid}),'.ljust(34) + f"# {nm}  [{prov}]")
+    print(f"\n{len(found)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
+    seen = set()
+    for nm, cc, prov, n in sorted(found, key=lambda x: x[0]):
+        if (nm, cc) in seen:
+            continue
+        seen.add((nm, cc))
+        note = f"# {nm}  [{prov}, {n} תוכניות]"
+        print(f'    "<slug>": ("w", {cc}),'.ljust(32) + note)
+    print("\nהחלף <slug> ב-custom_slug של הערוץ אצלנו (למשל 5plus, 5max).")
+
+
+def hot_scan(pattern: str) -> None:
+    """מדפיס channelID לכל ערוץ של HOT ששמו מתאים. HOT מפנה בלופ
+    מחוץ לישראל, ולכן זה חייב לרוץ מהשרת — בשונה מוואלה, שם ה-400
+    היה פרמטר שגוי שלי ולא חסימה."""
+    import urllib.request
+    from datetime import datetime
+    api = ("https://www.hot.net.il/HotCmsApiFront/api/"
+           "ProgramsSchedual/GetProgramsSchedual")
+    day = datetime.now().strftime("%Y/%m/%d")
+    body = json.dumps({"ProgramsStartDateTime": f"{day} 00:00:00",
+                       "ProgramsEndDateTime": f"{day} 23:59:59"}).encode()
+    req = urllib.request.Request(
+        api, data=body, method="POST",
+        headers={"User-Agent": UA_STR, "Content-Type": "application/json",
+                 "Referer": "https://www.hot.net.il/heb/tv/tvguide/"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            res = json.loads(r.read())
+    except Exception as e:
+        print(f"  HOT נכשל — {type(e).__name__}: {e}")
+        return
+    progs = (res.get("data") or {}).get("programsDetails") or []
+    names = {}
+    for p in progs:
+        cid = p.get("channelID")
+        nm = p.get("channelName") or p.get("channel_name") or ""
+        if cid is not None and nm:
+            names[str(cid)] = nm
+    print(f"  HOT: {len(progs)} תוכניות · {len(names)} ערוצים")
+    rx = re.compile(pattern, re.I)
+    hits = [(nm, cid) for cid, nm in names.items() if rx.search(nm)]
+    if not hits:
+        print("\nאין התאמה. הרחב עם --pattern")
+        return
+    print(f"\n{len(hits)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
+    for nm, cid in sorted(hits):
+        print(f'    "<slug>": ("h", "{cid}"),'.ljust(34) + f"# {nm}")
 
 
 def do_thumbs(check: bool) -> None:
@@ -170,6 +210,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--thumbs", action="store_true")
     ap.add_argument("--epg-scan", action="store_true")
+    ap.add_argument("--hot-scan", action="store_true",
+                    help="רשימת הערוצים של HOT. חוסם מחוץ לישראל — להריץ מהשרת")
     ap.add_argument("--pattern", default=r"ספורט\s*5|sport\s*5|5\s*(plus|max|\+)")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--revert", action="store_true")
@@ -182,13 +224,15 @@ def main() -> None:
         print(f"✓ שוחזר מ-{BACKUP}")
         return
     if a.epg_scan:
-        print("שואל את וואלה (חייב לרוץ מהשרת — הם חוסמים לפי מדינה)\n")
+        print("שואל את וואלה\n")
         epg_scan(a.pattern)
         if a.thumbs:
             print()
+    if a.hot_scan:
+        hot_scan(a.pattern)
     if a.thumbs:
         do_thumbs(a.check)
-    if not (a.thumbs or a.epg_scan):
+    if not (a.thumbs or a.epg_scan or a.hot_scan):
         ap.print_help()
 
 
