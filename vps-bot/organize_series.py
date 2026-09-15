@@ -72,6 +72,9 @@ def main() -> None:
                     help="שם הסדרה שייקבע לכל הפריטים")
     ap.add_argument("--merge-from", default="",
                     help="שם סדרה קיימת שתמוזג לתוך --series")
+    ap.add_argument("--pairs", default="",
+                    help="מספרי פרקים שהם בעצם זוג משולב, מופרדים בפסיק. "
+                         "למשל --pairs 2,4,6 יהפוך את פרק 2 ל-1-2 וכן הלאה")
     ap.add_argument("--match", default="",
                     help="הטקסט שמזהה את הפריטים בכותרת (ברירת מחדל: --series)")
     a = ap.parse_args()
@@ -141,6 +144,20 @@ def main() -> None:
         new = {"series_name": SERIES}
         if g(i, "series_name") != SERIES:
             changes.append((i, {"series_name": g(i, "series_name")}, new))
+
+    # ── פרקים משולבים ────────────────────────────────────────────────
+    # קובץ שמכיל שני פרקים הועלה כפרק אחד במספר הגבוה: "פ2+1" נשמר כפרק 2.
+    # התוצאה היא סדרה שנראית כאילו חסרים בה פרקים 1, 3 ו-5. כאן מסמנים
+    # את הטווח האמיתי: פרק 2 הופך ל-1-2, פרק 4 ל-3-4, וכן הלאה.
+    pairs = {int(x) for x in re.findall(r"\d+", a.pairs)} if a.pairs else set()
+    if pairs:
+        for i in items:
+            if g(i, "series_name") != SERIES and i not in [c[0] for c in changes]:
+                continue
+            ep = i.get("episode_number")
+            if ep in pairs and i.get("episode_number_end") != ep:
+                changes.append((i, {"episode_number": ep},
+                                {"episode_number": ep - 1, "episode_number_end": ep}))
 
     def final(i, new, k):
         """הערך שיהיה לפריט אחרי השינוי — מהשינוי אם נקבע, אחרת מה שכבר יש.
