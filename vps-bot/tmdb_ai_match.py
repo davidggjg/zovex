@@ -71,6 +71,9 @@ PROVIDERS = {
 # תרגום ביטחון מספרי לתוויות ש-tmdb_apply.py כבר יודע לקרוא.
 # תקרת הפלט לכל בקשה. ראה ההסבר ב-ask_model.
 _MAX_OUT = int(os.environ.get("LLM_MAX_TOKENS", "200"))
+# 45 ושלושה ניסיונות: גרוע-מכל ~3.5 דקות ליחידה ולא 12. קריאה
+# שלא ענתה ב-45 שניות לא תענה ב-90.
+_LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "45"))
 
 
 def _conf_label(c: float) -> str:
@@ -174,10 +177,20 @@ def http_json(url: str, headers=None, data=None, timeout=45, retries=6):
             print(f"\r  ⏸ {e.code} — ממתין {wait:.0f}s".ljust(40),
                   end="", flush=True)
             time.sleep(wait)
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # הדפסה חובה. הגרסה הקודמת ניסתה שוב בשקט מוחלט, ועם
+            # timeout=90 ושישה ניסיונות זה נתן עד 12 דקות של שתיקה על
+            # יחידה אחת — מונה קפוא בלי שום אבחנה. זה בדיוק מה שקרה
+            # בריצה של דוד, ובדיוק אותו סוג באג שהסתיר את חיפושי TMDB.
             if attempt == retries:
+                print(f"\n  ✗ {type(e).__name__} אחרי {retries + 1} "
+                      f"ניסיונות: {str(e)[:90]}")
                 raise
-            time.sleep(min(30.0, 2.0 * (2 ** attempt)))
+            wait = min(30.0, 2.0 * (2 ** attempt))
+            print(f"\r  ⏸ {type(e).__name__} — ניסיון {attempt + 2}/"
+                  f"{retries + 1} בעוד {wait:.0f}s".ljust(52),
+                  end="", flush=True)
+            time.sleep(wait)
     raise RuntimeError("לא אמור להגיע לכאן")
 
 
@@ -288,7 +301,7 @@ def ask_model(cfg: dict, raw: str, cands: list, year: str = "") -> dict:
     }).encode()
     res = http_json(f"{cfg['base_url']}/chat/completions",
                     headers={"Authorization": "Bearer " + cfg["key"]},
-                    data=body, timeout=90)
+                    data=body, timeout=_LLM_TIMEOUT, retries=3)
     txt = res["choices"][0]["message"]["content"]
     try:
         out = json.loads(txt)
@@ -378,6 +391,7 @@ def main() -> None:
 
     out, t0 = [], time.time()
     for n, u in enumerate(rows, 1):
+        _t_unit = time.time()
         q, yr = clean(u["name"])
         # גם עם השנה וגם בלעדיה — ראה ההערה ב-tmdb_candidates
         qs = [q] + ([f"{q} {yr}"] if yr else [])
@@ -390,6 +404,7 @@ def main() -> None:
         except Exception as e:
             ans = {"tmdb_id": None, "media_type": None, "confidence": 0.0,
                    "why": f"שגיאה: {type(e).__name__}"}
+        _unit_took = time.time() - _t_unit
         rec = {**u, "query": q, "year_hint": yr,
                "candidates": len(cands), **ans}
         out.append(rec)
@@ -400,6 +415,9 @@ def main() -> None:
         print(f"\r  {n}/{len(rows)} {mark} {u['name'][:34]:<36}", end="", flush=True)
         # שמירה כל 25 יחידות: ריצה לילית שנופלת בסוף לא צריכה למחוק
         # את כל מה שכבר נמדד.
+        if _unit_took > 20:
+            print(f"\n  ⚠ יחידה {n} לקחה {_unit_took:.0f} שניות "
+                  f"({u['name'][:30]})")
         if n == 10 and sum(TMDB_FAILS.values()) >= 10:
             print(f"\n⚠ עשר היחידות הראשונות ייצרו "
                   f"{sum(TMDB_FAILS.values())} כשלי TMDB: {dict(TMDB_FAILS)}")
