@@ -219,7 +219,15 @@ def main() -> None:
     ap.add_argument("--force", action="store_true",
                     help="לדרוס גם ערכים קיימים (ברירת המחדל: לא)")
     ap.add_argument("--limit", type=int, default=0,
-                    help="לעבד רק N יחידות (טעימה)")
+                    help="N היחידות הראשונות בסדר הקטלוג")
+    # --limit לבדו הוא טעימה מטעה, ונמדד: הרצה של --limit 40 החזירה
+    # en_title ל-254 פריטים אבל description לפריט אחד. לא באג — 40
+    # הראשונים בסדר הקטלוג הם הפריטים הישנים, שכבר יש להם תיאור. מה
+    # שנוסף עכשיו יושב בהמשך הקובץ. דגימה מייצגת חייבת להיות מפוזרת.
+    ap.add_argument("--sample", type=int, default=0,
+                    help="N יחידות באקראי מכל הקטלוג — טעימה מייצגת")
+    ap.add_argument("--seed", type=int, default=7,
+                    help="זרע הדגימה, כדי שאותה טעימה תחזור")
     ap.add_argument("--sleep", type=float, default=0.06)
     a = ap.parse_args()
 
@@ -246,11 +254,18 @@ def main() -> None:
         groups.setdefault((kind, str(tid)), []).append(it)
 
     keys = list(groups)
-    if a.limit:
+    how = "הכול"
+    if a.sample:
+        import random
+        random.Random(a.seed).shuffle(keys)
+        keys = keys[:a.sample]
+        how = f"דגימה אקראית (זרע {a.seed})"
+    elif a.limit:
         keys = keys[:a.limit]
+        how = "הראשונים בסדר הקטלוג — לא מייצג"
     print(f"קטלוג: {len(items)} פריטים · {len(groups)} יחידות עם tmdb_id")
     print(f"מעבד {len(keys)} יחידות · "
-          f"{sum(len(groups[k]) for k in keys)} פריטים\n")
+          f"{sum(len(groups[k]) for k in keys)} פריטים · {how}\n")
 
     changes, fields, failed, clash = [], Counter(), [], []
     t0 = time.time()

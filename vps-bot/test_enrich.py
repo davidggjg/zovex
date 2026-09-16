@@ -254,6 +254,49 @@ run(["--revert"])
 eq(json.loads(E.CONTENT.read_text(encoding="utf-8")), CAT_ITEMS,
    "revert מחזיר בית-בית למצב המקורי")
 
+# ── --sample מול --limit: דגימה מייצגת ──────────────────────────────────────
+# --limit לוקח את הראשונים בסדר הקטלוג, ולכן על קטלוג שהתחלתו מתוחזקת
+# הוא מראה "אין מה למלא" בעוד שהשאר ריק. נמדד בפועל: --limit 40 החזיר
+# en_title ל-254 פריטים ו-description לאחד.
+BIG = ([{"id": i, "title": f"ישן {i}", "tmdb_id": 100 + i,
+         "description": "כבר יש", "year": "2000", "en_title": "Old"}
+        for i in range(30)]
+       + [{"id": 200 + i, "title": f"חדש {i}", "tmdb_id": 300 + i}
+          for i in range(30)])
+E.CONTENT.write_text(json.dumps(BIG, ensure_ascii=False), encoding="utf-8")
+E.BACKUP.unlink(missing_ok=True)
+
+
+def names_touched(argv):
+    """אילו פריטים באמת נכנסו לעיבוד, לפי מה שנשלף מ-TMDB."""
+    FETCHED.clear()
+    run(argv)
+    return {u.rsplit("/", 1)[-1] for u in FETCHED}
+
+
+ids = names_touched(["--check", "--limit", "10"])
+eq(ids <= {str(100 + i) for i in range(30)}, True,
+   "--limit 10 נוגע רק בעשרת הראשונים (הישנים)")
+eq(len(ids), 10, "--limit 10 = 10 יחידות")
+
+ids = names_touched(["--check", "--sample", "20"])
+new_ids = {str(300 + i) for i in range(30)}
+eq(len(ids), 20, "--sample 20 = 20 יחידות")
+assert ids & new_ids, "דגימה אקראית חייבת להגיע גם לחדשים"
+assert not ids <= new_ids, "ולא רק לחדשים"
+
+# ואותו זרע מחזיר אותה דגימה
+eq(names_touched(["--check", "--sample", "20", "--seed", "3"]),
+   names_touched(["--check", "--sample", "20", "--seed", "3"]),
+   "אותו זרע = אותה דגימה")
+assert (names_touched(["--check", "--sample", "20", "--seed", "3"])
+        != names_touched(["--check", "--sample", "20", "--seed", "4"])), \
+    "זרע אחר = דגימה אחרת"
+
+# --sample גובר על --limit ולא מצטבר איתו
+eq(len(names_touched(["--check", "--sample", "15", "--limit", "5"])), 15,
+   "--sample גובר על --limit")
+
 print("\n" + "=" * 62)
 shutil.rmtree(SP, ignore_errors=True)
 if fails:
