@@ -35,6 +35,13 @@ tmdb_id, וזה שלב נפרד.
 נשארת "tr", ולכן היא לא תיפול בטעות ל"ישראליות" — וזה בדיוק ההבדל
 בין השדה הזה לבין ניחוש לפי שם עברי.
 
+ומה שהנתון לא יכול לבטא נשמר בנפרד: category_overrides.json ממפה
+tmdb_id לקטגוריה וגובר על הכול. הוא נדרש כי נמדד שמורביוס (526896)
+ומאדאם ווב (634492) הוצאו מ"מארוול" — הן הפקות סוני עם דמויות של
+מארוול, ורשימת המפיקים ב-TMDB לא מזכירה מארוול בכלל. "מארוול" היא
+קטגוריה עריכתית, ולכן היא גם ב-NEVER_DEMOTE: הכלל החלש לא יוציא
+ממנה פריט לעולם, אבל הכלל החיובי ימשיך להכניס אליה.
+
     python3 fix_categories.py --check          # מטריצת מעברים, בלי כתיבה
     python3 fix_categories.py --sample 60 --check
     python3 fix_categories.py
@@ -85,6 +92,36 @@ G_ANIMATION, G_HORROR, G_FAMILY, G_KIDS = 16, 27, 10751, 10762
 # Marvel Entertainment ו-Marvel Animation מופיעים על השאר.
 MARVEL_IDS = {420, 7505, 19551, 12939}
 MARVEL_WORDS = ("marvel",)
+
+# קטגוריות שהכלל החלש ("ברירת מחדל לפי סוג") לא יוציא מהן פריט לעולם.
+# "מארוול" היא עריכתית ו-TMDB לא יכול לשחזר אותה: נמדד שמורביוס
+# (526896) ומאדאם ווב (634492) הוצאו ממנה, כי הן הפקות סוני עם דמויות
+# של מארוול, ורשימת המפיקים ב-TMDB לא מזכירה את מארוול בכלל. הכלל
+# החיובי (מארוול מפיקה → מארוול) ממשיך להכניס פריטים פנימה.
+NEVER_DEMOTE = {C_MARVEL}
+
+# קביעות עריכתיות: tmdb_id → קטגוריה, גוברות על הכול. זה המקום לכל
+# החלטה שהנתון לא יכול לבטא, והיא נשמרת בין ריצות במקום לחזור בכל פעם.
+OVERRIDES = Path(os.environ.get("ZOVEX_CAT_OVERRIDES",
+                                os.path.join(_HERE, "category_overrides.json")))
+
+
+def load_overrides() -> dict:
+    try:
+        d = json.loads(OVERRIDES.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        sys.exit(f"{OVERRIDES} לא נקרא: {e}")
+    out, bad = {}, []
+    for k, v in (d or {}).items():
+        if str(v).strip() in KNOWN:
+            out[str(k).strip()] = str(v).strip()
+        else:
+            bad.append((k, v))
+    if bad:
+        sys.exit(f"{OVERRIDES}: קטגוריות שלא קיימות בקטלוג {bad}")
+    return out
 
 
 def _langs(d: dict) -> set:
@@ -204,20 +241,26 @@ def main() -> None:
           f"{sum(len(groups[k]) for k in keys)} פריטים"
           + (f" · דגימה אקראית (זרע {a.seed})" if a.sample else "") + "\n")
 
+    over = load_overrides()
+    if over:
+        print(f"{len(over)} קביעות עריכתיות מ-{OVERRIDES.name}\n")
     changes, moves, why_cnt, nodata = [], Counter(), Counter(), 0
     t0 = time.time()
     for n, k in enumerate(keys, 1):
         kind, tid = k
         d = E.fetch(key, kind, tid)
         cat, why = decide(kind == "tv", d)
+        if str(tid) in over:
+            cat, why = over[str(tid)], "קביעה עריכתית"
         if cat is None:
             nodata += 1
         else:
             why_cnt[why] += 1
             for it in groups[k]:
                 cur = (it.get("category") or "").strip()
-                if (a.no_demote and why == "ברירת מחדל לפי סוג"
-                        and cur in KNOWN and cur not in (C_SER, C_MOV)):
+                if (why == "ברירת מחדל לפי סוג" and cur in KNOWN
+                        and cur not in (C_SER, C_MOV)
+                        and (a.no_demote or cur in NEVER_DEMOTE)):
                     continue
                 if cur != cat:
                     changes.append((it, cur, cat, why))

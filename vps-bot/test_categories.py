@@ -234,6 +234,70 @@ by = {i["id"]: i.get("category")
       for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
 eq(by[90], "סרטים", "קטגוריה ריקה מתמלאת גם עם --no-demote")
 
+# ── מארוול לא יורדת לעולם ────────────────────────────────────────────────────
+# נמדד בהרצה אמיתית: מורביוס (526896) ומאדאם ווב (634492) הוצאו
+# מ"מארוול" ל"סרטים", כי הן הפקות סוני ורשימת המפיקים ב-TMDB לא
+# מזכירה מארוול. "מארוול" היא קטגוריה עריכתית שהנתון לא יכול לשחזר.
+MV = [{"id": 100, "title": "מורביוס", "tmdb_id": 111, "category": "מארוול"}]
+TABLE["111"] = tm("en", companies=["Columbia Pictures"], name="Morbius")
+E.CONTENT.write_text(json.dumps(MV, ensure_ascii=False), encoding="utf-8")
+E.CONTENT.with_name("content.json.bak_categories").unlink(missing_ok=True)
+run([])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[100], "מארוול", "מארוול לא יורדת גם בלי --no-demote")
+
+# אבל הכלל החיובי כן מכניס פנימה
+IN = [{"id": 101, "title": "נוקמים", "tmdb_id": 112, "category": "סרטים"}]
+TABLE["112"] = tm("en", companies=[420], name="Avengers")
+E.CONTENT.write_text(json.dumps(IN, ensure_ascii=False), encoding="utf-8")
+run([])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[101], "מארוול", "והכלל החיובי ממשיך להכניס למארוול")
+
+# ומעבר מ"מארוול" לקטגוריה ספציפית אחרת כן מותר — ההגנה היא רק מהגנרי
+SPEC = [{"id": 102, "title": "אנימה", "tmdb_id": 113, "category": "מארוול"}]
+TABLE["113"] = tm("ja", genres=[ANIM], name="Anime")
+E.CONTENT.write_text(json.dumps(SPEC, ensure_ascii=False), encoding="utf-8")
+run([])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[102], "אנימה", "ההגנה היא רק מהכלל הגנרי, לא מקטגוריה ספציפית")
+
+# ── קביעות עריכתיות ─────────────────────────────────────────────────────────
+OV = os.path.join(SP, "ov.json")
+os.environ["ZOVEX_CAT_OVERRIDES"] = OV
+import importlib
+spec2 = importlib.util.spec_from_file_location(
+    "F2", os.path.join(HERE, "fix_categories.py"))
+F2 = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(F2)
+F2._load_enrich = lambda: E
+
+eq(F2.load_overrides(), {}, "בלי קובץ — אין קביעות, בלי קריסה")
+
+json.dump({"113": "אימה"}, open(OV, "w"), ensure_ascii=False)
+eq(F2.load_overrides(), {"113": "אימה"}, "קובץ נקרא")
+
+json.dump({"113": "קטגוריה שלא קיימת"}, open(OV, "w"), ensure_ascii=False)
+try:
+    F2.load_overrides()
+    fails.append("קביעה לקטגוריה שלא קיימת עברה")
+except SystemExit as e:
+    assert "לא קיימות" in str(e.code), e.code
+
+# והקביעה גוברת על ההחלטה האוטומטית
+json.dump({"113": "אימה"}, open(OV, "w"), ensure_ascii=False)
+E.CONTENT.write_text(json.dumps(
+    [{"id": 103, "title": "אנימה", "tmdb_id": 113, "category": "סרטים"}],
+    ensure_ascii=False), encoding="utf-8")
+sys.argv = ["fix_categories.py", "--sleep", "0"]
+F2.main()
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[103], "אימה", "קביעה עריכתית גוברת על 'יפנית + אנימציה'")
+del os.environ["ZOVEX_CAT_OVERRIDES"]
+
 print("\n" + "=" * 62)
 import shutil as _sh
 _sh.rmtree(SP, ignore_errors=True)
