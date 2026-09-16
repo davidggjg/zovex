@@ -71,6 +71,22 @@ if os.environ.get("NO_IPV6", "1") != "0":
 
 ENV_PATHS = ["/opt/zovex-bot/.env", ".env"]
 
+# כלל ההתאמה הדטרמיניסטי יושב ב-tmdb_names, ואותו קובץ בדיוק משמש את
+# tmdb_exact_probe שמודד אותו. ייבוא לפי נתיב כי הקבצים האלה מורדים
+# ל-/opt/zovex-bot שאינו חבילה ואינו ב-sys.path.
+def _load_names():
+    import importlib.util
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmdb_names.py")
+    if not os.path.exists(p):
+        return None
+    spec = importlib.util.spec_from_file_location("tmdb_names", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+_names = _load_names()
+
 # שני הספקים תואמי-OpenAI, ולכן זה הבדל של כתובת ושם דגם בלבד.
 #
 # ברירת המחדל נבחרה במדידה ולא בהנחה. דוד העיר שגרוק מחליפה מודלים, וצדק:
@@ -228,6 +244,9 @@ def http_json(url: str, headers=None, data=None, timeout=45, retries=6):
 TMDB_FAILS = Counter()
 TMDB_TIMEOUT = float(os.environ.get("TMDB_TIMEOUT", "12"))
 
+# ספירת טוקנים מצטברת, ממולאת מ-usage שהשרת מחזיר בכל תשובה.
+USAGE = Counter()
+
 
 def tmdb_candidates(key: str, queries, limit: int = 8) -> list:
     """מועמדים אמיתיים בלבד.
@@ -327,6 +346,15 @@ def ask_model(cfg: dict, raw: str, cands: list, year: str = "") -> dict:
     res = http_json(f"{cfg['base_url']}/chat/completions",
                     headers={"Authorization": "Bearer " + cfg["key"]},
                     data=body, timeout=_LLM_TIMEOUT, retries=3)
+    # ספירת טוקנים אמיתית מהשרת, ולא אמדן. בלעדיה אין דרך לדעת שהמכסה
+    # היומית נגמרת עד שהיא נגמרת — וזה בדיוק מה שקרה: הריצה נתקעה על
+    # 429 עם Retry-After של 679 שניות, שהוא קצב המילוי של דלי היום,
+    # ולא היה שום מספר בלוג שיסביר למה.
+    us = res.get("usage") or {}
+    USAGE["prompt"] += int(us.get("prompt_tokens") or 0)
+    USAGE["completion"] += int(us.get("completion_tokens") or 0)
+    USAGE["total"] += int(us.get("total_tokens") or 0)
+    USAGE["calls"] += 1
     txt = res["choices"][0]["message"]["content"]
     try:
         out = json.loads(txt)
@@ -387,10 +415,30 @@ def main() -> None:
     ap.add_argument("--run", action="store_true",
                     help="מייצר הצעות למה שחסר")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--skip", type=int, default=0,
+                    help="לדלג על N היחידות הראשונות — כדי להמשיך ריצה "
+                         "שנעצרה במקום לשלם עליה שוב")
     ap.add_argument("--min-confidence", type=float, default=0.9)
     ap.add_argument("--sleep", type=float, default=0.25)
     ap.add_argument("--out", default="tmdb_ai_map.json")
+    # שלושת אלה הם ברז הטוקנים. ברירות המחדל הן בדיוק מה שנמדד עליו
+    # הדיוק (8 מועמדים, overview של 220 תווים, תקרת פלט 200) — בכוונה,
+    # כדי ששינוי יהיה החלטה מפורשת ולא הפתעה. מה שהם חוסכים נמדד:
+    #   8 מועמדים + overview מלא  ≈ 1,850 טוקנים לבקשה
+    #   5 מועמדים + overview 80   ≈   740
+    #   5 מועמדים בלי overview    ≈   690
+    ap.add_argument("--max-cands", type=int, default=8)
+    ap.add_argument("--overview", type=int, default=220,
+                    help="אורך התקציר לכל מועמד בתווים. 0 = בלי בכלל")
+    ap.add_argument("--token-budget", type=int, default=0,
+                    help="לעצור בשלום אחרי N טוקנים, ולשמור מה שנאסף")
+    ap.add_argument("--kind-filter", action="store_true",
+                    help="לא לשלוח מועמדי movie ליחידה שהיא סדרה אצלנו")
     a = ap.parse_args()
+    if a.max_cands < 1:
+        ap.error("--max-cands חייב להיות 1 ומעלה")
+    if a.kind_filter and _names is None:
+        ap.error("--kind-filter דורש את tmdb_names.py באותה תיקייה")
 
     if not (a.validate or a.run):
         ap.error("צריך --validate או --run")
@@ -408,11 +456,23 @@ def main() -> None:
 
     items = load_catalog(a.catalog)
     rows = units(items, want_known=a.validate)
+    total_units = len(rows)
+    # --skip לפני --limit: "מ-400 והלאה, 100 יחידות" הוא מה שצריך
+    # כשממשיכים ריצה, ו---limit לבדו היה חותך מההתחלה.
+    if a.skip:
+        rows = rows[a.skip:]
     if a.limit:
         rows = rows[:a.limit]
     mode = "אימות מול תשובות ידועות" if a.validate else "התאמה למה שחסר"
     print(f"{mode} · ספק {a.provider} · דגם {cfg['model']}")
-    print(f"{len(rows)} יחידות חיפוש · סף ביטחון {a.min_confidence}\n")
+    rng = f" (מתוך {total_units}, מדלג על {a.skip})" if a.skip else ""
+    print(f"{len(rows)} יחידות חיפוש{rng} · סף ביטחון {a.min_confidence}")
+    print(f"מועמדים {a.max_cands} · תקציר {a.overview or 'בלי'} · "
+          f"תקרת פלט {_MAX_OUT}"
+          + (f" · תקציב {a.token_budget:,} טוקנים" if a.token_budget else ""))
+    if a.kind_filter:
+        print("סינון סוג פעיל: סדרה אצלנו לא תראה מועמדי movie")
+    print()
 
     out, t0 = [], time.time()
     for n, u in enumerate(rows, 1):
@@ -420,7 +480,16 @@ def main() -> None:
         q, yr = clean(u["name"])
         # גם עם השנה וגם בלעדיה — ראה ההערה ב-tmdb_candidates
         qs = [q] + ([f"{q} {yr}"] if yr else [])
-        cands = tmdb_candidates(tkey, qs) if q else []
+        cands = tmdb_candidates(tkey, qs, limit=a.max_cands) if q else []
+        if a.kind_filter:
+            cands = [c for c in cands if _names.kind_ok(u["kind"],
+                                                        c["media_type"])]
+        if a.overview <= 0:
+            for c in cands:
+                c.pop("overview", None)
+        else:
+            for c in cands:
+                c["overview"] = (c.get("overview") or "")[:a.overview]
         try:
             ans = ask_model(cfg, u["name"], cands, yr)
         except urllib.error.HTTPError as e:
@@ -450,10 +519,20 @@ def main() -> None:
         if n % 25 == 0:
             try:
                 with open(a.out + ".partial", "w", encoding="utf-8") as fh:
-                    json.dump({"done": n, "of": len(rows), "rows": out},
+                    json.dump({"done": n, "of": len(rows), "skip": a.skip,
+                               "tokens": dict(USAGE), "rows": out},
                               fh, ensure_ascii=False)
             except Exception:
                 pass
+        # תקציב טוקנים: עצירה בשלום עדיפה על ריצה שמזדחלת 11 דקות
+        # ליחידה כשהמכסה היומית נגמרה. מה שנאסף נשמר, ו---skip ממשיך.
+        if a.token_budget and USAGE["total"] >= a.token_budget:
+            print(f"\n\n⏹ התקציב נגמר: {USAGE['total']:,} טוקנים אחרי "
+                  f"{n} יחידות. להמשיך מכאן:")
+            print(f"   python3 {os.path.basename(__file__)} --run "
+                  f"--skip {a.skip + n} --out {a.out}")
+            rows = rows[:n]
+            break
         if a.sleep:
             time.sleep(a.sleep)
     print(f"\n\nלקח {time.time()-t0:.0f} שניות "
@@ -461,6 +540,17 @@ def main() -> None:
     if TMDB_FAILS:
         print(f"⚠ חיפושי TMDB שנכשלו: {dict(TMDB_FAILS)}")
         print("  זה מאט הכול. TMDB_TIMEOUT שולט בתקרת ההמתנה לכל חיפוש.")
+    if USAGE["calls"]:
+        per = USAGE["total"] // USAGE["calls"]
+        print(f"טוקנים: {USAGE['total']:,} ב-{USAGE['calls']} קריאות "
+              f"({per:,} לקריאה · {USAGE['prompt']:,} קלט / "
+              f"{USAGE['completion']:,} פלט)")
+        # המכסה היומית החינמית של Groq היא לכל היותר 500K לדגם. כשהיא
+        # נגמרת, כל בקשה ממתינה לקצב המילוי — 5.8 טוקנים לשנייה — וזה
+        # מה שהפך יחידה של 4 שניות ליחידה של 11 דקות.
+        if per:
+            print(f"   בקצב הזה, 500,000 טוקנים ליום = "
+                  f"{500000 // per:,} יחידות ליום")
     print("=" * 62)
 
     if a.validate:

@@ -47,6 +47,15 @@ def main() -> None:
     if not rows:
         sys.exit(f"{a.src} ריק או בפורמט לא מוכר.")
 
+    # מלכודת אמיתית: --validate ו---run כותבים לאותו שם קובץ כברירת מחדל.
+    # קובץ אימות מכיל רק יחידות שכבר יש להן tmdb_id, ולכן tmdb_apply
+    # היה מדלג על כולן ומדווח "0 שינויים" — שנראה כמו כלום לתקן, ולא
+    # כמו הקובץ הלא-נכון. השדה correct קיים רק בקבצי אימות.
+    if sum(1 for r in rows if "correct" in r) > len(rows) // 2:
+        sys.exit(f"{a.src} הוא פלט של --validate ולא של --run: היחידות בו "
+                 "כבר מזוהות,\nולכן tmdb_apply לא ישנה בהן כלום. צריך את "
+                 "הקובץ מ---run.")
+
     keep, drop = [], []
     for r in rows:
         try:
