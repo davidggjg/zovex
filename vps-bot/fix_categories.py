@@ -100,28 +100,36 @@ MARVEL_WORDS = ("marvel",)
 # החיובי (מארוול מפיקה → מארוול) ממשיך להכניס פריטים פנימה.
 NEVER_DEMOTE = {C_MARVEL}
 
-# קביעות עריכתיות: tmdb_id → קטגוריה, גוברות על הכול. זה המקום לכל
-# החלטה שהנתון לא יכול לבטא, והיא נשמרת בין ריצות במקום לחזור בכל פעם.
+# קביעות עריכתיות: גוברות על הכול, ונשמרות בין ריצות במקום לחזור בכל
+# פעם. שני סוגי מפתח:
+#   "526896"          לפי tmdb_id  — לפריט עם מזהה (מורביוס/מאדאם ווב).
+#   "series:עספור"    לפי שם סדרה  — חל על כל פרקיה **בלי קשר למזהה**,
+#                     וזה נדרש כי עספור סדרת ילדים ישראלית שאין לה מזהה
+#                     בקטלוג, ולכן fix_categories לבדו לא יכול להכריע.
 OVERRIDES = Path(os.environ.get("ZOVEX_CAT_OVERRIDES",
                                 os.path.join(_HERE, "category_overrides.json")))
 
 
-def load_overrides() -> dict:
+def load_overrides() -> tuple:
+    """מחזיר (לפי מזהה, לפי שם סדרה). קטגוריה שלא קיימת נפסלת בקריאה."""
     try:
         d = json.loads(OVERRIDES.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return {}, {}
     except Exception as e:
         sys.exit(f"{OVERRIDES} לא נקרא: {e}")
-    out, bad = {}, []
+    by_id, by_series, bad = {}, {}, []
     for k, v in (d or {}).items():
-        if str(v).strip() in KNOWN:
-            out[str(k).strip()] = str(v).strip()
-        else:
+        cat, key = str(v).strip(), str(k).strip()
+        if cat not in KNOWN:
             bad.append((k, v))
+        elif key.startswith("series:"):
+            by_series[key[len("series:"):].strip()] = cat
+        else:
+            by_id[key] = cat
     if bad:
         sys.exit(f"{OVERRIDES}: קטגוריות שלא קיימות בקטלוג {bad}")
-    return out
+    return by_id, by_series
 
 
 def _langs(d: dict) -> set:
@@ -241,10 +249,28 @@ def main() -> None:
           f"{sum(len(groups[k]) for k in keys)} פריטים"
           + (f" · דגימה אקראית (זרע {a.seed})" if a.sample else "") + "\n")
 
-    over = load_overrides()
-    if over:
-        print(f"{len(over)} קביעות עריכתיות מ-{OVERRIDES.name}\n")
+    over, over_series = load_overrides()
+    if over or over_series:
+        print(f"{len(over)+len(over_series)} קביעות עריכתיות "
+              f"מ-{OVERRIDES.name}\n")
     changes, moves, why_cnt, nodata = [], Counter(), Counter(), 0
+
+    # קביעות לפי שם סדרה — פועלות על **כל** הפריטים, גם בלי tmdb_id,
+    # ולכן הן פס נפרד לפני הלולאה שמבוססת-מזהה. עספור נופלת כאן.
+    if over_series:
+        for it in items:
+            if it.get("is_live"):
+                continue
+            sn = str(it.get("series_name") or "").strip()
+            cat = over_series.get(sn)
+            cur = (it.get("category") or "").strip()
+            if cat and cur != cat:
+                changes.append((it, cur, cat, "קביעה עריכתית (שם סדרה)"))
+                moves[(cur or "(ריק)", cat)] += 1
+        why_cnt["קביעה עריכתית (שם סדרה)"] = len(
+            {str(it.get("series_name") or "").strip()
+             for it, _, _, w in changes if w == "קביעה עריכתית (שם סדרה)"})
+
     t0 = time.time()
     for n, k in enumerate(keys, 1):
         kind, tid = k
@@ -257,6 +283,9 @@ def main() -> None:
         else:
             why_cnt[why] += 1
             for it in groups[k]:
+                # קביעה לפי שם סדרה כבר טיפלה בפריט הזה בפס הקודם וגוברת.
+                if str(it.get("series_name") or "").strip() in over_series:
+                    continue
                 cur = (it.get("category") or "").strip()
                 if (why == "ברירת מחדל לפי סוג" and cur in KNOWN
                         and cur not in (C_SER, C_MOV)

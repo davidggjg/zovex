@@ -274,10 +274,16 @@ spec2 = importlib.util.spec_from_file_location(
 F2 = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(F2)
 F2._load_enrich = lambda: E
 
-eq(F2.load_overrides(), {}, "בלי קובץ — אין קביעות, בלי קריסה")
+eq(F2.load_overrides(), ({}, {}), "בלי קובץ — אין קביעות, בלי קריסה")
 
 json.dump({"113": "אימה"}, open(OV, "w"), ensure_ascii=False)
-eq(F2.load_overrides(), {"113": "אימה"}, "קובץ נקרא")
+eq(F2.load_overrides(), ({"113": "אימה"}, {}), "קובץ נקרא — מזהה בלבד")
+
+# מפתח לפי שם סדרה נכנס למילון הנפרד
+json.dump({"113": "אימה", "series:עספור": "סדרות ישראליות"},
+          open(OV, "w"), ensure_ascii=False)
+eq(F2.load_overrides(), ({"113": "אימה"}, {"עספור": "סדרות ישראליות"}),
+   "מפתח series: נכנס לפי שם סדרה")
 
 json.dump({"113": "קטגוריה שלא קיימת"}, open(OV, "w"), ensure_ascii=False)
 try:
@@ -297,6 +303,28 @@ by = {i["id"]: i.get("category")
       for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
 eq(by[103], "אימה", "קביעה עריכתית גוברת על 'יפנית + אנימציה'")
 del os.environ["ZOVEX_CAT_OVERRIDES"]
+
+# ── קביעה לפי שם סדרה: חלה גם בלי tmdb_id ───────────────────────────────────
+# עספור סדרה ישראלית בלי מזהה בקטלוג, ולכן הפס מבוסס-המזהה לא נוגע בה.
+# הקביעה לפי שם סדרה כן — וזה כל הטעם.
+json.dump({"series:עספור": "סדרות ישראליות"}, open(OV, "w"), ensure_ascii=False)
+os.environ["ZOVEX_CAT_OVERRIDES"] = OV
+E.CONTENT.write_text(json.dumps([
+    {"id": 1, "series_name": "עספור", "title": "e1", "category": "סדרות"},
+    {"id": 2, "series_name": "עספור", "title": "e2", "category": "סדרות ישראליות"},
+    {"id": 3, "series_name": "עספור", "title": "e3", "category": ""},
+    {"id": 9, "series_name": "אחרת", "title": "e", "category": "סדרות"},
+], ensure_ascii=False), encoding="utf-8")
+E.CONTENT.with_name("content.json.bak_categories").unlink(missing_ok=True)
+sys.argv = ["fix_categories.py", "--sleep", "0"]
+F2.main()
+_by = {i["id"]: i.get("category")
+       for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(_by[1], "סדרות ישראליות", "פרק גנרי עבר לקביעה לפי שם")
+eq(_by[2], "סדרות ישראליות", "פרק שכבר נכון נשאר")
+eq(_by[3], "סדרות ישראליות", "פרק ריק מתמלא")
+eq(_by[9], "סדרות", "סדרה אחרת לא נגעה")
+os.environ.pop("ZOVEX_CAT_OVERRIDES", None)
 
 print("\n" + "=" * 62)
 import shutil as _sh
