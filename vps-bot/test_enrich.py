@@ -306,6 +306,33 @@ new = E.plan_item({}, {"he": {"overview": "תיאור בעברית"}, "en": {}},
 eq(new.get("description"), "תיאור בעברית", "תיאור עברי הוא בדיוק מה שרוצים")
 eq(E.JUNK_EN, [], "ותיאור עברי אינו חריגה")
 
+# ── --force-fields: לדרוס שדה אחד ולא הכול ─────────────────────────────────
+# למה זה נדרש: 1,720 פריטים בקטלוג עם שנה שגויה, כי ברירת המחדל בפאנל
+# הניהול הייתה new Date().getFullYear(). את השנה צריך לתקן, ותיאורים
+# שנכתבו ביד אסור לדרוס — ו---force לבדו דורס את שניהם.
+D2 = {"he": {}, "en": {"name": "Right Name", "first_air_date": "1999-10-20",
+                       "overview": "TMDB text"}}
+cur = {"year": "2026", "en_title": "Old", "description": "התיאור שלנו"}
+
+eq(E.plan_item(dict(cur), D2, force=False), {}, "בלי force — כלום לא נדרס")
+eq(E.plan_item(dict(cur), D2, force={"year"}), {"year": "1999"},
+   "force על year דורס אותו בלבד")
+eq(sorted(E.plan_item(dict(cur), D2, force={"year", "en_title"})),
+   ["en_title", "year"], "שני שדות")
+eq(E.plan_item(dict(cur), D2, force=True),
+   {"year": "1999", "en_title": "Right Name", "description": "TMDB text"},
+   "force=True דורס הכול, כולל תיאור")
+eq("description" in E.plan_item(dict(cur), D2, force={"year"}), False,
+   "force על year לא נוגע בתיאור — זה כל העניין")
+eq(E.plan_item(dict(cur), D2, force=set()), {},
+   "קבוצה ריקה מתנהגת כמו בלי force")
+
+# ושדה שנדרס אינו מדווח כסתירה — אחרת אותו פריט היה מופיע בשני הדוחות
+cl = []
+E.plan_item(dict(cur), D2, force={"year"}, conflicts=cl)
+eq([f for f, _, _, _ in cl], ["en_title"],
+   "year נדרס ולכן אינו סתירה; en_title לא נדרס ולכן כן")
+
 # ── --sample מול --limit: דגימה מייצגת ──────────────────────────────────────
 # --limit לוקח את הראשונים בסדר הקטלוג, ולכן על קטלוג שהתחלתו מתוחזקת
 # הוא מראה "אין מה למלא" בעוד שהשאר ריק. נמדד בפועל: --limit 40 החזיר

@@ -28,8 +28,20 @@ tmdb_enrich — השלב שממלא בפועל תיאור, שם באנגלית, 
 הטריילרים דווקא לא צריכים שדה: השרת מגיש אותם ב-/content/trailer/<id>
 ופותר אותם מה-tmdb_id בעצמו, כך שברגע שהמזהה קיים הטריילר עובד.
 
-עיקרון: **שום דבר לא נדרס.** פריט שכבר יש לו תיאור נשאר איתו. --force
-קיים למי שרוצה אחרת, והוא לא ברירת המחדל בכוונה.
+עיקרון: **שום דבר לא נדרס.** פריט שכבר יש לו תיאור נשאר איתו.
+--force דורס הכול, ו---force-fields דורס שדות נבחרים בלבד. שניהם לא
+ברירת המחדל בכוונה.
+
+ולמה --force-fields נדרש: הריצה הראשונה דיווחה 1,720 סתירות שנה, ואלה
+לא מזהים שגויים אלא נתון שגוי שכבר היה בקטלוג. "וואן פיס" אצלנו 2026
+ו-1999 ב-TMDB, "זגורי אמפריה" 2026 מול 2014. השורש נמצא בפאנל הניהול
+שבאתר: ברירת המחדל של שדה השנה הייתה new Date().getFullYear(), וגם
+בשמירה היה Number(form.year) || new Date().getFullYear() — כלומר כל
+פריט שהוסף בלי לגעת בשדה קיבל בשקט את שנת ההעלאה. השדה מוצג באתר
+כשנת יציאה, ולכן זה פשוט שגוי. הבאג תוקן בארבעה מקומות ב-AdminPanel,
+ו---force-fields year מתקן את מה שכבר נכתב — בלי לגעת בתיאורים.
+
+    python3 tmdb_enrich.py --force-fields year --check
 
 יעילות: 215 פרקים של אותה סדרה שולחים בקשה אחת, לא 215. המטמון הוא לפי
 (סוג, מזהה), ולכן העלות נמדדת בסדרות ולא בפרקים.
@@ -176,7 +188,7 @@ def fetch(key: str, kind: str, tid) -> dict:
     return d
 
 
-def plan_item(it: dict, d: dict, force: bool, conflicts: list = None) -> dict:
+def plan_item(it: dict, d: dict, force, conflicts: list = None) -> dict:
     """מה היה משתנה בפריט הזה. לא כותב — רק מחשב.
 
     ו-conflicts הוא הצד השני של אותו מטבע: שדה שכבר יש לו ערך אצלנו,
@@ -189,11 +201,15 @@ def plan_item(it: dict, d: dict, force: bool, conflicts: list = None) -> dict:
     he, en = d.get("he") or {}, d.get("en") or {}
     new = {}
 
+    # force הוא או True (הכול) או קבוצת שמות שדות
+    forced = (lambda f: True) if force is True else (
+        (lambda f: f in force) if force else (lambda f: False))
+
     def put(field, val):
         if val in (None, "", 0):
             return
         cur = it.get(field)
-        if force or cur in (None, "", 0):
+        if forced(field) or cur in (None, "", 0):
             if str(cur) != str(val):
                 new[field] = val
         elif (conflicts is not None and field in _CONFLICT_FIELDS
@@ -254,7 +270,13 @@ def main() -> None:
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--revert", action="store_true")
     ap.add_argument("--force", action="store_true",
-                    help="לדרוס גם ערכים קיימים (ברירת המחדל: לא)")
+                    help="לדרוס גם ערכים קיימים בכל השדות (ברירת המחדל: לא)")
+    # --force על הכול הוא כלי גס מדי למה שנדרש בפועל. מה שנמדד: 1,720
+    # פריטים עם שנה שגויה, כי ברירת המחדל בפאנל הניהול הייתה
+    # new Date().getFullYear() וכל פריט שהוסף בלי לגעת בשדה קיבל את
+    # שנת ההעלאה. את זה צריך לתקן — אבל בלי לדרוס תיאורים שנכתבו ביד.
+    ap.add_argument("--force-fields", default="",
+                    help="שדות לדרוס, מופרדים בפסיק. למשל: year")
     ap.add_argument("--limit", type=int, default=0,
                     help="N היחידות הראשונות בסדר הקטלוג")
     # --limit לבדו הוא טעימה מטעה, ונמדד: הרצה של --limit 40 החזירה
@@ -267,6 +289,12 @@ def main() -> None:
                     help="זרע הדגימה, כדי שאותה טעימה תחזור")
     ap.add_argument("--sleep", type=float, default=0.06)
     a = ap.parse_args()
+
+    ff = {x.strip() for x in a.force_fields.split(",") if x.strip()}
+    bad = ff - {"description", "en_title", "year", "thumbnail_url", "category"}
+    if bad:
+        sys.exit(f"--force-fields: שדות לא מוכרים {sorted(bad)}")
+    force_arg = True if a.force else ff
 
     if a.revert:
         if not BACKUP.exists():
@@ -316,7 +344,7 @@ def main() -> None:
                            (it0.get("series_name") or it0.get("title")
                             or "?").strip()))
         for it in groups[k]:
-            new = plan_item(it, d, a.force, clash)
+            new = plan_item(it, d, force_arg, clash)
             if new:
                 changes.append((it, new))
                 # .keys() ולא new: Counter.update על מילון **מחבר את

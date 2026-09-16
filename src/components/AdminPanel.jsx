@@ -82,7 +82,12 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [videoUrlInput, setVideoUrlInput] = useState("");
   const [form, setForm] = useState({
     title: "", thumbnail_url: "", category: "", description: "",
-    year: String(new Date().getFullYear()),
+    // ריק ולא השנה הנוכחית. ברירת המחדל הקודמת מילאה בשקט את שנת
+    // ההעלאה לכל פריט שהוסף בלי לגעת בשדה, והתוצאה נמדדה: 1,720
+    // פריטים בקטלוג עם שנה שגויה — "וואן פיס" 2026 במקום 1999,
+    // "זגורי אמפריה" 2026 במקום 2014. השדה מוצג באתר כשנת יציאה
+    // (MovieDetail), ולכן שנה ריקה עדיפה על שנה שקרית.
+    year: "",
     series_name: "", season_number: "", episode_number: "", episode_title: "",
     jellyfinServer: "", jellyfinApiKey: "", custom_slug: ""
   });
@@ -125,7 +130,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   };
 
   const resetForm = () => {
-    setForm({ title: "", thumbnail_url: "", category: categories[0] || "", description: "", year: String(new Date().getFullYear()), series_name: "", season_number: "", episode_number: "", episode_title: "", jellyfinServer: "", jellyfinApiKey: "", custom_slug: "" });
+    setForm({ title: "", thumbnail_url: "", category: categories[0] || "", description: "", year: "", series_name: "", season_number: "", episode_number: "", episode_title: "", jellyfinServer: "", jellyfinApiKey: "", custom_slug: "" });
     setVideoUrlInput(""); setIsSeries(false); setEditingMovie(null);
     setFormStatus({ type: "", message: "" }); setShowExistingSeries(false);
   };
@@ -187,7 +192,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     }
     const payload = {
       title: form.title, description: form.description, thumbnail_url: autoThumb,
-      category: form.category, year: Number(form.year) || new Date().getFullYear(),
+      category: form.category, year: Number(form.year) || null,
       video_id: info.video_id, type: info.type, video_url: videoUrlInput,
       series_name: isSeries ? (form.series_name || form.title) : null,
       season_number: isSeries ? (Number(form.season_number) || 1) : null,
@@ -258,7 +263,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     setForm({
       title: movie.title || "", thumbnail_url: movie.thumbnail_url || "",
       category: movie.category || "", description: movie.description || "",
-      year: String(movie.year || new Date().getFullYear()),
+      year: String(movie.year || ""),
       series_name: movie.series_name || "", season_number: String(movie.season_number || ""),
       episode_number: String(movie.episode_number || ""), episode_title: movie.episode_title || "",
       jellyfinServer: movie.jellyfin_server || "", jellyfinApiKey: movie.jellyfin_api_key || "",
