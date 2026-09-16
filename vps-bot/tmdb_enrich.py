@@ -12,9 +12,18 @@ tmdb_enrich — השלב שממלא בפועל תיאור, שם באנגלית, 
 למה זה נדרש בנפרד: tmdb_apply כותב **רק** את המזהה. בלי השלב הזה יש
 בקטלוג מספר ואין תיאור.
 
-כמה חסר בפועל — להריץ catalog_stats.py, לא לנחש. גרסה קודמת של
-התיעוד הזה טענה "description חסר ברוב הפריטים", ואז דגימה אקראית של
-187 פריטים החזירה אפס תיאורים להשלמה. הטענה הייתה אמדן שלי ולא מדידה.
+וזה מה שנמדד בקטלוג (catalog_stats.py, 13,070 פריטי VOD):
+
+    thumbnail_url  13,070  100%   אין מה להשלים
+    category       13,069   99%   אין מה להשלים
+    description    12,292   94%   חסר ב-470 שיש להם מזהה
+    tmdb_id         9,554   73%
+    year            4,954   37%   ← הפער הגדול
+    en_title        1,190    9%   ← הפער הגדול
+
+גרסה קודמת של התיעוד הזה טענה "description חסר ברוב הפריטים". זה היה
+אמדן שלי ולא מדידה, והוא היה שגוי בגדול: 94% מהקטלוג כבר עם תיאור.
+הערך האמיתי של השלב הזה הוא year ו-en_title, ועוד 470 תיאורים.
 
 הטריילרים דווקא לא צריכים שדה: השרת מגיש אותם ב-/content/trailer/<id>
 ופותר אותם מה-tmdb_id בעצמו, כך שברגע שהמזהה קיים הטריילר עובד.
@@ -155,12 +164,15 @@ def fetch(key: str, kind: str, tid) -> dict:
     """
     d = _fetch_one(key, kind, tid)
     if d.get("he") or d.get("en"):
+        d["kind"] = kind
         return d
     other = "movie" if kind == "tv" else "tv"
     d2 = _fetch_one(key, other, tid)
     if d2.get("he") or d2.get("en"):
         KIND_FLIPS[f"{kind}→{other}"] += 1
+        d2["kind"] = other
         return d2
+    d["kind"] = kind
     return d
 
 
@@ -192,15 +204,23 @@ def plan_item(it: dict, d: dict, force: bool, conflicts: list = None) -> dict:
     # תרגום, ולכן הבדיקה היא על תוכן ולא על קיום המפתח.
     put("description", (he.get("overview") or "").strip()
         or (en.get("overview") or "").strip())
-    # שם "באנגלית" שכתוב בעברית אינו שם באנגלית. זה קורה כי בקשה עם
-    # language=en-US מחזירה את הכותר הראשי כשאין תרגום, ורשומה שנוצרה
-    # בעברית תחזיר עברית. נמדד בדגימה: "לבד בבית" קיבל en_title="לבד
-    # בבית". זה גם טביעת האצבע של רשומת זבל — אותו סוג רשומה שהחזיקה
-    # את "300" על מזהה 1416873 — ולרשומות כאלה אין overview, מה שמסביר
-    # למה description יצא 0 מ-187.
+    # שם "באנגלית" שכתוב בעברית אינו שם באנגלית, ולכן לא נכתב. זה קורה
+    # כי בקשה עם language=en-US מחזירה את הכותר הראשי כשאין תרגום
+    # אנגלי, ורשומה שהמקור שלה עברי תחזיר עברית.
+    #
+    # ולזה שני מקורות שונים לגמרי, ושניהם נמדדו:
+    #   תוכן ישראלי מקורי — "לבד בבית" הוא tv/230326, סדרת ילדים של
+    #   כאן חינוכית עם 93 פרקים. ההתאמה נכונה; פשוט אין לה שם באנגלית
+    #   ואין לה overview, כי TMDB לא מתרגם סדרות ילדים ישראליות.
+    #   רשומה דלה — 1416873, "שם הסרט: קאצוהיקו מוש", שהחזיקה את "300"
+    #   במקום 1271. שם ההתאמה עצמה שגויה.
+    #
+    # השדה לא נכתב בשני המקרים, אבל ההבדל ביניהם קובע אם צריך לתקן
+    # את המזהה — ולכן מודפס קישור לדף, ובסוג הנכון.
     ent = (en.get("name") or en.get("title") or "").strip()
     if _has_hebrew(ent):
-        JUNK_EN.append((it.get("tmdb_id"), ent))
+        JUNK_EN.append((d.get("kind") or "movie", it.get("tmdb_id"), ent,
+                        (it.get("series_name") or it.get("title") or "?").strip()))
     else:
         put("en_title", ent)
     date = (he.get("first_air_date") or he.get("release_date")
@@ -327,16 +347,20 @@ def main() -> None:
     # המזהים שכנראה שגויים, והם הסיבה שדגימה של 187 פריטים החזירה
     # אפס תיאורים.
     if JUNK_EN:
-        uniq = {}
-        for tid, name in JUNK_EN:
-            uniq.setdefault(tid, name)
-        print(f"\n⚠ {len(uniq)} מזהי TMDB שהכותר האנגלי שלהם עברי — "
-              "כנראה רשומות זבל, ה-en_title שלהם לא נכתב:")
-        for tid, name in list(uniq.items())[:12]:
-            print(f"   tmdb_id {str(tid):<10} \"{name[:30]}\""
-                  f"   themoviedb.org/movie/{tid}")
+        uniq, cnt = {}, Counter()
+        for kind, tid, ent, ours in JUNK_EN:
+            uniq.setdefault((kind, tid), (ent, ours))
+            cnt[(kind, tid)] += 1
+        print(f"\n⚠ {len(uniq)} מזהים שאין להם שם באנגלית ב-TMDB "
+              f"({sum(cnt.values())} פריטים) — en_title לא נכתב:")
+        for (kind, tid), (ent, ours) in list(uniq.items())[:12]:
+            print(f"   {ours[:24]:<26} → {kind}/{tid} \"{ent[:22]}\" "
+                  f"×{cnt[(kind, tid)]}")
+            print(f"      themoviedb.org/{kind}/{tid}")
         if len(uniq) > 12:
             print(f"   ...ועוד {len(uniq)-12}")
+        print("   תוכן ישראלי מקורי — תקין, אין לו שם באנגלית.")
+        print("   שם שלא קשור לפריט אצלנו — המזהה שגוי וצריך תיקון.")
 
     if clash:
         by_field = Counter(f for f, _, _, _ in clash)

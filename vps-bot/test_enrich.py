@@ -111,10 +111,19 @@ E.KIND_FLIPS.clear(); CALLS.clear()
 d = E.fetch("K", "movie", 501)
 eq(bool(d.get("he") or d.get("en")), True, "היפוך סוג מצא את הפריט")
 eq(dict(E.KIND_FLIPS), {"movie→tv": 1}, "ההיפוך נספר ולא נבלע")
+eq(d.get("kind"), "tv", "והסוג שנענה בפועל מדווח")
+
+E.KIND_FLIPS.clear(); CALLS.clear()
+eq(E.fetch("K", "tv", 7).get("kind"), "tv", "בלי היפוך — הסוג המקורי")
 
 E.KIND_FLIPS.clear(); CALLS.clear()
 d = E.fetch("K", "tv", 999)
-eq(d, {"he": {}, "en": {}}, "מזהה שלא קיים בשום סוג חוזר ריק")
+eq({k: v for k, v in d.items() if k != "kind"}, {"he": {}, "en": {}},
+   "מזהה שלא קיים בשום סוג חוזר ריק")
+eq(d.get("kind"), "tv", "וגם אז הסוג מדווח")
+# main בודק he/en במפורש ולא את האמיתות של d, ולכן התוספת של kind
+# לא הופכת תשובה ריקה ל"נענתה"
+eq(bool(d.get("he") or d.get("en")), False, "kind לא מסווה כשל")
 eq(dict(E.KIND_FLIPS), {}, "ובלי לדווח על היפוך")
 eq(len(CALLS), 4, "נוסו שתי שפות בשני סוגים")
 
@@ -265,24 +274,37 @@ eq(E._has_hebrew(None), False, "None")
 eq(E._has_hebrew("Home Alone (לבד בבית)"), True, "עברית מעורבת נתפסת")
 
 E.JUNK_EN.clear()
-new = E.plan_item({}, {"he": {}, "en": {"title": "לבד בבית",
-                                        "release_date": "2021-11-12"}},
+new = E.plan_item({"tmdb_id": 230326, "series_name": "לבד בבית"},
+                  {"kind": "tv", "he": {}, "en": {"name": "לבד בבית",
+                                                  "first_air_date": "2021-11-12"}},
                   force=False)
 eq("en_title" in new, False, "en_title עברי לא נכתב")
 eq(new.get("year"), "2021", "אבל שאר השדות כן נכתבים")
-eq(len(E.JUNK_EN), 1, "והמזהה נרשם כחשוד")
+eq(len(E.JUNK_EN), 1, "והמזהה נרשם")
+# הסוג חייב להגיע מהתשובה ולא להיות מקודד: "לבד בבית" הוא tv/230326,
+# סדרת ילדים ישראלית לגיטימית. קישור ל-/movie/230326 מוביל לסרט צרפתי
+# מ-1995 ("Le Nouveau Monde") — כלומר גרסה קודמת של הדיווח הפנתה לדף
+# הלא-נכון והסיקה ממנו שההתאמה שגויה, כשהיא נכונה.
+eq(E.JUNK_EN[0][0], "tv", "הסוג מגיע מהתשובה של fetch")
+eq(E.JUNK_EN[0][1], 230326, "המזהה")
+eq(E.JUNK_EN[0][3], "לבד בבית", "ושם הפריט אצלנו, כדי שיהיה מה להשוות")
+
+# בלי "kind" בתשובה — ברירת מחדל ולא קריסה
+E.JUNK_EN.clear()
+E.plan_item({"tmdb_id": 1}, {"he": {}, "en": {"title": "עברית"}}, force=False)
+eq(E.JUNK_EN[0][0], "movie", "בלי kind — ברירת מחדל movie")
 
 E.JUNK_EN.clear()
 new = E.plan_item({}, {"he": {}, "en": {"title": "Home Alone"}}, force=False)
 eq(new.get("en_title"), "Home Alone", "en_title אנגלי כן נכתב")
-eq(E.JUNK_EN, [], "ולא נרשם כחשוד")
+eq(E.JUNK_EN, [], "ולא נרשם")
 
 # ותיאור בעברית כן רצוי — הכלל חל על en_title בלבד
 E.JUNK_EN.clear()
 new = E.plan_item({}, {"he": {"overview": "תיאור בעברית"}, "en": {}},
                   force=False)
 eq(new.get("description"), "תיאור בעברית", "תיאור עברי הוא בדיוק מה שרוצים")
-eq(E.JUNK_EN, [], "ותיאור עברי אינו חשד")
+eq(E.JUNK_EN, [], "ותיאור עברי אינו חריגה")
 
 # ── --sample מול --limit: דגימה מייצגת ──────────────────────────────────────
 # --limit לוקח את הראשונים בסדר הקטלוג, ולכן על קטלוג שהתחלתו מתוחזקת
