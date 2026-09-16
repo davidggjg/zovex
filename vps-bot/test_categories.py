@@ -274,15 +274,15 @@ spec2 = importlib.util.spec_from_file_location(
 F2 = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(F2)
 F2._load_enrich = lambda: E
 
-eq(F2.load_overrides(), ({}, {}), "בלי קובץ — אין קביעות, בלי קריסה")
+eq(F2.load_overrides(), ({}, {}, {}), "בלי קובץ — אין קביעות, בלי קריסה")
 
 json.dump({"113": "אימה"}, open(OV, "w"), ensure_ascii=False)
-eq(F2.load_overrides(), ({"113": "אימה"}, {}), "קובץ נקרא — מזהה בלבד")
+eq(F2.load_overrides(), ({"113": "אימה"}, {}, {}), "קובץ נקרא — מזהה בלבד")
 
 # מפתח לפי שם סדרה נכנס למילון הנפרד
 json.dump({"113": "אימה", "series:עספור": "סדרות ישראליות"},
           open(OV, "w"), ensure_ascii=False)
-eq(F2.load_overrides(), ({"113": "אימה"}, {"עספור": "סדרות ישראליות"}),
+eq(F2.load_overrides(), ({"113": "אימה"}, {"עספור": "סדרות ישראליות"}, {}),
    "מפתח series: נכנס לפי שם סדרה")
 
 json.dump({"113": "קטגוריה שלא קיימת"}, open(OV, "w"), ensure_ascii=False)

@@ -111,25 +111,37 @@ OVERRIDES = Path(os.environ.get("ZOVEX_CAT_OVERRIDES",
 
 
 def load_overrides() -> tuple:
-    """מחזיר (לפי מזהה, לפי שם סדרה). קטגוריה שלא קיימת נפסלת בקריאה."""
+    """מחזיר (לפי מזהה, לפי שם סדרה, לפי כותרת).
+
+    שלושה סוגי מפתח, כי לא לכל פריט יש אותו עוגן:
+      "526896"        tmdb_id — לפריט עם מזהה.
+      "series:עספור"  שם סדרה — לכל פרקיה, בלי קשר למזהה.
+      "title:ונום 2"  כותרת   — לסרט בודד בלי series_name ובלי מזהה,
+                      וזה בדיוק המצב של 6 סרטי מארוול שנמצאו מפוזרים
+                      ב"סרטים": ונום 2, הפנתר השחור, דוקטור סטריינג'
+                      וכו', שאין להם עוגן אחר.
+    קטגוריה שלא קיימת בקטלוג נפסלת בקריאה.
+    """
     try:
         d = json.loads(OVERRIDES.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}, {}
+        return {}, {}, {}
     except Exception as e:
         sys.exit(f"{OVERRIDES} לא נקרא: {e}")
-    by_id, by_series, bad = {}, {}, []
+    by_id, by_series, by_title, bad = {}, {}, {}, []
     for k, v in (d or {}).items():
         cat, key = str(v).strip(), str(k).strip()
         if cat not in KNOWN:
             bad.append((k, v))
         elif key.startswith("series:"):
             by_series[key[len("series:"):].strip()] = cat
+        elif key.startswith("title:"):
+            by_title[key[len("title:"):].strip()] = cat
         else:
             by_id[key] = cat
     if bad:
         sys.exit(f"{OVERRIDES}: קטגוריות שלא קיימות בקטלוג {bad}")
-    return by_id, by_series
+    return by_id, by_series, by_title
 
 
 def _langs(d: dict) -> set:
@@ -249,27 +261,29 @@ def main() -> None:
           f"{sum(len(groups[k]) for k in keys)} פריטים"
           + (f" · דגימה אקראית (זרע {a.seed})" if a.sample else "") + "\n")
 
-    over, over_series = load_overrides()
-    if over or over_series:
-        print(f"{len(over)+len(over_series)} קביעות עריכתיות "
+    over, over_series, over_title = load_overrides()
+    if over or over_series or over_title:
+        print(f"{len(over)+len(over_series)+len(over_title)} קביעות עריכתיות "
               f"מ-{OVERRIDES.name}\n")
     changes, moves, why_cnt, nodata = [], Counter(), Counter(), 0
 
-    # קביעות לפי שם סדרה — פועלות על **כל** הפריטים, גם בלי tmdb_id,
-    # ולכן הן פס נפרד לפני הלולאה שמבוססת-מזהה. עספור נופלת כאן.
-    if over_series:
+    # קביעות לפי שם סדרה / כותרת — פועלות על **כל** הפריטים, גם בלי
+    # tmdb_id, ולכן פס נפרד לפני הלולאה מבוססת-המזהה. עספור נופלת ב-
+    # שם-סדרה; 6 סרטי מארוול המפוזרים נופלים ב-כותרת.
+    if over_series or over_title:
         for it in items:
             if it.get("is_live"):
                 continue
             sn = str(it.get("series_name") or "").strip()
             cat = over_series.get(sn)
+            if not cat and not sn:            # כותרת חלה רק על פריט בודד
+                cat = over_title.get(str(it.get("title") or "").strip())
             cur = (it.get("category") or "").strip()
             if cat and cur != cat:
-                changes.append((it, cur, cat, "קביעה עריכתית (שם סדרה)"))
+                changes.append((it, cur, cat, "קביעה עריכתית (שם/כותרת)"))
                 moves[(cur or "(ריק)", cat)] += 1
-        why_cnt["קביעה עריכתית (שם סדרה)"] = len(
-            {str(it.get("series_name") or "").strip()
-             for it, _, _, w in changes if w == "קביעה עריכתית (שם סדרה)"})
+        why_cnt["קביעה עריכתית (שם/כותרת)"] = sum(
+            1 for _, _, _, w in changes if w == "קביעה עריכתית (שם/כותרת)")
 
     t0 = time.time()
     for n, k in enumerate(keys, 1):
@@ -283,8 +297,12 @@ def main() -> None:
         else:
             why_cnt[why] += 1
             for it in groups[k]:
-                # קביעה לפי שם סדרה כבר טיפלה בפריט הזה בפס הקודם וגוברת.
-                if str(it.get("series_name") or "").strip() in over_series:
+                # קביעה לפי שם סדרה/כותרת כבר טיפלה בפריט הזה בפס הקודם
+                # וגוברת על ההחלטה מ-TMDB.
+                _sn = str(it.get("series_name") or "").strip()
+                if _sn in over_series:
+                    continue
+                if not _sn and str(it.get("title") or "").strip() in over_title:
                     continue
                 cur = (it.get("category") or "").strip()
                 if (why == "ברירת מחדל לפי סוג" and cur in KNOWN
