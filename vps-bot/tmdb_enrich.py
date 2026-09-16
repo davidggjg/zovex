@@ -78,6 +78,10 @@ GENRE_CAT = {
 }
 
 
+# סוגים שהתהפכו בפועל, לדיווח. ספירה ולא שתיקה.
+KIND_FLIPS = Counter()
+
+
 def load_key() -> str:
     v = os.environ.get("TMDB_API_KEY", "").strip()
     if v:
@@ -115,8 +119,7 @@ def get(url: str, timeout=40):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
-def fetch(key: str, kind: str, tid) -> dict:
-    """פרטי פריט בשתי שפות. עברית לתיאור, אנגלית לשם ולנפילה-אחורה."""
+def _fetch_one(key: str, kind: str, tid) -> dict:
     out = {}
     for lang, tag in (("he-IL", "he"), ("en-US", "en")):
         q = urllib.parse.urlencode({"api_key": key, "language": lang})
@@ -125,6 +128,27 @@ def fetch(key: str, kind: str, tid) -> dict:
         except Exception:
             out[tag] = {}
     return out
+
+
+def fetch(key: str, kind: str, tid) -> dict:
+    """פרטי פריט בשתי שפות. עברית לתיאור, אנגלית לשם ולנפילה-אחורה.
+
+    והסוג נבדק ולא מונח. הסיבה: tmdb_apply כותב לקטלוג **רק** את
+    המזהה, ה-media_type שההתאמה מצאה נזרק, וכאן הסוג נגזר מחדש מקיום
+    series_name. לסדרה זה תמיד נכון — ההתאמה לא מרשה לסדרה מזהה movie.
+    אבל פריט בודד אצלנו יכול להיות מיני-סדרה שנשמרה כשורה אחת, ואז
+    /movie/<מזהה של tv> מחזיר 404 בשתי השפות, וזה נספר כ"לא נענה"
+    בלי שום רמז לסיבה. לכן אם הסוג הראשון חוזר ריק, מנסים את השני.
+    """
+    d = _fetch_one(key, kind, tid)
+    if d.get("he") or d.get("en"):
+        return d
+    other = "movie" if kind == "tv" else "tv"
+    d2 = _fetch_one(key, other, tid)
+    if d2.get("he") or d2.get("en"):
+        KIND_FLIPS[f"{kind}→{other}"] += 1
+        return d2
+    return d
 
 
 def plan_item(it: dict, d: dict, force: bool) -> dict:
@@ -211,23 +235,40 @@ def main() -> None:
     print(f"מעבד {len(keys)} יחידות · "
           f"{sum(len(groups[k]) for k in keys)} פריטים\n")
 
-    changes, fields, failed = [], Counter(), 0
+    changes, fields, failed = [], Counter(), []
     t0 = time.time()
     for n, k in enumerate(keys, 1):
         kind, tid = k
         d = fetch(key, kind, tid)
         if not (d.get("he") or d.get("en")):
-            failed += 1
+            it0 = groups[k][0]
+            failed.append((kind, tid,
+                           (it0.get("series_name") or it0.get("title")
+                            or "?").strip()))
         for it in groups[k]:
             new = plan_item(it, d, a.force)
             if new:
                 changes.append((it, new))
-                fields.update(new)
+                # .keys() ולא new: Counter.update על מילון **מחבר את
+                # הערכים**, ועל מחרוזות זה שרשור. הסיכום הדפיס
+                # "תיאורתיאורתיאור" במקום מספר.
+                fields.update(new.keys())
         print(f"\r  {n}/{len(keys)}".ljust(22), end="", flush=True)
         if a.sleep:
             time.sleep(a.sleep)
-    print(f"\n\nלקח {time.time()-t0:.0f} שניות · {failed} יחידות לא נענו\n"
-          + "=" * 62)
+    print(f"\n\nלקח {time.time()-t0:.0f} שניות · {len(failed)} יחידות לא נענו")
+    if KIND_FLIPS:
+        print(f"סוג שהתהפך: {dict(KIND_FLIPS)} — מזהה שנשמר כסרט והוא "
+              "סדרה או להפך")
+    # כשל שקוף הוא הדבר שהכי קשה לאבחן, ולכן המזהים שלא נענו מודפסים.
+    # 404 בשתי השפות ובשני הסוגים פירושו מזהה שגוי בקטלוג, לא תקלת רשת.
+    if failed:
+        print("\nיחידות שלא נענו (מזהה שגוי או TMDB לא זמין):")
+        for kind, tid, name in failed[:10]:
+            print(f"   {name[:30]:<32} {kind}/{tid}")
+        if len(failed) > 10:
+            print(f"   ...ועוד {len(failed)-10}")
+    print("=" * 62)
 
     if not changes:
         print("אין מה להשלים.")
