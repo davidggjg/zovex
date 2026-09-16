@@ -122,6 +122,49 @@ E.KIND_FLIPS.clear(); CALLS.clear()
 E.fetch("K", "tv", 7)
 eq(len(CALLS), 2, "סוג שנענה מיד — בלי ניסיון שני")
 
+# ── דיווח סתירות: הסימן היחיד שמזהה שגוי ────────────────────────────────────
+# שנה ושם באנגלית שלא מסתדרים עם TMDB הם מה שחשף ש"300" בקטלוג הצביע
+# על רשומת זבל. תיאור ופוסטר *תמיד* שונים ולכן לא נחשבים סתירה.
+cl = []
+E.plan_item({"year": "1999", "en_title": "Wrong Title",
+             "description": "הניסוח שלנו", "thumbnail_url": "https://x/y.jpg"},
+            {"he": {}, "en": {"name": "Breaking Bad",
+                              "first_air_date": "2008-01-20",
+                              "overview": "TMDB text", "poster_path": "/z.jpg"}},
+            force=False, conflicts=cl)
+eq(sorted(f for f, _, _, _ in cl), ["en_title", "year"],
+   "רק שנה ושם באנגלית נחשבים סתירה")
+eq([(c, v) for f, _, c, v in cl if f == "year"], [("1999", "2008")],
+   "הערך שאצלנו והערך ב-TMDB מדווחים שניהם")
+
+# שדה תואם אינו סתירה, וגם לא הפרש רווחים בלבד
+cl = []
+E.plan_item({"year": "2008", "en_title": " Breaking Bad "},
+            {"he": {}, "en": {"name": "Breaking Bad",
+                              "first_air_date": "2008-05-05"}},
+            force=False, conflicts=cl)
+eq(cl, [], "ערך זהה (וגם עם רווחים) אינו סתירה")
+
+# --force כותב ולא מדווח: הערך נכנס ל-new ולא ל-conflicts
+cl = []
+new = E.plan_item({"year": "1999"},
+                  {"he": {}, "en": {"first_air_date": "2008-01-20"}},
+                  force=True, conflicts=cl)
+eq(new.get("year"), "2008", "--force כותב את הערך")
+eq(cl, [], "--force לא מדווח סתירה על מה שהוא דרס")
+
+# שדה חסר אינו סתירה — הוא פשוט מתמלא
+cl = []
+new = E.plan_item({}, {"he": {}, "en": {"first_air_date": "2008-01-20"}},
+                  force=False, conflicts=cl)
+eq(new.get("year"), "2008", "שדה חסר מתמלא")
+eq(cl, [], "שדה חסר אינו סתירה")
+
+# וללא conflicts בכלל — התנהגות זהה לקודם, בלי קריסה
+eq(E.plan_item({"year": "1999"},
+               {"he": {}, "en": {"first_air_date": "2008-01-20"}},
+               force=False), {}, "בלי conflicts הפונקציה עובדת כמו קודם")
+
 # ── הזרימה המלאה: קיבוץ, כתיבה, גיבוי, גרסה, revert ────────────────────────
 CAT_ITEMS = (
     # סדרה של 3 פרקים עם אותו מזהה = בקשה אחת

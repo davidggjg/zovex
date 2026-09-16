@@ -81,6 +81,12 @@ GENRE_CAT = {
 # סוגים שהתהפכו בפועל, לדיווח. ספירה ולא שתיקה.
 KIND_FLIPS = Counter()
 
+# רק שדות שהשוואה עליהם אומרת משהו. description תמיד שונה (הניסוח
+# שלנו מול TMDB), thumbnail_url תמיד שונה (מתארח במקום אחר), ו-category
+# שונה לגיטימית. שנה ושם באנגלית הם היחידים שסתירה בהם מרמזת על מזהה
+# שגוי ולא על העדפת ניסוח.
+_CONFLICT_FIELDS = {"year", "en_title"}
+
 
 def load_key() -> str:
     v = os.environ.get("TMDB_API_KEY", "").strip()
@@ -151,8 +157,16 @@ def fetch(key: str, kind: str, tid) -> dict:
     return d
 
 
-def plan_item(it: dict, d: dict, force: bool) -> dict:
-    """מה היה משתנה בפריט הזה. לא כותב — רק מחשב."""
+def plan_item(it: dict, d: dict, force: bool, conflicts: list = None) -> dict:
+    """מה היה משתנה בפריט הזה. לא כותב — רק מחשב.
+
+    ו-conflicts הוא הצד השני של אותו מטבע: שדה שכבר יש לו ערך אצלנו,
+    והערך של TMDB **שונה**. זה לא נכתב (חוץ מ---force), אבל זה הסימן
+    היחיד שיש לנו שהמזהה עצמו שגוי. הוכח שזה קורה: מתוך 183 יחידות
+    שנבדקו מול המזהה שכבר היה בקטלוג, שתיים היו שגויות — "300" הצביע
+    על רשומת זבל עברית, ו"הצילו! כדור הארץ השתגע" על דרמה טייוואנית.
+    שדה שנכתב בעבר ולא מסתדר עם TMDB הוא בדיוק מה שחושף את זה.
+    """
     he, en = d.get("he") or {}, d.get("en") or {}
     new = {}
 
@@ -163,6 +177,9 @@ def plan_item(it: dict, d: dict, force: bool) -> dict:
         if force or cur in (None, "", 0):
             if str(cur) != str(val):
                 new[field] = val
+        elif (conflicts is not None and field in _CONFLICT_FIELDS
+                and str(cur).strip() != str(val).strip()):
+            conflicts.append((field, it, cur, val))
 
     # תיאור: עברית אם יש, אחרת אנגלית. TMDB מחזיר overview ריק כשאין
     # תרגום, ולכן הבדיקה היא על תוכן ולא על קיום המפתח.
@@ -235,7 +252,7 @@ def main() -> None:
     print(f"מעבד {len(keys)} יחידות · "
           f"{sum(len(groups[k]) for k in keys)} פריטים\n")
 
-    changes, fields, failed = [], Counter(), []
+    changes, fields, failed, clash = [], Counter(), [], []
     t0 = time.time()
     for n, k in enumerate(keys, 1):
         kind, tid = k
@@ -246,7 +263,7 @@ def main() -> None:
                            (it0.get("series_name") or it0.get("title")
                             or "?").strip()))
         for it in groups[k]:
-            new = plan_item(it, d, a.force)
+            new = plan_item(it, d, a.force, clash)
             if new:
                 changes.append((it, new))
                 # .keys() ולא new: Counter.update על מילון **מחבר את
@@ -269,6 +286,29 @@ def main() -> None:
         if len(failed) > 10:
             print(f"   ...ועוד {len(failed)-10}")
     print("=" * 62)
+
+    # הדיווח הזה בא לפני "אין מה להשלים", כי הוא הערך היחיד שהריצה
+    # מחזירה כשאין מה למלא: סתירה בין מה שכבר בקטלוג לבין TMDB היא
+    # הסימן שהמזהה עצמו שגוי, ולא נתון חסר.
+    if clash:
+        by_field = Counter(f for f, _, _, _ in clash)
+        print(f"\n⚠ {len(clash)} סתירות בין הקטלוג ל-TMDB "
+              f"({dict(by_field)}) — לא נכתבו, אבל שווה עין:")
+        seen = set()
+        shown = 0
+        for f, it, cur, val in clash:
+            k = (it.get("series_name") or it.get("title") or "?").strip()
+            if k in seen:
+                continue
+            seen.add(k)
+            print(f"   {k[:26]:<28} {f}: אצלנו {str(cur)[:22]:<24} "
+                  f"ב-TMDB {str(val)[:22]}  (tmdb_id {it.get('tmdb_id')})")
+            shown += 1
+            if shown >= 15:
+                break
+        if len(seen) > shown:
+            print(f"   ...ועוד {len(seen)-shown} שמות")
+        print("   שנה או שם באנגלית שלא מסתדרים = חשד שהמזהה לא נכון.")
 
     if not changes:
         print("אין מה להשלים.")
