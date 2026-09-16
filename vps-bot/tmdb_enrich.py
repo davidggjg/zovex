@@ -38,6 +38,31 @@ from collections import Counter
 from pathlib import Path
 
 TMDB = "https://api.themoviedb.org/3"
+
+# ── IPv6 ─────────────────────────────────────────────────────────────────────
+# הסיבה שכל יחידה לקחה 56 שניות, ונמדדה שלב-אחר-שלב:
+#     he-IL  חיפוש TMDB   23.97s   הצליח, 2 תוצאות
+#     en-US  חיפוש TMDB   24.79s   הצליח, 2 תוצאות
+#     ask_model            6.42s
+# ואותו חיפוש ב-curl: 0.6 שניות. ההבדל אינו הרשת אלא סדר הניסיונות.
+#
+# ל-api.themoviedb.org יש רשומת AAAA, ולשרת אין נתיב IPv6 עובד.
+# socket.create_connection של פייתון עובר על הכתובות **לפי הסדר** —
+# IPv6 ראשון — ונחסם ב-connect() עד הטיימאאוט של ה-TCP, כ-24 שניות,
+# ואז נופל ל-IPv4 ומצליח. curl עושה Happy Eyeballs (RFC 8305): מנסה
+# את שתי המשפחות במקביל עם ראש-יתרון קצר, ולכן הוא לעולם לא תקוע.
+#
+# כאן פותרים רק ל-IPv4. השרת הזה ממילא מגיע ליעדים האלה ב-IPv4 בלבד,
+# והנפילה-אחורה כבר מוכיחה את זה. NO_IPV6=0 מבטל אם מתישהו יהיה IPv6.
+if os.environ.get("NO_IPV6", "1") != "0":
+    import socket as _socket
+    _orig_getaddrinfo = _socket.getaddrinfo
+
+    def _getaddrinfo_v4(host, port, family=0, *args, **kwargs):
+        return _orig_getaddrinfo(host, port, _socket.AF_INET, *args, **kwargs)
+
+    _socket.getaddrinfo = _getaddrinfo_v4
+
 DATA = Path(os.environ.get("ZOVEX_DATA", "/opt/zovex-bot/data"))
 CONTENT = DATA / "content.json"
 VERSION = DATA / "content_version.txt"
