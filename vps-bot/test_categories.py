@@ -189,6 +189,51 @@ except SystemExit as e:
     assert "דגימה" in str(e.code), f"נימוק לא צפוי: {e.code}"
 eq(json.loads(E.CONTENT.read_text(encoding="utf-8")), CAT, "--sample לא כתב")
 
+# ── הורדת דרגה: ספציפי → גנרי ───────────────────────────────────────────────
+# נמדד בהרצה אמיתית: 20 מ-614 השינויים היו ירידה מקטגוריה ספציפית
+# לגנרית, כי "ברירת מחדל לפי סוג" הכריעה — הכלל החלש ביותר. כשחסר
+# ז'אנר ב-TMDB, בחירה אנושית קודמת עשויה להיות מדויקת יותר.
+DEMO = (
+    [{"id": 60 + i, "series_name": "ילדים", "title": f"פרק {i}",
+      "tmdb_id": 66, "category": "סדרות לילדים"} for i in range(3)]
+    + [{"id": 70, "title": "כבר נכון", "tmdb_id": 77, "category": "סרטים"}]
+)
+TABLE["66"] = tm("en", name="Plain")      # בלי ז'אנר → ברירת מחדל
+TABLE["77"] = tm("en", name="Plain2")
+E.CONTENT.write_text(json.dumps(DEMO, ensure_ascii=False), encoding="utf-8")
+E.CONTENT.with_name("content.json.bak_categories").unlink(missing_ok=True)
+
+run(["--check"])
+run([])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[60], "סדרות", "בלי --no-demote ההורדה מתבצעת")
+eq(by[70], "סרטים", "ומה שכבר גנרי לא משתנה")
+
+E.CONTENT.write_text(json.dumps(DEMO, ensure_ascii=False), encoding="utf-8")
+run(["--no-demote"])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[60], "סדרות לילדים", "--no-demote משאיר את הקטגוריה הספציפית")
+eq(by[62], "סדרות לילדים", "לכל הפרקים")
+
+# --no-demote מונע רק ירידה לגנרי, לא שינוי בין ספציפיים
+UP = [{"id": 80, "title": "אנימה יפנית", "tmdb_id": 88, "category": "אימה"}]
+TABLE["88"] = tm("ja", genres=[ANIM], name="Anime")
+E.CONTENT.write_text(json.dumps(UP, ensure_ascii=False), encoding="utf-8")
+run(["--no-demote"])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[80], "אנימה", "--no-demote לא חוסם מעבר בין שתי קטגוריות ספציפיות")
+
+# וגם לא חוסם מילוי של קטגוריה ריקה
+EMPTY = [{"id": 90, "title": "ריק", "tmdb_id": 77, "category": ""}]
+E.CONTENT.write_text(json.dumps(EMPTY, ensure_ascii=False), encoding="utf-8")
+run(["--no-demote"])
+by = {i["id"]: i.get("category")
+      for i in json.loads(E.CONTENT.read_text(encoding="utf-8"))}
+eq(by[90], "סרטים", "קטגוריה ריקה מתמלאת גם עם --no-demote")
+
 print("\n" + "=" * 62)
 import shutil as _sh
 _sh.rmtree(SP, ignore_errors=True)

@@ -164,6 +164,8 @@ def main() -> None:
     ap.add_argument("--sample", type=int, default=0,
                     help="N יחידות באקראי — טעימה מייצגת")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--no-demote", action="store_true",
+                    help="לא להוריד פריט מקטגוריה ספציפית לגנרית")
     ap.add_argument("--sleep", type=float, default=0.06)
     a = ap.parse_args()
 
@@ -214,8 +216,11 @@ def main() -> None:
             why_cnt[why] += 1
             for it in groups[k]:
                 cur = (it.get("category") or "").strip()
+                if (a.no_demote and why == "ברירת מחדל לפי סוג"
+                        and cur in KNOWN and cur not in (C_SER, C_MOV)):
+                    continue
                 if cur != cat:
-                    changes.append((it, cur, cat))
+                    changes.append((it, cur, cat, why))
                     moves[(cur or "(ריק)", cat)] += 1
         print(f"\r  {n}/{len(keys)}".ljust(22), end="", flush=True)
         if a.sleep:
@@ -240,7 +245,7 @@ def main() -> None:
 
     after = Counter((it.get("category") or "(ריק)").strip()
                     for it in items if not it.get("is_live"))
-    for it, cur, cat in changes:
+    for it, cur, cat, _w in changes:
         after[cur or "(ריק)"] -= 1
         after[cat] += 1
     print("\nהתפלגות אחרי:")
@@ -251,8 +256,33 @@ def main() -> None:
     if bad:
         print(f"\n⚠ קטגוריות שלא היו קיימות: {sorted(bad)}")
 
+    # הורדות דרגה: ירידה מקטגוריה ספציפית לקטגוריה הגנרית, בגלל
+    # ש"ברירת מחדל לפי סוג" הכריעה. זה הכלל החלש ביותר — הוא פשוט
+    # אומר "סדרה" או "סרט" — וכשהוא דורס בחירה אנושית ספציפית, בדרך
+    # כלל הסיבה היא שחסר ז'אנר ב-TMDB ולא שהקטגוריה הייתה שגויה.
+    # הן מעטות, ולכן מפורטות בשמן ולא רק נספרות.
+    FALLBACK = {C_SER, C_MOV}
+    demo = [(it, cur, cat) for it, cur, cat, w in changes
+            if w == "ברירת מחדל לפי סוג" and cur in KNOWN and cat in FALLBACK
+            and cur not in FALLBACK]
+    if demo:
+        print(f"\n⚠ {len(demo)} פריטים יורדים מקטגוריה ספציפית לגנרית, "
+              "כי חסר ז'אנר ב-TMDB.")
+        print("   כאן בחירה אנושית קודמת עשויה להיות טובה מהנתון — "
+              "שווה עין, וזה קטן מספיק לתקן ביד:")
+        seen = set()
+        for it, cur, cat in demo:
+            nm = (it.get("series_name") or it.get("title") or "?").strip()
+            if nm in seen:
+                continue
+            seen.add(nm)
+            print(f"      {nm[:28]:<30} {cur[:20]:<22} → {cat}"
+                  f"   (tmdb_id {it.get('tmdb_id')})")
+        print(f"   {len(seen)} שמות, {len(demo)} פריטים. "
+              "--no-demote משאיר אותם כמו שהם.")
+
     print("\nדוגמאות:")
-    for it, cur, cat in changes[:8]:
+    for it, cur, cat, _w in changes[:8]:
         nm = (it.get("series_name") or it.get("title") or "?").strip()
         print(f"   {nm[:26]:<28} {cur[:18]:<20} → {cat}")
 
@@ -264,7 +294,7 @@ def main() -> None:
         sys.exit("דגימה היא לבדיקה בלבד. להחלה — להריץ בלי --sample.")
 
     shutil.copy2(CONTENT, BACKUP)
-    for it, cur, cat in changes:
+    for it, cur, cat, _w in changes:
         it["category"] = cat
     E.atomic_write(CONTENT, json.dumps(items, ensure_ascii=False, indent=2))
     try:
