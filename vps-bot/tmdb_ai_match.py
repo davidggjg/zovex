@@ -69,6 +69,10 @@ PROVIDERS = {
 }
 
 # תרגום ביטחון מספרי לתוויות ש-tmdb_apply.py כבר יודע לקרוא.
+# תקרת הפלט לכל בקשה. ראה ההסבר ב-ask_model.
+_MAX_OUT = int(os.environ.get("LLM_MAX_TOKENS", "200"))
+
+
 def _conf_label(c: float) -> str:
     return "ודאי" if c >= 0.9 else ("סביר" if c >= 0.75 else "ספק")
 
@@ -146,6 +150,20 @@ def http_json(url: str, headers=None, data=None, timeout=45, retries=6):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
+            # "Request too large" הוא 429 שלא יעזור לו שום המתנה: הבקשה
+            # עצמה גדולה מהמכסה לדקה. ניסיון חוזר רק מסתיר את הסיבה.
+            if e.code == 429:
+                try:
+                    peek = e.read()
+                    e.msg_body = peek
+                except Exception:
+                    peek = b""
+                if b"too large" in peek.lower():
+                    raise RuntimeError(
+                        "הבקשה גדולה מהמכסה לדקה. זה לא נפתר בהמתנה — "
+                        "צריך max_tokens קטן יותר (LLM_MAX_TOKENS) או "
+                        "פחות מועמדים. הודעת השרת: "
+                        + peek[:200].decode("utf-8", "replace"))
             if e.code not in (429, 500, 502, 503, 504) or attempt == retries:
                 raise
             ra = e.headers.get("retry-after") if e.headers else None
@@ -243,6 +261,12 @@ def ask_model(cfg: dict, raw: str, cands: list, year: str = "") -> dict:
     body = json.dumps({
         "model": cfg["model"],
         "temperature": 0,
+        # max_tokens חובה, לא אופטימיזציה. בלעדיו Groq שומר מראש את תקרת
+        # הפלט המלאה של המודל מול מכסת ה-OTPM (1,000 טוקנים לדקה בחינם),
+        # וזה לבד גדול מהמכסה — כלומר 429 קבוע שאף ניסיון חוזר לא יפתור.
+        # נמדד: התשובה האמיתית היא 52 טוקנים, בלי טוקני חשיבה, וזהה
+        # לחלוטין עם ובלי התקרה. 200 הוא מרווח נוח.
+        "max_tokens": _MAX_OUT,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM},
