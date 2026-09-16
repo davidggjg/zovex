@@ -36,6 +36,11 @@ from collections import Counter
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
+# הקטגוריות הגנריות — סוג בלבד, בלי מקור/קהל/ז'אנר. סדרה שכל פרקיה
+# גנריים תאוחד; סדרה שחלק מפרקיה בקטגוריה ספציפית לא תיגרר לגנרי
+# ברוב, כי הספציפי כמעט תמיד הנכון וההזרמה היא שיצרה את הגנרי.
+GENERIC_CATS = {"סדרות", "סרטים"}
+
 
 def _load_enrich():
     """CONTENT/VERSION/atomic_write מגיעים מ-tmdb_enrich, לא משוכפלים."""
@@ -61,7 +66,7 @@ def plan(items: list, do_ids=True, do_cats=True) -> tuple:
         if sn:
             series.setdefault(sn, []).append(it)
 
-    changes, id_clash, cat_tie = [], [], []
+    changes, id_clash, cat_tie, cat_defer = [], [], [], []
     stat = Counter()
     stat["סדרות"] = len(series)
     for sn, eps in series.items():
@@ -98,6 +103,15 @@ def plan(items: list, do_ids=True, do_cats=True) -> tuple:
             cat_tie.append((sn, len(eps), dict(cats)))
             continue
         win = top[0][0]
+        # הרוב אינו תמיד הצודק. Asfur נמדדה עם 21 פרקים ב"סדרות
+        # ישראליות" — הקטגוריה הנכונה, כי זו סדרת ילדים ישראלית —
+        # והרוב ב"סדרות" הגנרי משך אותם למטה, רק כי יותר פרקים תויגו
+        # לא נכון בהזרמה. כשהמנצח גנרי אבל קיימת קטגוריה ספציפית,
+        # לא מכריעים כאן: fix_categories, שרץ מיד אחרי עם נתוני TMDB,
+        # יקבע נכון. גנרי מנצח רק כשכל הקטגוריות גנריות.
+        if win in GENERIC_CATS and any(c not in GENERIC_CATS for c in cats):
+            cat_defer.append((sn, len(eps), dict(cats)))
+            continue
         off = [e for e in eps
                if str(e.get("category") or "").strip() != win]
         if off:
@@ -105,7 +119,7 @@ def plan(items: list, do_ids=True, do_cats=True) -> tuple:
             for e in off:
                 changes.append((e, sn, "category",
                                 str(e.get("category") or "").strip(), win))
-    return changes, id_clash, cat_tie, stat
+    return changes, id_clash, cat_tie, cat_defer, stat
 
 
 def main() -> None:
@@ -134,7 +148,7 @@ def main() -> None:
         sys.exit(f"לא נמצא: {CONTENT}")
 
     items = json.loads(CONTENT.read_text(encoding="utf-8"))
-    changes, id_clash, cat_tie, stat = plan(
+    changes, id_clash, cat_tie, cat_defer, stat = plan(
         items, do_ids=not a.cats_only, do_cats=not a.ids_only)
 
     print(f"קטלוג: {len(items)} פריטים · {stat['סדרות']} סדרות")
@@ -157,6 +171,16 @@ def main() -> None:
             print(f"      {sn[:26]:<28} {n:>4} פרקים · {d}")
         if len(cat_tie) > 10:
             print(f"      ...ועוד {len(cat_tie)-10}")
+
+    if cat_defer:
+        print(f"\n⚠ {len(cat_defer)} סדרות שרובן בקטגוריה גנרית אבל חלקן "
+              "בספציפית — לא מאחדים כאן.")
+        print("   הרוב הגנרי בדרך כלל תוצאת הזרמה; fix_categories יכריע "
+              "מ-TMDB:")
+        for sn, n, d in cat_defer[:10]:
+            print(f"      {sn[:26]:<28} {n:>4} פרקים · {d}")
+        if len(cat_defer) > 10:
+            print(f"      ...ועוד {len(cat_defer)-10}")
 
     if not changes:
         print("\nכל הסדרות עקביות. אין מה לתקן.")

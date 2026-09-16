@@ -52,14 +52,18 @@ for cand in tmdb_ai_map.json tmdb_ai_map.json.partial tmdb_exact_map.json; do
 done
 if [ -n "$MAP" ]; then
   say "2/4 · מחיל מיפוי AI מ-${MAP} (סף 0.99)"
-  # --check תמיד קודם, כדי לראות כמה עוברים ולתפוס קובץ ריק/שגוי
-  python3 tmdb_map_filter.py --src "$MAP" --min 0.99 --check
-  if [ -z "$CHECK" ]; then
-    python3 tmdb_map_filter.py --src "$MAP" --min 0.99
-    OUT="${MAP%.json}"; OUT="${OUT%.partial}_ge099.json"
-    # tmdb_map_filter גוזר את שם היעד מהמקור; מוצאים את מה שנוצר עכשיו
-    NEWMAP="$(ls -t ./*_ge099.json 2>/dev/null | head -1 || true)"
-    [ -n "$NEWMAP" ] && python3 tmdb_apply.py --map "$NEWMAP"
+  # שלב אופציונלי: כשל כאן לא מפיל את הצינור. tmdb_map_filter יוצא
+  # בשגיאה בשלושה מצבים תקינים-לגמרי — קובץ validate (עוד לא הרצת
+  # התאמה), קובץ ריק, וסף שאף אחד לא עובר — וכולם פשוט אומרים "אין
+  # מיפוי להחיל עכשיו", לא "עצור הכול". שלבים 3-4 עומדים בפני עצמם.
+  if python3 tmdb_map_filter.py --src "$MAP" --min 0.99 --check; then
+    if [ -z "$CHECK" ]; then
+      python3 tmdb_map_filter.py --src "$MAP" --min 0.99
+      NEWMAP="$(ls -t ./*_ge099.json 2>/dev/null | head -1 || true)"
+      [ -n "$NEWMAP" ] && python3 tmdb_apply.py --map "$NEWMAP"
+    fi
+  else
+    echo "  ↳ אין מיפוי בר-החלה מ-${MAP} (validate / ריק / סף גבוה) — מדלג."
   fi
 else
   say "2/4 · אין קובץ מיפוי AI — מדלג (זה תקין אם עוד לא הרצת התאמה)"
