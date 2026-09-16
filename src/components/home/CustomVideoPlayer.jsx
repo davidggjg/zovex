@@ -181,6 +181,41 @@ function rememberSilent(id) {
   } catch {}
 }
 
+// ── קבצים שהדפדפן לא יודע לפענח בכלל (AVI וכו') ─────────────────────────────
+//
+// חלק מהקטלוג הוא AVI (video/x-msvideo, מכולת RIFF). שום דפדפן לא מנגן AVI
+// ב-HTML5 — הוא זורק שגיאת מדיה עם code 4 (MEDIA_ERR_SRC_NOT_SUPPORTED)
+// והסרט מת לגמרי ("direct 4"). זה שונה מ"אילם": שם הווידאו כן מנגן. כאן
+// הקובץ בכלל לא נפתח, ולכן טעינה חוזרת של אותו קישור תיכשל שוב לנצח.
+//
+// הפתרון: נתיב /vt/ בשרת, שממיר את הקובץ ל-HLS עם ffmpeg (וידאו+אודיו
+// מקודדים ל-H.264/AAC) וה-hls.js שכבר בשימוש מנגן. אותה חתימה בדיוק
+// (_stream_sig על אותם chat/msg/exp), ולכן ה-?exp=&sig= עובר כמו שהוא.
+function transcodeFixSrc(src) {
+  if (!src) return null;
+  const m = String(src).match(/^(.*)\/stream\/(-?\d+)\/(\d+)(\?.*)?$/);
+  if (!m) return null;                       // לא קישור /stream שלנו
+  return `${m[1]}/vt/${m[2]}/${m[3]}/index.m3u8${m[4] || ""}`;
+}
+
+// זוכרים פריט שהתגלה כלא-נתמך, כדי שבצפייה הבאה נלך ישר ל-/vt.
+const UNSUPPORTED_KEY = "zovex_unsupported_items";
+
+function loadUnsupportedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(UNSUPPORTED_KEY) || "[]")); }
+  catch { return new Set(); }
+}
+
+function rememberUnsupported(id) {
+  if (!id) return;
+  try {
+    const s = loadUnsupportedSet();
+    if (s.has(id)) return;
+    s.add(id);
+    localStorage.setItem(UNSUPPORTED_KEY, JSON.stringify([...s].slice(-500)));
+  } catch {}
+}
+
 function isIframeUrl(src, type) {
   if (!src) return false;
   // "telegram" is intentionally absent: buildSrc routes telegram URLs to either
@@ -753,7 +788,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
 //   Direct MP4 → "https://example.com/video.mp4"
 //   Telegram   → "https://zovex.duckdns.org/stream/{channelId}/{msgId}?exp=...&sig=..."
 //                (already resolved by the server - buildSrc() just passes it through)
-function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel, onSilent }) {
+function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel, onSilent, onUnsupported }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -863,6 +898,14 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
 
     const onError = () => {
       if (destroyed) return;
+      // code 4 = MEDIA_ERR_SRC_NOT_SUPPORTED: הדפדפן לא יודע לפענח את
+      // המכולה/הקודק (AVI וכו'). טעינה חוזרת של אותו קישור תיכשל שוב לנצח,
+      // ולכן במקרה הזה עוברים למסלול ההמרה בשרת (/vt) אם הוא זמין. שאר
+      // השגיאות (רשת/תשובה קטועה) — טעינה חוזרת מאותה נקודה כמקודם.
+      if (video.error?.code === 4 && onUnsupported) {
+        onUnsupported(video.currentTime || startTime || 0);
+        return;
+      }
       reloadAt(video.currentTime || startTime || 0);
     };
     video.addEventListener("error", onError);
@@ -1202,17 +1245,31 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   // אחרת מנגנים רגיל, ועוברים רק אם הדפדפן באמת לא פענח אודיו. כך שאר
   // הקטלוג — שרובו תקין — לא משלם שום מחיר.
   const fixedSrc = isLive ? null : audioFixSrc(rawSrc);
+  const transcodeSrc = isLive ? null : transcodeFixSrc(rawSrc);
   const [useAudioFix, setUseAudioFix] = useState(
     () => !!fixedSrc && loadSilentSet().has(movie.id));
+  // פריט שכבר התגלה כלא-נתמך — ישר ל-/vt, בלי לשלם שוב את כשל הנגינה.
+  const [useTranscode, setUseTranscode] = useState(
+    () => !!transcodeSrc && loadUnsupportedSet().has(movie.id));
   const [resumeAt, setResumeAt] = useState(startTime);
 
-  const src = useAudioFix && fixedSrc ? fixedSrc : rawSrc;
+  // ההמרה (/vt) מנצחת: קובץ לא-נתמך בכלל לא נפתח, ולכן תיקון-הקול לא רלוונטי לו.
+  const src = useTranscode && transcodeSrc ? transcodeSrc
+            : useAudioFix && fixedSrc ? fixedSrc
+            : rawSrc;
 
   // מעבר למסלול המתוקן, מהמקום שבו הצופה נמצא — לא מתחילת הפרק.
   const switchToAudioFix = (at) => {
     rememberSilent(movie.id);
     setResumeAt(Math.max(0, at || 0));
     setUseAudioFix(true);
+  };
+
+  // מעבר למסלול ההמרה כשהדפדפן לא יודע לפענח את הקובץ בכלל (AVI, code 4).
+  const switchToTranscode = (at) => {
+    rememberUnsupported(movie.id);
+    setResumeAt(Math.max(0, at || 0));
+    setUseTranscode(true);
   };
 
   useEffect(() => {
@@ -1236,7 +1293,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
-        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} onSilent={fixedSrc ? switchToAudioFix : null} />
+        <DirectVideoPlayer src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} onSilent={fixedSrc ? switchToAudioFix : null} onUnsupported={transcodeSrc ? switchToTranscode : null} />
       )}
     </div>
   );
