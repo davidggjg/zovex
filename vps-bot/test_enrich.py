@@ -254,6 +254,36 @@ run(["--revert"])
 eq(json.loads(E.CONTENT.read_text(encoding="utf-8")), CAT_ITEMS,
    "revert מחזיר בית-בית למצב המקורי")
 
+# ── כותר "אנגלי" בעברית: לא נכתב, ומדווח ───────────────────────────────────
+# נמדד בדגימה אמיתית: "לבד בבית" קיבל en_title="לבד בבית". זה קורה כי
+# language=en-US מחזיר את הכותר הראשי כשאין תרגום, ורשומה שנוצרה
+# בעברית מחזירה עברית. זו גם טביעת האצבע של רשומת זבל.
+eq(E._has_hebrew("לבד בבית"), True, "מזהה עברית")
+eq(E._has_hebrew("Home Alone"), False, "אנגלית אינה עברית")
+eq(E._has_hebrew(""), False, "ריק")
+eq(E._has_hebrew(None), False, "None")
+eq(E._has_hebrew("Home Alone (לבד בבית)"), True, "עברית מעורבת נתפסת")
+
+E.JUNK_EN.clear()
+new = E.plan_item({}, {"he": {}, "en": {"title": "לבד בבית",
+                                        "release_date": "2021-11-12"}},
+                  force=False)
+eq("en_title" in new, False, "en_title עברי לא נכתב")
+eq(new.get("year"), "2021", "אבל שאר השדות כן נכתבים")
+eq(len(E.JUNK_EN), 1, "והמזהה נרשם כחשוד")
+
+E.JUNK_EN.clear()
+new = E.plan_item({}, {"he": {}, "en": {"title": "Home Alone"}}, force=False)
+eq(new.get("en_title"), "Home Alone", "en_title אנגלי כן נכתב")
+eq(E.JUNK_EN, [], "ולא נרשם כחשוד")
+
+# ותיאור בעברית כן רצוי — הכלל חל על en_title בלבד
+E.JUNK_EN.clear()
+new = E.plan_item({}, {"he": {"overview": "תיאור בעברית"}, "en": {}},
+                  force=False)
+eq(new.get("description"), "תיאור בעברית", "תיאור עברי הוא בדיוק מה שרוצים")
+eq(E.JUNK_EN, [], "ותיאור עברי אינו חשד")
+
 # ── --sample מול --limit: דגימה מייצגת ──────────────────────────────────────
 # --limit לוקח את הראשונים בסדר הקטלוג, ולכן על קטלוג שהתחלתו מתוחזקת
 # הוא מראה "אין מה למלא" בעוד שהשאר ריק. נמדד בפועל: --limit 40 החזיר

@@ -10,11 +10,11 @@ tmdb_enrich — השלב שממלא בפועל תיאור, שם באנגלית, 
     3. tmdb_enrich.py     ← כאן. מושך מ-TMDB ומשלים את השדות
 
 למה זה נדרש בנפרד: tmdb_apply כותב **רק** את המזהה. בלי השלב הזה יש
-בקטלוג מספר ואין תיאור. ומה שנמדד בקטלוג:
+בקטלוג מספר ואין תיאור.
 
-    description  חסר ברוב הפריטים
-    en_title     1,190 מתוך 13,172   (9%)
-    year         4,951                (37%)
+כמה חסר בפועל — להריץ catalog_stats.py, לא לנחש. גרסה קודמת של
+התיעוד הזה טענה "description חסר ברוב הפריטים", ואז דגימה אקראית של
+187 פריטים החזירה אפס תיאורים להשלמה. הטענה הייתה אמדן שלי ולא מדידה.
 
 הטריילרים דווקא לא צריכים שדה: השרת מגיש אותם ב-/content/trailer/<id>
 ופותר אותם מה-tmdb_id בעצמו, כך שברגע שהמזהה קיים הטריילר עובד.
@@ -86,6 +86,13 @@ KIND_FLIPS = Counter()
 # שונה לגיטימית. שנה ושם באנגלית הם היחידים שסתירה בהם מרמזת על מזהה
 # שגוי ולא על העדפת ניסוח.
 _CONFLICT_FIELDS = {"year", "en_title"}
+
+# רשומות TMDB שהכותר ה"אנגלי" שלהן עברי — כלומר כנראה רשומות זבל.
+JUNK_EN = []
+
+
+def _has_hebrew(s) -> bool:
+    return any("֐" <= c <= "׿" for c in str(s or ""))
 
 
 def load_key() -> str:
@@ -185,7 +192,17 @@ def plan_item(it: dict, d: dict, force: bool, conflicts: list = None) -> dict:
     # תרגום, ולכן הבדיקה היא על תוכן ולא על קיום המפתח.
     put("description", (he.get("overview") or "").strip()
         or (en.get("overview") or "").strip())
-    put("en_title", (en.get("name") or en.get("title") or "").strip())
+    # שם "באנגלית" שכתוב בעברית אינו שם באנגלית. זה קורה כי בקשה עם
+    # language=en-US מחזירה את הכותר הראשי כשאין תרגום, ורשומה שנוצרה
+    # בעברית תחזיר עברית. נמדד בדגימה: "לבד בבית" קיבל en_title="לבד
+    # בבית". זה גם טביעת האצבע של רשומת זבל — אותו סוג רשומה שהחזיקה
+    # את "300" על מזהה 1416873 — ולרשומות כאלה אין overview, מה שמסביר
+    # למה description יצא 0 מ-187.
+    ent = (en.get("name") or en.get("title") or "").strip()
+    if _has_hebrew(ent):
+        JUNK_EN.append((it.get("tmdb_id"), ent))
+    else:
+        put("en_title", ent)
     date = (he.get("first_air_date") or he.get("release_date")
             or en.get("first_air_date") or en.get("release_date") or "")
     if date[:4].isdigit():
@@ -268,6 +285,7 @@ def main() -> None:
           f"{sum(len(groups[k]) for k in keys)} פריטים · {how}\n")
 
     changes, fields, failed, clash = [], Counter(), [], []
+    JUNK_EN.clear(); KIND_FLIPS.clear()
     t0 = time.time()
     for n, k in enumerate(keys, 1):
         kind, tid = k
@@ -305,6 +323,21 @@ def main() -> None:
     # הדיווח הזה בא לפני "אין מה להשלים", כי הוא הערך היחיד שהריצה
     # מחזירה כשאין מה למלא: סתירה בין מה שכבר בקטלוג לבין TMDB היא
     # הסימן שהמזהה עצמו שגוי, ולא נתון חסר.
+    # רשומות זבל: כותר "אנגלי" בעברית ובדרך כלל בלי overview. אלה
+    # המזהים שכנראה שגויים, והם הסיבה שדגימה של 187 פריטים החזירה
+    # אפס תיאורים.
+    if JUNK_EN:
+        uniq = {}
+        for tid, name in JUNK_EN:
+            uniq.setdefault(tid, name)
+        print(f"\n⚠ {len(uniq)} מזהי TMDB שהכותר האנגלי שלהם עברי — "
+              "כנראה רשומות זבל, ה-en_title שלהם לא נכתב:")
+        for tid, name in list(uniq.items())[:12]:
+            print(f"   tmdb_id {str(tid):<10} \"{name[:30]}\""
+                  f"   themoviedb.org/movie/{tid}")
+        if len(uniq) > 12:
+            print(f"   ...ועוד {len(uniq)-12}")
+
     if clash:
         by_field = Counter(f for f, _, _, _ in clash)
         print(f"\n⚠ {len(clash)} סתירות בין הקטלוג ל-TMDB "
