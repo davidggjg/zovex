@@ -182,6 +182,15 @@ def http_json(url: str, headers=None, data=None, timeout=45, retries=6):
 
 
 # ── TMDB ─────────────────────────────────────────────────────────────────────
+# מונה כשלים גלובלי. הגרסה הראשונה עשתה "except Exception: continue"
+# ובלעה הכול — כולל timeout של 45 שניות, בשקט מוחלט. ארבעה חיפושים
+# ליחידה נתנו עד שלוש דקות ליחידה בלי שום סימן בלוג, וזה בדיוק מה
+# שקרה בריצה של דוד: ~יחידה בדקה עם אפס 429. כשל שקוף הוא הדבר שהכי
+# קשה לאבחן, ולכן הוא נספר ומדווח עכשיו.
+TMDB_FAILS = Counter()
+TMDB_TIMEOUT = float(os.environ.get("TMDB_TIMEOUT", "12"))
+
+
 def tmdb_candidates(key: str, queries, limit: int = 8) -> list:
     """מועמדים אמיתיים בלבד.
 
@@ -199,8 +208,10 @@ def tmdb_candidates(key: str, queries, limit: int = 8) -> list:
                 {"api_key": key, "query": name, "language": lang,
                  "include_adult": "false"})
             try:
-                res = http_json(f"{TMDB}/search/multi?{qs}")
-            except Exception:
+                res = http_json(f"{TMDB}/search/multi?{qs}",
+                                timeout=TMDB_TIMEOUT, retries=1)
+            except Exception as e:
+                TMDB_FAILS[type(e).__name__] += 1
                 continue
             for r in (res.get("results") or []):
                 mt = r.get("media_type")
@@ -389,6 +400,10 @@ def main() -> None:
         print(f"\r  {n}/{len(rows)} {mark} {u['name'][:34]:<36}", end="", flush=True)
         # שמירה כל 25 יחידות: ריצה לילית שנופלת בסוף לא צריכה למחוק
         # את כל מה שכבר נמדד.
+        if n == 10 and sum(TMDB_FAILS.values()) >= 10:
+            print(f"\n⚠ עשר היחידות הראשונות ייצרו "
+                  f"{sum(TMDB_FAILS.values())} כשלי TMDB: {dict(TMDB_FAILS)}")
+            print("  בדוק גישה ל-api.themoviedb.org מהשרת לפני שתמשיך.\n")
         if n % 25 == 0:
             try:
                 with open(a.out + ".partial", "w", encoding="utf-8") as fh:
@@ -398,7 +413,12 @@ def main() -> None:
                 pass
         if a.sleep:
             time.sleep(a.sleep)
-    print(f"\n\nלקח {time.time()-t0:.0f} שניות\n" + "=" * 62)
+    print(f"\n\nלקח {time.time()-t0:.0f} שניות "
+          f"({(time.time()-t0)/max(len(rows),1):.1f}s ליחידה)")
+    if TMDB_FAILS:
+        print(f"⚠ חיפושי TMDB שנכשלו: {dict(TMDB_FAILS)}")
+        print("  זה מאט הכול. TMDB_TIMEOUT שולט בתקרת ההמתנה לכל חיפוש.")
+    print("=" * 62)
 
     if a.validate:
         graded = [r for r in out if "correct" in r]
