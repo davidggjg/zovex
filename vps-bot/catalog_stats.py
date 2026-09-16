@@ -16,6 +16,7 @@ catalog_stats — מה באמת חסר בקטלוג, ומה מהמלאי הקי�
     python3 catalog_stats.py /נתיב/אחר/content.json
 """
 import json, sys
+from collections import Counter
 P = sys.argv[1] if len(sys.argv) > 1 else "/opt/zovex-bot/data/content.json"
 items = json.loads(open(P, encoding="utf-8").read())
 live = [i for i in items if i.get("is_live")]
@@ -37,3 +38,22 @@ for i in bad[:8]:
 withid = [i for i in vod if i.get("tmdb_id")]
 nodesc = [i for i in withid if not str(i.get("description") or "").strip()]
 print(f"\nיש מזהה ואין תיאור:  {len(nodesc)} מתוך {len(withid)}")
+
+# ── קטגוריות ─────────────────────────────────────────────────────────────────
+# זה הקלט לבניית המפה מז'אנרים של TMDB לקטגוריות שקיימות אצלנו. בלי
+# הרשימה האמיתית אין דרך למפות, ובלי לדעת לכמה מכל קטגוריה יש tmdb_id
+# אין דרך לדעת איזה חלק נפתר בחינם ואיזה צריך מודל.
+print()
+cats = Counter((i.get("category") or "(ריק)").strip() for i in vod)
+withid = Counter((i.get("category") or "(ריק)").strip()
+                 for i in vod if i.get("tmdb_id"))
+print(f"{len(cats)} קטגוריות:\n")
+print(f"{'קטגוריה':<44}{'פריטים':>8}{'עם מזהה':>9}")
+for c, n in cats.most_common():
+    print(f"{c[:42]:<44}{n:>8}{withid[c]:>9}")
+TOT = "סה\u05f4כ"
+print(f"\n{TOT:<44}{len(vod):>8}{sum(withid.values()):>9}")
+
+# וכמה סדרות מול סרטים, כי קטגוריה נכונה לסדרה עשויה להיות אחרת
+ser = sum(1 for i in vod if str(i.get("series_name") or "").strip())
+print(f"\nמתוכם פרקי סדרות: {ser} · פריטים בודדים: {len(vod)-ser}")
