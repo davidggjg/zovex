@@ -32,7 +32,7 @@ def label(c: float) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default="tmdb_ai_map.json",
-                    help="המיפוי שנוצר ב---run")
+                    help="המיפוי מ---run, או קובץ .partial של ריצה שנעצרה")
     ap.add_argument("--min", type=float, default=0.99)
     ap.add_argument("--out", default="")
     ap.add_argument("--check", action="store_true")
@@ -43,7 +43,17 @@ def main() -> None:
     except FileNotFoundError:
         sys.exit(f"לא נמצא {a.src}. הוא נוצר ב-tmdb_ai_match.py --run.")
 
-    rows = (d.get("accepted") or []) + (d.get("review") or [])
+    # קובץ .partial: tmdb_ai_match שומר אותו כל 25 יחידות תחת המפתח
+    # "rows", והמיפוי הסופי נכתב רק בסוף הריצה. בלי לקרוא אותו, ריצה
+    # שנפלה באמצע מאבדת את כל מה שכבר נעשה — וזה בדיוק מה שקרה כמעט
+    # כשההמתנות על 429 הגיעו ל-572 שניות ליחידה.
+    if d.get("rows") and not d.get("accepted"):
+        rows = list(d["rows"])
+        print(f"קובץ חלקי: {d.get('done', '?')} מתוך {d.get('of', '?')} "
+              f"יחידות נסרקו" + (f" (מדלג על {d['skip']})" if d.get("skip")
+                                 else "") + "\n")
+    else:
+        rows = (d.get("accepted") or []) + (d.get("review") or [])
     if not rows:
         sys.exit(f"{a.src} ריק או בפורמט לא מוכר.")
 
