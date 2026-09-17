@@ -165,6 +165,11 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
 
   const handleSave = async () => {
     if (!form.title || !form.category) { setFormStatus({ type: "error", message: "שם וקטגוריה חובה" }); return; }
+    // סימנתי את הקישור בכוכבית, אז האימות חייב לאכוף אותו — אחרת נשמר
+    // פריט שלא יכול להתנגן. רק בפריט חדש: בעריכה מותר לגעת רק במטא-דאטה.
+    if (!editingMovie && !videoUrlInput.trim()) {
+      setFormStatus({ type: "error", message: "קישור וידאו חובה" }); return;
+    }
     const info = extractVideoInfo(videoUrlInput);
     let autoEpNum = Number(form.episode_number) || null;
     if (isSeries && !editingMovie && !autoEpNum) {
@@ -219,7 +224,12 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
       description: isSeries ? inherit("description") : form.description,
       thumbnail_url: isSeries ? inherit("thumbnail_url") : form.thumbnail_url,
       category: form.category, year: Number(form.year) || null,
-      video_id: info.video_id, type: info.type, video_url: videoUrlInput,
+      // שדה ריק בעריכה לא מוחק את הקישור הקיים. startEdit משחזר את
+      // הכתובת מ-video_id עבור עשרה סוגים, אבל לא לכולם (telegram,
+      // jellyfin) — ובלי ההגנה הזאת שמירה הייתה מרוקנת להם את הווידאו.
+      ...(videoUrlInput.trim()
+        ? { video_id: info.video_id, type: info.type, video_url: videoUrlInput }
+        : {}),
       series_name: isSeries ? (form.series_name || form.title) : null,
       season_number: isSeries ? (Number(form.season_number) || 1) : null,
       episode_number: isSeries ? autoEpNum : null,
@@ -247,7 +257,17 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
           m.id && m.id === mine ? { ...m, ...payload }
           : m.series_name === payload.series_name ? { ...m, ...spread }
           : m);
-        if (!mine) next.push(payload);          // פרק חדש
+        if (!mine) {
+          // חייב מזהה ותאריך, בדיוק כמו Movie.create — פריט בלי id שובר
+          // עריכה, מחיקה, היסטוריה, ואת בניית הכתובת באתר (id.slice(0,6)).
+          // ובראש ולא בסוף, כי create עושה [newMovie, ...movies] ו-list
+          // מסתמך על הסדר הזה.
+          next.unshift({
+            ...payload,
+            id: crypto.randomUUID(),
+            created_date: new Date().toISOString(),
+          });
+        }
         await Movie.saveAll(next);
         const which = Object.keys(spread).map(k => spreadLabels[k]).join(", ");
         const n = all.filter(m => m.series_name === payload.series_name).length;
@@ -284,27 +304,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     loadMovies();
   };
 
-  const updateSeriesThumbnail = async (seriesName, thumbnailUrl) => {
-    if (!seriesName || !thumbnailUrl) return;
-    setSaving(true);
-    try {
-      const all = await Movie.list("-created_date", 100000);
-      await Movie.saveAll(all.map(m => m.series_name === seriesName ? { ...m, thumbnail_url: thumbnailUrl } : m));
-    } catch {}
-    setFormStatus({ type: "success", message: "תמונה עודכנה לסדרה!" });
-    loadMovies(); setSaving(false); setTimeout(() => setFormStatus({ type: "", message: "" }), 3000);
-  };
 
-  const updateSeriesDescription = async (seriesName, description) => {
-    if (!seriesName || !description) return;
-    setSaving(true);
-    try {
-      const all = await Movie.list("-created_date", 100000);
-      await Movie.saveAll(all.map(m => m.series_name === seriesName ? { ...m, description } : m));
-    } catch {}
-    setFormStatus({ type: "success", message: "תיאור עודכן לסדרה!" });
-    loadMovies(); setSaving(false); setTimeout(() => setFormStatus({ type: "", message: "" }), 3000);
-  };
 
   const startEdit = (movie) => {
     setEditingMovie(movie); setIsSeries(!!movie.series_name);
@@ -535,6 +535,9 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
               {editingMovie && <button onClick={resetForm} style={{ width: "100%", marginTop: 8, background: "#F0F0F5", color: "#6e6e73", border: "1.5px solid #d2d2d7", borderRadius: 12, padding: 10, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>ביטול עריכה</button>}
               {formStatus.message && <div style={{ marginTop: 10, borderRadius: 10, padding: "10px 12px", fontSize: 12, background: formStatus.type === "success" ? "#f0fff4" : "#fff5f5", color: formStatus.type === "success" ? "#1a7a3a" : "#ff3b30" }}>{formStatus.message}</div>}
             </div>
+            <BulkEpisodesPanel movies={movies} seriesMap={seriesMap}
+              existingSeriesNames={existingSeriesNames} loadMovies={loadMovies}
+              cardStyle={cardStyle} inp={inp} dot={dot} MovieEntity={Movie} />
           </div>
         )}
 
@@ -784,6 +787,127 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── העלאת עונה שלמה בפעולה אחת ───────────────────────────────────────────────
+//
+// זה מה שהפך העלאת סדרה ל"מאוד קשה": עונה של 40 פרקים היא 40 מילויי טופס
+// ו-40 שמירות. וכל Movie.create כותב ל-GitHub בנפרד, כלומר גם 40 commits
+// ו-40 המתנות. כאן מדביקים את הקישורים בבת אחת, והם נשמרים בכתיבה **אחת**.
+//
+// המטא-דאטה לא נשאלת בכלל: היא נלקחת מהסדרה הקיימת (תיאור, פוסטר, קטגוריה,
+// כתובת), כי ממילא אלה שדות ברמת הסדרה. למי שמעלה עונה 2 אין מה למלא.
+function BulkEpisodesPanel({ movies, seriesMap, existingSeriesNames, loadMovies, cardStyle, inp, dot, MovieEntity }) {
+  const [serName, setSerName] = useState("");
+  const [season, setSeason] = useState("1");
+  const [raw, setRaw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState({ type: "", text: "" });
+
+  // שורה אחת = פרק אחד. iframe מקבל חילוץ src, כמו בשדה הבודד, כי זה מה
+  // שאנשים מדביקים בפועל. כפילויות מול מה שכבר בקטלוג נופלות כאן ולא
+  // מגיעות לשמירה.
+  const seen = new Set(movies.map(m => (m.video_url || "").trim()).filter(Boolean));
+  const links = raw.split("\n").map(l => {
+    let v = l.trim();
+    if (!v) return null;
+    if (v.includes("<iframe")) { const m = v.match(/src=["']([^"']+)['"]/); if (m) v = m[1]; }
+    return v;
+  }).filter(Boolean);
+  const fresh = [...new Set(links)].filter(v => !seen.has(v));
+  const dupes = links.length - fresh.length;
+
+  const sn = serName.trim();
+  const seasonN = Number(season) || 1;
+  const used = movies
+    .filter(m => m.series_name === sn && (m.season_number || 1) === seasonN)
+    .map(m => m.episode_number || 0);
+  const startAt = used.length ? Math.max(...used) + 1 : 1;
+  const rep = seriesMap[sn];
+
+  const run = async () => {
+    if (!sn) { setMsg({ type: "error", text: "בחר או הקלד שם סדרה" }); return; }
+    if (!fresh.length) { setMsg({ type: "error", text: "אין קישורים חדשים להוספה" }); return; }
+    if (!rep?.category) { setMsg({ type: "error", text: "לסדרה הזאת אין קטגוריה — הוסף פרק אחד רגיל קודם" }); return; }
+    setBusy(true);
+    try {
+      const all = await MovieEntity.list("-created_date", 100000);
+      const made = fresh.map((url, i) => {
+        const info = extractVideoInfo(url);
+        const ep = startAt + i;
+        return {
+          id: crypto.randomUUID(),
+          created_date: new Date().toISOString(),
+          title: `${sn} פרק ${ep}`,
+          series_name: sn,
+          season_number: seasonN,
+          episode_number: ep,
+          episode_title: "",
+          // ברמת הסדרה — נלקח מהסדרה ולא נשאל מהמשתמש
+          category: rep.category,
+          description: rep.description || "",
+          thumbnail_url: rep.thumbnail_url || "",
+          custom_slug: rep.custom_slug || null,
+          year: rep.year || null,
+          video_url: url, video_id: info.video_id, type: info.type,
+        };
+      });
+      // כתיבה אחת לכל העונה, במקום אחת לפרק
+      await MovieEntity.saveAll([...made.reverse(), ...all]);
+      setMsg({ type: "success", text: `נוספו ${made.length} פרקים (${startAt}-${startAt + made.length - 1}) לעונה ${seasonN}` });
+      setRaw("");
+      await loadMovies();
+    } catch (e) {
+      setMsg({ type: "error", text: "השמירה נכשלה: " + (e?.message || "שגיאה") });
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ ...cardStyle, border: "2px solid #34c759" }}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, display: "flex", alignItems: "center", color: "#1a7a3a" }}>
+        {dot} העלאת עונה שלמה בבת אחת
+      </div>
+      <div style={{ fontSize: 11, color: "#6e6e73", marginBottom: 12, lineHeight: 1.7 }}>
+        הדבק קישור אחד בכל שורה. כל שורה תהפוך לפרק עוקב, והתיאור, הפוסטר
+        והקטגוריה יילקחו מהסדרה — אין מה למלא.
+      </div>
+
+      <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>סדרה</label>
+      <select value={sn} onChange={e => setSerName(e.target.value)} style={{ ...inp, marginBottom: 10 }}>
+        <option value="">בחר סדרה קיימת...</option>
+        {existingSeriesNames.map(n => <option key={n} value={n}>{n}</option>)}
+      </select>
+
+      <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>עונה</label>
+      <input type="number" min="1" value={season} onChange={e => setSeason(e.target.value)} style={{ ...inp, marginBottom: 10 }} />
+
+      <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>
+        קישורים — שורה לכל פרק
+      </label>
+      <textarea value={raw} onChange={e => setRaw(e.target.value)} rows={7}
+        placeholder={"https://.../ep1.mp4\nhttps://.../ep2.mp4\nhttps://..."}
+        dir="ltr" style={{ ...inp, resize: "vertical", minHeight: 120, fontFamily: "monospace", fontSize: 11 }} />
+
+      {sn && fresh.length > 0 && (
+        <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 10, background: "#f0fff4", fontSize: 11.5, color: "#1a7a3a", lineHeight: 1.7 }}>
+          <b>{fresh.length}</b> פרקים ייווצרו — מספר <b>{startAt}</b> עד <b>{startAt + fresh.length - 1}</b> בעונה {seasonN}
+          {dupes > 0 && <div style={{ color: "#b8860b" }}>{dupes} קישורים דולגו (כבר קיימים בקטלוג)</div>}
+          {!rep?.category && <div style={{ color: "#ff3b30" }}>לסדרה אין קטגוריה — הוסף פרק אחד רגיל קודם</div>}
+        </div>
+      )}
+
+      <button onClick={run} disabled={busy || !fresh.length || !sn}
+        style={{ width: "100%", marginTop: 12, background: busy || !fresh.length || !sn ? "#ccc" : "#34c759", color: "#fff", border: "none", borderRadius: 12, padding: 13, fontSize: 14, fontWeight: 700, cursor: busy || !fresh.length || !sn ? "default" : "pointer", fontFamily: "inherit" }}>
+        {busy ? "שומר..." : `הוסף ${fresh.length || ""} פרקים`}
+      </button>
+      {msg.text && (
+        <div style={{ marginTop: 10, borderRadius: 10, padding: "10px 12px", fontSize: 12, background: msg.type === "success" ? "#f0fff4" : "#fff5f5", color: msg.type === "success" ? "#1a7a3a" : "#ff3b30" }}>
+          {msg.text}
+        </div>
+      )}
     </div>
   );
 }
