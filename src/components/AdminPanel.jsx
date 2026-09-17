@@ -184,14 +184,31 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
       }
     }
     setSaving(true);
-    let autoThumb = form.thumbnail_url;
-    if (!autoThumb && isSeries) {
-      const serName = form.series_name || form.title;
-      const ep1 = movies.find(m => m.series_name === serName && (m.season_number || 1) === 1 && (m.episode_number || 1) === 1);
-      if (ep1?.thumbnail_url) autoThumb = ep1.thumbnail_url;
-    }
+    // ── מה שמתאר את הסדרה, ולא את הפרק ──────────────────────────────────
+    // תיאור, פוסטר, קטגוריה, כתובת ושנה שייכים ל**סדרה**: אין היגיון
+    // שלפרק 4 יהיה תיאור אחר מפרק 5. לכן הם נעים לשני הכיוונים:
+    //
+    //   מה שמילאת   → נכתב לכל פרקי הסדרה
+    //   מה שהשארת ריק → נשאב מפרק אחר שכבר יש לו
+    //
+    // זה מה שהופך העלאת סדרה לסבירה: ממלאים תיאור ופוסטר **פעם אחת**, על
+    // פרק אחד, וכל השאר מסתדר. קודם רק הפוסטר נשאב, ורק מפרק 1 של עונה 1
+    // — כך שמי שהעלה עונה 2 לא קיבל כלום.
+    const serName = isSeries ? (form.series_name || form.title) : null;
+    const sibs = isSeries
+      ? movies.filter(m => m.series_name === serName)
+      : [];
+    const inherit = k => {
+      const own = form[k];
+      if (own !== "" && own != null) return own;
+      // מפרק 1 קודם, אחרת מכל פרק שיש לו — עונה 2 לא אמורה לצאת קרחת
+      const ep1 = sibs.find(m => (m.season_number || 1) === 1 && (m.episode_number || 1) === 1);
+      return (ep1 && ep1[k]) || sibs.find(m => m[k])?.[k] || own;
+    };
     const payload = {
-      title: form.title, description: form.description, thumbnail_url: autoThumb,
+      title: form.title,
+      description: isSeries ? inherit("description") : form.description,
+      thumbnail_url: isSeries ? inherit("thumbnail_url") : form.thumbnail_url,
       category: form.category, year: Number(form.year) || null,
       video_id: info.video_id, type: info.type, video_url: videoUrlInput,
       series_name: isSeries ? (form.series_name || form.title) : null,
@@ -200,16 +217,38 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
       episode_title: isSeries ? form.episode_title : null,
       custom_slug: form.custom_slug ? form.custom_slug.trim().toLowerCase() : null,
     };
+    // רק מה שבאמת יש לו ערך מתפשט. בלי הסינון הזה, שמירה עם תיאור ריק
+    // הייתה מוחקת תיאור תקין מכל הסדרה — בדיוק ההיפך מהכוונה.
+    const spread = {};
+    for (const k of ["description", "thumbnail_url", "category", "custom_slug", "year"]) {
+      if (payload[k] !== "" && payload[k] != null) spread[k] = payload[k];
+    }
+    const spreadLabels = {
+      description: "תיאור", thumbnail_url: "תמונה", category: "קטגוריה",
+      custom_slug: "כתובת", year: "שנה",
+    };
     try {
-      if (editingMovie) {
-        if (payload.series_name && (editingMovie.category !== payload.category || payload.custom_slug !== editingMovie.custom_slug)) {
-          const all = await Movie.list("-created_date", 100000);
-          await Movie.saveAll(all.map(m => m.id === editingMovie.id ? { ...m, ...payload } : m.series_name === payload.series_name ? { ...m, category: payload.category, custom_slug: payload.custom_slug } : m));
-          setFormStatus({ type: "success", message: "עודכן! קטגוריה וכתובת URL עודכנו לכל הסדרה" });
-        } else {
-          await Movie.update(editingMovie.id, payload);
-          setFormStatus({ type: "success", message: "עודכן!" });
-        }
+      if (payload.series_name && Object.keys(spread).length) {
+        // סדרה: הפרק הזה נשמר במלואו, ושדות הסדרה נכתבים לכל האחים שלו.
+        // נכון גם בהוספה ולא רק בעריכה — מי שמוסיף פרק עם תיאור מצפה
+        // שהוא יחול על הסדרה, ולא שיצטרך לערוך אותו שוב.
+        const all = await Movie.list("-created_date", 100000);
+        const mine = editingMovie?.id;
+        const next = all.map(m =>
+          m.id && m.id === mine ? { ...m, ...payload }
+          : m.series_name === payload.series_name ? { ...m, ...spread }
+          : m);
+        if (!mine) next.push(payload);          // פרק חדש
+        await Movie.saveAll(next);
+        const which = Object.keys(spread).map(k => spreadLabels[k]).join(", ");
+        const n = all.filter(m => m.series_name === payload.series_name).length;
+        setFormStatus({
+          type: "success",
+          message: `${mine ? "עודכן" : "נשמר"}! ${which} הוחלו על כל הסדרה (${n} פרקים)`,
+        });
+      } else if (editingMovie) {
+        await Movie.update(editingMovie.id, payload);
+        setFormStatus({ type: "success", message: "עודכן!" });
       } else {
         await Movie.create(payload);
         setFormStatus({ type: "success", message: "נשמר!" });
@@ -346,6 +385,26 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   ))}
                 </div>
               </div>
+              {/* הסבר להעלאת סדרה. נוסף כי הדיווח מהשטח היה "מאוד מסובך,
+                  אנשים לא מבינים איך מעלים" — והטופס באמת היה עשרה שדות
+                  בשורה בלי לומר מה חובה, מה סדר הפעולות, ומה נגזר לבד. */}
+              {isSeries && !editingMovie && (
+                <div style={{
+                  marginBottom: 12, padding: "11px 13px", borderRadius: 12,
+                  background: "#eef6ff", border: "1.5px solid #bcdcff",
+                  fontSize: 11.5, lineHeight: 1.75, color: "#1c1c1e",
+                }}>
+                  <div style={{ fontWeight: 800, marginBottom: 5, fontSize: 12.5 }}>
+                    איך מעלים פרק לסדרה
+                  </div>
+                  <div><b>1.</b> סדרה קיימת? בחר אותה בכפתור למטה — השם, הקטגוריה והפוסטר יתמלאו לבד.</div>
+                  <div><b>2.</b> סדרה חדשה? חפש אותה בחיפוש למעלה — התיאור, הפוסטר והשנה יתמלאו מ-TMDB.</div>
+                  <div><b>3.</b> הדבק את קישור הווידאו, ומספר העונה והפרק. זה הכל.</div>
+                  <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #bcdcff", color: "#0071e3", fontWeight: 700 }}>
+                    תיאור, פוסטר, קטגוריה וכתובת נשמרים ל<u>כל הסדרה</u> — מלא אותם פעם אחת בפרק אחד, ולא בכל פרק מחדש.
+                  </div>
+                </div>
+              )}
               {/* existing series picker */}
               {isSeries && existingSeriesNames.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
