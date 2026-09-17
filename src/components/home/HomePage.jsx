@@ -143,28 +143,17 @@ export default function HomePage({
             )}
           </div>
         </div>
-        {/* שני קישורים לתגים מפורשים, ולא /releases/latest/ — גיטהאב מחשב
-            "latest" לפי תאריך הפרסום ולא לפי שם התג, ולכן כל שחרור חדש חוטף
-            את הקישור. זה בדיוק מה שקרה בעבר: שחרור בדיקה בשם Tv הפך לחדש
-            יותר וכפתור ההורדה החזיר 404. לכן כל כפתור מצביע לתג + אסֶט
-            קבועים שקיימים במאגר:
-              • טלפון → tag=latest,  asset=zovex.apk  (מתעדכן ע"י ה-CI)
-              • טלוויזיה → tag=Tv,   asset=base.apk   (בניית ה-Android TV) */}
+        {/* כפתור אחד, ובכוונה. זו **אותה אפליקציה** לטלפון ולטלוויזיה — ה-APK
+            מזהה לבד על מה הוא רץ (Platform.isTV, ו-isTelevision() בצד
+            הנייטיב) ומחליף מסכים ופקדים בהתאם. שני כפתורים היו מטעים:
+            ה-release בשם Tv הוא ערוץ **בדיקות**, לא "גרסה לטלוויזיה".
+
+            התג latest מפורש בכתובת, ולא /releases/latest/ — גיטהאב מחשב
+            "latest" לפי תאריך הפרסום ולא לפי שם התג, ולכן כל שחרור חדש
+            חוטף את הקישור. זה בדיוק מה שקרה בעבר: שחרור בדיקה בשם Tv הפך
+            לחדש יותר וכפתור ההורדה החזיר 404. */}
         <a
           href="https://github.com/davidggjg/zovex-android/releases/download/latest/zovex.apk"
-          download
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            padding: "8px 10px", marginBottom: 8, borderRadius: 10,
-            background: "rgba(229,9,20,0.08)", border: "1px solid rgba(229,9,20,0.25)",
-            color: "#e5e5e5", fontSize: 12, fontWeight: 700, textDecoration: "none",
-          }}
-        >
-          <Download size={14} color="#e50914" />
-          {t("home.downloadApp")}
-        </a>
-        <a
-          href="https://github.com/davidggjg/zovex-android/releases/download/Tv/base.apk"
           download
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
@@ -174,7 +163,7 @@ export default function HomePage({
           }}
         >
           <Download size={14} color="#e50914" />
-          {t("home.downloadAppTV")}
+          {t("home.downloadApp")}
         </a>
         <div style={{ paddingBottom: 11 }}>
           <button
