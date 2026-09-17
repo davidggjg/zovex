@@ -35,6 +35,7 @@ if(window.Hls&&Hls.isSupported()){
 <\/script>
 </body>
 </html>`;
+
   return (
     <iframe
       srcDoc={html}
@@ -80,6 +81,14 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
   const [isSeries, setIsSeries] = useState(false);
   const [showExistingSeries, setShowExistingSeries] = useState(false);
   const [videoUrlInput, setVideoUrlInput] = useState("");
+  // הפרק הבא בעונה. חושב פעם אחת ומשמש גם לתצוגה בטופס וגם לשמירה, כדי
+  // שהמספר שהמשתמש רואה יהיה בדיוק המספר שנשמר.
+  const computeNextEp = (serName, seasonNum) => {
+    const used = movies
+      .filter(m => m.series_name === serName && (m.season_number || 1) === (Number(seasonNum) || 1))
+      .map(m => m.episode_number || 0);
+    return used.length ? Math.max(...used) + 1 : 1;
+  };
   const [form, setForm] = useState({
     title: "", thumbnail_url: "", category: "", description: "",
     // ריק ולא השנה הנוכחית. ברירת המחדל הקודמת מילאה בשקט את שנת
@@ -91,6 +100,9 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     series_name: "", season_number: "", episode_number: "", episode_title: "",
     jellyfinServer: "", jellyfinApiKey: "", custom_slug: ""
   });
+  // אחרי אתחול form, אחרת TDZ: השורה הזאת קראה ל-form לפני שהוגדר
+  // והייתה מפילה את כל הפאנל בזמן ריצה.
+  const nextEpNum = computeNextEp(form.series_name || form.title, form.season_number);
   const [newCat, setNewCat] = useState("");
   const [editingCat, setEditingCat] = useState(null);
   const [editingCatVal, setEditingCatVal] = useState("");
@@ -156,10 +168,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
     const info = extractVideoInfo(videoUrlInput);
     let autoEpNum = Number(form.episode_number) || null;
     if (isSeries && !editingMovie && !autoEpNum) {
-      const serName = form.series_name || form.title;
-      const seasonN = Number(form.season_number) || 1;
-      const existing = movies.filter(m => m.series_name === serName && (m.season_number || 1) === seasonN).map(m => m.episode_number || 0);
-      autoEpNum = existing.length ? Math.max(...existing) + 1 : 1;
+      autoEpNum = computeNextEp(form.series_name || form.title, form.season_number);
     }
     // בדיקת כפילויות — רק בהוספה חדשה, לא בעריכה (שם עורכים פריט קיים בכוונה).
     // משווים שם מדויק (כך ש"אנקונדה" ו"אנקונדה 2" לא נחשבים כפילות - אלה סרטים
@@ -376,9 +385,22 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
 
             <div style={cardStyle}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center" }}>{dot}{editingMovie ? "עריכת תוכן" : "פרטי התוכן"}</div>
+              {/* קישור הווידאו ראשון, ובכוונה. זה הדבר שיש ביד כשמתחילים,
+                  וקודם הוא היה השדה האחרון — אחרי שמונה שדות אחרים. */}
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>
+                  1. קישור וידאו <span style={{ color: "#ff3b30" }}>*</span>
+                  {videoUrlInput && <span style={{ color: "#0071e3", fontWeight: 400, marginRight: 6, fontSize: 10 }}> · זוהה: {extractVideoInfo(videoUrlInput).type}</span>}
+                </label>
+                <input value={videoUrlInput} onChange={e => {
+                  let val = e.target.value;
+                  if (val.includes("<iframe")) { const m = val.match(/src=["']([^"']+)['"]/); if (m) val = m[1]; }
+                  setVideoUrlInput(val);
+                }} placeholder="הדבק כאן: YouTube / Drive / mp4 / iframe..." dir="ltr" style={inp} />
+              </div>
               {/* type toggle */}
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>סוג תוכן</label>
+                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>2. סוג תוכן</label>
                 <div style={{ display: "flex", gap: 8 }}>
                   {[["movie","סרט"],["series","סדרה"]].map(([v, l]) => (
                     <button key={v} onClick={() => { setIsSeries(v === "series"); setShowExistingSeries(v === "series" && existingSeriesNames.length > 0); }} style={{ flex: 1, borderRadius: 12, padding: "10px 0", fontSize: 13, fontWeight: 700, border: "1.5px solid", cursor: "pointer", fontFamily: "inherit", borderColor: (v === "series") === isSeries ? "#0071e3" : "#d2d2d7", background: (v === "series") === isSeries ? "#0071e3" : "#F0F0F5", color: (v === "series") === isSeries ? "#fff" : "#6e6e73" }}>{l}</button>
@@ -427,7 +449,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
               )}
               {/* title */}
               <div style={{ marginBottom: 12 }}>
-                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>{isSeries ? "כותרת לתצוגה (שם הפרק)" : "שם הסרט"}</label>
+                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>{isSeries ? "3. כותרת הפרק" : "3. שם הסרט"} <span style={{ color: "#ff3b30" }}>*</span></label>
                 <input value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))} placeholder={isSeries ? "למשל: הכבוד של אשרף פרק 1" : "שם הסרט"} style={inp} />
               </div>
               {!isSeries && (
@@ -460,7 +482,14 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                     </div>
                     <div>
                       <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>מספר פרק</label>
-                      <input type="number" min="1" value={form.episode_number} onChange={e => setForm(p => ({ ...p, episode_number: e.target.value }))} placeholder="1" style={inp} />
+                      <input type="number" min="1" value={form.episode_number} onChange={e => setForm(p => ({ ...p, episode_number: e.target.value }))} placeholder={String(nextEpNum)} style={inp} />
+                      {/* המספר הבא חושב מאז ומתמיד בשמירה, אבל אף אחד לא ידע
+                          — ולכן מילאו אותו ביד וטעו. עכשיו הוא מוצג. */}
+                      {!editingMovie && !form.episode_number && (
+                        <div style={{ fontSize: 10, color: "#0071e3", marginTop: 4, fontWeight: 700 }}>
+                          יישמר אוטומטית כפרק {nextEpNum}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -472,7 +501,7 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   <input type="number" value={form.year} onChange={e => setForm(p => ({ ...p, year: e.target.value }))} style={inp} />
                 </div>
                 <div>
-                  <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>קטגוריה</label>
+                  <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>קטגוריה <span style={{ color: "#ff3b30" }}>*</span></label>
                   <select value={form.category} onChange={e => setForm(p => ({ ...p, category: e.target.value }))} style={inp}>
                     <option value="">בחר...</option>
                     {categories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -493,28 +522,6 @@ export default function AdminPanel({ movies, seriesMap, liveChannels, categories
                   </div>
                   <input value={form.thumbnail_url} onChange={e => setForm(p => ({ ...p, thumbnail_url: e.target.value }))} placeholder="https://.../poster.jpg" dir="ltr" style={{ ...inp, flex: 1 }} />
                 </div>
-                {isSeries && editingMovie && (
-                  <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
-                    <button type="button" onClick={() => updateSeriesDescription(form.series_name || editingMovie.series_name, form.description)} disabled={!form.description} style={{ flex: 1, background: form.description ? "#5e5ce6" : "#ccc", color: "#fff", border: "none", borderRadius: 12, padding: "10px 0", fontSize: 12, fontWeight: 700, cursor: form.description ? "pointer" : "default", fontFamily: "inherit" }}>
-                      📝 תיאור לסדרה
-                    </button>
-                    <button type="button" onClick={() => updateSeriesThumbnail(form.series_name || editingMovie.series_name, form.thumbnail_url)} disabled={!form.thumbnail_url} style={{ flexShrink: 0, background: form.thumbnail_url ? "#ff9500" : "#ccc", color: "#fff", border: "none", borderRadius: 12, padding: "10px 12px", fontSize: 16, cursor: form.thumbnail_url ? "pointer" : "default", fontFamily: "inherit" }}>
-                      🖼️
-                    </button>
-                  </div>
-                )}
-              </div>
-              {/* URL input */}
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ display: "block", fontSize: 11, color: "#6e6e73", marginBottom: 5, fontWeight: 700 }}>
-                  קישור וידאו
-                  {videoUrlInput && <span style={{ color: "#0071e3", fontWeight: 400, marginRight: 6, fontSize: 10 }}> - {extractVideoInfo(videoUrlInput).type}</span>}
-                </label>
-                <input value={videoUrlInput} onChange={e => {
-                  let val = e.target.value;
-                  if (val.includes("<iframe")) { const m = val.match(/src=["']([^"']+)['"]/); if (m) val = m[1]; }
-                  setVideoUrlInput(val);
-                }} placeholder="YouTube / Drive / Dailymotion / Rumble / mp4 / Kaltura iframe..." dir="ltr" style={inp} />
               </div>
               {/* save buttons */}
               <div style={{ display: "flex", gap: 8 }}>
