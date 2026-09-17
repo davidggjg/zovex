@@ -156,14 +156,28 @@ export default function HomePage({
           href="https://github.com/davidggjg/zovex-android/releases/download/latest/zovex.apk"
           download
           style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            padding: "8px 10px", marginBottom: 10, borderRadius: 10,
-            background: "rgba(229,9,20,0.08)", border: "1px solid rgba(229,9,20,0.25)",
-            color: "#e5e5e5", fontSize: 12, fontWeight: 700, textDecoration: "none",
+            display: "flex", alignItems: "center", gap: 11,
+            padding: "12px 14px", marginBottom: 11, borderRadius: 14,
+            background: "linear-gradient(135deg, rgba(229,9,20,0.15), rgba(229,9,20,0.06))",
+            border: "1px solid rgba(229,9,20,0.32)",
+            textDecoration: "none",
           }}
         >
-          <Download size={14} color="#e50914" />
-          {t("home.downloadApp")}
+          <span style={{
+            width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+            background: "rgba(229,9,20,0.18)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Download size={17} color="#ff2b38" />
+          </span>
+          <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <span style={{ fontSize: 13.5, fontWeight: 800, color: "#fff" }}>
+              {t("home.downloadApp")}
+            </span>
+            <span style={{ fontSize: 11, color: "#a9a9ad" }}>
+              {t("home.downloadAppSub")}
+            </span>
+          </span>
         </a>
         <div style={{ paddingBottom: 11 }}>
           <button
