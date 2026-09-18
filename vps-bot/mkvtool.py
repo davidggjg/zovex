@@ -125,40 +125,44 @@ def human(n):
 
 
 # ── התקדמות ──────────────────────────────────────────────────────────────────
-class Prog:
-    """callback להורדה/העלאה: אחוז, מהירות בפועל וזמן משוער.
+def make_prog(msg, label, total):
+    """מחזיר callback להורדה/העלאה: אחוז, מהירות בפועל וזמן משוער.
 
-    העריכות מווסתות. טלגרם מגביל קצב עריכות הודעה, וכלי שמעדכן על כל נתח
-    חוטף FloodWait ומפסיק לדווח בדיוק כשהקובץ גדול — כלומר בדיוק כשהדיווח
-    הכי נחוץ.
+    **חייב להיות פונקציה ולא אובייקט.** pyrogram בודק
+    inspect.iscoroutinefunction(progress), ועבור מופע של מחלקה עם
+    ‎async def __call__‎ הבדיקה מחזירה False — ואז הוא מריץ אותו כפונקציה
+    רגילה, מקבל קורוטינה שאיש לא ממתין לה, וזורק אותה בשקט. כך נבנתה
+    הגרסה הראשונה, ולכן לא הוצג שום פס.
+
+    העריכות מווסתות: טלגרם מגביל קצב עריכות, וכלי שמעדכן על כל נתח חוטף
+    FloodWait ומפסיק לדווח בדיוק כשהקובץ גדול.
     """
+    state = {"t0": time.time(), "last": 0.0}
 
-    def __init__(self, msg, label, total):
-        self.msg, self.label, self.total = msg, label, total or 0
-        self.t0 = time.time()
-        self.last_edit = 0.0
-
-    async def __call__(self, current, total):
-        total = total or self.total
+    async def cb(current, total_in):
+        tot = total_in or total or 0
         now = time.time()
-        done = total and current >= total
-        if not done and now - self.last_edit < EDIT_EVERY:
+        if tot and current < tot and now - state["last"] < EDIT_EVERY:
             return
-        self.last_edit = now
-        el = max(0.001, now - self.t0)
+        state["last"] = now
+        el = max(0.001, now - state["t0"])
         speed = current / el
-        pct = (current * 100.0 / total) if total else 0
-        bar = "▰" * int(pct / 10) + "▱" * (10 - int(pct / 10))
-        eta = ""
-        if speed > 0 and total and current < total:
-            left = int((total - current) / speed)
-            eta = f" · נותרו {left // 60}:{left % 60:02d}"
+        pct = (current * 100.0 / tot) if tot else 0
+        filled = int(pct / 5)
+        bar = "█" * filled + "░" * (20 - filled)
+        eta = "—"
+        if speed > 0 and tot and current < tot:
+            left = int((tot - current) / speed)
+            eta = f"{left // 60}:{left % 60:02d}"
         try:
-            await self.msg.edit(
-                f"{self.label}\n`{bar}` {pct:.0f}%\n"
-                f"{human(current)} / {human(total)} · {human(speed)}/ש{eta}")
+            await msg.edit(
+                f"{label}\n\n`{bar}`  **{pct:.0f}%**\n"
+                f"{human(current)} מתוך {human(tot)}\n"
+                f"מהירות {human(speed)}/ש · נותרו {eta}")
         except Exception:
             pass          # FloodWait/עריכה זהה — דיווח הוא נוחות, לא תלות
+
+    return cb
 
 
 # ── מי מורשה ─────────────────────────────────────────────────────────────────
@@ -255,6 +259,31 @@ def describe(info: dict):
     return audio, subs, video
 
 
+# ── ניקוי SRT ────────────────────────────────────────────────────────────────
+# ההמרה מ-ass ל-srt גוררת איתה את תגיות העיצוב של ass, והתוצאה נראית כך:
+#   <font size="20" color="#000000">{\an0}</font>Hello
+# זה תקין תחבירית ומכוער לקריאה, ורוב הנגנים מציגים את הזבל כטקסט. מנקים
+# את מה ששייך ל-ass ומשאירים את מה ש-srt באמת תומך בו (<i>, <b>, <u>).
+ASS_OVERRIDE = re.compile(r"\{\\[^}]*\}")
+FONT_TAG = re.compile(r"</?font[^>]*>", re.I)
+
+
+def clean_srt(path):
+    try:
+        txt = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+    out = FONT_TAG.sub("", ASS_OVERRIDE.sub("", txt))
+    # שורות שנשארו ריקות אחרי הניקוי היו כולן עיצוב — מסירים כדי שלא
+    # יופיעו כמסגרות ריקות על המסך.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    if out != txt:
+        try:
+            path.write_text(out, encoding="utf-8")
+        except Exception:
+            pass
+
+
 # ── מצב לכל קובץ ─────────────────────────────────────────────────────────────
 # TTL: בלי זה המילון גדל לנצח וגם משאיר קבצים על הדיסק. נלמד בדרך הקשה
 # בחלקים אחרים של המערכת הזאת.
@@ -335,7 +364,7 @@ def summary(job):
     if not IS_BOT[0]:
         head += ("\n\n**ענה בהודעה:**\n"
                  "`2` בחר/בטל אודיו · `s1` בחר/בטל כתובית\n"
-                 "`וידאו` · `כתוביות` · `הכל` · `בטל`\n"
+                 "`וידאו` · `כתוביות` · `הכל` · `mkv` · `בטל`\n"
                  "אפשר גם בשורה אחת: `2 s1 הכל`")
     return head
 
@@ -358,18 +387,68 @@ async def run_ff(args, timeout=7200):
     return proc.returncode == 0, (err or b"").decode("utf-8", "replace")[-600:]
 
 
-async def build_video(job) -> tuple:
-    """וידאו + רק האודיו שנבחר. stream copy — בלי קידוד מחדש."""
-    out = job["dir"] / f"{Path(job['name']).stem}.selected.mkv"
+async def build_video(job, container="mp4") -> tuple:
+    """וידאו + רק האודיו שנבחר.
+
+    ## למה mp4 ולמה לא סתם copy
+
+    כדי שטלגרם ינגן את הקובץ בלחיצה ולא יבקש להוריד אותו, צריך שלושה
+    דברים: מיכל mp4, ‎+faststart‎ (מזיז את טבלת האינדקס לתחילת הקובץ, אחרת
+    הנגן חייב את כל הקובץ לפני שהוא מתחיל), ושליחה כווידאו ולא כמסמך.
+
+    הווידאו עצמו **מועתק** ולא מקודד מחדש — זה מה שמשאיר את זה בשניות
+    במקום שעות, ובאיכות זהה. האודיו הוא הסיפור: AC3 ו-DTS חוקיים ב-mp4
+    אבל רוב הנגנים, כולל של טלגרם, לא מנגנים אותם. לכן אודיו שאינו
+    AAC מומר ל-AAC — קידוד זול שלוקח שניות — וזה בדיוק ההבדל בין קובץ
+    שנפתח לקובץ ששותק.
+
+    ‎-tag:v hvc1‎ נדרש ל-HEVC בתוך mp4: בלי התג אפל ו-QuickTime לא מזהים
+    את הזרם, והקובץ "תקין" בכל בדיקה ופשוט לא נפתח אצל חצי מהמשתמשים.
+
+    container="mkv" משאיר הכל בהעתקה מלאה, בלי המרת אודיו ובלי הגבלות
+    מיכל — לשמירה ארכיונית ולא לצפייה ישירה.
+    """
+    ext = "mkv" if container == "mkv" else "mp4"
+    out = job["dir"] / f"{Path(job['name']).stem}.{ext}"
     args = ["-i", str(job["src"]), "-map", "0:v:0"]
     for i in sorted(job["pick_a"]):
         args += ["-map", f"0:a:{i}"]
-    # כתוביות שנבחרו נשארות גם בתוך הווידאו — מי שרוצה רק קובץ נפרד
-    # מקבל אותו בנפרד ממילא, ומי שרוצה אותן מוטמעות מקבל.
     for i in sorted(job["pick_s"]):
         args += ["-map", f"0:s:{i}"]
-    args += ["-c", "copy", str(out)]
+
+    if ext == "mkv":
+        args += ["-c", "copy"]
+    else:
+        args += ["-c:v", "copy"]
+        vcodec = (job["video"][0]["codec"] if job["video"] else "").lower()
+        if vcodec in ("hevc", "h265"):
+            args += ["-tag:v", "hvc1"]
+        # אודיו: מעתיקים רק AAC, כל השאר מומר. הבדיקה היא על הרצועות
+        # שנבחרו בפועל ולא על הקובץ כולו.
+        picked = [a for a in job["audio"] if a["i"] in job["pick_a"]]
+        if all((a["codec"] or "").lower() == "aac" for a in picked):
+            args += ["-c:a", "copy"]
+        else:
+            args += ["-c:a", "aac", "-b:a", "192k"]
+        # mp4 לא מחזיק ass/subrip; mov_text הוא מה שיש בו.
+        if job["pick_s"]:
+            args += ["-c:s", "mov_text"]
+        args += ["-movflags", "+faststart"]
+    args += [str(out)]
+
     ok, err = await run_ff(args)
+    if not ok and ext == "mp4" and job["pick_s"]:
+        # כתובית תמונה אינה ניתנת להטמעה ב-mp4. מנסים שוב בלעדיה — הקובץ
+        # הנפרד ממילא נשלח, אז אין כאן אובדן אמיתי.
+        args2 = [a for a in args]
+        for i in sorted(job["pick_s"]):
+            while f"0:s:{i}" in args2:
+                k = args2.index(f"0:s:{i}")
+                del args2[k - 1:k + 1]
+        if "-c:s" in args2:
+            k = args2.index("-c:s")
+            del args2[k:k + 2]
+        ok, err = await run_ff(args2)
     return (out if ok else None), err
 
 
@@ -392,10 +471,11 @@ async def build_subs(job) -> tuple:
             # נופלים ל-.mks (מטרוסקה־כתוביות) שמקבל כל קודק. הנפילה
             # מדווחת, כך שלא נשארים עם קובץ שבור בלי לדעת.
             cands = [(s["ext"], "copy"), ("mks", "copy")]
-        elif s["ext"] == "ass":
-            cands = [("ass", "copy")]
         else:
-            cands = [("srt", "srt"), ("ass", "copy")]
+            # SRT תמיד קודם, גם עבור ass/ssa. זה מה שמבוקש ומה שכל נגן
+            # קורא; המחיר הוא עיצוב ומיקום שאובדים בהמרה, ולכן אם ההמרה
+            # נכשלת נופלים לפורמט המקורי במקום להחזיר כלום.
+            cands = [("srt", "srt"), (s["ext"], "copy"), ("ass", "copy")]
 
         ok = False
         for ext, codec in cands:
@@ -409,6 +489,8 @@ async def build_subs(job) -> tuple:
             out.unlink(missing_ok=True)
 
         if ok:
+            if out.suffix.lower() == ".srt":
+                clean_srt(out)
             files.append(out)
             if s["bitmap"]:
                 notes.append(f"🖼 {lang_name(s['lang'])} — כתובית **תמונה**, "
@@ -449,7 +531,7 @@ def main():
     LAST_JOB: dict = {}
 
 
-    async def do_run(client, job, want_v, want_s):
+    async def do_run(client, job, want_v, want_s, container="mp4"):
         """ההרצה עצמה. משותפת לכפתורים (מצב בוט) ולפקודות טקסט (יוזר-בוט),
         כדי שלא יהיו שתי גרסאות שנסחפות זו מזו."""
         note = await client.send_message(job["chat"], "⏳ ממתין לתור של ffmpeg...")
@@ -466,7 +548,7 @@ def main():
                         await client.send_message(job["chat"], "\n".join(notes))
                 if want_v:
                     await note.edit("🎬 בונה וידאו (stream copy, בלי קידוד מחדש)...")
-                    out, err = await build_video(job)
+                    out, err = await build_video(job, container)
                     if out is None:
                         await note.edit(f"❌ בניית הווידאו נכשלה:\n`{err[-300:]}`")
                         return
@@ -477,9 +559,20 @@ def main():
                             f"({human(MAX_UPLOAD)}).\nהקובץ נשאר בשרת:\n`{out}`")
                         return
                     await note.edit(f"⬆️ מעלה ({human(sz)})...")
-                    await client.send_document(job["chat"], str(out),
-                                               file_name=out.name,
-                                               progress=Prog(note, "⬆️ מעלה", sz))
+                    up = make_prog(note, "⬆️ מעלה", sz)
+                    if out.suffix.lower() == ".mp4":
+                        # send_video ולא send_document: מסמך מוצג ככרטיס
+                        # להורדה גם כשהקובץ מושלם. רק כווידאו טלגרם מנגן
+                        # אותו בלחיצה, וזה מה שביקשת ב"צפייה ישירה".
+                        v = job["video"][0] if job["video"] else {}
+                        await client.send_video(
+                            job["chat"], str(out), file_name=out.name,
+                            duration=job.get("duration") or 0,
+                            width=v.get("w") or 0, height=v.get("h") or 0,
+                            supports_streaming=True, progress=up)
+                    else:
+                        await client.send_document(job["chat"], str(out),
+                                                   file_name=out.name, progress=up)
                     sent_any = True
                 job["born"] = time.time()
                 mins = max(1, RETENTION // 60)
@@ -503,7 +596,7 @@ def main():
             return
 
         status = await m.reply(f"⬇️ מוריד **{name}** ({human(size)})...")
-        prog = Prog(status, f"⬇️ מוריד **{name}**", size)
+        prog = make_prog(status, f"⬇️ מוריד **{name}**", size)
         jid = str(m.id)
         jdir = WORK_DIR / jid
         jdir.mkdir(parents=True, exist_ok=True)
@@ -524,6 +617,10 @@ def main():
             await status.edit(f"❌ לא הצלחתי לקרוא את הקובץ: {e}")
             return
         audio, subs, video = describe(info)
+        try:
+            duration = int(float((info.get("format") or {}).get("duration") or 0))
+        except Exception:
+            duration = 0
         if not audio and not subs:
             shutil.rmtree(jdir, ignore_errors=True)
             await status.edit("❌ לא נמצאו רצועות אודיו או כתוביות בקובץ.")
@@ -535,7 +632,7 @@ def main():
                # היה בוחר, ולכן זו הבחירה שהכי סביר שהמשתמש רוצה.
                "pick_a": {a["i"] for a in audio if a["default"]} or ({0} if audio else set()),
                "pick_s": set(), "born": time.time(), "chat": m.chat.id,
-               "msg_id": status.id}
+               "msg_id": status.id, "duration": duration}
         JOBS[jid] = job
         LAST_JOB[m.chat.id] = jid
         await status.edit(summary(job), reply_markup=keyboard(job))
@@ -590,6 +687,7 @@ def main():
     WORDS_S = {"כתוביות", "subs", "s", "כתובית"}
     WORDS_B = {"הכל", "שניהם", "both", "b", "all"}
     WORDS_X = {"בטל", "ביטול", "cancel", "x"}
+    WORDS_MKV = {"mkv", "מקורי", "ארכיון"}
 
     @app.on_message(allowed() & filters.text & ~filters.regex(r"^/"))
     async def on_text(client: Client, m: Message):
@@ -605,10 +703,14 @@ def main():
 
         want_v = want_s = cancel = False
         touched = False
+        container = "mp4"
         for tok in re.split(r"[\s,]+", (m.text or "").strip().lower()):
             if not tok:
                 continue
-            if tok in WORDS_X:
+            if tok in WORDS_MKV:
+                container = "mkv"
+                want_v = True
+            elif tok in WORDS_X:
                 cancel = True
             elif tok in WORDS_B:
                 want_v = want_s = True
@@ -639,7 +741,7 @@ def main():
             await m.reply("לא נבחרה אף כתובית.")
             return
         if want_v or want_s:
-            await do_run(client, job, want_v, want_s)
+            await do_run(client, job, want_v, want_s, container)
         elif touched:
             await m.reply(summary(job), reply_markup=keyboard(job))
 
