@@ -69,6 +69,14 @@ while true; do
     LOAD=$(cut -d' ' -f1 /proc/loadavg)
     C443=$(ss -tn state established '( sport = :443 )' 2>/dev/null | tail -n +2 | wc -l)
 
+    # סחרור הסשנים מול טלגרם, נספר על החלון שמאז הדגימה הקודמת. זו השאלה
+    # הפתוחה היחידה אחרי fix_pool_thrash: מדידה של אפס התקבלה על שרת
+    # שאותחל זה עתה ובשעה ריקה, ולכן היא לא יכולה להבדיל בין "התיקון
+    # עובד" ל"עוד לא הספיק להצטבר". רק העמודה הזאת לאורך יממה תפריד.
+    JL=$(journalctl -u zovex-bot --since "${EVERY} sec ago" --no-pager -o cat 2>/dev/null)
+    CONN=$(printf '%s' "$JL" | grep -c "Connecting" )
+    SKIP=$(printf '%s' "$JL" | grep -c "מדלג על הפלה")
+
     TJ=$(curl -s --max-time 5 "http://127.0.0.1:$PORT/debug/tasks" 2>/dev/null)
     CJ=$(curl -s --max-time 5 "http://127.0.0.1:$PORT/debug/caches" 2>/dev/null)
     TASK=$(field "$TJ" "pending_tracked")
@@ -77,10 +85,10 @@ while true; do
     SEGMB=$(field "$CJ" "hls_seg_cache_bytes")
     [ -n "$SEGMB" ] && SEGMB=$((SEGMB / 1048576))
 
-    printf '%s | up %5sh | rss %5s | fd %4s | sock %4s | thr %3s | ffm %2s | task %4s | pool %3s/%4s | seg %3sMB | load %5s | c443 %4s\n' \
+    printf '%s | up %5sh | rss %5s | fd %4s | sock %4s | thr %3s | ffm %2s | task %4s | pool %3s/%4s | seg %3sMB | load %5s | c443 %4s | conn %6s | skip %4s\n' \
         "$(date '+%F %H:%M')" "$UPH" "${RSS:-?}" "$FD" "$SOCK" "${THR:-?}" \
         "$FFM" "${TASK:-?}" "${POOLS:-?}" "${CONNS:-?}" "${SEGMB:-?}" \
-        "$LOAD" "$C443" >> "$OUT"
+        "$LOAD" "$C443" "$CONN" "$SKIP" >> "$OUT"
 
     sleep "$EVERY"
 done
