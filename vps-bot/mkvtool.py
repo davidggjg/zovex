@@ -34,6 +34,26 @@ mkvtool — שולחים קובץ MKV לחשבון, בוחרים רצועות ב
 היא נפילת החשבון מהבריכה — כלומר הכלי הזה היה מוריד סרטים לצופים כדי
 לחתוך קובץ. הוא בודק את זה בהפעלה ונעצר עם הסבר.
 
+## התקדמות, הרשאות, ומחיקה אוטומטית
+
+**התקדמות.** הורדה והעלאה מציגות אחוז, מהירות בפועל וזמן משוער, ומתעדכנות
+כל כמה שניות. העריכות מווסתות בכוונה: טלגרם מגביל קצב עריכות, וכלי
+שמעדכן על כל נתח חוטף FloodWait ומפסיק לדווח בדיוק כשהקובץ גדול.
+
+**הרשאות.** הבעלים יכול לפתוח את הכלי לאנשים נוספים:
+
+    /allow 123456789      — מוסיף
+    /deny  123456789      — מסיר
+    /allowed              — מי מורשה
+
+הרשימה נשמרת לקובץ ושורדת הפעלה מחדש. הבעלים תמיד מורשה ולא ניתן להסרה,
+כדי שלא ייווצר מצב שבו אין לאיש גישה.
+
+**מחיקה מהשרת.** הקבצים נמחקים מהשרת שעה אחרי הטיפול, וזה נאמר למשתמש
+בהודעה. המחיקה היא **רק מהשרת** — מה שכבר נשלח בטלגרם נשאר בטלגרם. מטאטא
+רץ ברקע כל חמש דקות, ולא רק כשמגיע קובץ חדש: אחרת קובץ אחרון שנשלח בערב
+היה יושב על הדיסק עד הקובץ הבא.
+
 ## הפעלה
 
 צריך בקובץ הסביבה (‎/opt/zovex-bot/.env‎):
@@ -41,6 +61,7 @@ mkvtool — שולחים קובץ MKV לחשבון, בוחרים רצועות ב
     API_ID, API_HASH          — כבר קיימים שם
     MKVTOOL_OWNER=<user id>   — מי מורשה להשתמש. חובה.
     MKVTOOL_SESSION=mkvtool   — שם session נפרד (ברירת מחדל)
+    MKVTOOL_RETENTION=3600    — שניות עד מחיקה מהשרת (ברירת מחדל: שעה)
 
 בהרצה ראשונה הוא יבקש התחברות (טלפון + קוד) ויישמר ל-session משלו.
 
@@ -66,6 +87,12 @@ STREAM_BOTS_FILE = Path(os.environ.get("STREAM_BOTS_FILE",
 # של קובץ גדול ממלאת את הדיסק ומפילה גם את שירות ההזרמה.
 FREE_SPACE_FACTOR = 2.5
 MAX_UPLOAD = int(os.environ.get("MKVTOOL_MAX_UPLOAD", str(2000 * 1024 * 1024)))
+
+RETENTION = int(os.environ.get("MKVTOOL_RETENTION", "3600"))
+ALLOW_FILE = DATA_DIR / "mkvtool_allowed.json"
+# כל כמה שניות מותר לערוך הודעת התקדמות. טלגרם מגביל קצב עריכות, וכלי
+# שמעדכן על כל נתח חוטף FloodWait ומפסיק לדווח בדיוק כשהקובץ גדול.
+EDIT_EVERY = float(os.environ.get("MKVTOOL_EDIT_EVERY", "4"))
 
 # כתוביות שהן תמונה ולא טקסט. אי אפשר להמיר אותן ל-SRT בלי OCR.
 BITMAP_SUBS = {"hdmv_pgs_subtitle": "sup", "dvd_subtitle": "sub",
@@ -95,6 +122,62 @@ def human(n):
         if n < 1024 or u == "GB":
             return f"{n:.1f} {u}"
         n /= 1024
+
+
+# ── התקדמות ──────────────────────────────────────────────────────────────────
+class Prog:
+    """callback להורדה/העלאה: אחוז, מהירות בפועל וזמן משוער.
+
+    העריכות מווסתות. טלגרם מגביל קצב עריכות הודעה, וכלי שמעדכן על כל נתח
+    חוטף FloodWait ומפסיק לדווח בדיוק כשהקובץ גדול — כלומר בדיוק כשהדיווח
+    הכי נחוץ.
+    """
+
+    def __init__(self, msg, label, total):
+        self.msg, self.label, self.total = msg, label, total or 0
+        self.t0 = time.time()
+        self.last_edit = 0.0
+
+    async def __call__(self, current, total):
+        total = total or self.total
+        now = time.time()
+        done = total and current >= total
+        if not done and now - self.last_edit < EDIT_EVERY:
+            return
+        self.last_edit = now
+        el = max(0.001, now - self.t0)
+        speed = current / el
+        pct = (current * 100.0 / total) if total else 0
+        bar = "▰" * int(pct / 10) + "▱" * (10 - int(pct / 10))
+        eta = ""
+        if speed > 0 and total and current < total:
+            left = int((total - current) / speed)
+            eta = f" · נותרו {left // 60}:{left % 60:02d}"
+        try:
+            await self.msg.edit(
+                f"{self.label}\n`{bar}` {pct:.0f}%\n"
+                f"{human(current)} / {human(total)} · {human(speed)}/ש{eta}")
+        except Exception:
+            pass          # FloodWait/עריכה זהה — דיווח הוא נוחות, לא תלות
+
+
+# ── מי מורשה ─────────────────────────────────────────────────────────────────
+ALLOWED: set = set()
+
+
+def load_allowed():
+    try:
+        ALLOWED.update(int(x) for x in json.loads(ALLOW_FILE.read_text()))
+    except Exception:
+        pass
+
+
+def save_allowed():
+    try:
+        ALLOW_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ALLOW_FILE.write_text(json.dumps(sorted(ALLOWED)), encoding="utf-8")
+    except Exception as e:
+        print(f"אזהרה: לא נשמרה רשימת ההרשאות: {e}")
 
 
 # ── בדיקות הפעלה ─────────────────────────────────────────────────────────────
@@ -176,7 +259,7 @@ def describe(info: dict):
 # TTL: בלי זה המילון גדל לנצח וגם משאיר קבצים על הדיסק. נלמד בדרך הקשה
 # בחלקים אחרים של המערכת הזאת.
 JOBS: dict = {}
-JOB_TTL = 3600 * 3
+JOB_TTL = RETENTION
 
 
 def sweep_jobs():
@@ -187,7 +270,15 @@ def sweep_jobs():
             shutil.rmtree(j["dir"], ignore_errors=True)
 
 
+# האם אנחנו בוט אמיתי (עם טוקן) או חשבון משתמש. **חשבון משתמש אינו יכול
+# לשלוח כפתורים** — זו מגבלה של טלגרם, לא באג. לכן במצב יוזר-בוט הממשק
+# הוא פקודות טקסט, ורק במצב בוט מוצגים כפתורים.
+IS_BOT = [False]
+
+
 def keyboard(job):
+    if not IS_BOT[0]:
+        return None
     rows = []
     for a in job["audio"]:
         on = a["i"] in job["pick_a"]
@@ -222,9 +313,30 @@ def summary(job):
     if any(s["bitmap"] for s in job["subs"]):
         head += ("\n🖼 = כתובית **תמונה** (בלוריי/DVD). היא תצא בפורמט "
                  "המקורי; אין ממנה טקסט בלי OCR.\n")
+    if not IS_BOT[0]:
+        # חשבון משתמש לא יכול כפתורים, ולכן הרשימה ממוספרת והבחירה בטקסט.
+        head += "\n**אודיו:**\n"
+        for a in job["audio"]:
+            mark = "✅" if a["i"] in job["pick_a"] else "▫️"
+            ch = f" · {a['ch']}ch" if a.get("ch") else ""
+            head += f"{mark} `{a['i'] + 1}` {lang_name(a['lang'])} ({a['codec']}{ch})\n"
+        if job["subs"]:
+            head += "**כתוביות:**\n"
+            for x in job["subs"]:
+                mark = "✅" if x["i"] in job["pick_s"] else "▫️"
+                kind = "🖼" if x["bitmap"] else "📝"
+                head += (f"{mark} `s{x['i'] + 1}` {kind} {lang_name(x['lang'])} "
+                         f"({x['codec']})\n")
+
     pa = ", ".join(lang_name(a["lang"]) for a in job["audio"] if a["i"] in job["pick_a"])
     ps = ", ".join(lang_name(s["lang"]) for s in job["subs"] if s["i"] in job["pick_s"])
     head += f"\nנבחר — אודיו: {pa or '(אין)'} · כתוביות: {ps or '(אין)'}"
+
+    if not IS_BOT[0]:
+        head += ("\n\n**ענה בהודעה:**\n"
+                 "`2` בחר/בטל אודיו · `s1` בחר/בטל כתובית\n"
+                 "`וידאו` · `כתוביות` · `הכל` · `בטל`\n"
+                 "אפשר גם בשורה אחת: `2 s1 הכל`")
     return head
 
 
@@ -321,10 +433,63 @@ def main():
     owner_id = int(owner)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+    load_allowed()
     app = Client(SESSION, api_id=int(os.environ["API_ID"]),
                  api_hash=os.environ["API_HASH"], workdir=str(DATA_DIR))
 
-    @app.on_message(filters.user(owner_id) & (filters.document | filters.video))
+    def allowed():
+        """מסנן דינמי. filters.user() נקבע פעם אחת בטעינה, ולכן לא היה
+        מתעדכן כשמוסיפים מישהו ב-/allow."""
+        async def f(_, __, m):
+            u = m.from_user.id if m.from_user else None
+            return u is not None and (u == owner_id or u in ALLOWED)
+        return filters.create(f)
+
+    # הודעה אחרונה של כל צ'אט, כדי שאפשר יהיה לענות בלי לצטט
+    LAST_JOB: dict = {}
+
+
+    async def do_run(client, job, want_v, want_s):
+        """ההרצה עצמה. משותפת לכפתורים (מצב בוט) ולפקודות טקסט (יוזר-בוט),
+        כדי שלא יהיו שתי גרסאות שנסחפות זו מזו."""
+        note = await client.send_message(job["chat"], "⏳ ממתין לתור של ffmpeg...")
+        sent_any = False
+        async with FFMPEG_LOCK:
+            try:
+                if want_s:
+                    await note.edit("📄 מחלץ כתוביות...")
+                    files, notes = await build_subs(job)
+                    for f in files:
+                        await client.send_document(job["chat"], str(f))
+                        sent_any = True
+                    if notes:
+                        await client.send_message(job["chat"], "\n".join(notes))
+                if want_v:
+                    await note.edit("🎬 בונה וידאו (stream copy, בלי קידוד מחדש)...")
+                    out, err = await build_video(job)
+                    if out is None:
+                        await note.edit(f"❌ בניית הווידאו נכשלה:\n`{err[-300:]}`")
+                        return
+                    sz = out.stat().st_size
+                    if sz > MAX_UPLOAD:
+                        await note.edit(
+                            f"⚠️ הפלט {human(sz)} — מעל מגבלת ההעלאה "
+                            f"({human(MAX_UPLOAD)}).\nהקובץ נשאר בשרת:\n`{out}`")
+                        return
+                    await note.edit(f"⬆️ מעלה ({human(sz)})...")
+                    await client.send_document(job["chat"], str(out),
+                                               file_name=out.name,
+                                               progress=Prog(note, "⬆️ מעלה", sz))
+                    sent_any = True
+                job["born"] = time.time()
+                mins = max(1, RETENTION // 60)
+                await note.edit("✅ סיימתי." + (
+                    f"\n\n🗑 הקבצים יימחקו **מהשרת** בעוד {mins} דקות. "
+                    f"מה שכבר נשלח כאן נשאר בטלגרם." if sent_any else ""))
+            except Exception as e:
+                await note.edit(f"❌ שגיאה: {type(e).__name__}: {e}")
+
+    @app.on_message(allowed() & (filters.document | filters.video))
     async def on_file(client: Client, m: Message):
         sweep_jobs()
         media = m.document or m.video
@@ -338,11 +503,13 @@ def main():
             return
 
         status = await m.reply(f"⬇️ מוריד **{name}** ({human(size)})...")
+        prog = Prog(status, f"⬇️ מוריד **{name}**", size)
         jid = str(m.id)
         jdir = WORK_DIR / jid
         jdir.mkdir(parents=True, exist_ok=True)
         try:
-            src = await client.download_media(m, file_name=str(jdir / name))
+            src = await client.download_media(m, file_name=str(jdir / name),
+                                              progress=prog)
         except Exception as e:
             shutil.rmtree(jdir, ignore_errors=True)
             await status.edit(f"❌ ההורדה נכשלה: {type(e).__name__}")
@@ -367,11 +534,13 @@ def main():
                # ברירת מחדל: הרצועות שמסומנות default בקובץ. זה מה שנגן
                # היה בוחר, ולכן זו הבחירה שהכי סביר שהמשתמש רוצה.
                "pick_a": {a["i"] for a in audio if a["default"]} or ({0} if audio else set()),
-               "pick_s": set(), "born": time.time(), "chat": m.chat.id}
+               "pick_s": set(), "born": time.time(), "chat": m.chat.id,
+               "msg_id": status.id}
         JOBS[jid] = job
+        LAST_JOB[m.chat.id] = jid
         await status.edit(summary(job), reply_markup=keyboard(job))
 
-    @app.on_callback_query(filters.user(owner_id))
+    @app.on_callback_query(allowed())
     async def on_click(client: Client, q: CallbackQuery):
         data = q.data or ""
         m = re.match(r"^(gv|gs|gb|a|s|x)(\d+):(\d+)$", data)
@@ -411,34 +580,98 @@ def main():
             return
 
         await q.answer("מתחיל")
-        note = await client.send_message(job["chat"], "⏳ ממתין לתור של ffmpeg...")
-        async with FFMPEG_LOCK:
-            try:
-                if want_s:
-                    await note.edit("📄 מחלץ כתוביות...")
-                    files, notes = await build_subs(job)
-                    for f in files:
-                        await client.send_document(job["chat"], str(f))
-                    if notes:
-                        await client.send_message(job["chat"], "\n".join(notes))
-                if want_v:
-                    await note.edit("🎬 בונה וידאו (stream copy, בלי קידוד מחדש)...")
-                    out, err = await build_video(job)
-                    if out is None:
-                        await note.edit(f"❌ בניית הווידאו נכשלה:\n`{err[-300:]}`")
-                        return
-                    sz = out.stat().st_size
-                    if sz > MAX_UPLOAD:
-                        await note.edit(
-                            f"⚠️ הפלט {human(sz)} — מעל מגבלת ההעלאה "
-                            f"({human(MAX_UPLOAD)}).\nהקובץ נשאר בשרת:\n`{out}`")
-                        return
-                    await note.edit(f"⬆️ מעלה ({human(sz)})...")
-                    await client.send_document(job["chat"], str(out),
-                                               file_name=out.name)
-                await note.edit("✅ סיימתי.")
-            except Exception as e:
-                await note.edit(f"❌ שגיאה: {type(e).__name__}: {e}")
+        await do_run(client, job, want_v, want_s)
+
+
+    # ── ממשק טקסט ────────────────────────────────────────────────────────────
+    # חשבון משתמש אינו יכול לשלוח כפתורים (מגבלת טלגרם, לא באג), ולכן במצב
+    # יוזר-בוט הבחירה נעשית בהודעה. אפשר לצרף הכל בשורה אחת: "2 s1 הכל".
+    WORDS_V = {"וידאו", "video", "v", "סרט"}
+    WORDS_S = {"כתוביות", "subs", "s", "כתובית"}
+    WORDS_B = {"הכל", "שניהם", "both", "b", "all"}
+    WORDS_X = {"בטל", "ביטול", "cancel", "x"}
+
+    @app.on_message(allowed() & filters.text & ~filters.regex(r"^/"))
+    async def on_text(client: Client, m: Message):
+        jid = None
+        if m.reply_to_message_id:
+            jid = next((k for k, v in JOBS.items()
+                        if v["msg_id"] == m.reply_to_message_id), None)
+        if jid is None:
+            jid = LAST_JOB.get(m.chat.id)
+        job = JOBS.get(jid) if jid else None
+        if not job:
+            return                      # לא קשור לקובץ — לא מתערבים בשיחה
+
+        want_v = want_s = cancel = False
+        touched = False
+        for tok in re.split(r"[\s,]+", (m.text or "").strip().lower()):
+            if not tok:
+                continue
+            if tok in WORDS_X:
+                cancel = True
+            elif tok in WORDS_B:
+                want_v = want_s = True
+            elif tok in WORDS_V:
+                want_v = True
+            elif tok in WORDS_S:
+                want_s = True
+            elif re.fullmatch(r"s\d+", tok):
+                i = int(tok[1:]) - 1
+                if any(x["i"] == i for x in job["subs"]):
+                    job["pick_s"] ^= {i}
+                    touched = True
+            elif tok.isdigit():
+                i = int(tok) - 1
+                if any(x["i"] == i for x in job["audio"]):
+                    job["pick_a"] ^= {i}
+                    touched = True
+
+        if cancel:
+            shutil.rmtree(job["dir"], ignore_errors=True)
+            JOBS.pop(jid, None)
+            await m.reply("🗑 בוטל והקבצים נמחקו מהשרת.")
+            return
+        if want_v and not job["pick_a"]:
+            await m.reply("לא נבחרה אף רצועת אודיו.")
+            return
+        if want_s and not job["pick_s"]:
+            await m.reply("לא נבחרה אף כתובית.")
+            return
+        if want_v or want_s:
+            await do_run(client, job, want_v, want_s)
+        elif touched:
+            await m.reply(summary(job), reply_markup=keyboard(job))
+
+    # ── הרשאות ───────────────────────────────────────────────────────────────
+    @app.on_message(filters.user(owner_id) & filters.command(
+        ["allow", "deny", "allowed"], prefixes="/"))
+    async def on_admin(client: Client, m: Message):
+        parts = (m.text or "").split()
+        cmd = parts[0].lstrip("/").split("@")[0]
+        if cmd == "allowed":
+            if not ALLOWED:
+                await m.reply(f"מורשים: רק אתה ({owner_id}).")
+            else:
+                await m.reply("מורשים:\n" + "\n".join(
+                    [f"• {owner_id} (בעלים)"] + [f"• {u}" for u in sorted(ALLOWED)]))
+            return
+        ids = [int(x) for x in parts[1:] if x.lstrip("-").isdigit()]
+        if not ids:
+            await m.reply(f"שימוש: `/{cmd} 123456789`")
+            return
+        for u in ids:
+            if cmd == "allow":
+                ALLOWED.add(u)
+            else:
+                # הבעלים לא ניתן להסרה — אחרת אפשר לנעול את כולם בחוץ
+                if u == owner_id:
+                    await m.reply("לא מסירים את הבעלים.")
+                    continue
+                ALLOWED.discard(u)
+        save_allowed()
+        await m.reply(("✅ נוסף: " if cmd == "allow" else "✅ הוסר: ")
+                      + ", ".join(str(u) for u in ids))
 
     # כל קובץ שמגיע ממי שאינו המורשה — נרשם עם המזהה שלו.
     #
@@ -446,22 +679,39 @@ def main():
     # המזהה של החשבון שהכלי רץ עליו, אבל הקבצים נשלחים אליו מחשבון אישי
     # אחר, שום דבר לא יקרה ולא תהיה שום הודעה. כאן זה הופך לשורה שאומרת
     # בדיוק איזה מספר צריך להיות שם.
-    @app.on_message((filters.document | filters.video) & ~filters.user(owner_id))
+    @app.on_message((filters.document | filters.video) & ~allowed())
     async def on_stranger(client: Client, m: Message):
         who = m.from_user.id if m.from_user else "?"
         name = (m.from_user.first_name if m.from_user else "") or ""
         print(f"⚠️  התקבל קובץ מ-{who} ({name}) — לא ברשימת המורשים.")
         print(f"    אם זה אתה: MKVTOOL_OWNER={who}")
 
+    async def sweeper():
+        """מוחק מהשרת קבצים שפג זמנם. רץ ברקע ולא רק כשמגיע קובץ חדש —
+        אחרת קובץ אחרון שנשלח בערב יושב על הדיסק עד הקובץ הבא."""
+        while True:
+            await asyncio.sleep(300)
+            try:
+                sweep_jobs()
+            except Exception:
+                pass
+
     async def runner():
         await app.start()
         me = await app.get_me()
+        IS_BOT[0] = bool(getattr(me, "is_bot", False))
+        asyncio.create_task(sweeper())
         print(f"✅ מחובר כ-{me.first_name or ''} "
               f"(@{me.username or '—'}) · id={me.id}")
         if me.id == owner_id:
             print("   MKVTOOL_OWNER הוא המזהה של החשבון הזה עצמו, כלומר הכלי")
             print("   יגיב רק לקבצים שהחשבון הזה שולח לעצמו (Saved Messages).")
             print("   אם תשלח מחשבון אישי אחר — שנה את MKVTOOL_OWNER למזהה שלו.")
+        if not IS_BOT[0]:
+            print("מצב חשבון־משתמש: אין כפתורים (מגבלת טלגרם) — הבחירה בטקסט.")
+        print(f"מחיקה מהשרת: {RETENTION // 60} דקות אחרי הטיפול")
+        if ALLOWED:
+            print(f"מורשים נוספים: {', '.join(str(u) for u in sorted(ALLOWED))}")
         print("מוכן. שלח קובץ.")
         await idle()
         await app.stop()
