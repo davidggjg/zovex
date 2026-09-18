@@ -17,16 +17,113 @@ vod_watch — מדמה צופים אמיתיים בסרטים/סדרות ותו�
 ברירת המחדל פונה ל-127.0.0.1:8000, כלומר בודקת את החוליה טלגרם→שרת בלי
 לצרוך רוחב פס חיצוני ובלי להפריע לצופים.
 
+## למה יש גם יומן אירועים
+
+הכלי ידע לספור תקיעות, אבל לא לומר **למה**. "תקיעה בדקה 7.2" היא עובדה
+נכונה שלא מקדמת כלום. לכן כל תקיעה נרשמת עכשיו עם כל מה שידוע עליה —
+כמה נמשכה, איפה בקובץ, ומה היה קצב האספקה בעשר השניות שלפניה (זה מה
+שמפריד בין "הכל נעצר" ל"זרם לאט מדי", שתי תקלות שונות עם שני פתרונות) —
+ולצידה שורות היומן של השירות מאותן שניות. הכתיבה היא מיידית ולא בסוף,
+כי ריצה ארוכה ברקע עלולה להיקטע, ודוח שנכתב רק בסוף הוא דוח שלא קיים.
+
+בסוף מודפסת גם פריסה של תקיעות לפי דקה: "נתקע כל כמה דקות" היא טענה על
+**קצב**, ותקיעה אחת ארוכה ותקיעה כל שתי דקות נראות זהות בספירה כוללת.
+
+## להריץ בלי לשבת מול המסך
+
+    nohup python3 vod_watch.py --minutes 60 --streams 3 \
+          --log /tmp/vod_events.log > /tmp/vod_watch.txt 2>&1 &
+
+ואז, בכל רגע: tail -40 /tmp/vod_events.log
+
     python3 vod_watch.py --minutes 40 --streams 3
     python3 vod_watch.py --minutes 5 --streams 2 --bitrate 2.5
     python3 vod_watch.py --minutes 40 --streams 3 --public     # דרך הכתובת הציבורית
 """
-import argparse, json, os, random, re, signal, sys, threading, time
+import argparse, json, os, random, re, signal, subprocess, sys, threading, time
 import urllib.request, urllib.error
 from urllib.parse import urlsplit, urlunsplit
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 STOP = threading.Event()
+
+# ── יומן אירועים ─────────────────────────────────────────────────────────────
+# הכלי ידע לספור תקיעות, אבל לא לומר **למה** אחת מהן קרתה. לכן שורות היומן
+# של השירות נאספות בזמן אמת, וכל תקיעה נרשמת יחד עם מה שהופיע ביומן סביבה.
+# בלי זה נשארים עם "תקיעה בדקה 7.2" — עובדה נכונה שלא מקדמת כלום.
+SERVICE = "zovex-bot"
+JOURNAL = deque(maxlen=600)                  # (זמן, שורה מצונזרת)
+JLOCK = threading.Lock()
+LOGF = None
+LOGLOCK = threading.Lock()
+T_START = [0.0]
+
+REDACT = [
+    (re.compile(r"https?://[^\s\"'<>]+"), "‹כתובת›"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "‹IP›"),
+    (re.compile(r"\b[a-z0-9][a-z0-9.-]{6,}\.(?:tv|pw|com|net|org|io|me|cc|xyz|to)\b", re.I), "‹מתחם›"),
+]
+# רק מה שיכול להסביר תקיעה בהזרמה מטלגרם. סינון רחב מדי מציף את הקובץ
+# בשורות גישה רגילות ומסתיר בדיוק את מה שחיפשנו.
+INTERESTING = re.compile(
+    r"Send exception|TCPTransport|dead connection|timeout|timed out|reconnect|"
+    r"flood|FloodWait|Telegram|pool|session|ConnectError|ReadError|RpcError|"
+    r"stream|ERROR|WARNING|Traceback", re.I)
+
+
+def clean(s):
+    for pat, rep in REDACT:
+        s = pat.sub(rep, s)
+    return s
+
+
+def follow_journal():
+    """עוקב אחרי יומן השירות ברקע. כישלון כאן לא מפיל כלום — פשוט אין הקשר."""
+    proc = None
+    for unit in (SERVICE, SERVICE + ".service"):
+        try:
+            proc = subprocess.Popen(
+                ["journalctl", "-u", unit, "-f", "-n", "0", "-o", "cat"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, errors="replace", bufsize=1)
+            break
+        except Exception:
+            proc = None
+    if proc is None:
+        return
+    try:
+        for ln in proc.stdout:
+            if STOP.is_set():
+                break
+            if INTERESTING.search(ln):
+                with JLOCK:
+                    JOURNAL.append((time.monotonic(), clean(ln.strip())[:180]))
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def log_event(title, kind, detail, at=None, context_s=45.0):
+    """רושם אירוע מיד — ריצה ארוכה ברקע עלולה להיקטע, ודוח שנכתב רק בסוף
+    הוא דוח שלא קיים."""
+    now = at if at is not None else time.monotonic()
+    rel = int(now - T_START[0])
+    line = f"[{rel // 60:02d}:{rel % 60:02d}] {clean(title)[:30]} — {kind} — {detail}"
+    with JLOCK:
+        ctx = [l for ts, l in JOURNAL if now - ts <= context_s]
+    with LOGLOCK:
+        if LOGF:
+            LOGF.write(line + "\n")
+            for l in ctx[-8:]:
+                LOGF.write(f"           ↳ יומן: {l}\n")
+            if not ctx:
+                LOGF.write("           ↳ יומן: שקט — שום שורה לא נרשמה סביב התקיעה\n")
+    return line, ctx
 
 
 def _classify(e):
@@ -66,6 +163,31 @@ class Watch:
         self.ended_reason = ''
         self.seek_ms = []
         self.size_bytes = None
+        self.recent = deque(maxlen=400)     # (זמן, בייטים) — קצב לפני התקיעה
+        self.stall_at_bytes = 0             # איפה בקובץ נתפסה התקיעה
+        self.details = []                   # תיאור מלא לכל תקיעה
+
+    def _rate_before(self, t, window=10.0):
+        """כמה בייט הגיעו ב-window השניות שלפני t. זה מפריד בין 'הכל נעצר'
+        לבין 'זרם לאט מדי' — שתי תקלות שונות עם שני פתרונות שונים."""
+        n = sum(b for ts, b in self.recent if t - window <= ts <= t)
+        return n / window
+
+    def _close_stall(self, now, t0):
+        dur = now - self.stall_open
+        if dur >= self.stall_after:
+            at = round(self.stall_open - t0, 1)
+            self.stalls.append((at, round(dur, 1)))
+            pct = (f"{self.stall_at_bytes * 100.0 / self.size_bytes:.0f}% מהקובץ"
+                   if self.size_bytes else f"בייט {self.stall_at_bytes}")
+            rate = self._rate_before(self.stall_open)
+            detail = (f"נמשכה {dur:.1f}ש · {pct} · "
+                      f"בעשר השניות שלפניה הגיעו {rate * 8 / 1e6:.2f} מגהביט/ש "
+                      f"מתוך {self.bitrate * 8 / 1e6:.2f} שנדרשו")
+            line, ctx = log_event(self.title, "תקיעה", detail, at=now)
+            self.details.append({"at": at, "dur": round(dur, 1),
+                                 "detail": detail, "journal": ctx[-8:]})
+        self.stall_open = None
 
     def note_error(self, name):
         self.errors[name] = self.errors.get(name, 0) + 1
@@ -99,6 +221,7 @@ class Watch:
         except Exception as e:
             self.note_error(_classify(e))
             self.ended_reason = "לא נפתח"
+            log_event(self.title, "לא נפתח בכלל", _classify(e))
             return
 
         with resp:
@@ -115,6 +238,8 @@ class Watch:
                 except Exception as e:
                     self.note_error(_classify(e))
                     self.ended_reason = "נותק באמצע"
+                    log_event(self.title, "נותק באמצע הזרימה",
+                              f"{_classify(e)} · אחרי {human(self.total_bytes)}")
                     break
                 now = time.monotonic()
                 if not chunk:
@@ -124,6 +249,7 @@ class Watch:
                     self.ttfb_ms = int((now - started) * 1000)
                 self.total_bytes += len(chunk)
                 buf += len(chunk)
+                self.recent.append((now, len(chunk)))
 
                 if not playing:
                     # עוד ממלאים את הבאפר המקדים — לא צורכים ולא סופרים תקיעות.
@@ -134,11 +260,7 @@ class Watch:
                             self.startup_s = round(now - started, 2)
                         elif self.stall_open is not None:
                             # סוף תקיעה: הבאפר התמלא והנגן חוזר לנגן.
-                            dur = now - self.stall_open
-                            if dur >= self.stall_after:
-                                self.stalls.append((round(self.stall_open - t0, 1),
-                                                    round(dur, 1)))
-                            self.stall_open = None
+                            self._close_stall(now, t0)
                     continue
 
                 buf -= (now - last) * self.bitrate
@@ -149,11 +271,10 @@ class Watch:
                     playing = False
                     if self.stall_open is None:
                         self.stall_open = now
+                        self.stall_at_bytes = self.total_bytes
 
         if self.stall_open is not None:
-            dur = time.monotonic() - self.stall_open
-            if dur >= self.stall_after:
-                self.stalls.append((round(self.stall_open - t0, 1), round(dur, 1)))
+            self._close_stall(time.monotonic(), t0)
         if not self.ended_reason:
             self.ended_reason = "הסתיים בזמן"
 
@@ -297,7 +418,17 @@ def main():
                     help="אורך משוער של סרט, לגזירת קצב הווידאו מהגודל")
     ap.add_argument("--seed", type=int, default=0, help="0 = אקראי בכל הרצה")
     ap.add_argument("--out", default="vod_watch_report.json")
+    ap.add_argument("--log", default="/tmp/vod_events.log",
+                    help="יומן אירועים מפורט, נכתב תוך כדי ריצה (ריק = בלי)")
     a = ap.parse_args()
+
+    global LOGF
+    if a.log:
+        try:
+            LOGF = open(a.log, "a", encoding="utf-8", buffering=1)
+            LOGF.write(f"\n===== ריצה חדשה · {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        except Exception as e:
+            print(f"אזהרה: לא הצלחתי לפתוח את {a.log}: {e}")
 
     origin = None if a.public else "http://127.0.0.1:8000"
     src = ("http://127.0.0.1:8000" if not a.public
@@ -350,6 +481,8 @@ def main():
     threads = [threading.Thread(target=w.run, args=(deadline,), daemon=True)
                for w in watches]
     t_start = time.monotonic()
+    T_START[0] = t_start
+    threading.Thread(target=follow_journal, daemon=True).start()
     for th in threads:
         th.start()
 
@@ -387,10 +520,14 @@ def main():
             longest = max(d for _, d in w.stalls)
             print(f"   תקיעות         {len(w.stalls)}  ·  סה\"כ {stall_tot:.1f} שנ'"
                   f"  ·  הארוכה {longest:.1f} שנ'")
-            for at, d in w.stalls[:6]:
-                print(f"                    בדקה {at/60:.1f} — {d:.1f} שנ'")
-            if len(w.stalls) > 6:
-                print(f"                    ... ועוד {len(w.stalls)-6}")
+            for d in w.details[:12]:
+                print(f"       ├ דקה {d['at']/60:5.1f} — {d['detail']}")
+                for l in d["journal"][-3:]:
+                    print(f"       │    יומן: {l}")
+                if not d["journal"]:
+                    print("       │    יומן: שקט — שום שורה סביב התקיעה הזאת")
+            if len(w.details) > 12:
+                print(f"       └ ... ועוד {len(w.details)-12} (כולן בקובץ היומן)")
         elif w.startup_s is None:
             # בלי "אין תקיעות ✅" כאן: הניגון לא התחיל, ולכן גלאי התקיעות
             # מעולם לא נדרך. דיווח "תקין" על זרם שלא זרם הוא שקר.
@@ -399,12 +536,30 @@ def main():
             print("   תקיעות         אין ✅")
         if got < need * 0.9:
             print(f"   ⚠️  אספקה       {got*8/1e6:.2f} מתוך {need*8/1e6:.2f} מגהביט —"
-                  f" פי {need/max(got,1):.0f} איטי מהנדרש")
+                  f" פי {need/max(got,1):.1f} איטי מהנדרש")
         if w.seek_ms:
             print(f"   קפיצה בזמן     {', '.join(str(x) for x in w.seek_ms)} מ\"ש")
         if w.errors:
             print("   שגיאות         " + ", ".join(f"{k}×{v}" for k, v in w.errors.items()))
         print(f"   סיום           {w.ended_reason}")
+
+    # "נתקע כל כמה דקות" היא טענה על קצב, ורק פריסה על ציר הזמן מאשרת
+    # או מפריכה אותה. תקיעה אחת ארוכה ותקיעה כל שתי דקות נראות זהות
+    # בספירה כוללת, והן שתי תקלות שונות לגמרי.
+    per_min = {}
+    for w in watches:
+        for at, _d in w.stalls:
+            per_min[int(at // 60)] = per_min.get(int(at // 60), 0) + 1
+    if per_min:
+        print("\n── תקיעות לפי דקה ──")
+        for m in range(int(el // 60) + 1):
+            n = per_min.get(m, 0)
+            if n:
+                print(f"  דקה {m:>3}:  {n:>3}  " + "█" * min(n, 40))
+        gaps = sorted(per_min)
+        if len(gaps) > 1:
+            d = [gaps[i + 1] - gaps[i] for i in range(len(gaps) - 1)]
+            print(f"  מרווח ממוצע בין דקות עם תקיעה: {sum(d)/len(d):.1f} דקות")
 
     never = [w for w in watches if w.startup_s is None]
     bad = [w for w in watches if w.stalls or w.errors]
@@ -421,10 +576,16 @@ def main():
         "public": a.public,
         "items": [{"title": w.title, "ttfb_ms": w.ttfb_ms, "startup_s": w.startup_s,
                    "bytes": w.total_bytes, "size_bytes": w.size_bytes,
-                   "stalls": w.stalls, "seek_ms": w.seek_ms,
+                   "stalls": w.stalls, "details": w.details, "seek_ms": w.seek_ms,
                    "errors": w.errors, "ended": w.ended_reason} for w in watches],
     }, open(a.out, "w"), ensure_ascii=False, indent=1)
     print(f"דוח מלא נשמר ל-{a.out}")
+    if LOGF:
+        print(f"יומן אירועים מפורט: {a.log}")
+        try:
+            LOGF.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

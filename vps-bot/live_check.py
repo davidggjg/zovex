@@ -53,7 +53,7 @@ live_check — למה השידורים החיים נתקעים, בלי לחשו�
 במקום הכתובות שלהם. אפשר להדביק את הפלט בבטחה.
 """
 import argparse, json, os, re, subprocess, sys, threading, time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
@@ -134,23 +134,43 @@ def fetch(url, timeout=8.0, max_bytes=None):
         return 0, b"", time.time() - t0, type(e).__name__
 
 
+EXTINF = re.compile(r"#EXTINF:\s*([\d.]+)")
+TARGETDUR = re.compile(r"#EXT-X-TARGETDURATION:\s*([\d.]+)")
+
+
 def parse_manifest(text):
-    """מחזיר (fingerprint, segments, is_master).
+    """מחזיר (fingerprint, segments, durations, target, is_master).
 
     הטביעה היא מספר הרצף + ארבעת המקטעים האחרונים. playlist חי חייב לשנות
     אותה כל כמה שניות; אם היא לא זזה — הזרם עצמו לא מתקדם, וזה בדיוק מה
     שהצופה רואה כתמונה קפואה.
+
+    durations = {שם מקטע: אורך בשניות}. זה מה שמאפשר למדוד **סחיפה**: כמה
+    שניות של שידור התקדמו לעומת כמה שניות באמת עברו. בלי זה אפשר לראות רק
+    תקיעות שחוצות סף, ותקיעה של חצי שנייה שחוזרת כל הזמן — בדיוק מה שהצופה
+    חווה כגמגום — נעלמת מתחת לכל סף אפשרי.
     """
     seq, segs, master = "", [], False
+    durs, target, pending = {}, 0.0, None
     for ln in text.splitlines():
         s = ln.strip()
         if s.startswith("#EXT-X-MEDIA-SEQUENCE"):
             seq = s
         elif s.startswith("#EXT-X-STREAM-INF"):
             master = True
+        elif s.startswith("#EXT-X-TARGETDURATION"):
+            m = TARGETDUR.match(s)
+            if m:
+                target = float(m.group(1))
+        elif s.startswith("#EXTINF"):
+            m = EXTINF.match(s)
+            pending = float(m.group(1)) if m else None
         elif s and not s.startswith("#"):
             segs.append(s)
-    return (seq, tuple(segs[-4:])), segs, master
+            if pending is not None:
+                durs[s] = pending
+            pending = None
+    return (seq, tuple(segs[-4:])), segs, durs, (target or 0.0), master
 
 
 class Chan:
@@ -168,6 +188,26 @@ class Chan:
         self.max_stall = 0.0
         self.latency = []
         self.resolved = False                  # master → variant כבר נפתר
+        # סחיפה: שניות שידור שהתקדמו מול שניות אמיתיות שעברו
+        self.target = 0.0
+        self.seen = set()                      # מקטעים שכבר נספרו
+        self.stream_sec = 0.0
+        self.t_first = None                    # מתי נספרה הדגימה הטובה הראשונה
+        self.t_last = None
+        self.events = []
+        self.seg_slow = []                     # (שניות אספקה, אורך המקטע)
+
+    def threshold(self, floor):
+        """סף תקיעה לערוץ הזה. מקטע באורך 4ש אומר ש-playlist תקין *אמור*
+        לעמוד עד 4 שניות, ולכן סף קבוע נמוך היה מדווח תקיעה על ערוץ מושלם.
+        הסף נגזר מאורך המקטע של הערוץ עצמו."""
+        return max(floor, (self.target or 4.0) * 2.0)
+
+    @property
+    def drift(self):
+        """יחס: שניות שידור שהתקדמו חלקי שניות אמיתיות. 1.0 = בריא."""
+        wall = (self.t_last - self.t_first) if (self.t_first and self.t_last) else 0
+        return (self.stream_sec / wall) if wall >= 30 else None
 
     @property
     def url(self):
@@ -247,6 +287,33 @@ def watch(a):
     access = Counter()
     jminute = Counter()
     jlock = threading.Lock()
+    # שורות היומן האחרונות עם חותמת זמן. כשנרשם אירוע, נשמרות איתו השורות
+    # שהופיעו סביבו — אחרת נשארים עם "משהו קרה ב-04:12" בלי מה שקרה.
+    jrecent = deque(maxlen=400)
+    events = []
+    elock = threading.Lock()
+    logf = None
+    if a.log:
+        try:
+            logf = open(a.log, "a", encoding="utf-8", buffering=1)
+            logf.write(f"\n===== ריצה חדשה · {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+        except Exception as e:
+            print(f"  (אזהרה: לא הצלחתי לפתוח את {a.log}: {e})")
+
+    def ev(c, kind, detail, now):
+        """רושם אירוע עם כל הפרטים, ומיד — הריצה עשויה להיקטע."""
+        rel = int(now - start)
+        rec = {"t": rel, "chan": c.title, "kind": kind, "detail": detail}
+        with elock:
+            events.append(rec)
+            c.events.append(rec)
+            if logf:
+                logf.write(f"[{rel // 60:02d}:{rel % 60:02d}] {clean(c.title)} — "
+                           f"{kind} — {clean(detail)}\n")
+                with jlock:
+                    ctx = [l for ts, l in jrecent if now - ts <= a.context]
+                for l in ctx[-6:]:
+                    logf.write(f"           ↳ יומן: {l}\n")
 
     def on_line(ln, now):
         m = ACCESS.search(ln)
@@ -256,6 +323,7 @@ def watch(a):
                 access[code] += 1
                 if not code.startswith("2"):
                     jminute[int((now - start) // 60)] += 1
+                    jrecent.append((now, clean(ln.strip())[:170]))
                     if len(jsamples["גישה"]) < a.show:
                         jsamples["גישה"].append(clean(ln.strip())[:170])
             return
@@ -264,6 +332,7 @@ def watch(a):
                 with jlock:
                     jcounts[name] += 1
                     jminute[int((now - start) // 60)] += 1
+                    jrecent.append((now, clean(ln.strip())[:170]))
                     if len(jsamples[name]) < a.show:
                         jsamples[name].append(clean(ln.strip())[:170])
                 return
@@ -308,13 +377,16 @@ def watch(a):
         c.polls += 1
         c.latency.append(dt)
         if st != 200:
-            c.errors[f"HTTP {st}" if st else (err or "timeout")] += 1
+            what = f"HTTP {st}" if st else (err or "timeout")
+            c.errors[what] += 1
+            ev(c, "playlist נכשל", f"{what} · {dt:.1f}ש", now)
             return
         text = body.decode("utf-8", "replace")
         if not text.lstrip().startswith("#EXTM3U"):
             c.errors["לא m3u8"] += 1
+            ev(c, "תשובה שאינה m3u8", f"{len(body)} בתים", now)
             return
-        fp, segs, master = parse_manifest(text)
+        fp, segs, durs, target, master = parse_manifest(text)
 
         # master playlist: יורדים פעם אחת לוריאנט הראשון וממשיכים למדוד אותו.
         if master and segs and not c.resolved:
@@ -323,28 +395,69 @@ def watch(a):
             c.path = nxt.path + (("?" + nxt.query) if nxt.query else "")
             return
         c.ok += 1
+        if target:
+            c.target = target
+        # תגובה איטית ל-playlist היא גמגום שהצופה מרגיש, גם בלי תקיעה מלאה
+        if dt >= a.slow:
+            ev(c, "playlist איטי", f"{dt:.1f}ש", now)
 
+        # ── סחיפה ──
+        # כל מקטע חדש שמופיע ברשימה מוסיף את אורכו למונה שניות-השידור.
+        # ההשוואה שלו לשעון הקיר היא המדד שתופס גם גמגומים קטנים.
+        if c.t_first is None:
+            # הדגימה הראשונה רק *מסמנת* את מה שכבר ברשימה. בלי זה שש
+            # המקטעים שהיו שם מלכתחילה היו נספרים כ-24 שניות שידור שהתקדמו
+            # באפס שניות אמיתיות, וכל ערוץ היה נראה בריא ב-300%.
+            c.seen = set(segs)
+            c.t_first = c.t_last = now
+            c.fp, c.changed_at = fp, now
+            return
+        new = [s for s in segs if s not in c.seen]
+        if new:
+            c.stream_sec += sum(durs.get(s, c.target or 4.0) for s in new)
+            c.seen.update(new)
+            if len(c.seen) > 400:              # לא לצבור לנצח
+                c.seen = set(segs)
+        c.t_last = now
+
+        thr = c.threshold(a.stall)
         if c.fp is None or fp != c.fp:
             if c.in_stall and c.changed_at:
-                c.stalls.append(now - c.changed_at)
+                gap = now - c.changed_at
+                c.stalls.append(gap)
+                ev(c, "תקיעה הסתיימה", f"נמשכה {gap:.0f}ש", now)
             c.in_stall = False
             c.fp, c.changed_at = fp, now
         else:
             gap = now - (c.changed_at or now)
             c.max_stall = max(c.max_stall, gap)
-            if gap >= a.stall:
+            if gap >= thr:
+                if not c.in_stall:
+                    ev(c, "תקיעה התחילה",
+                       f"ה-playlist לא זז {gap:.0f}ש (סף {thr:.0f}ש)", now)
                 c.in_stall = True
                 stall_minute[int((now - start) // 60)] += 1
 
         if do_seg and segs:
             # עד הסוף במכוון — ראה את ההערה בראש הקובץ על מקטע קטוע.
-            sst, sbody, sdt, serr = fetch(urljoin(c.url, segs[-1]), timeout=a.timeout)
+            last = segs[-1]
+            sst, sbody, sdt, serr = fetch(urljoin(c.url, last), timeout=a.timeout)
+            dur = durs.get(last, c.target or 4.0)
             if sst != 200:
-                c.seg[f"HTTP {sst}" if sst else (serr or "timeout")] += 1
+                what = f"HTTP {sst}" if sst else (serr or "timeout")
+                c.seg[what] += 1
+                ev(c, "מקטע נכשל", f"{what} · {sdt:.1f}ש", now)
             elif not sbody:
                 c.seg["200 ריק (!)"] += 1
+                ev(c, "מקטע 200 ריק", "אפס בתים — הנגן יקפא בלי שגיאה", now)
             else:
                 c.seg["תקין"] += 1
+                c.seg_slow.append((sdt, dur))
+                # מקטע שמכסה 4 שניות וידאו ולוקח 5 שניות להגיע = המאגר
+                # של הנגן מתרוקן. זו התקיעה, גם אם שום בקשה לא נכשלה.
+                if sdt > dur:
+                    ev(c, "מקטע איטי מהזמן שהוא מכסה",
+                       f"{sdt:.1f}ש להביא {dur:.0f}ש וידאו · {len(sbody)//1024}KB", now)
 
         if pub_on[0]:
             pst, pbody, _, perr = fetch(c.pub_url, timeout=a.timeout)
@@ -397,21 +510,37 @@ def watch(a):
             c.stalls.append(now - c.changed_at)
 
     report(a, chans, jcounts, jsamples, access, stall_minute, jminute,
-           int(now - start))
+           int(now - start), events)
+    if logf:
+        print(f"\nיומן האירועים המפורט: {a.log}")
+        try:
+            logf.close()
+        except Exception:
+            pass
 
 
-def report(a, chans, jcounts, jsamples, access, stall_minute, jminute, elapsed):
+def report(a, chans, jcounts, jsamples, access, stall_minute, jminute, elapsed, events=()):
     m, s = elapsed // 60, elapsed % 60
     dur = ("דקה" if m == 1 else f"{m} דקות") + f" ו-{s} שניות"
     print(f"\n{'=' * 62}\nסיכום · {dur}\n{'=' * 62}")
 
     print("\n── לפי ערוץ ──")
-    print(f"  {'ערוץ':22} {'דגימות':>7} {'שגיאות':>7} {'תקיעות':>7} {'ארוכה':>7}")
-    for c in sorted(chans, key=lambda x: -x.max_stall):
+    print("  'התקדמות' = כמה מזמן השידור באמת התקדם. 100% בריא;")
+    print("  90% אומר שעשירית מהזמן לא זזה — זה הגמגום שהצופה מרגיש,")
+    print("  גם כשאף תקיעה בודדת לא חצתה שום סף.")
+    print(f"  {'ערוץ':22} {'דגימות':>7} {'שגיאות':>7} {'תקיעות':>7} {'ארוכה':>7} {'התקדמות':>9}")
+    for c in sorted(chans, key=lambda x: (x.drift if x.drift is not None else 9)):
         errs = sum(c.errors.values())
+        d = c.drift
+        dtxt = "—" if d is None else f"{min(d, 9.99) * 100:.0f}%"
         print(f"  {clean(c.title)[:22]:22} {c.polls:>7} {errs:>7} "
-              f"{len(c.stalls):>7} {c.max_stall:>6.0f}ש")
+              f"{len(c.stalls):>7} {c.max_stall:>6.0f}ש {dtxt:>9}")
         detail = []
+        if c.seg_slow:
+            behind = [x for x in c.seg_slow if x[0] > x[1]]
+            if behind:
+                detail.append(f"מקטעים שהגיעו לאט מהזמן שהם מכסים: "
+                              f"{len(behind)} מתוך {len(c.seg_slow)}")
         if c.errors:
             detail.append("שגיאות: " + ", ".join(f"{k}×{v}" for k, v in c.errors.most_common(4)))
         if c.pub_errors:
@@ -453,6 +582,14 @@ def report(a, chans, jcounts, jsamples, access, stall_minute, jminute, elapsed):
             for s in jsamples[name]:
                 print(f"  {s}")
 
+    if events:
+        print(f"\n── אירועים ({len(events)}) ──")
+        for e in events[:40]:
+            print(f"  [{e['t'] // 60:02d}:{e['t'] % 60:02d}] {clean(e['chan'])[:18]:18} "
+                  f"{e['kind']} — {clean(e['detail'])}")
+        if len(events) > 40:
+            print(f"  ... ועוד {len(events) - 40}. כולם בקובץ היומן.")
+
     # ── פסק דין ──
     print("\n── מה זה אומר ──")
     stalled = [c for c in chans if c.stalls]
@@ -461,8 +598,16 @@ def report(a, chans, jcounts, jsamples, access, stall_minute, jminute, elapsed):
     # השקט ביותר: אין לו "תקיעה" למדוד, כי הוא אף פעם לא התחיל. בלי השורה
     # הזאת הוא היה נעלם מפסק הדין לגמרי.
     dead = [c for c in chans if c.polls and not c.ok]
+    # ערוץ שמתקדם פחות מ-95% מזמן האמת מגמגם, גם אם אף תקיעה לא חצתה סף.
+    drifting = [c for c in chans if c.drift is not None and c.drift < 0.95]
     bad502 = access.get("502", 0)
-    if not stalled and not errored and not bad502 and not jcounts:
+    if drifting:
+        print("  · ערוצים שאיבדו זמן שידור (גמגום, לא בהכרח תקיעה מלאה):")
+        for c in sorted(drifting, key=lambda x: x.drift):
+            lost = (1 - c.drift) * (c.t_last - c.t_first)
+            print(f"      {clean(c.title)[:24]:24} התקדם {c.drift * 100:.0f}% "
+                  f"— איבד כ-{lost:.0f} שניות")
+    if not stalled and not errored and not bad502 and not jcounts and not drifting:
         print("  בחלון הזה השרת היה נקי: כל playlist שנבדק המשיך להתקדם,")
         print("  ואף בקשה לא נכשלה. זה לא אומר שאין בעיה — זה אומר שהיא לא")
         print("  קרתה כאן ועכשיו. אם צופה נתקע בדיוק בזמן הריצה, החשוד עובר")
@@ -565,8 +710,15 @@ def main():
     ap.add_argument("--channels", type=int, default=6, help="כמה ערוצים לדגום")
     ap.add_argument("--only", default="", help="רק ערוצים ששמם מכיל את זה")
     ap.add_argument("--every", type=float, default=6.0, help="שניות בין דגימות")
-    ap.add_argument("--stall", type=float, default=30.0,
-                    help="כמה שניות בלי תזוזה נחשבות תקיעה")
+    ap.add_argument("--stall", type=float, default=8.0,
+                    help="רצפת סף התקיעה. הסף בפועל נגזר מאורך המקטע של "
+                         "הערוץ (פי 2), כי playlist תקין עומד עד מקטע שלם")
+    ap.add_argument("--slow", type=float, default=3.0,
+                    help="תשובת playlist איטית מזה נרשמת כאירוע")
+    ap.add_argument("--context", type=float, default=45.0,
+                    help="כמה שניות של יומן לשמור ליד כל אירוע")
+    ap.add_argument("--log", default="/tmp/live_events.log",
+                    help="קובץ יומן אירועים מפורט (ריק = בלי)")
     ap.add_argument("--timeout", type=float, default=8.0)
     ap.add_argument("--segments", action="store_true",
                     help="למדוד גם מקטעי וידאו (נמשכים עד הסוף)")
