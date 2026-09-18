@@ -11,14 +11,25 @@ catch_slow_open — תופס את הפתיחה האיטית *באמצע המעש
 ## מה הוא עושה
 
 פותח זרם בבקשת Range של בייט אחד — מה שמכריח את השרת לעשות את מלוא עבודת
-הפתיחה בלי להוריד כלום — ובזמן שהבקשה **עדיין תלויה**, מצלם את ערימות
-הקריאה של התהליך עם py-spy. אם הפתיחה לוקחת 12 שניות, הצילום נלקח בשנייה
-השלישית והשמינית שלהן, ואז רואים בדיוק באיזו שורה בקוד הן נשרפות.
+הפתיחה בלי להוריד כלום — ואוסף שתי עדויות על כל פתיחה שנתקעה:
 
-זה ההבדל בין "פתיחה לוקחת 12 שניות" לבין "12 השניות יושבות ב-
-_get_bot_msg_fast" — הראשון הוא תסמין, השני הוא הבאג.
+**1. שורות היומן שנכתבו בדיוק בזמן שהיא הייתה תלויה.** זו העדות העיקרית.
+הקוד מדווח ליומן בדיוק את האירועים שיכולים להסביר פתיחה איטית — בוט
+שנחנק, חיבור מת שמופל, חלון שנכשל רגעית, בריכה שנבנית — וההצלבה עם חלון
+הזמן של הפתיחה מצביעה על האירוע ולא רק על העובדה.
 
-py-spy נדרש. הוא קורא תהליך חי מבחוץ, לא דורש שינוי קוד ולא ריסט:
+**2. ערימות קריאה (py-spy), אם הוא מצליח לקרוא את התהליך.**
+
+## מה למדנו על py-spy כאן, כדי שלא נחזור על זה
+
+ריצה ראשונה על השרת החזירה `run (uvicorn/main.py:621)` בלבד — כלומר לולאת
+האירועים. זו לא תקלה: **py-spy אינו יכול לראות קורוטינה שממתינה.** ב-
+asyncio בקשה שתקועה על רשת אינה יושבת על שום ערימה, היא מושהית. ערימות
+יעזרו רק אם הזמן נשרף ב-CPU, ולכן מ-21 שניות של המתנה לטלגרם הן יראו
+בדיוק כלום. הן נשארו בכלי כי "הליבה בלולאת האירועים" הוא עדיין מידע —
+הוא מפריד בין "השרת עובד קשה" ל"השרת מחכה" — אבל העדות היא היומן.
+
+py-spy אופציונלי. הוא קורא תהליך חי מבחוץ, בלי שינוי קוד ובלי ריסט:
 
     pip install py-spy
 
@@ -33,7 +44,10 @@ import urllib.request, urllib.error
 from urllib.parse import urlsplit, urlunsplit
 
 UA = "zovex-catch/1"
-SELF = re.compile(r"/opt/zovex-bot/|main\.py")
+# רק main.py שלנו. גרסה קודמת סיננה על "main.py" וקלטה גם את
+# uvicorn/main.py, ואז כל "ממצא" היה לולאת האירועים.
+SELF = re.compile(r"/opt/zovex-bot/main\.py|\bmain\.py:\d")
+SERVICE = "zovex-bot"
 
 
 def find_pid():
@@ -100,6 +114,59 @@ def rewrite_origin(url, origin):
     return urlunsplit((o.scheme, o.netloc, p.path, p.query, p.fragment))
 
 
+# ── היומן, וזו העדות האמיתית ─────────────────────────────────────────────────
+# py-spy לא יכול לראות קורוטינה שממתינה: ב-asyncio בקשה שתקועה על רשת אינה
+# יושבת על שום ערימה, היא מושהית. ריצה ראשונה החזירה בדיוק את זה — הליבה
+# בלולאת האירועים, כלומר "השרת מחכה", וזה נכון אבל לא אומר *למה*.
+#
+# הקוד עצמו כן מדווח את הרגעים האלה ליומן: בוט שנחנק, חיבור מת שמופל,
+# חלון שנכשל רגעית, בריכה שנבנית. לכן העדות היא שורות היומן שנכתבו *בדיוק*
+# בזמן שהפתיחה הייתה תלויה.
+JOURNAL = []
+JLOCK = threading.Lock()
+REDACT = [(re.compile(r"https?://[^\s\"'<>]+"), "‹כתובת›"),
+          (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "‹IP›")]
+
+
+def _clean(s):
+    for pat, rep in REDACT:
+        s = pat.sub(rep, s)
+    return s
+
+
+def follow_journal(stop):
+    proc = None
+    for unit in (SERVICE, SERVICE + ".service"):
+        try:
+            proc = subprocess.Popen(
+                ["journalctl", "-u", unit, "-f", "-n", "0", "-o", "cat"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, errors="replace", bufsize=1)
+            break
+        except Exception:
+            proc = None
+    if proc is None:
+        return
+    try:
+        for ln in proc.stdout:
+            if stop.is_set():
+                break
+            with JLOCK:
+                JOURNAL.append((time.time(), _clean(ln.strip())[:200]))
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def journal_between(t0, t1):
+    with JLOCK:
+        return [l for ts, l in JOURNAL if t0 - 0.5 <= ts <= t1 + 0.5]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=12)
@@ -146,9 +213,13 @@ def main():
     random.shuffle(cands)
     items = cands[:a.n]
 
-    print(f"{len(items)} פתיחות · מצלם ערימות אחרי {a.slow}ש של המתנה\n")
+    stop = threading.Event()
+    threading.Thread(target=follow_journal, args=(stop,), daemon=True).start()
+    time.sleep(1.0)                      # שיספיק להתחבר ליומן לפני הפתיחה הראשונה
+
+    print(f"{len(items)} פתיחות · עוקב אחרי היומן ומצלם ערימות אחרי {a.slow}ש\n")
     log = open(a.out, "w", encoding="utf-8")
-    results, caught = [], []
+    results, caught, jcaught = [], [], []
 
     for title, url in items:
         box = {}
@@ -181,12 +252,23 @@ def main():
                     shots.append((round(time.time() - t0, 1), text))
         th.join(timeout=a.timeout + 10)
 
+        t1 = time.time()
         dt = box.get("t", -1)
         err = box.get("err")
         results.append(dt)
+        jlines = journal_between(t0, t1) if dt >= a.slow else []
         mark = "🐢" if dt >= a.slow else "  "
         print(f"  {mark} {title[:30]:30} {dt:6.2f}ש" + (f"  ✗ {err}" if err else ""))
         log.write(f"\n===== {title} · {dt:.2f}ש" + (f" · {err}" if err else "") + " =====\n")
+        if jlines:
+            log.write("--- היומן בזמן שהפתיחה הייתה תלויה ---\n")
+            for l in jlines:
+                log.write(f"  {l}\n")
+            jcaught.append((title, dt, jlines))
+            for l in jlines:
+                print(f"       יומן: {l[:120]}")
+        elif dt >= a.slow:
+            print("       יומן: שקט מוחלט לאורך כל ההמתנה")
         for at, text in shots:
             frames = interesting(text)
             log.write(f"--- צילום ב-{at}ש ---\n")
@@ -195,6 +277,7 @@ def main():
             if frames:
                 caught.append((title, at, frames))
 
+    stop.set()
     log.close()
     ok = [x for x in results if x >= 0]
     slow = [x for x in ok if x >= a.slow]
@@ -203,6 +286,19 @@ def main():
         ok_s = sorted(ok)
         print(f"  חציון {ok_s[len(ok_s)//2]:.2f}ש · הגרוע {ok_s[-1]:.2f}ש · "
               f"איטיות ({a.slow}ש+): {len(slow)}/{len(ok)}")
+
+    if jcaught:
+        from collections import Counter
+        # מנרמלים מספרים כדי ששורות זהות בתוכן יתאחדו לספירה אחת.
+        norm = lambda l: re.sub(r"\d+", "N", l)
+        c = Counter(norm(l) for _t, _d, ls in jcaught for l in ls)
+        print("\n── מה נרשם ביומן בזמן הפתיחות האיטיות ──")
+        for line, n in c.most_common(10):
+            print(f"  {n:3}×  {line[:110]}")
+    elif [x for x in ok if x >= a.slow]:
+        print("\n── היומן ──")
+        print("  אף שורה לא נכתבה בזמן אף אחת מהפתיחות האיטיות.")
+        print("  כלומר הקוד לא חשב שקרה משהו חריג — הוא פשוט חיכה לטלגרם.")
 
     if caught:
         # מה שחוזר על עצמו בין פתיחות איטיות שונות הוא החשוד. מסגרת שמופיעה
