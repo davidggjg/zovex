@@ -50,7 +50,7 @@ import asyncio, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 try:
-    from pyrogram import Client, filters
+    from pyrogram import Client, filters, idle
     from pyrogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
                                 Message, CallbackQuery)
 except ImportError:
@@ -440,9 +440,35 @@ def main():
             except Exception as e:
                 await note.edit(f"❌ שגיאה: {type(e).__name__}: {e}")
 
-    print(f"mkvtool רץ · session={SESSION} · owner={owner_id}")
+    # כל קובץ שמגיע ממי שאינו המורשה — נרשם עם המזהה שלו.
+    #
+    # זו התקלה הכי סבירה בהתקנה הזאת, והיא **שקטה**: אם MKVTOOL_OWNER הוא
+    # המזהה של החשבון שהכלי רץ עליו, אבל הקבצים נשלחים אליו מחשבון אישי
+    # אחר, שום דבר לא יקרה ולא תהיה שום הודעה. כאן זה הופך לשורה שאומרת
+    # בדיוק איזה מספר צריך להיות שם.
+    @app.on_message((filters.document | filters.video) & ~filters.user(owner_id))
+    async def on_stranger(client: Client, m: Message):
+        who = m.from_user.id if m.from_user else "?"
+        name = (m.from_user.first_name if m.from_user else "") or ""
+        print(f"⚠️  התקבל קובץ מ-{who} ({name}) — לא ברשימת המורשים.")
+        print(f"    אם זה אתה: MKVTOOL_OWNER={who}")
+
+    async def runner():
+        await app.start()
+        me = await app.get_me()
+        print(f"✅ מחובר כ-{me.first_name or ''} "
+              f"(@{me.username or '—'}) · id={me.id}")
+        if me.id == owner_id:
+            print("   MKVTOOL_OWNER הוא המזהה של החשבון הזה עצמו, כלומר הכלי")
+            print("   יגיב רק לקבצים שהחשבון הזה שולח לעצמו (Saved Messages).")
+            print("   אם תשלח מחשבון אישי אחר — שנה את MKVTOOL_OWNER למזהה שלו.")
+        print("מוכן. שלח קובץ.")
+        await idle()
+        await app.stop()
+
+    print(f"mkvtool · session={SESSION} · owner={owner_id}")
     print(f"תיקיית עבודה: {WORK_DIR}")
-    app.run()
+    app.run(runner())
 
 
 if __name__ == "__main__":
