@@ -122,7 +122,7 @@ def log_event(title, kind, detail, at=None, context_s=45.0):
             for l in ctx[-8:]:
                 LOGF.write(f"           ↳ יומן: {l}\n")
             if not ctx:
-                LOGF.write("           ↳ יומן: שקט — שום שורה לא נרשמה סביב התקיעה\n")
+                LOGF.write("           ↳ יומן: שקט — שום שורה לא נרשמה סביב האירוע\n")
     return line, ctx
 
 
@@ -166,6 +166,16 @@ class Watch:
         self.recent = deque(maxlen=400)     # (זמן, בייטים) — קצב לפני התקיעה
         self.stall_at_bytes = 0             # איפה בקובץ נתפסה התקיעה
         self.details = []                   # תיאור מלא לכל תקיעה
+        # כמה זמן הזרם הזה באמת רץ. בלי זה, כותר שהקובץ שלו נגמר בדקה 8
+        # מתוך 16 נראה כאילו סופק בחצי מהקצב — הזמן שאחרי הסוף נכנס למכנה.
+        self.active_s = 0.0
+        self.started_playing_at = None
+        # הקצב לפני שהבאפר התמלא. זו המדידה היחידה שאינה חנוקה: מרגע
+        # שהבאפר מלא הנגן *בכוונה* מפסיק למשוך, ולכן קצב ממוצע על כל
+        # הריצה לא יכול לעלות על קצב הווידאו ואינו מודד יכולת אספקה.
+        self.startup_rate = None
+        self.seeks = []                     # (שנייה מתחילת הריצה, מ"ש, תקין)
+        self.played = []                    # כותרים שנוגנו (במצב --loop)
 
     def _rate_before(self, t, window=10.0):
         """כמה בייט הגיעו ב-window השניות שלפני t. זה מפריד בין 'הכל נעצר'
@@ -206,6 +216,8 @@ class Watch:
         buf = 0.0
         playing = False
         last = None                      # נקבע רק כשהניגון מתחיל
+        self._last_ttfb = self._last_startup = None
+        self.ended_reason = ''
         try:
             req = urllib.request.Request(
                 self.url, headers={"User-Agent": "zovex-vodwatch/1",
@@ -245,8 +257,10 @@ class Watch:
                 if not chunk:
                     self.ended_reason = "הקובץ נגמר"
                     break
-                if self.ttfb_ms is None:
-                    self.ttfb_ms = int((now - started) * 1000)
+                if self._last_ttfb is None:
+                    self._last_ttfb = int((now - started) * 1000)
+                    if self.ttfb_ms is None:
+                        self.ttfb_ms = self._last_ttfb
                 self.total_bytes += len(chunk)
                 buf += len(chunk)
                 self.recent.append((now, len(chunk)))
@@ -256,8 +270,19 @@ class Watch:
                     if buf >= self.prebuffer:
                         playing = True
                         last = now
-                        if self.startup_s is None:
-                            self.startup_s = round(now - started, 2)
+                        if self._last_startup is None:
+                            self._last_startup = round(now - started, 2)
+                            el0 = now - started
+                            if el0 > 0 and self.startup_rate is None:
+                                self.startup_rate = self.total_bytes / el0
+                            if self.startup_s is None:
+                                self.startup_s = self._last_startup
+                                self.started_playing_at = now
+                            if self._last_startup >= 4.0:
+                                log_event(self.title, "התחלה איטית",
+                                          f"{self._last_startup:.1f}ש עד שהנגן התחיל "
+                                          f"(בייט ראשון אחרי {self._last_ttfb} מ\"ש)",
+                                          at=now)
                         elif self.stall_open is not None:
                             # סוף תקיעה: הבאפר התמלא והנגן חוזר לנגן.
                             self._close_stall(now, t0)
@@ -275,8 +300,57 @@ class Watch:
 
         if self.stall_open is not None:
             self._close_stall(time.monotonic(), t0)
+        self.active_s += time.monotonic() - t0
         if not self.ended_reason:
             self.ended_reason = "הסתיים בזמן"
+
+    def run_many(self, deadline, next_item):
+        """ממשיך לצפות: כשקובץ נגמר, עובר לכותר הבא.
+
+        בלי זה ריצה של 30 דקות מסתיימת אחרי 16, כי הקבצים נגמרו — והשקט
+        שאחריהם נכנס לכל ממוצע ומזייף אותו. צופה אמיתי גם הוא לא מפסיק
+        לצפות כשפרק נגמר.
+        """
+        while True:
+            before = self.total_bytes
+            self.run(deadline)
+            self.played.append({
+                "title": self.title, "startup_s": self._last_startup,
+                "ttfb_ms": self._last_ttfb, "bytes": self.total_bytes - before,
+                "ended": self.ended_reason})
+            if (STOP.is_set() or time.monotonic() >= deadline
+                    or self.ended_reason != "הקובץ נגמר"):
+                break
+            nxt = next_item()
+            if not nxt:
+                break
+            self.title, self.url = nxt[0], nxt[1]
+            self.size_bytes = None
+            log_event(self.title, "כותר חדש", "הקודם נגמר — ממשיך לצפות")
+
+    def seek_probe(self, slow_s):
+        """קפיצה בודדת למקום אקראי, כמו משתמש שמדלג. נמדדת בחיבור נפרד
+        כדי לא לעצור את הזרימה ולייצר תקיעה מדומה."""
+        if not self.size_bytes or STOP.is_set():
+            return
+        start = int(self.size_bytes * random.uniform(0.05, 0.95))
+        t = time.monotonic()
+        try:
+            req = urllib.request.Request(
+                self.url, headers={"User-Agent": "zovex-vodwatch/1",
+                                   "Range": f"bytes={start}-{start + 65535}"})
+            with urllib.request.urlopen(req, timeout=40) as r:
+                r.read(65536)
+            ms = int((time.monotonic() - t) * 1000)
+            self.seeks.append((round(time.monotonic() - T_START[0], 1), ms, True))
+            if ms >= slow_s * 1000:
+                log_event(self.title, "קפיצה איטית",
+                          f"{ms} מ\"ש עד הבייט הראשון אחרי דילוג "
+                          f"({start * 100.0 / self.size_bytes:.0f}% מהקובץ)")
+        except Exception as e:
+            self.note_error("קפיצה: " + _classify(e))
+            self.seeks.append((round(time.monotonic() - T_START[0], 1), None, False))
+            log_event(self.title, "קפיצה נכשלה", _classify(e))
 
     # ── קפיצה בזמן ─────────────────────────────────────────────────────────
     def seek_test(self, fractions=(0.25, 0.5, 0.8)):
@@ -420,6 +494,12 @@ def main():
     ap.add_argument("--out", default="vod_watch_report.json")
     ap.add_argument("--log", default="/tmp/vod_events.log",
                     help="יומן אירועים מפורט, נכתב תוך כדי ריצה (ריק = בלי)")
+    ap.add_argument("--loop", action="store_true",
+                    help="כשקובץ נגמר — לעבור לכותר הבא ולהמשיך עד סוף החלון")
+    ap.add_argument("--seek-every", type=float, default=90.0, dest="seek_every",
+                    help="כל כמה שניות לבדוק דילוג באמצע הצפייה (0 = בלי)")
+    ap.add_argument("--seek-slow", type=float, default=2.0, dest="seek_slow",
+                    help="דילוג איטי מזה נרשם כאירוע")
     a = ap.parse_args()
 
     global LOGF
@@ -430,9 +510,11 @@ def main():
         except Exception as e:
             print(f"אזהרה: לא הצלחתי לפתוח את {a.log}: {e}")
 
-    origin = None if a.public else "http://127.0.0.1:8000"
-    src = ("http://127.0.0.1:8000" if not a.public
-           else "https://zovex.duckdns.org") + "/content/lite"
+    # הפורט לא היה ניתן לשינוי, וזה חוסם גם בדיקה מול מופע אחר וגם שרת
+    # שמאזין במקום אחר. PORT הוא אותו משתנה ש-main.py קורא.
+    local = "http://127.0.0.1:" + os.environ.get("PORT", "8000")
+    origin = None if a.public else local
+    src = (local if not a.public else "https://zovex.duckdns.org") + "/content/lite"
     print(f"מושך קטלוג מ-{src} ...")
     with urllib.request.urlopen(src, timeout=60) as r:
         catalog = json.loads(r.read().decode("utf-8", "replace"))
@@ -478,13 +560,37 @@ def main():
     signal.signal(signal.SIGINT, on_sig)
     signal.signal(signal.SIGTERM, on_sig)
 
-    threads = [threading.Thread(target=w.run, args=(deadline,), daemon=True)
-               for w in watches]
+    # מאגר כותרים להמשך במצב --loop. ננעל, כי כמה צופים שואבים ממנו.
+    spare = [(t, u) for t, u in pick_items(catalog, 60, origin, seed + 1)
+             if u not in {w.url for w in watches}]
+    spare_lock = threading.Lock()
+
+    def next_item():
+        with spare_lock:
+            return spare.pop(0) if spare else None
+
     t_start = time.monotonic()
     T_START[0] = t_start
     threading.Thread(target=follow_journal, daemon=True).start()
+    target = (lambda w: w.run_many(deadline, next_item)) if a.loop else \
+             (lambda w: w.run(deadline))
+    threads = [threading.Thread(target=target, args=(w,), daemon=True)
+               for w in watches]
     for th in threads:
         th.start()
+
+    if a.seek_every > 0:
+        def seek_loop():
+            # דילוג הוא החשוד שהמדידה הקודמת הצביעה עליו: הזרימה הרציפה
+            # הייתה נקייה, אבל דילוג לקח שניות. לכן הוא נמדד תוך כדי
+            # צפייה ולא רק בסוף, ובחיבור נפרד כדי לא לעצור את הזרימה.
+            while not STOP.is_set() and time.monotonic() < deadline:
+                time.sleep(a.seek_every)
+                for w in watches:
+                    if STOP.is_set():
+                        break
+                    w.seek_probe(a.seek_slow)
+        threading.Thread(target=seek_loop, daemon=True).start()
 
     # התקדמות חיה
     while any(th.is_alive() for th in threads):
@@ -508,14 +614,28 @@ def main():
     print("=" * 62)
     for w in watches:
         need = w.bitrate
-        got = w.total_bytes / el if el else 0
+        # לפי הזמן שהזרם הזה באמת רץ, ולא לפי אורך הריצה כולה. כותר שהקובץ
+        # שלו נגמר בדקה 8 מתוך 16 נראה אחרת לגמרי בין שתי הנוסחאות, וקודם
+        # הוא דווח כ"פי 2 איטי מהנדרש" כשלמעשה סופק במלואו.
+        span = w.active_s or el
+        got = w.total_bytes / span if span else 0
         stall_tot = sum(d for _, d in w.stalls)
         print(f"\n▶ {w.title}")
         print(f"   בייט ראשון     {w.ttfb_ms if w.ttfb_ms is not None else '—'} מ\"ש")
         print(f"   עד שהתחיל      {w.startup_s if w.startup_s is not None else '—'} שנ'"
               f"   (מילוי באפר מקדים)")
         print(f"   ירדו           {human(w.total_bytes)}  ({got*8/1e6:.2f} מגהביט/ש' בפועל,"
-              f" נדרש {need*8/1e6:.2f})")
+              f" נדרש {need*8/1e6:.2f})  · זרם {span/60:.1f} דק'")
+        if w.startup_rate:
+            # המדידה היחידה שאינה חנוקה: מרגע שהבאפר מלא הנגן מפסיק למשוך
+            # בכוונה, ולכן הממוצע לא יכול לעלות על קצב הווידאו ואינו אומר
+            # כלום על יכולת האספקה. זה כן.
+            print(f"   קצב לא חנוק   {w.startup_rate*8/1e6:.2f} מגהביט/ש'"
+                  f"   (נמדד בזמן מילוי הבאפר הראשון)")
+        if w.played:
+            print(f"   כותרים         {len(w.played)}: "
+                  + ", ".join(p["title"][:22] for p in w.played[:6])
+                  + (" ..." if len(w.played) > 6 else ""))
         if w.stalls:
             longest = max(d for _, d in w.stalls)
             print(f"   תקיעות         {len(w.stalls)}  ·  סה\"כ {stall_tot:.1f} שנ'"
@@ -534,11 +654,21 @@ def main():
             print("   תקיעות         — הניגון לא התחיל, אין מה למדוד")
         else:
             print("   תקיעות         אין ✅")
-        if got < need * 0.9:
-            print(f"   ⚠️  אספקה       {got*8/1e6:.2f} מתוך {need*8/1e6:.2f} מגהביט —"
-                  f" פי {need/max(got,1):.1f} איטי מהנדרש")
+        # אזהרת אספקה רק כשיש לה על מה להישען. הממוצע לבדו לא יכול
+        # להעיד: הנגן חונק את עצמו בכוונה כשהבאפר מלא, ולכן "פחות מהנדרש"
+        # הוא המצב התקין ולא תקלה. הקצב הלא-חנוק הוא הראיה.
+        if w.startup_rate is not None and w.startup_rate < need:
+            print(f"   ⚠️  אספקה       גם בלי חניקה סופק רק "
+                  f"{w.startup_rate*8/1e6:.2f} מתוך {need*8/1e6:.2f} מגהביט —"
+                  f" פי {need/max(w.startup_rate,1):.1f} איטי מהנדרש")
+        ok_seeks = [ms for _, ms, ok in w.seeks if ok and ms is not None]
+        if ok_seeks:
+            ok_seeks_sorted = sorted(ok_seeks)
+            med = ok_seeks_sorted[len(ok_seeks_sorted) // 2]
+            print(f"   דילוגים        {len(w.seeks)} · חציון {med} מ\"ש · "
+                  f"הגרוע {max(ok_seeks)} מ\"ש")
         if w.seek_ms:
-            print(f"   קפיצה בזמן     {', '.join(str(x) for x in w.seek_ms)} מ\"ש")
+            print(f"   קפיצה בסוף     {', '.join(str(x) for x in w.seek_ms)} מ\"ש")
         if w.errors:
             print("   שגיאות         " + ", ".join(f"{k}×{v}" for k, v in w.errors.items()))
         print(f"   סיום           {w.ended_reason}")
