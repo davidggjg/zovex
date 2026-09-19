@@ -198,6 +198,17 @@ function transcodeFixSrc(src) {
   return `${m[1]}/vt/${m[2]}/${m[3]}/index.m3u8${m[4] || ""}`;
 }
 
+// ── מה יש בקובץ, לפי השרת ───────────────────────────────────────────────────
+// אותה חתימה של /stream עוברת כמו שהיא, ולכן ה-?exp=&sig= שבקישור תקף גם
+// כאן. התשובה נשמרת בשרת ל-6 שעות, כך שהצופה השני של אותו פריט מקבל
+// אותה מיד.
+function vodInfoSrc(src) {
+  if (!src) return null;
+  const m = String(src).match(/^(.*)\/stream\/(-?\d+)\/(\d+)(\?.*)?$/);
+  if (!m) return null;
+  return `${m[1]}/vodinfo/${m[2]}/${m[3]}${m[4] || ""}`;
+}
+
 // זוכרים פריט שהתגלה כלא-נתמך, כדי שבצפייה הבאה נלך ישר ל-/vt.
 const UNSUPPORTED_KEY = "zovex_unsupported_items";
 
@@ -911,30 +922,72 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     video.addEventListener("error", onError);
 
     let lastT = -1, stuckSince = 0, nudges = 0;
-    let everAdvanced = false, escalated = false, deadMs = 0;
+    let everAdvanced = false, escalated = false, deadMs = 0, askedInfo = false;
     const stallWatch = setInterval(() => {
       if (destroyed) return;
 
       // ── מעולם לא התחיל לנגן ──────────────────────────────────────────
-      // קובץ MKV עם אודיו AC-3 (או DTS) נטען בדפדפן ופשוט לא מפוענח: אין
-      // שגיאה, ה-currentTime נשאר על אפס, והצופה רואה "נטען ונתקע".
-      // שני המנגנונים שהיו כאן שותקים בדיוק במקרה הזה — error.code 4 לא
-      // נורה, והמשמר יוצא מוקדם כי *יש* באפר. לכן הבדיקה הזאת עומדת
-      // לפני שתיהן, ולא מותנית בבאפר.
+      // קובץ MKV (ואודיו AC-3/DTS בתוכו) נטען בדפדפן ופשוט לא נפתח: אין
+      // שגיאה שאנחנו מקבלים, ה-currentTime נשאר על אפס, והצופה רואה
+      // "נטען ונתקע". שני המנגנונים שהיו כאן שותקים בדיוק במקרה הזה —
+      // error.code 4 לא נורה, והמשמר יוצא מוקדם כי *יש* באפר.
       //
-      // נספרות רק שניות שבהן הנגן באמת מנסה לנגן. בלי זה, autoplay חסום
-      // או עצירה על הפריים הראשון היו נקראים "לא מפוענח" ושולחים להמרה
-      // קובץ תקין לגמרי.
+      // צילום מהמכשיר של דוד: 0:00 / 0:00, כפתור הפעלה מוצג, כלומר
+      // **paused=true** ו-readyState=0 — הדפדפן לא הצליח לקרוא אפילו את
+      // המטא-דאטה, ואז חדל. לכן שני מצבים נפרדים:
+      //
+      //   readyState === 0   הדפדפן לא פתח את הקובץ בכלל. paused כאן הוא
+      //                      תוצאה של הכשל, לא בחירה של הצופה, ולכן
+      //                      **אסור** לתלות את הבדיקה ב-paused.
+      //   readyState >= 1    יש מטא-דאטה אבל הזמן לא זז. כאן כן נספרות
+      //                      רק שניות שבהן הנגן מנסה, אחרת autoplay חסום
+      //                      או עצירה על הפריים הראשון ייקראו "לא נתמך".
+      //
+      // החלון הארוך (25ש) הוא בכוונה: משיכה מטלגרם מתחילה איטי — נמדד
+      // TTFB של 6 עד 15 שניות — ו-readyState הוא 0 כל אותו זמן. חלון
+      // קצר יותר היה שולח להמרה קבצים תקינים שרק נטענים לאט.
       if (!everAdvanced && !escalated && onUnsupported) {
-        if (video.paused || video.ended) {
+        if (video.readyState === 0) {
+          deadMs += 1000;
+        } else if (video.paused || video.ended) {
           deadMs = 0;
         } else if (video.currentTime < 0.3) {
           deadMs += 1000;
-          if (deadMs >= 12000) {
-            escalated = true;
-            onUnsupported(startTime || 0);
-            return;
+        }
+
+        // אחרי 4 שניות שבהן שום דבר לא קרה — שואלים את השרת מה בכלל יש
+        // בקובץ. ‎/vodinfo יודע לענות מ-16 בתים (ראה
+        // fix_vodinfo_container.py), וזו תשובה ודאית במקום ניחוש לפי
+        // שעון. כך הקובץ השבור מזוהה תוך שניות במקום 25.
+        //
+        // דווקא **לא** שואלים מיד עם פתיחת הנגן: התשובה הראשונה לפריט
+        // עולה לשרת משיכה של 2MB מטלגרם, וזה בדיוק המשאב שהצופה מחכה
+        // לו באותן שניות. בקובץ תקין הזמן מתקדם, deadMs לא מגיע ל-4,
+        // והשאלה לא נשאלת בכלל.
+        if (deadMs >= 4000 && !askedInfo) {
+          askedInfo = true;
+          const infoUrl = vodInfoSrc(src);
+          if (infoUrl) {
+            fetch(infoUrl)
+              .then(r => (r.ok ? r.json() : null))
+              .then(d => {
+                if (destroyed || escalated || everAdvanced) return;
+                if (!d || d.browser_ok !== false) return;
+                escalated = true;
+                onUnsupported(startTime || 0);
+              })
+              .catch(() => {});   // אין תשובה — השעון למטה נשאר כרשת ביטחון
           }
+        }
+
+        // רשת הביטחון, לכשהשרת לא ענה. החלון ארוך בכוונה: משיכה מטלגרם
+        // מתחילה איטי — נמדד TTFB של 6 עד 15 שניות — ו-readyState הוא 0
+        // כל אותו זמן. חלון קצר יותר היה שולח להמרה קבצים תקינים.
+        const limit = video.readyState === 0 ? 25000 : 12000;
+        if (deadMs >= limit) {
+          escalated = true;
+          onUnsupported(startTime || 0);
+          return;
         }
       }
 
