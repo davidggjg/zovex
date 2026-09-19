@@ -103,13 +103,36 @@ TEXT_SUBS = {"subrip": "srt", "srt": "srt", "ass": "ass", "ssa": "ass",
              "mov_text": "srt", "webvtt": "vtt", "text": "srt"}
 
 LANG_HE = {
-    "eng": "אנגלית", "heb": "עברית", "ara": "ערבית", "rus": "רוסית",
-    "fre": "צרפתית", "fra": "צרפתית", "spa": "ספרדית", "ger": "גרמנית",
-    "deu": "גרמנית", "ita": "איטלקית", "jpn": "יפנית", "kor": "קוריאנית",
-    "chi": "סינית", "zho": "סינית", "por": "פורטוגזית", "tur": "טורקית",
-    "hin": "הינדי", "pol": "פולנית", "nld": "הולנדית", "dut": "הולנדית",
-    "swe": "שוודית", "und": "לא מצוין",
+    "eng": "אנגלית", "en": "אנגלית", "heb": "עברית", "he": "עברית",
+    "iw": "עברית", "ara": "ערבית", "ar": "ערבית", "rus": "רוסית",
+    "ru": "רוסית", "fre": "צרפתית", "fra": "צרפתית", "fr": "צרפתית",
+    "spa": "ספרדית", "es": "ספרדית", "ger": "גרמנית", "deu": "גרמנית",
+    "de": "גרמנית", "ita": "איטלקית", "it": "איטלקית", "jpn": "יפנית",
+    "ja": "יפנית", "kor": "קוריאנית", "ko": "קוריאנית", "chi": "סינית",
+    "zho": "סינית", "zh": "סינית", "por": "פורטוגזית", "pt": "פורטוגזית",
+    "tur": "טורקית", "tr": "טורקית", "hin": "הינדי", "hi": "הינדי",
+    "tam": "טמילית", "ta": "טמילית", "tel": "טלוגו", "mal": "מלאיאלאם",
+    "kan": "קאנאדה", "ben": "בנגלית", "mar": "מראטהי", "pan": "פנג'אבי",
+    "urd": "אורדו", "fas": "פרסית", "per": "פרסית", "tha": "תאית",
+    "vie": "וייטנאמית", "ind": "אינדונזית", "may": "מלאית", "msa": "מלאית",
+    "pol": "פולנית", "nld": "הולנדית", "dut": "הולנדית", "swe": "שוודית",
+    "nor": "נורווגית", "dan": "דנית", "fin": "פינית", "ces": "צ'כית",
+    "cze": "צ'כית", "slk": "סלובקית", "hun": "הונגרית", "ron": "רומנית",
+    "rum": "רומנית", "bul": "בולגרית", "ell": "יוונית", "gre": "יוונית",
+    "ukr": "אוקראינית", "srp": "סרבית", "hrv": "קרואטית", "slv": "סלובנית",
+    "lit": "ליטאית", "lav": "לטבית", "est": "אסטונית", "und": "לא מצוין",
+    "mul": "רב-לשוני", "zxx": "בלי דיבור",
 }
+
+
+# טלגרם ואנדרואיד מוסיפים סימני כיווניות נסתרים סביב טקסט מעורב
+# עברית-מספרים. "1 וידאו" הגיע לקוד כ-"1", "\u200fוידאו" — והמילה השנייה
+# לא התאימה לשום פקודה, ולכן ההודעה נראתה כאילו התעלמו ממנה.
+INVISIBLE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def strip_invisible(t):
+    return INVISIBLE.sub("", t or "")
 
 
 def lang_name(code):
@@ -299,6 +322,31 @@ def sweep_jobs():
             shutil.rmtree(j["dir"], ignore_errors=True)
 
 
+def presets(job):
+    """אפשרויות מוכנות, ממוספרות, עם שמות השפות בפועל.
+
+    הגרסה הקודמת דרשה להרכיב פקודה ("1 s1 הכל") — שפה קטנה שצריך ללמוד,
+    וזה בדיוק מה שלא עובד כשמישהו אחר מקבל את הכלי ליד. כאן כל שילוב
+    סביר כבר כתוב במפורש, והמשתמש שולח מספר אחד.
+
+    התפריט נבנה מהקובץ עצמו, ולכן השפות שמופיעות הן אלה שבאמת יש בו.
+    """
+    out = []
+    for a in job["audio"]:
+        out.append({"t": f"וידאו ב{lang_name(a['lang'])} בלבד",
+                    "a": {a["i"]}, "s": set(), "v": True, "sb": False})
+    for a in job["audio"]:
+        for x in job["subs"]:
+            out.append({
+                "t": f"וידאו ב{lang_name(a['lang'])} + קובץ כתוביות "
+                     f"{lang_name(x['lang'])}",
+                "a": {a["i"]}, "s": {x["i"]}, "v": True, "sb": True})
+    for x in job["subs"]:
+        out.append({"t": f"רק קובץ כתוביות {lang_name(x['lang'])}",
+                    "a": set(), "s": {x["i"]}, "v": False, "sb": True})
+    return out[:9]
+
+
 # האם אנחנו בוט אמיתי (עם טוקן) או חשבון משתמש. **חשבון משתמש אינו יכול
 # לשלוח כפתורים** — זו מגבלה של טלגרם, לא באג. לכן במצב יוזר-בוט הממשק
 # הוא פקודות טקסט, ורק במצב בוט מוצגים כפתורים.
@@ -337,35 +385,25 @@ def summary(job):
     head = f"**{job['name']}**\n{human(job['size'])}"
     if v:
         head += f" · {v['codec']} {v.get('w')}×{v.get('h')}"
-    head += (f"\n\n🔊 {len(job['audio'])} רצועות אודיו · "
-             f"📝 {len(job['subs'])} כתוביות\n")
-    if any(s["bitmap"] for s in job["subs"]):
-        head += ("\n🖼 = כתובית **תמונה** (בלוריי/DVD). היא תצא בפורמט "
-                 "המקורי; אין ממנה טקסט בלי OCR.\n")
-    if not IS_BOT[0]:
-        # חשבון משתמש לא יכול כפתורים, ולכן הרשימה ממוספרת והבחירה בטקסט.
-        head += "\n**אודיו:**\n"
-        for a in job["audio"]:
-            mark = "✅" if a["i"] in job["pick_a"] else "▫️"
-            ch = f" · {a['ch']}ch" if a.get("ch") else ""
-            head += f"{mark} `{a['i'] + 1}` {lang_name(a['lang'])} ({a['codec']}{ch})\n"
-        if job["subs"]:
-            head += "**כתוביות:**\n"
-            for x in job["subs"]:
-                mark = "✅" if x["i"] in job["pick_s"] else "▫️"
-                kind = "🖼" if x["bitmap"] else "📝"
-                head += (f"{mark} `s{x['i'] + 1}` {kind} {lang_name(x['lang'])} "
-                         f"({x['codec']})\n")
 
-    pa = ", ".join(lang_name(a["lang"]) for a in job["audio"] if a["i"] in job["pick_a"])
-    ps = ", ".join(lang_name(s["lang"]) for s in job["subs"] if s["i"] in job["pick_s"])
-    head += f"\nנבחר — אודיו: {pa or '(אין)'} · כתוביות: {ps or '(אין)'}"
+    head += "\n\n**מה יש בקובץ:**\n"
+    for a in job["audio"]:
+        ch = f" · {a['ch']} ערוצים" if a.get("ch") else ""
+        t = f" · {a['title'][:24]}" if a["title"] else ""
+        head += f"🔊 {lang_name(a['lang'])} ({a['codec']}{ch}){t}\n"
+    for x in job["subs"]:
+        kind = "🖼 תמונה" if x["bitmap"] else "📝 טקסט"
+        head += f"{kind} · כתוביות {lang_name(x['lang'])}\n"
+    if not job["subs"]:
+        head += "📝 אין כתוביות בקובץ\n"
 
-    if not IS_BOT[0]:
-        head += ("\n\n**ענה בהודעה:**\n"
-                 "`2` בחר/בטל אודיו · `s1` בחר/בטל כתובית\n"
-                 "`וידאו` · `כתוביות` · `הכל` · `mkv` · `בטל`\n"
-                 "אפשר גם בשורה אחת: `2 s1 הכל`")
+    head += "\n**מה לעשות? שלח מספר:**\n"
+    for n, pr in enumerate(presets(job), 1):
+        head += f"`{n}` · {pr['t']}\n"
+    if any(x["bitmap"] for x in job["subs"]):
+        head += ("\n🖼 כתובית תמונה (בלוריי/DVD) — תצא בפורמט המקורי. "
+                 "אין ממנה טקסט בלי OCR.\n")
+    head += "\n`mkv` — הקובץ המקורי בלי המרות · `בטל` — מחיקה"
     return head
 
 
@@ -516,8 +554,29 @@ def main():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     load_allowed()
-    app = Client(SESSION, api_id=int(os.environ["API_ID"]),
-                 api_hash=os.environ["API_HASH"], workdir=str(DATA_DIR))
+
+    # מהירות. שני דברים משפיעים בפועל:
+    #
+    # 1. tgcrypto — בלעדיו ההצפנה של MTProto רצה בפייתון טהור, וזה חונק
+    #    כל העברה גדולה. זו הבדיקה הראשונה ששווה לעשות כשמשהו איטי.
+    # 2. max_concurrent_transmissions — כמה העברות במקביל. ברירת המחדל
+    #    של pyrogram היא 1, כלומר גם שתי בקשות מאותו משתמש מחכות בתור.
+    try:
+        import tgcrypto           # noqa: F401
+    except ImportError:
+        print("⚠️  tgcrypto לא מותקן — ההצפנה רצה בפייתון טהור וזה איטי.")
+        print("    pip install tgcrypto   (מאיץ הורדות והעלאות משמעותית)")
+
+    conns = int(os.environ.get("MKVTOOL_CONNS", "8"))
+    try:
+        app = Client(SESSION, api_id=int(os.environ["API_ID"]),
+                     api_hash=os.environ["API_HASH"], workdir=str(DATA_DIR),
+                     max_concurrent_transmissions=conns)
+    except TypeError:
+        # גרסת pyrogram ישנה שאינה מכירה את הפרמטר. לא נכשלים בגללו.
+        print("(גרסת pyrogram לא תומכת ב-max_concurrent_transmissions)")
+        app = Client(SESSION, api_id=int(os.environ["API_ID"]),
+                     api_hash=os.environ["API_HASH"], workdir=str(DATA_DIR))
 
     def allowed():
         """מסנן דינמי. filters.user() נקבע פעם אחת בטעינה, ולכן לא היה
@@ -702,9 +761,10 @@ def main():
             return                      # לא קשור לקובץ — לא מתערבים בשיחה
 
         want_v = want_s = cancel = False
-        touched = False
         container = "mp4"
-        for tok in re.split(r"[\s,]+", (m.text or "").strip().lower()):
+        chosen = None
+        text = strip_invisible(m.text).strip().lower()
+        for tok in re.split(r"[\s,]+", text):
             if not tok:
                 continue
             if tok in WORDS_MKV:
@@ -718,16 +778,18 @@ def main():
                 want_v = True
             elif tok in WORDS_S:
                 want_s = True
-            elif re.fullmatch(r"s\d+", tok):
-                i = int(tok[1:]) - 1
-                if any(x["i"] == i for x in job["subs"]):
-                    job["pick_s"] ^= {i}
-                    touched = True
             elif tok.isdigit():
-                i = int(tok) - 1
-                if any(x["i"] == i for x in job["audio"]):
-                    job["pick_a"] ^= {i}
-                    touched = True
+                # מספר = אפשרות מהתפריט, לא רצועה. זה מה שהופך את זה
+                # לשימושי למי שרואה את הכלי בפעם הראשונה.
+                pr = presets(job)
+                k = int(tok) - 1
+                if 0 <= k < len(pr):
+                    chosen = pr[k]
+
+        if chosen:
+            job["pick_a"] = set(chosen["a"])
+            job["pick_s"] = set(chosen["s"])
+            want_v, want_s = chosen["v"], chosen["sb"]
 
         if cancel:
             shutil.rmtree(job["dir"], ignore_errors=True)
@@ -742,8 +804,9 @@ def main():
             return
         if want_v or want_s:
             await do_run(client, job, want_v, want_s, container)
-        elif touched:
-            await m.reply(summary(job), reply_markup=keyboard(job))
+        else:
+            await m.reply("לא הבנתי. שלח את **המספר** של מה שאתה רוצה "
+                          "מהרשימה למעלה (למשל `1`).")
 
     # ── הרשאות ───────────────────────────────────────────────────────────────
     @app.on_message(filters.user(owner_id) & filters.command(
