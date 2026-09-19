@@ -39,8 +39,14 @@ threads, משימות asyncio, בריכות — ולכן ההסבר לא יכו�
 
 * `BadMsgNotification` — **רק נרשם כאזהרה, בלי ניסיון חוזר.** בקשה שנופלת
   על זה לא נפתרת, והקורא ממתין עד ה-timeout שלו.
-* **הפרט הקריטי:** ping נשלח עם `wait_response=False`, כלומר אין לו handler
-  ב-`self.results`. `BadServerSalt` שמגיע בתשובה ל-ping **נזרק בשקט**.
+* `self.salt = 0` בבנייה. pyrogram **מעולם לא מבקש** salt — הוא מקבל אחד
+  רק כשהשרת דוחה לו הודעה. ב-`start()` נשלח `Ping(ping_id=0)` שכן ממתין
+  לתשובה, הוא נדחה, וכך ה-salt נקבע. זה עובד — פעם אחת, בהפעלה.
+* **הפרט הקריטי:** `ping_worker` שולח `PingDelayDisconnect(...)` עם
+  `wait_response=False`. ב-`send()`, `self.results[msg_id]` נרשם **רק** אם
+  `wait_response`, ולכן ל-ping אין handler — ו-`BadServerSalt` שמגיע
+  בתשובה לו נזרק בשקט. הפינגים שומרים את ה-TCP בחיים ו**לא** מרעננים את
+  ה-salt.
 
 ולכן: סשן לא פעיל אינו מתקן את ה-salt שלו לעולם, גם אם הוא שולח ping כל 5
 שניות. התיקון מגיע רק כשבקשה **אמיתית** נופלת עליו — כלומר על גב הצופה.
@@ -119,9 +125,21 @@ MEDIA_SESSION_TTL = int(os.environ.get("MEDIA_SESSION_TTL", "1800"))
 
 ## מה מוכח ומה לא
 
-**מוכח:** תוחלת ה-salt; ש-pyrogram לא קורא ל-`GetFutureSalts`; שהוא זורק
-`BadServerSalt` שמגיע ל-ping; ש-`MEDIA_SESSION_TTL` שלנו זהה בדיוק לחלון
-ה-salt; שהסחרור הנמדד תואם את מודל המחזור ב-49%; ותיעוד 429 של טלגרם.
+**מוכח, שורה-שורה מקוד המקור של pyrogram 2.0.106:**
+
+| | |
+|---|---|
+| `session.py:85` | `self.salt = 0` — מתחיל באפס |
+| `session.py:330` | ה-salt נכנס לכל חבילה (`mtproto.pack`) |
+| `session.py:363` | מתעדכן **רק** מתוך `BadServerSalt` |
+| `session.py:322` | `if wait_response: self.results[msg_id] = Result()` |
+| `ping_worker` | שולח עם `wait_response=False` → אין handler → נזרק |
+| `raw/functions/__init__.py:31` | `GetFutureSalts` קיימת בספרייה, ולא נקראת מאף מקום |
+| `raw/core/future_salt.py:29` | `["valid_since", "valid_until", "salt"]` |
+
+ובנוסף: תוחלת ה-salt (30+30 דקות); ש-`MEDIA_SESSION_TTL` שלנו זהה בדיוק
+לחלון ה-salt; שהסחרור הנמדד תואם את מודל המחזור ב-49%; ותיעוד 429 של
+טלגרם.
 
 **מוסק, לא מוכח:** ש-1800 נבחר בגלל ה-salt (ההערה בקוד אומרת סיבה אחרת,
 והכיול היה אמפירי — ההתאמה עשויה להיות מקרית ועדיין תקפה בתוצאה).
