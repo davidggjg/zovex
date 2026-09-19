@@ -841,20 +841,41 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     // בשקט — בלי אירוע error ובלי שום סימן אחר. webkitAudioDecodedByteCount
     // הוא הדרך היחידה לדעת: הוא נשאר 0 בזמן שהווידאו מתקדם.
     //
-    // בודקים פעם אחת בלבד, ורק אחרי שהניגון באמת התקדם, כדי לא לבלבל
-    // "עוד לא התחיל" עם "אין קול". דפדפן שלא מדווח על השדה הזה (פיירפוקס)
-    // פשוט לא מפעיל את המסלול — עדיף לא לגעת מאשר לנחש.
-    let audioProbe = null, probed = false;
+    // דפדפן שלא מדווח על השדה הזה (פיירפוקס) פשוט לא מפעיל את המסלול —
+    // עדיף לא לגעת מאשר לנחש.
+    //
+    // קודם זו הייתה בדיקה **אחת** 3.5 שניות אחרי 'playing', בתנאי
+    // currentTime > 1. זה מרוץ שהבדיקה מפסידה בו: משיכה מטלגרם מתחילה
+    // איטי (נמדד TTFB של 6 עד 15 שניות) והניגון בהתחלה מקרטע. אם באותה
+    // שנייה הזמן עוד לא עבר 1 או שהנגן ממתין — probed כבר דלוק, והסרט
+    // כולו מתנגן בלי קול בלי שאיש יידע.
+    //
+    // עכשיו דוגמים כל שנייה עד לתשובה חד-משמעית, ומוסיפים תנאי:
+    // webkitVideoDecodedByteCount > 0, כלומר הפענוח באמת עובד. זו
+    // ההבחנה שמפרידה "אין קול" מ"עוד לא התחיל", והיא נכונה גם כשההתחלה
+    // מקרטעת — בלי להישען על הרגע המדויק שבו נדגם.
+    let audioProbe = null, probeDone = false;
     const probeAudio = () => {
-      if (probed || !onSilent) return;
-      probed = true;
-      audioProbe = setTimeout(() => {
-        if (destroyed) return;
-        const decoded = video.webkitAudioDecodedByteCount;
-        if (decoded === 0 && video.currentTime > 1 && !video.paused) {
-          onSilent(video.currentTime);
+      if (audioProbe || probeDone || !onSilent) return;
+      let ticks = 0;
+      audioProbe = setInterval(() => {
+        if (destroyed) { clearInterval(audioProbe); return; }
+        ticks += 1;
+        const a = video.webkitAudioDecodedByteCount;
+        const v = video.webkitVideoDecodedByteCount;
+        if (a === undefined || a > 0) {          // אין מדידה, או שיש קול
+          probeDone = true; clearInterval(audioProbe); audioProbe = null;
+          return;
         }
-      }, 3500);
+        if (v > 0 && video.currentTime > 1.5 && !video.paused) {
+          probeDone = true; clearInterval(audioProbe); audioProbe = null;
+          onSilent(video.currentTime);
+          return;
+        }
+        if (ticks > 90) {                        // תקרה — לא מסיקים כלום
+          probeDone = true; clearInterval(audioProbe); audioProbe = null;
+        }
+      }, 1000);
     };
 
     const onPlaying = () => {
@@ -1036,7 +1057,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
       destroyed = true;
       clearInterval(reportInterval);
       clearInterval(stallWatch);
-      clearTimeout(audioProbe);
+      clearInterval(audioProbe);   // setInterval עכשיו, לא setTimeout
       { const dur = getUsableDuration(video); if (dur > 0) reportProgress(onProgressRef, video.currentTime, dur); }
       video.removeEventListener("error", onError);
       video.removeEventListener("loadedmetadata", onLoaded);
@@ -1328,8 +1349,9 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   // הקטלוג — שרובו תקין — לא משלם שום מחיר.
   const fixedSrc = isLive ? null : audioFixSrc(rawSrc);
   const transcodeSrc = isLive ? null : transcodeFixSrc(rawSrc);
-  const [useAudioFix, setUseAudioFix] = useState(
-    () => !!fixedSrc && loadSilentSet().has(movie.id));
+  const [useAudioFix, setUseAudioFix] = useState(false);
+  // הכתובת שהשרת החזיר למסלול תיקון-הקול. ראה goAudioFix.
+  const [fixUrl, setFixUrl] = useState(null);
   // פריט שכבר התגלה כלא-נתמך — ישר ל-/vt, בלי לשלם שוב את כשל הנגינה.
   const [useTranscode, setUseTranscode] = useState(
     () => !!transcodeSrc && loadUnsupportedSet().has(movie.id));
@@ -1337,15 +1359,48 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
 
   // ההמרה (/vt) מנצחת: קובץ לא-נתמך בכלל לא נפתח, ולכן תיקון-הקול לא רלוונטי לו.
   const src = useTranscode && transcodeSrc ? transcodeSrc
-            : useAudioFix && fixedSrc ? fixedSrc
+            : useAudioFix && (fixUrl || fixedSrc) ? (fixUrl || fixedSrc)
             : rawSrc;
 
-  // מעבר למסלול המתוקן, מהמקום שבו הצופה נמצא — לא מתחילת הפרק.
-  const switchToAudioFix = (at) => {
+  // ── מעבר למסלול תיקון-הקול, מהמקום שבו הצופה נמצא ──────────────────────
+  //
+  // קודם זה הלך ישר ל-/vh, ועל הקובץ של דוד זה היה מסלול ללא מוצא:
+  //
+  //     GET /vh/-1003936100530/7170/index.m3u8  →  415
+  //     {"detail":"אין ftyp — לא קובץ MP4"}
+  //
+  // ‎/vh בונה את נקודות החיתוך מה-moov של MP4, ולכן הוא מסרב ל-MKV —
+  // כלומר דווקא לקבצים שהכי צריכים אותו. זה, ולא הזיהוי, מה שהשאיר את
+  // הסרט בלי קול **בכל** דפדפן: הזיהוי עבד, היעד היה שבור.
+  //
+  // לכן שואלים את השרת לאן ללכת. ‎/vodinfo מחזיר ‎/vh לקובץ MP4 (בדיוק
+  // מה שהיה כאן קודם, בלי שינוי) ו-‎/vt לקובץ שאינו MP4. אם אין תשובה —
+  // נשארים על ‎/vh, שזו ההתנהגות הישנה.
+  const goAudioFix = (at) => {
     rememberSilent(movie.id);
-    setResumeAt(Math.max(0, at || 0));
-    setUseAudioFix(true);
+    const apply = (url) => {
+      if (url) setFixUrl(url);
+      setResumeAt(Math.max(0, at || 0));
+      setUseAudioFix(true);
+    };
+    const info = vodInfoSrc(rawSrc);
+    if (!info) return apply(null);
+    // ממתינים לתשובה ולא מחליפים פעמיים: החלפה ל-/vh ואז ל-/vt הייתה
+    // מקפיצה את הצופה פעמיים, והראשונה ממילא נכשלת על הקבצים האלה.
+    fetch(info)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => apply(d && d.url ? d.url : null))
+      .catch(() => apply(null));
   };
+  const switchToAudioFix = goAudioFix;
+
+  // פריט שכבר ידוע כאילם: פותרים מיד עם פתיחת הנגן, בלי לשלם שוב את
+  // שלוש השניות של הזיהוי.
+  useEffect(() => {
+    if (isLive || !fixedSrc) return;
+    if (loadSilentSet().has(movie.id)) goAudioFix(startTime || 0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // מעבר למסלול ההמרה כשהדפדפן לא יודע לפענח את הקובץ בכלל (AVI, code 4).
   const switchToTranscode = (at) => {
