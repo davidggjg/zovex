@@ -31,6 +31,8 @@
 #   pool    בריכות טלגרם / חיבורים בהן.
 #   load    עומס. זה מה שמזהה את *רגע* התקיעה בתוך העקומה.
 #   c443    חיבורים פתוחים של צופים.
+#   salt    רענוני salt שהצליחו / שנכשלו (ראה FINDING_server_salt.md).
+#           "-" פירושו שהפאצ' fix_salt_refresh עוד לא הוחל.
 
 OUT=${SNAP_OUT:-/tmp/zovex_snap.log}
 EVERY=${SNAP_EVERY:-300}
@@ -82,13 +84,15 @@ while true; do
     TASK=$(field "$TJ" "pending_tracked")
     POOLS=$(field "$CJ" "media_sessions_pools")
     CONNS=$(field "$CJ" "media_sessions_total_conns")
+    SOK=$(field "$CJ" "salt_ok")
+    SBAD=$(field "$CJ" "salt_fail")
     SEGMB=$(field "$CJ" "hls_seg_cache_bytes")
     [ -n "$SEGMB" ] && SEGMB=$((SEGMB / 1048576))
 
-    printf '%s | up %5sh | rss %5s | fd %4s | sock %4s | thr %3s | ffm %2s | task %4s | pool %3s/%4s | seg %3sMB | load %5s | c443 %4s | conn %6s | skip %4s\n' \
+    printf '%s | up %5sh | rss %5s | fd %4s | sock %4s | thr %3s | ffm %2s | task %4s | pool %3s/%4s | seg %3sMB | load %5s | c443 %4s | conn %6s | skip %4s | salt %5s/%-4s\n' \
         "$(date '+%F %H:%M')" "$UPH" "${RSS:-?}" "$FD" "$SOCK" "${THR:-?}" \
         "$FFM" "${TASK:-?}" "${POOLS:-?}" "${CONNS:-?}" "${SEGMB:-?}" \
-        "$LOAD" "$C443" "$CONN" "$SKIP" >> "$OUT"
+        "$LOAD" "$C443" "$CONN" "$SKIP" "${SOK:--}" "${SBAD:--}" >> "$OUT"
 
     sleep "$EVERY"
 done
