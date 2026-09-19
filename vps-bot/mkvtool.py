@@ -188,6 +188,131 @@ def make_prog(msg, label, total):
     return cb
 
 
+# ── הורדה מקבילה ─────────────────────────────────────────────────────────────
+# download_media של pyrogram מושך נתח אחרי נתח על חיבור אחד. נמדד בקהילה
+# ובתיעוד: חיבור בודד נותן 0.3–0.5 MB/ש, ומשיכה מקבילה של חלקים על כמה
+# חיבורים מגיעה ל-7–20. זה לא טריק — התיעוד הרשמי של טלגרם אומר במפורש
+# ש"שאילתות גדולות יטופלו דרך סשן וחיבור נפרדים או יותר".
+#
+# הבוט הראשי כאן כבר עושה בדיוק את זה (_band_fetch/_get_block), והקוד למטה
+# בנוי על אותה תבנית מוכחת.
+#
+# החלק הוא 1MB בדיוק, וזה עומד בכל הכללים של upload.GetFile: offset ו-limit
+# מתחלקים ב-4KB, 1MB מתחלק ב-limit, והבקשה נופלת כולה בתוך גבול 1MB אחד.
+#
+# מספר העובדים מוגבל: מעל ~20 טלגרם מחזיר FLOOD_WAIT, וזה מאט במקום להאיץ —
+# בדיוק מה שקרה כאן כשהעליתי את המקביליות ל-8 בלי למדוד.
+PART = 1024 * 1024
+FAST_WORKERS = max(1, min(16, int(os.environ.get("MKVTOOL_WORKERS", "4"))))
+FAST_RETRIES = 4
+
+
+async def _media_session(client, dc_id):
+    """חיבור media נוסף לאותו לקוח. אותה תבנית כמו בבוט הראשי."""
+    from pyrogram.session import Session, Auth
+    from pyrogram.raw import functions as raw_fn
+    test_mode = await client.storage.test_mode()
+    home = await client.storage.dc_id()
+    if dc_id == home:
+        auth = await client.storage.auth_key()
+    else:
+        auth = await Auth(client, dc_id, test_mode).create()
+    sess = Session(client, dc_id, auth, test_mode, is_media=True)
+    await sess.start()
+    if dc_id != home:
+        for _ in range(3):
+            exp = await client.invoke(raw_fn.auth.ExportAuthorization(dc_id=dc_id))
+            try:
+                await sess.invoke(raw_fn.auth.ImportAuthorization(
+                    id=exp.id, bytes=exp.bytes))
+                break
+            except Exception:
+                pass
+    return sess
+
+
+async def _get_part(sess, location, offset, limit):
+    """חלק בודד, עם ניסיונות חוזרים. FloodWait — ישנים בדיוק כמה שביקשו."""
+    from pyrogram.errors import FloodWait
+    from pyrogram.raw import functions as raw_fn
+    backoff = 1.0
+    for attempt in range(FAST_RETRIES):
+        try:
+            r = await sess.invoke(raw_fn.upload.GetFile(
+                location=location, offset=offset, limit=limit, precise=False))
+            return getattr(r, "bytes", b"")
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 0.5)
+        except Exception:
+            if attempt == FAST_RETRIES - 1:
+                raise
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 8)
+    return b""
+
+
+async def fast_download(client, message, dest: Path, size: int, progress=None):
+    """מוריד במקביל. מחזיר True בהצלחה, False אם לא ניתן — והקורא נופל
+    ל-download_media הרגיל. כישלון כאן לא אמור לעלות למשתמש כלום."""
+    from pyrogram.file_id import FileId
+    from pyrogram.raw import types as raw_types
+
+    media = message.document or message.video or message.audio
+    if not media or not size:
+        return False
+    try:
+        fid = FileId.decode(media.file_id)
+        location = raw_types.InputDocumentFileLocation(
+            id=fid.media_id, access_hash=fid.access_hash,
+            file_reference=fid.file_reference, thumb_size=fid.thumbnail_size or "")
+    except Exception:
+        return False
+
+    parts = (size + PART - 1) // PART
+    workers = max(1, min(FAST_WORKERS, parts))
+    sessions = []
+    done = {"n": 0}
+    lock = asyncio.Lock()
+
+    async def one(wi, sess):
+        # כל עובד לוקח כל n-י חלק. פתיחת ידית נפרדת לכל עובד: החלקים לא
+        # חופפים, ולכן אין צורך בנעילה על הכתיבה עצמה.
+        with open(dest, "r+b") as fh:
+            for idx in range(wi, parts, workers):
+                off = idx * PART
+                data = await _get_part(sess, location, off, PART)
+                if not data:
+                    continue
+                fh.seek(off)
+                fh.write(data)
+                if progress:
+                    async with lock:
+                        done["n"] += len(data)
+                        await progress(min(done["n"], size), size)
+
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as fh:       # הקצאה מראש, כדי ש-seek יעבוד
+            fh.truncate(size)
+        for _ in range(workers):
+            sessions.append(await _media_session(client, fid.dc_id))
+        await asyncio.gather(*[one(i, sessions[i]) for i in range(workers)])
+        # אימות: קובץ בגודל לא נכון הוא קובץ פגום, ועדיף ליפול למסלול
+        # האיטי מאשר להחזיר וידאו קטוע שנראה תקין.
+        if dest.exists() and dest.stat().st_size == size:
+            return True
+        return False
+    except Exception as e:
+        print(f"הורדה מקבילה נכשלה ({type(e).__name__}: {e}) — נופל למסלול הרגיל")
+        return False
+    finally:
+        for sess in sessions:
+            try:
+                await sess.stop()
+            except Exception:
+                pass
+
+
 # ── מי מורשה ─────────────────────────────────────────────────────────────────
 ALLOWED: set = set()
 
@@ -567,7 +692,10 @@ def main():
         print("⚠️  tgcrypto לא מותקן — ההצפנה רצה בפייתון טהור וזה איטי.")
         print("    pip install tgcrypto   (מאיץ הורדות והעלאות משמעותית)")
 
-    conns = int(os.environ.get("MKVTOOL_CONNS", "8"))
+    # היה 8, וזה היה טעות: כמה קבצים ירדו במקביל, טלגרם החזיר FLOOD_WAIT של
+    # 6-7 שניות על כל חלק, והתוצאה הייתה איטית בהרבה מלפני. המקביליות
+    # שמשתלמת היא בין *חלקים של אותו קובץ* (fast_download), לא בין קבצים.
+    conns = int(os.environ.get("MKVTOOL_CONNS", "2"))
     try:
         app = Client(SESSION, api_id=int(os.environ["API_ID"]),
                      api_hash=os.environ["API_HASH"], workdir=str(DATA_DIR),
@@ -660,8 +788,14 @@ def main():
         jdir = WORK_DIR / jid
         jdir.mkdir(parents=True, exist_ok=True)
         try:
-            src = await client.download_media(m, file_name=str(jdir / name),
-                                              progress=prog)
+            # קודם המסלול המקביל. אם הוא לא מצליח מכל סיבה — נופלים
+            # למסלול הרגיל, וזה שקוף למשתמש.
+            target = jdir / name
+            if await fast_download(client, m, target, size, prog):
+                src = str(target)
+            else:
+                src = await client.download_media(m, file_name=str(target),
+                                                  progress=prog)
         except Exception as e:
             shutil.rmtree(jdir, ignore_errors=True)
             await status.edit(f"❌ ההורדה נכשלה: {type(e).__name__}")
@@ -875,6 +1009,7 @@ def main():
         if not IS_BOT[0]:
             print("מצב חשבון־משתמש: אין כפתורים (מגבלת טלגרם) — הבחירה בטקסט.")
         print(f"מחיקה מהשרת: {RETENTION // 60} דקות אחרי הטיפול")
+        print(f"הורדה מקבילה: {FAST_WORKERS} חיבורים (MKVTOOL_WORKERS)")
         if ALLOWED:
             print(f"מורשים נוספים: {', '.join(str(u) for u in sorted(ALLOWED))}")
         print("מוכן. שלח קובץ.")
