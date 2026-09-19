@@ -911,19 +911,48 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     video.addEventListener("error", onError);
 
     let lastT = -1, stuckSince = 0, nudges = 0;
+    let everAdvanced = false, escalated = false, deadMs = 0;
     const stallWatch = setInterval(() => {
-      if (destroyed || video.paused || video.ended || video.seeking) {
+      if (destroyed) return;
+
+      // ── מעולם לא התחיל לנגן ──────────────────────────────────────────
+      // קובץ MKV עם אודיו AC-3 (או DTS) נטען בדפדפן ופשוט לא מפוענח: אין
+      // שגיאה, ה-currentTime נשאר על אפס, והצופה רואה "נטען ונתקע".
+      // שני המנגנונים שהיו כאן שותקים בדיוק במקרה הזה — error.code 4 לא
+      // נורה, והמשמר יוצא מוקדם כי *יש* באפר. לכן הבדיקה הזאת עומדת
+      // לפני שתיהן, ולא מותנית בבאפר.
+      //
+      // נספרות רק שניות שבהן הנגן באמת מנסה לנגן. בלי זה, autoplay חסום
+      // או עצירה על הפריים הראשון היו נקראים "לא מפוענח" ושולחים להמרה
+      // קובץ תקין לגמרי.
+      if (!everAdvanced && !escalated && onUnsupported) {
+        if (video.paused || video.ended) {
+          deadMs = 0;
+        } else if (video.currentTime < 0.3) {
+          deadMs += 1000;
+          if (deadMs >= 12000) {
+            escalated = true;
+            onUnsupported(startTime || 0);
+            return;
+          }
+        }
+      }
+
+      if (video.paused || video.ended || video.seeking) {
         lastT = -1; stuckSince = 0;
         return;
       }
       const t = video.currentTime;
+      if (t > 0.3) everAdvanced = true;
       if (Math.abs(t - lastT) > 0.05) {         // הזמן מתקדם — הכול תקין
         lastT = t; stuckSince = 0; nudges = 0;
         return;
       }
       // תקוע *ויש* עוד באפר פירושו תקלת פענוח רגעית, לא רעב נתונים.
-      // נגיעה כזאת רק תזרוק באפר תקין, ולכן לא נוגעים.
-      if (bufferAhead(video) > 0.5) return;
+      // נגיעה כזאת רק תזרוק באפר תקין, ולכן לא נוגעים. חל רק אחרי
+      // שהניגון באמת התחיל — לפני כן "יש באפר" הוא הסימן לתקלה, לא
+      // הוכחה שהכול בסדר.
+      if (everAdvanced && bufferAhead(video) > 0.5) return;
       if (!stuckSince) { stuckSince = Date.now(); return; }
       if (Date.now() - stuckSince < 8000) return;
 
