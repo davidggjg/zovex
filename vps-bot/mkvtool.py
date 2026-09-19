@@ -761,6 +761,10 @@ def main():
                         await client.send_document(job["chat"], str(out),
                                                    file_name=out.name, progress=up)
                     sent_any = True
+                # המשימה נגמרה. מכאן ואילך הכלי לא מגיב יותר בצ'אט הזה
+                # עד שיישלח קובץ חדש — הוא סיים את התפקיד שלו.
+                job["done"] = True
+                LAST_JOB.pop(job["chat"], None)
                 job["born"] = time.time()
                 mins = max(1, RETENTION // 60)
                 await note.edit("✅ סיימתי." + (
@@ -891,8 +895,8 @@ def main():
         if jid is None:
             jid = LAST_JOB.get(m.chat.id)
         job = JOBS.get(jid) if jid else None
-        if not job:
-            return                      # לא קשור לקובץ — לא מתערבים בשיחה
+        if not job or job.get("done"):
+            return                      # אין משימה פתוחה — לא מתערבים בשיחה
 
         want_v = want_s = cancel = False
         container = "mp4"
@@ -938,9 +942,13 @@ def main():
             return
         if want_v or want_s:
             await do_run(client, job, want_v, want_s, container)
-        else:
-            await m.reply("לא הבנתי. שלח את **המספר** של מה שאתה רוצה "
-                          "מהרשימה למעלה (למשל `1`).")
+        elif re.search(r"\d", text) or any(
+                w in text for w in WORDS_MKV | WORDS_X | WORDS_B | WORDS_V | WORDS_S):
+            # עונים רק על מה שנראה כמו ניסיון פקודה. גרסה קודמת ענתה
+            # "לא הבנתי" לכל טקסט, ולכן הפריעה לשיחה רגילה בין שני אנשים
+            # אחרי שהקובץ כבר נשלח.
+            await m.reply(f"לא הבנתי. שלח מספר בין 1 ל-{len(presets(job))} "
+                          "מהרשימה למעלה.")
 
     # ── הרשאות ───────────────────────────────────────────────────────────────
     @app.on_message(filters.user(owner_id) & filters.command(
