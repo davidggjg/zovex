@@ -386,7 +386,7 @@ function TopBar({ title, episode, onClose, visible }) {
 }
 
 // ─── Bottom controls bar ──────────────────────────────────────
-function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menuOpen, setMenuOpen }) {
+function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menuOpen, setMenuOpen, knownDuration = 0 }) {
   const [playing, setPlaying] = useState(true);
   const [muted, setMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -412,7 +412,15 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
     if (!v) return;
     // סנכרון מיידי — אם המטא-דאטה כבר נטענה עד שהגענו לכאן (למשל וידאו שנטען
     // מהר), נקבל את הערכים הנוכחיים במקום לחכות לאירוע שכבר לא יקרה שוב
-    const syncDuration = () => { const d = getUsableDuration(v); if (d > 0) setDuration(d); };
+    // knownDuration = האורך האמיתי של הסרט, כפי שהשרת קרא אותו מהקובץ.
+    //
+    // בהמרה זורמת (/vt) הרשימה גדלה תוך כדי, ולכן הנגן יודע רק כמה כבר
+    // הומר — ומציג 0:00 / 0:00 בהתחלה ואז אורך שמטפס. זה מה שדוד ראה.
+    // כשיש אורך אמיתי הוא מנצח, כי הוא נכון מהשנייה הראשונה.
+    const syncDuration = () => {
+      const d = Math.max(getUsableDuration(v), knownDuration || 0);
+      if (d > 0) setDuration(d);
+    };
     syncDuration();
     if (v.currentTime) setCurrentTime(v.currentTime);
     setPlaying(!v.paused);
@@ -442,7 +450,7 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
     // videoReady משמש כטריגר: הוא הופך ל-true בדיוק כשה-<video> האמיתי נוצר
     // ונשמר ב-ref — כך שהאפקט הזה רץ שוב ברגע שיש בפועל מה להאזין לו, ולא
     // "מפספס" את האירועים כי הוא רץ מוקדם מדי (לפני שהאלמנט קיים).
-  }, [videoRef, dragging, videoReady, duration]);
+  }, [videoRef, dragging, videoReady, duration, knownDuration]);
 
   const togglePlay = () => {
     const v = videoRef.current;
@@ -686,7 +694,7 @@ function NextEpisodeButton({ videoRef, onNext, label, videoReady }) {
 
 // ─── Controls wrapper (auto-hide) ─────────────────────────────
 // FIX: לחיצה על כל מקום במסך (לא רק ה-div) מפעילה/מעצירה + מציגה כפתורים
-function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false, videoReady, onNextEpisode, nextEpisodeLabel }) {
+function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, isLive = false, videoReady, onNextEpisode, nextEpisodeLabel, knownDuration = 0 }) {
   const [visible, setVisible] = useState(true);
   // תפריט פתוח (מהירות הפעלה) מחזיק את הפקדים על המסך. בלעדיו הטיימר
   // של 3.5 שניות היה מכבה את הסרגל בדיוק כשפותחים את ההגדרות, והיה צריך
@@ -782,7 +790,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
       </div>
 
       <BottomBar videoRef={videoRef} onSkip={onSkip} visible={visible} isLive={isLive} videoReady={videoReady}
-        menuOpen={menuOpen} setMenuOpen={setMenuOpen} />
+        menuOpen={menuOpen} setMenuOpen={setMenuOpen} knownDuration={knownDuration} />
       {!isLive && <NextEpisodeButton videoRef={videoRef} onNext={onNextEpisode} label={nextEpisodeLabel} videoReady={videoReady} />}
       <SkipAnim side={skipAnim} />
     </div>
@@ -1106,7 +1114,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
 }
 
 // ─── HLS player ───────────────────────────────────────────────
-function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false, onNextEpisode, nextEpisodeLabel }) {
+function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false, onNextEpisode, nextEpisodeLabel, knownDuration = 0 }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
   const playerRef = useRef(null);
@@ -1276,7 +1284,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} videoReady={videoReady} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={movie.episode_title ? `פרק ${movie.episode_number} - ${movie.episode_title}` : movie.episode_number ? `פרק ${movie.episode_number}` : null} onClose={onClose} onSkip={handleSkip} skipAnim={skipAnim} isLive={isLive} videoReady={videoReady} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} knownDuration={knownDuration} />
     </div>
   );
 }
@@ -1352,6 +1360,9 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   const [useAudioFix, setUseAudioFix] = useState(false);
   // הכתובת שהשרת החזיר למסלול תיקון-הקול. ראה goAudioFix.
   const [fixUrl, setFixUrl] = useState(null);
+  // אורך הסרט כפי שהשרת קרא אותו מהקובץ עצמו. ראה השימוש ב-BottomBar:
+  // בהמרה זורמת הנגן לבדו לא יודע כמה זמן הסרט, ומציג 0:00 / 0:00.
+  const [knownDuration, setKnownDuration] = useState(0);
   // פריט שכבר התגלה כלא-נתמך — ישר ל-/vt, בלי לשלם שוב את כשל הנגינה.
   const [useTranscode, setUseTranscode] = useState(
     () => !!transcodeSrc && loadUnsupportedSet().has(movie.id));
@@ -1378,8 +1389,9 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
   // נשארים על ‎/vh, שזו ההתנהגות הישנה.
   const goAudioFix = (at) => {
     rememberSilent(movie.id);
-    const apply = (url) => {
+    const apply = (url, dur) => {
       if (url) setFixUrl(url);
+      if (dur) setKnownDuration(dur);
       setResumeAt(Math.max(0, at || 0));
       setUseAudioFix(true);
     };
@@ -1389,7 +1401,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
     // מקפיצה את הצופה פעמיים, והראשונה ממילא נכשלת על הקבצים האלה.
     fetch(info)
       .then(r => (r.ok ? r.json() : null))
-      .then(d => apply(d && d.url ? d.url : null))
+      .then(d => apply(d && d.url ? d.url : null, d && d.duration))
       .catch(() => apply(null));
   };
   const switchToAudioFix = goAudioFix;
@@ -1401,6 +1413,22 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
     if (loadSilentSet().has(movie.id)) goAudioFix(startTime || 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // במסלול ההמרה צריך את האורך האמיתי גם כשלא עברנו דרך goAudioFix —
+  // למשל פריט שכבר סומן כלא-נתמך ונכנס ישר ל-/vt. התשובה שמורה בשרת
+  // לשש שעות, ולכן זו שאלה זולה.
+  useEffect(() => {
+    if (!useTranscode || knownDuration) return;
+    const info = vodInfoSrc(rawSrc);
+    if (!info) return;
+    let alive = true;
+    fetch(info)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (alive && d && d.duration) setKnownDuration(d.duration); })
+      .catch(() => {});
+    return () => { alive = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useTranscode]);
 
   // מעבר למסלול ההמרה כשהדפדפן לא יודע לפענח את הקובץ בכלל (AVI, code 4).
   const switchToTranscode = (at) => {
@@ -1426,7 +1454,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
           <p style={{ color: "#888", fontSize: 15, fontFamily: "Arial" }}>אין קישור וידאו זמין</p>
         </div>
       ) : isHlsUrl(src) ? (
-        <HlsPlayer key={src} src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} />
+        <HlsPlayer key={src} src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} knownDuration={knownDuration} />
       ) : isIframeUrl(src, type) ? (
         <IframePlayer src={src} movie={movie} onClose={onClose} />
       ) : (
