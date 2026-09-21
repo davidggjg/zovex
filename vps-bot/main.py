@@ -8404,7 +8404,10 @@ def _mp4_duration(moov):
 
 _VF_TTL = 6 * 3600
 _vf_cache: dict = {}          # (chat,msg) -> (זמן, מידע)
-_VF_CACHE_MAX = 40            # כל כותרת ~2MB; תקרה כדי לא לנפח את הזיכרון
+_VF_HDR_MAX = 40              # כל כותרת ~2MB; תקרה כדי לא לנפח את הזיכרון
+# שם נפרד בכוונה: fix_vh_cache הגדיר _VF_CACHE_MAX כתקרת דיסק
+# בבתים ודרס את הערך הזה, וכך תנאי הפינוי למטה השווה אורך dict
+# מול 21,474,836,480 ולא התקיים לעולם. ראה fix_hdr_cache_cap.py.
 _VF_SEG_TARGET = float(os.environ.get("VODFIX_SEG", "10"))
 _VF_ABR = os.environ.get("VODFIX_AUDIO_BITRATE", "192k")
 
@@ -9135,7 +9138,7 @@ async def _vf_header_for(chat: int, msg: int):
             # לא מייצרים קובץ שגוי. בלי כותרת, /fs פשוט לא זמין לקובץ הזה.
             log.warning("vodfix: %s/%s — בניית כותרת נכשלה: %s", chat, msg, e)
 
-    if len(_vf_cache) >= _VF_CACHE_MAX:
+    if len(_vf_cache) >= _VF_HDR_MAX:
         for k in sorted(_vf_cache, key=lambda k: _vf_cache[k][0])[:10]:
             _vf_cache.pop(k, None)
     _vf_cache[key] = (now, info)
