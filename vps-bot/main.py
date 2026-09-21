@@ -72,6 +72,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/opt/zovex-bot/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 PROGRESS_FILE = DATA_DIR / "progress.json"
 HISTORY_FILE  = DATA_DIR / "history.json"
+FAVORITES_FILE = DATA_DIR / "favorites.json"
 SESSION_NAME  = "stream_bot"
 SESSION_FILE  = DATA_DIR / f"{SESSION_NAME}.session"
 
@@ -180,6 +181,7 @@ def restore_from_dataset():
     for fname, path in (
         ("progress.json", PROGRESS_FILE),
         ("history.json", HISTORY_FILE),
+        ("favorites.json", FAVORITES_FILE),
         (f"{SESSION_NAME}.session", SESSION_FILE),
     ):
         try:
@@ -206,6 +208,28 @@ def backup_to_dataset(fname: str, path: Path):
     except Exception as e:
         log.warning("⚠️ גיבוי %s ל-Dataset נכשל: %s", fname, e)
 
+# [fix_atomic_writes] כתיבה אטומית -----------------------------------------
+# write_text מאפס את הקובץ לפני שהוא כותב. מוות של התהליך באמצע (restart,
+# OOM, דיסק מלא) משאיר JSON חתוך, ו-load_json בולע את השגיאה ומחזיר {} —
+# כלומר הקטלוג "נעלם" בשקט. os.replace בתוך אותה מערכת קבצים הוא אטומי:
+# או הישן במלואו או החדש במלואו. אותה שיטה בדיוק שכבר בשימוש במטמון הקצה.
+def _atomic_write_text(path, text, encoding="utf-8"):
+    import os as _os
+    from pathlib import Path as _Path
+    path = _Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with open(tmp, "w", encoding=encoding) as fh:
+            fh.write(text)
+            fh.flush()
+            _os.fsync(fh.fileno())      # בלי זה replace יכול להקדים את הנתונים
+        _os.replace(tmp, path)          # אטומי
+    except Exception:
+        try: tmp.unlink(missing_ok=True)
+        except Exception: pass
+        raise
+# ---------------------------------------------------------------------------
+
 def load_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -213,7 +237,7 @@ def load_json(path: Path) -> dict:
         return {}
 
 def save_json(path: Path, data: dict, backup_name: Optional[str] = None):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))  # [fix_atomic_writes]
     if backup_name:
         # ברקע — כדי לא להאט את התשובה למשתמש
         asyncio.create_task(asyncio.to_thread(backup_to_dataset, backup_name, path))
@@ -281,6 +305,52 @@ async def add_history(
     db[x_user_id] = db[x_user_id][:50]  # מקסימום 50 פריטים בהיסטוריה
     save_json(HISTORY_FILE, db, "history.json")
     return {"ok": True}
+
+# ── מועדפים ──────────────────────────────────────────────────────────────────
+# אותו מבנה כמו history.json: {user_id: [פריט, ...]}. הפריט נושא כותרת
+# ותמונה כדי שמסך המועדפים יצייר מיד, בלי לחפש כל פריט בקטלוג המלא.
+
+class FavoriteItem(BaseModel):
+    media_id: str
+    title: str = ""
+    thumbnail_url: Optional[str] = ""
+
+
+@api.get("/api/favorites")
+async def get_favorites(x_user_id: str = Header(..., description="Google User ID")):
+    db = load_json(FAVORITES_FILE)
+    return db.get(x_user_id, [])
+
+
+@api.post("/api/favorites")
+async def add_favorite(item: FavoriteItem,
+                       x_user_id: str = Header(..., description="Google User ID")):
+    db = load_json(FAVORITES_FILE)
+    lst = db.get(x_user_id) or []
+    # הסרה לפני הוספה: לחיצה חוזרת מרעננת את הפריט במקום לשכפל אותו.
+    lst = [f for f in lst if f.get("media_id") != item.media_id]
+    lst.insert(0, {
+        "media_id": item.media_id,
+        "title": item.title or "",
+        "thumbnail_url": item.thumbnail_url or "",
+        "added_at": time.time(),
+    })
+    db[x_user_id] = lst[:500]
+    save_json(FAVORITES_FILE, db, "favorites.json")
+    return {"ok": True, "count": len(db[x_user_id])}
+
+
+@api.delete("/api/favorites/{media_id}")
+async def remove_favorite(media_id: str,
+                          x_user_id: str = Header(..., description="Google User ID")):
+    db = load_json(FAVORITES_FILE)
+    lst = db.get(x_user_id) or []
+    n = len(lst)
+    db[x_user_id] = [f for f in lst if f.get("media_id") != media_id]
+    if len(db[x_user_id]) != n:
+        save_json(FAVORITES_FILE, db, "favorites.json")
+    return {"ok": True, "removed": n - len(db[x_user_id])}
+
 
 # ── Stream helpers ────────────────────────────────────────────────────────────
 
@@ -861,6 +931,45 @@ async def _probe_bot(b):
         return False
 
 
+def _kill_session_tasks(sess) -> int:
+    """מבטל כל משימה אסינכרונית שעדיין חיה על session מת, וסוגר את החיבור.
+
+    סורק את תכונות ה-session ולא מחפש שמות קבועים ("ping_task" וכו'), כי
+    השמות משתנים בין גרסאות Pyrogram ותיקון שתלוי בהם יישבר בשקט בשדרוג
+    הבא — וכישלון שקט כאן מחזיר בדיוק את הדליפה שהוא נועד למנוע.
+
+    נקרא אך ורק מ-_force_down, כלומר על session שכבר הוחלט שהוא מת.
+    """
+    if sess is None:
+        return 0
+    killed = 0
+    try:
+        for val in list(vars(sess).values()):
+            if isinstance(val, asyncio.Task) and not val.done():
+                val.cancel()
+                killed += 1
+    except Exception:
+        pass
+    # החיבור עצמו: בלי סגירה מפורשת השקע עלול להישאר פתוח עד שה-GC יגיע
+    # אליו, ועד אז משימה שלא נתפסה בסריקה עוד יכולה לכתוב אליו.
+    conn = getattr(sess, "connection", None)
+    if conn is not None:
+        for meth in ("close", "disconnect"):
+            fn = getattr(conn, meth, None)
+            if fn is None:
+                continue
+            try:
+                r = fn()
+                if asyncio.iscoroutine(r):
+                    asyncio.ensure_future(r)
+                break
+            except Exception:
+                pass
+    if killed:
+        log.info("🧹 בוטלו %d משימות של session מת", killed)
+    return killed
+
+
 async def _force_down(client):
     """מוודא שהלקוח באמת מנותק לפני start(), ולא רק שביקשנו ממנו.
 
@@ -895,6 +1004,12 @@ async def _force_down(client):
             raise
         except Exception:
             pass
+    # ביקשנו מה-session להיעצר; כאן מוודאים שהוא באמת נעצר. אם הבקשה
+    # נכשלה, משימת ה-ping שלו ממשיכה לכתוב לשקע מת כל 5 שניות — לנצח —
+    # בעוד start() יוצר session חדש לידה. כך הצטברו 90 sessions יתומים
+    # ו-18 שגיאות בשנייה. ביטול ישיר סוגר את זה.
+    _kill_session_tasks(sess)
+
     # מוצא אחרון. לא אלגנטי, אבל החלופה היא בוט שלא יחזור לעולם — וזה
     # בדיוק המצב שנמדד לפני התיקון הזה.
     for flag in ("is_connected", "is_initialized"):
@@ -918,6 +1033,15 @@ async def _revive_bot(b):
         b["peer_ok"] = await _resolve_peer(b["client"], name)
         for k in [k for k in _bot_msg_cache if k[0] == name]:
             _bot_msg_cache.pop(k, None)
+        # # [fix_media_session_leak]
+        # בריכות ה-media של הבוט שייכות ללקוח שמת — משימות ה-ping שלהן
+        # ממשיכות לירות על שקעים סגורים (36 "Send exception" בדקה, נמדד).
+        # drop_media_sessions מוציאה ועוצרת כל אחת (sess.stop → הורג ping).
+        for _o, _dc in [k for k in list(_media_sessions) if k[0] == name]:
+            try:
+                await drop_media_sessions(_o, _dc)
+            except Exception:
+                pass
         b["health_fails"] = 0
         b["cooldown_until"] = 0.0
         log.info("✅  %s הורם מחדש", name)
@@ -2208,7 +2332,7 @@ def _load_relay_hosts() -> dict:
     return hosts
 
 def _save_relay_hosts(hosts: dict):
-    RELAY_HOSTS_FILE.write_text(
+    _atomic_write_text(RELAY_HOSTS_FILE,  # [fix_atomic_writes]
         json.dumps({h: hosts[h] for h in sorted(hosts)}, ensure_ascii=False, indent=2),
         encoding="utf-8")
 
@@ -2505,6 +2629,51 @@ def _hls_probe_vcodec(url: str):
         return None
 
 
+# [fix_live_audio]
+_hls_acodec_cache: dict = {}        # host/path -> (זמן, האם הקול פגום)
+_HLS_ACODEC_TTL = 6 * 3600
+# כמה שורות שגיאה בארבע שניות נחשבות "פגום". ערוץ תקין מחזיר 0; ניקולודיאון
+# החזיר מאות. הסף רחוק מספיק משניהם כדי לא להיות רגיש לרעש.
+_HLS_AUDIO_BAD_AT = int(os.environ.get("HLS_AUDIO_BAD_AT", "8"))
+
+
+def _hls_probe_audio_bad(src: str) -> bool:
+    """מפענח ארבע שניות של קול בלבד וסופר שגיאות. ריצה חוסמת, ולכן
+    נקראת דרך run_in_executor כמו בדיקת הווידאו שלידה."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-v", "error", "-t", "4",
+             "-i", src, "-vn", "-f", "null", "-"],
+            capture_output=True, timeout=45)
+        n = len([ln for ln in r.stderr.decode("utf-8", "replace").splitlines()
+                 if ln.strip()])
+        return n >= _HLS_AUDIO_BAD_AT
+    except Exception:
+        return False        # ספק — לא משנים התנהגות
+
+
+async def _hls_audio_args(host: str, path: str, src: str) -> list:
+    """ארגומנטי הקול. copy כברירת מחדל, קידוד מחדש רק לזרם פגום.
+
+    async ו-run_in_executor ולא קריאה ישירה: הבדיקה מריצה ffmpeg עד 45
+    שניות, וקריאה חוסמת כזאת מתוך קורוטינה הייתה מקפיאה את כל השרת —
+    בדיוק כמו שבדיקת הווידאו שלידה כבר עושה."""
+    key = f"{host}/{path}"
+    now = time.time()
+    ent = _hls_acodec_cache.get(key)
+    if ent is None or now - ent[0] > _HLS_ACODEC_TTL:
+        loop = asyncio.get_running_loop()
+        bad = await loop.run_in_executor(None, _hls_probe_audio_bad, src)
+        _hls_acodec_cache[key] = (now, bad)
+        ent = _hls_acodec_cache[key]
+        log.info("hls_codec: %s → קול %s", key,
+                 "פגום, מקודד מחדש" if bad else "תקין, copy")
+    if ent[1]:
+        return ["-c:a", "aac", "-ac", "2", "-b:a", "128k", "-ar", "48000"]
+    return ["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]
+
+
 async def _hls_codec_args(host: str, path: str, src: str):
     """הארגומנטים שקובעים איך לטפל בזרמים. copy כברירת מחדל."""
     key = f"{host}/{path}"
@@ -2517,11 +2686,16 @@ async def _hls_codec_args(host: str, path: str, src: str):
         ent = _hls_vcodec_cache[key]
         log.info("hls_codec: %s → קודק מקור %s", key, codec or "לא ידוע")
     codec = ent[1]
-    # לא ידוע, או כבר H.264 — לא נוגעים. זו ההתנהגות שהייתה כאן תמיד.
+    # [fix_live_audio]
+    # הקול נבדק בנפרד מהווידאו. עד כאן ההחלטה הייתה לפי הווידאו בלבד,
+    # ולכן ערוץ עם וידאו H.264 תקין וקול פגום קיבל "-c copy" — והקול
+    # הפגום עבר כמו שהוא. כרום דוחה אותו עם PIPELINE_ERROR_DECODE ומפיל
+    # את כל הניגון, בעוד VLC ו-ffmpeg פשוט מדלגים וממשיכים.
+    aud = await _hls_audio_args(host, path, src)
     if not codec or codec == "h264":
-        return ["-c", "copy", "-bsf:a", "aac_adtstoasc"]
-    # קודק שדפדפן לא יפענח: ממירים וידאו בלבד, ומשאירים את האודיו כמו שהוא
-    # (הוא כבר AAC, ולכן גם מסנן ה-ADTS נשאר).
+        return ["-c:v", "copy"] + aud
+    # קודק שדפדפן לא יפענח: ממירים את הווידאו. הקול נקבע בנפרד
+    # ב-_hls_audio_args — copy אם הוא תקין, קידוד מחדש אם לא.
     return [
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
         "-profile:v", "main", "-pix_fmt", "yuv420p",
@@ -2529,8 +2703,7 @@ async def _hls_codec_args(host: str, path: str, src: str):
         "-b:v", "2000k", "-maxrate", "2400k", "-bufsize", "4000k",
         # תקרת רוחב: מגבילה את עלות הקידוד ומונעת מערוץ אחד לחנוק את השרת.
         "-vf", "scale=min(1280\,iw):-2",
-        "-c:a", "copy", "-bsf:a", "aac_adtstoasc",
-    ]
+    ] + aud
 
 
 async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
@@ -2959,12 +3132,64 @@ def load_admins() -> list:
 def save_admins(lst: list):
     ADMINS_FILE.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
 
+# ── מעלי-דרייב מאושרים ────────────────────────────────────────────────────────
+# רשימה נפרדת מהאדמינים: משתמשי טלגרם שמורשים לשלוח "היי בוט <קישור דרייב>"
+# ולהזרים תוכן, בלי גישת אדמין מלאה. מנוהלת בפאנל (כרטיס נפרד).
+DRIVE_UPLOADERS_FILE = DATA_DIR / "drive_uploaders.json"
+
+def load_drive_uploaders() -> list:
+    if DRIVE_UPLOADERS_FILE.exists():
+        try:
+            return json.loads(DRIVE_UPLOADERS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    return []
+
+def save_drive_uploaders(lst: list):
+    DRIVE_UPLOADERS_FILE.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def is_drive_uploader(uid) -> bool:
+    try:
+        uid = int(uid)
+    except Exception:
+        return False
+    return any(int(a.get("id", 0)) == uid for a in load_drive_uploaders())
+
+
 def is_admin_id(uid) -> bool:
     try:
         uid = int(uid)
     except Exception:
         return False
     return any(int(a.get("id", 0)) == uid for a in load_admins())
+
+class DriveUploaderReq(BaseModel):
+    password: str
+    action: str
+    id: Optional[int] = None
+    name: Optional[str] = ""
+
+
+@api.post("/panel/drive-uploaders")
+async def drive_uploaders_api(req: DriveUploaderReq, request: Request):
+    """ניהול רשימת מעלי-הדרייב המאושרים. גישת אדמין בלבד."""
+    check_panel_password(request, req.password)
+    lst = load_drive_uploaders()
+    if req.action == "list":
+        return {"uploaders": lst}
+    if req.action == "add":
+        if req.id is None:
+            raise HTTPException(400, "חסר id")
+        if not any(int(a["id"]) == int(req.id) for a in lst):
+            lst.append({"id": int(req.id), "name": req.name or ""})
+            save_drive_uploaders(lst)
+        return {"uploaders": lst}
+    if req.action == "remove":
+        lst = [a for a in lst if int(a["id"]) != int(req.id)]
+        save_drive_uploaders(lst)
+        return {"uploaders": lst}
+    raise HTTPException(400, "פעולה לא מוכרת")
+
 
 class PanelReq(BaseModel):
     password: str
@@ -3003,7 +3228,39 @@ ADMIN_HTML_FILE = Path(__file__).parent / "admin.html"
 @api.get("/admin", response_class=HTMLResponse)
 async def admin_page():
     if ADMIN_HTML_FILE.exists():
-        return HTMLResponse(ADMIN_HTML_FILE.read_text(encoding="utf-8"))
+        # [fix_admin_freshness]
+        # באנר "עודכן לפני X" + no-store. ראה fix_admin_freshness.py:
+        # /admin הוגש בלי Cache-Control, דפדפנים שמרו אותו, ופאצ' שהוחל
+        # נראה כאילו לא נכנס. הבאנר מודד את הקובץ בצד השרת ולכן אומר את
+        # האמת גם אם משהו בדרך שמר עותק.
+        _html = ADMIN_HTML_FILE.read_text(encoding="utf-8")
+        try:
+            _age = time.time() - ADMIN_HTML_FILE.stat().st_mtime
+            if _age < 7200:                      # שעתיים, ואז נעלם מעצמו
+                # דקות תמיד, ולא "לפני שעה": הבאנר מוצג רק עד שעתיים,
+                # ו"לפני 90 דקות" מדויק יותר מ"לפני שעה" — וזה כל הערך
+                # שלו. "לפני 1 דקות" הוא שגוי בעברית, ולכן יחיד בנפרד.
+                _m = int(_age // 60)
+                _when = ("עכשיו" if _m < 1 else
+                         "לפני דקה" if _m == 1 else
+                         "לפני %d דקות" % _m)
+                _bar = (
+                    '<div style="position:sticky;top:0;z-index:9999;'
+                    'background:#1a7a3a;color:#fff;font:700 12px system-ui;'
+                    'padding:7px 12px;text-align:center;direction:rtl">'
+                    'הפאנל עודכן ' + _when + ' · אם זה נראה ישן — Ctrl+Shift+R'
+                    '</div>')
+                if "<body" in _html:
+                    _i = _html.index(">", _html.index("<body")) + 1
+                    _html = _html[:_i] + _bar + _html[_i:]
+                else:
+                    _html = _bar + _html
+        except Exception:
+            pass                                 # באנר הוא נוחות, לא תלות
+        return HTMLResponse(_html, headers={
+            "Cache-Control": "no-store, must-revalidate",
+            "Pragma": "no-cache",
+        })
     return HTMLResponse("<h1>admin.html לא נמצא בשרת</h1>"
                         "<p>העלה את הקובץ ל-" + str(ADMIN_HTML_FILE) + "</p>",
                         status_code=404)
@@ -3144,7 +3401,11 @@ SIGN_SECRET = _load_or_create_sign_secret()
 # ליום שלם — ואז החתימה פגה מתחת לידיים והנגן קיבל 403. יחד עם רענון הקטלוג
 # לפי SIG_EPOCH_WINDOW, לקוח מקבל קישורים טריים הרבה לפני שהישנים פגים.
 SIGN_TTL = int(os.environ.get("STREAM_SIGN_TTL", "86400"))
-_STREAM_PATH_RE = re.compile(r"/stream/(-?\d+)/(\d+)")
+# # [fix_ac3_route] חותמים גם /vh: מטען החתימה הוא chat/msg/exp
+# ולכן זהה בשני הנתיבים. קבוצה לא-לוכדת כדי שמספרי הקבוצות
+# יישארו chat=1, msg=2. בלי זה קישור /vh בקטלוג מוגש בלי
+# חתימה ומקבל 403.
+_STREAM_PATH_RE = re.compile(r"/(?:stream|vh)/(-?\d+)/(\d+)")
 
 def _stream_sig(chat: str, msg: str, exp: int) -> str:
     data = f"{chat}/{msg}/{exp}".encode()
@@ -3720,9 +3981,156 @@ async def _handle_custom_name(client: Client, message: Message, uid: int):
         f"🎬 לפי «{name}» מצאתי — איזו זו?",
         reply_markup=_options_keyboard(cmid, options, name))
 
+# ── העלאה מ-Google Drive: "היי בוט <קישור>" ממעלה מאושר ──────────────────────
+DRIVE_TMP = DATA_DIR / "drive_tmp"
+DRIVE_MIN_FREE = int(os.environ.get("DRIVE_MIN_FREE_GB", "6")) * 1024 ** 3
+DRIVE_MAX_BYTES = int(os.environ.get("DRIVE_MAX_GB", "2")) * 1024 ** 3  # מגבלת בוט טלגרם
+
+
+def _extract_drive_link(text: str):
+    from urllib.parse import urlparse
+    m = re.search(r"https?://[^\s]+", text or "")
+    if not m:
+        return None
+    url = m.group(0).strip().rstrip(").,\u200f\u200e")
+    host = urlparse(url).netloc.lower()
+    if host.endswith("google.com") or host.endswith("googleusercontent.com"):
+        return url
+    return None
+
+
+def _blocking_drive_download(url: str, outdir: str):
+    import re as _re, gdown
+    # מחלצים את מזהה הקובץ מכל צורה נפוצה של קישור Drive ומשתמשים ב-uc?id=,
+    # במקום fuzzy=True שלא קיים בכל גרסה. gdown מטפל באישור של קבצים גדולים.
+    m = (_re.search(r"/d/([A-Za-z0-9_-]{20,})", url)
+         or _re.search(r"[?&]id=([A-Za-z0-9_-]{20,})", url))
+    src = f"https://drive.google.com/uc?id={m.group(1)}" if m else url
+    return gdown.download(src, output=outdir + "/", quiet=True)
+
+
+async def _handle_drive_upload(client, message, uid, text):
+    import tempfile, time as _t
+    link = _extract_drive_link(text)
+    if not link:
+        await message.reply_text("שלח כך:\nהיי בוט\n<קישור Google Drive ציבורי>")
+        return
+    try:
+        free = shutil.disk_usage(str(DATA_DIR)).free
+    except Exception:
+        free = None
+    if free is not None and free < DRIVE_MIN_FREE:
+        await message.reply_text(f"❌ אין מספיק מקום פנוי בשרת ({free // 1024**3}GB). נקה ונסה שוב.")
+        return
+    status = await message.reply_text("⏳ מתחיל הורדה מהדרייב…")
+    DRIVE_TMP.mkdir(parents=True, exist_ok=True)
+    workdir = tempfile.mkdtemp(dir=str(DRIVE_TMP))
+
+    def _dirsize():
+        tot = 0
+        try:
+            for f in os.listdir(workdir):
+                fp = os.path.join(workdir, f)
+                if os.path.isfile(fp):
+                    tot += os.path.getsize(fp)
+        except Exception:
+            pass
+        return tot
+
+    async def _edit(txt):
+        try:
+            await status.edit_text(txt)
+        except Exception:
+            pass
+
+    try:
+        # הורדה עם התקדמות חיה. gdown לא מדווח התקדמות, אז מנטרים את גודל
+        # הקובץ על הדיסק כל 4 שניות — מראה כמה ירד ובאיזו מהירות.
+        dl_task = asyncio.create_task(asyncio.to_thread(_blocking_drive_download, link, workdir))
+        last_b, last_t = 0, _t.time()
+        while not dl_task.done():
+            await asyncio.sleep(4)
+            cur = _dirsize()
+            now = _t.time()
+            spd = (cur - last_b) / max(0.1, now - last_t)
+            last_b, last_t = cur, now
+            await _edit(f"⬇ מוריד מהדרייב… {cur // 1048576}MB · {spd / 1048576:.1f}MB/s")
+        try:
+            path = dl_task.result()
+        except ModuleNotFoundError:
+            await _edit("❌ gdown לא מותקן בשרת. הרץ: pip3 install gdown")
+            return
+        except Exception as e:
+            await _edit(f"❌ ההורדה נכשלה: {str(e)[:200]}")
+            return
+        if not path or not os.path.exists(path):
+            await _edit("❌ לא הצלחתי להוריד. ודא שהקישור ציבורי ('כל מי שיש לו הקישור').")
+            return
+        size = os.path.getsize(path)
+        if size > DRIVE_MAX_BYTES:
+            await _edit(f"❌ הקובץ גדול מדי ({size // 1024**3}GB). המגבלה דרך הבוט היא "
+                        f"{DRIVE_MAX_BYTES // 1024**3}GB — קובץ כזה תעלה מהטלפון.")
+            return
+        fname = os.path.basename(path)
+
+        # העלאה לטלגרם עם התקדמות חיה: אחוז, מהירות, וזמן שנותר.
+        up = {"t0": _t.time(), "last": 0.0}
+        async def _prog(current, total):
+            now = _t.time()
+            if now - up["last"] < 4 and current < total:
+                return
+            up["last"] = now
+            el = max(0.1, now - up["t0"])
+            spd = current / el
+            eta = int((total - current) / spd) if spd > 0 else 0
+            pct = (100 * current / total) if total else 0
+            mm, ss = divmod(eta, 60)
+            await _edit(f"⬆ מעלה לטלגרם… {pct:.0f}% · {current // 1048576}/{total // 1048576}MB "
+                        f"· {spd / 1048576:.1f}MB/s · נותרו {mm}:{ss:02d}")
+        dest_channel = current_upload_channel()
+        async with _upload_lock:
+            try:
+                sent = await client.send_document(
+                    dest_channel, path, file_name=fname, caption=fname[:200],
+                    progress=_prog)
+            except Exception as e:
+                await _edit(f"❌ ההעלאה לטלגרם נכשלה: {str(e)[:200]}")
+                return
+            channel_msg_id = sent.id
+            note_uploaded_msg_id(dest_channel, channel_msg_id)
+            await asyncio.sleep(1.5)
+        media = sent.document or sent.video or sent.audio
+        fuid = getattr(media, "file_unique_id", "") or ""
+        ep = parse_episode_info(fname)
+        if ep:
+            add_episode_entry(ep, channel_msg_id, fuid, dest_channel)
+            await _edit(f"✅ נוסף לרשימת ההעלאות: {ep['series']} — עונה {ep['season']} פרק {ep['episode']}.\n"
+                        f"ממתין לאישור בפאנל.")
+            return
+        query, options = await smart_tmdb_search(fname)
+        if options:
+            entry = add_movie_entry(options[0], channel_msg_id, fuid, dest_channel)
+            await _edit(f"✅ נוסף לרשימת ההעלאות: {entry['title']} ({entry.get('year') or '?'}).\nבדוק ואשר בפאנל.")
+        else:
+            entry = add_movie_entry(
+                {"title": query or fname, "year": "", "tmdb_id": 0, "type": "movie",
+                 "poster": "", "overview": ""}, channel_msg_id, fuid, dest_channel)
+            await _edit(f"✅ נוסף לרשימת ההעלאות בשם: {entry['title']}.\nבדוק ואשר בפאנל.")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 async def on_upload(client: Client, message: Message):
     """מנהל שלח קובץ/וידאו לבוט ההעלאה (או טקסט — לזרימת שם ידני)."""
     uid = message.from_user.id if message.from_user else 0
+    _txt = (message.text or "")
+    # "היי בוט <קישור דרייב>" — פתוח גם למעלי-דרייב מאושרים, לא רק לאדמינים.
+    if re.match(r"^\s*היי\s*בוט", _txt):
+        if is_admin_id(uid) or is_drive_uploader(uid):
+            await _handle_drive_upload(client, message, uid, _txt)
+        else:
+            log.info("drive: התעלמות מ-uid לא-מורשה %s", uid)
+        return
     if not is_admin_id(uid):
         # לא מורשה — לא עונים כלל (הבעלים ביקש: מי שלא ברשימה, הבוט לא יענה לו)
         log.info("upload_bot: התעלמות מ-uid לא-מורשה %s", uid)
@@ -4398,7 +4806,7 @@ def save_content(arr: list):
             _prune_content_backups()
     except Exception as e:
         log.warning("גיבוי content נכשל (ממשיכים בשמירה): %s", e)
-    CONTENT_FILE.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(CONTENT_FILE, json.dumps(arr, ensure_ascii=False, indent=2))  # [fix_atomic_writes]
     _bump_content_version()
 
 async def seed_content_if_empty():
@@ -5163,13 +5571,217 @@ async def _items_by_id_async(ver: int) -> dict:
         return await asyncio.to_thread(_build_item_index, ver)
 
 
+# ── טריילרים ─────────────────────────────────────────────────────────────────
+# מפתח יוטיוב לכל פריט שיש לו tmdb_id. המטמון ממופתח לפי ("movie"|"tv", tmdb_id)
+# ולא לפי מזהה הפריט, כי כל פרקי הסדרה חולקים טריילר אחד.
+
+TRAILERS_FILE = DATA_DIR / "trailers.json"
+TRAILER_MISS_TTL = 14 * 24 * 3600      # בדיקה חוזרת לפריט בלי טריילר
+
+def _load_trailers() -> dict:
+    try:
+        return json.loads(TRAILERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_trailers(db: dict) -> None:
+    try:
+        TRAILERS_FILE.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        log.warning("שמירת trailers.json נכשלה: %s", e)
+
+def _pick_trailer(results: list):
+    """הטוב ביותר מבין הסרטונים: טריילר רשמי, אחר כך טריילר, אחר כך טיזר.
+    רק יוטיוב — ה-CDN של TMDB עצמו לא מגיש וידאו, וספקים אחרים לא ניתנים
+    להטמעה אצלנו."""
+    yt = [v for v in results if (v.get("site") or "").lower() == "youtube" and v.get("key")]
+    for want_official in (True, False):
+        for want_type in ("Trailer", "Teaser", "Clip"):
+            for v in yt:
+                if v.get("type") == want_type and bool(v.get("official")) == want_official:
+                    return v
+    return yt[0] if yt else None
+
+
+_YT_RE = re.compile(
+    r"(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?v=|embed/|shorts/|v/))"
+    r"([A-Za-z0-9_-]{6,})")
+
+def _yt_key(url: str):
+    """מפתח יוטיוב מתוך קישור בכל צורה, או None. מקבל גם מפתח חשוף, כדי
+    שהדבקה של המזהה בלבד תעבוד ולא תיראה כמו תקלה."""
+    u = (url or "").strip()
+    if not u:
+        return None
+    m = _YT_RE.search(u)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,}", u):
+        return u
+    return None
+
+
+def _has_trailer(item: dict, tdb: dict) -> bool:
+    """האם לפריט יש טריילר — ידני או כזה שכבר נמצא ונשמר במטמון."""
+    if _yt_key(item.get("trailer_url")):
+        return True
+    tid = item.get("tmdb_id")
+    if not tid:
+        return False
+    kind = "tv" if item.get("series_name") else "movie"
+    hit = tdb.get(f"{kind}:{tid}")
+    return bool(hit and hit.get("key"))
+
+
+@api.get("/panel/no-trailer")
+async def panel_no_trailer(request: Request, password: str = ""):
+    """מה שאין לו טריילר. סדרות מקובצות לפי שם — רשימה של 424 פרקים לאותה
+    סדרה אינה רשימת עבודה, היא רעש."""
+    check_panel_password(request, password)
+    tdb = _load_trailers()
+    movies, series = [], {}
+    for m in load_content():
+        if m.get("is_live") or _has_trailer(m, tdb):
+            continue
+        sn = (m.get("series_name") or "").strip()
+        if sn:
+            e = series.setdefault(sn, {"series_name": sn, "id": m.get("id"),
+                                       "category": m.get("category"),
+                                       "tmdb_id": m.get("tmdb_id"), "episodes": 0,
+                                       "thumbnail_url": m.get("thumbnail_url")})
+            e["episodes"] += 1
+        else:
+            movies.append({"id": m.get("id"), "title": m.get("title"),
+                           "year": m.get("year"), "category": m.get("category"),
+                           "tmdb_id": m.get("tmdb_id"),
+                           "thumbnail_url": m.get("thumbnail_url")})
+    movies.sort(key=lambda x: str(x.get("title") or ""))
+    ser = sorted(series.values(), key=lambda x: -x["episodes"])
+    return JSONResponse({"movies": movies, "series": ser,
+                         "counts": {"movies": len(movies), "series": len(ser)}})
+
+
+@api.get("/content/trailer/{item_id}")
+async def content_trailer(item_id: str):
+    item = next((m for m in load_content() if str(m.get("id")) == str(item_id)), None)
+    if not item:
+        return JSONResponse({"key": None, "reason": "no_item"})
+    # ידני גובר על TMDB: מי שהזין קישור בפאנל יודע טוב יותר מהתאמה אוטומטית,
+    # וזו גם הדרך היחידה לתת טריילר לפריט שאין לו tmdb_id בכלל.
+    manual = _yt_key(item.get("trailer_url"))
+    if manual:
+        return JSONResponse({"key": manual, "manual": True},
+                            headers={"Cache-Control": "public, max-age=3600"})
+    tid = item.get("tmdb_id")
+    if not tid or not TMDB_API_KEY:
+        return JSONResponse({"key": None, "reason": "no_tmdb_id"})
+    kind = "tv" if item.get("series_name") else "movie"
+    ck = f"{kind}:{tid}"
+
+    db = _load_trailers()
+    hit = db.get(ck)
+    if hit and (hit.get("key") or (time.time() - hit.get("at", 0)) < TRAILER_MISS_TTL):
+        return JSONResponse({"key": hit.get("key"), "cached": True},
+                            headers={"Cache-Control": "public, max-age=86400"})
+
+    best = None
+    try:
+        async with httpx.AsyncClient(timeout=12) as cx:
+            # עברית קודם (יש תוכן עם טריילר מדובב), ואם אין — אנגלית.
+            for lang in ("he", "en-US"):
+                r = await cx.get(f"https://api.themoviedb.org/3/{kind}/{tid}/videos",
+                                 params={"api_key": TMDB_API_KEY, "language": lang})
+                if r.status_code != 200:
+                    continue
+                best = _pick_trailer(r.json().get("results") or [])
+                if best:
+                    break
+    except Exception as e:
+        log.info("trailer: שגיאה ב-TMDB עבור %s: %s", ck, e)
+        # לא נרשם למטמון: תקלת רשת אינה "אין טריילר".
+        return JSONResponse({"key": None, "reason": "tmdb_error"})
+
+    key = best.get("key") if best else None
+    db[ck] = {"key": key, "at": time.time()}
+    _save_trailers(db)
+    return JSONResponse({"key": key}, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ── תוכן באנגלית ─────────────────────────────────────────────────────────────
+# TMDB מחזיק את אותו סרט בכמה שפות. זה תוכן רשמי ולא תרגום מכונה, ולכן זו
+# הדרך הנכונה לתת שם ותקציר באנגלית במקום לתרגם 12,700 תקצירים.
+# תלוי ב-tmdb_id: פריט בלי מזהה יישאר בעברית.
+
+LOCALE_EN_FILE = DATA_DIR / "locale_en.json"
+LOCALE_MISS_TTL = 14 * 24 * 3600
+
+def _load_locale_en() -> dict:
+    try:
+        return json.loads(LOCALE_EN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_locale_en(db: dict) -> None:
+    try:
+        LOCALE_EN_FILE.write_text(json.dumps(db, ensure_ascii=False), encoding="utf-8")
+    except Exception as ex:
+        log.warning("שמירת locale_en.json נכשלה: %s", ex)
+
+async def _localized_fields(item: dict) -> dict:
+    """{title, description} באנגלית, או {} כשאין. לא זורק לעולם: כשל כאן
+    צריך להשאיר את הפריט בעברית, לא להפיל את פתיחת הסרט."""
+    tid = item.get("tmdb_id")
+    if not tid or not TMDB_API_KEY:
+        return {}
+    kind = "tv" if item.get("series_name") else "movie"
+    ck = f"{kind}:{tid}"
+    db = _load_locale_en()
+    hit = db.get(ck)
+    if hit and (hit.get("title") or hit.get("description")
+                or (time.time() - hit.get("at", 0)) < LOCALE_MISS_TTL):
+        return {k: v for k, v in hit.items() if k in ("title", "description") and v}
+    try:
+        async with httpx.AsyncClient(timeout=12) as cx:
+            r = await cx.get(f"https://api.themoviedb.org/3/{kind}/{tid}",
+                             params={"api_key": TMDB_API_KEY, "language": "en-US"})
+            if r.status_code != 200:
+                return {}
+            j = r.json()
+    except Exception as ex:
+        log.info("locale_en: שגיאה עבור %s: %s", ck, ex)
+        return {}          # תקלת רשת אינה "אין אנגלית" — לא נרשם למטמון
+    out = {}
+    ttl = (j.get("title") or j.get("name") or "").strip()
+    ov = (j.get("overview") or "").strip()
+    if ttl:
+        out["title"] = ttl
+    if ov:
+        out["description"] = ov
+    db[ck] = dict(out, at=time.time())
+    _save_locale_en(db)
+    return out
+
+
 @api.get("/content/item/{item_id}")
-async def content_item(item_id: str):
-    """פריט בודד עם כל השדות — משמש למשיכת התיאור כשפותחים סרט/סדרה."""
+async def content_item(item_id: str, lang: str = "he"):
+    """פריט בודד עם כל השדות — משמש למשיכת התיאור כשפותחים סרט/סדרה.
+    lang=en מחליף שם ותקציר בגרסה האנגלית של TMDB כשהיא קיימת."""
     e = (await _items_by_id_async(get_content_version())).get(item_id)
     if e is None:
         raise HTTPException(404, "not found")
-    return JSONResponse(e, headers={"Cache-Control": "public, max-age=300"})
+    if lang == "en":
+        # עותק ולא המקור: המילון הזה משותף לכל הבקשות, ושינוי במקום היה
+        # מרעיל את הקטלוג באנגלית גם למי שביקש עברית.
+        e = dict(e)
+        loc = await _localized_fields(e)
+        if loc.get("title"):
+            e["title"] = loc["title"]
+        elif (e.get("en_title") or "").strip():
+            e["title"] = e["en_title"].strip()
+        if loc.get("description"):
+            e["description"] = loc["description"]
+    return JSONResponse(e, headers={"Cache-Control": "public, max-age=300",
+                                    "Vary": "Accept-Language"})
 
 
 async def _content_response(request: Request) -> Response:
@@ -5385,6 +5997,100 @@ async def content_mutate(req: ContentMutateReq, request: Request):
     save_content(result)
     return {"ok": True, "deleted": deleted, "updated": updated, "added": added,
             "count": len(result), "version": get_content_version()}
+
+
+# ── יצירת קובץ .torrent מפריט שכבר על השרת (mktorrent) ────────────────────────
+# qBittorrent 4.4.1 לא חושף API ליצירת טורנט. לתוכן שהמשתמש מחזיק בזכויות עליו.
+# Path (לא pathlib.Path): מיובא כ-from pathlib import Path בראש הקובץ, בעוד
+# שהמודול pathlib מיובא רק בהמשך. שימוש ב-pathlib.Path כאן, ברמת המודול,
+# היה נתקל בשם לא-מוגדר בזמן הטעינה ומפיל את השירות.
+QBT_DL_ROOT = Path(os.environ.get("QBT_DL_ROOT", "/home/torrents"))
+QBT_WEBUI_HOST = os.environ.get("QBT_WEBUI_HOST", "127.0.0.1:8080")
+QBT_WEBUI_PASS_FILE = Path("/etc/qbt-webui.pass")
+
+
+async def _qbt_cookie_ok(request: Request) -> bool:
+    """מאמת מול qBittorrent — מעביר את עוגיית ה-SID ובודק אם תקפה. כך מי
+    שכבר מחובר לדף הטורנטים מורשה, בלי סיסמה שנייה."""
+    sid = request.cookies.get("SID")
+    if not sid:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=8) as cx:
+            r = await cx.get(f"http://{QBT_WEBUI_HOST}/api/v2/app/version",
+                             headers={"Cookie": f"SID={sid}"})
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _webui_pass_ok(pw: str) -> bool:
+    """גיבוי לאימות מול /etc/qbt-webui.pass (טקסט גולמי)."""
+    try:
+        stored = QBT_WEBUI_PASS_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return False
+    return bool(stored) and hmac.compare_digest(
+        (pw or "").encode("utf-8", "surrogatepass"),
+        stored.encode("utf-8", "surrogatepass"))
+
+
+class MakeTorrentReq(BaseModel):
+    name: str
+    announce: str
+    private: bool = True
+    password: Optional[str] = None
+
+
+@api.post("/api/maketorrent")
+async def make_torrent(req: MakeTorrentReq, request: Request):
+    """יוצר .torrent מפריט שהושלם ב-DL_ROOT/complete ומחזיר אותו להורדה.
+    הזריעה נשארת מהשרת: מוסיפים את ה-.torrent חזרה ל-qBittorrent על אותו קובץ."""
+    import tempfile
+    if not (await _qbt_cookie_ok(request) or _webui_pass_ok(req.password or "")):
+        raise HTTPException(status_code=401, detail="לא מחובר — התחבר בדף הטורנטים.")
+
+    if not shutil.which("mktorrent"):
+        raise HTTPException(status_code=503,
+            detail="mktorrent לא מותקן בשרת. הרץ: apt install -y mktorrent")
+
+    ann = (req.announce or "").strip()
+    if not re.match(r"^(https?|udp)://", ann):
+        raise HTTPException(status_code=400,
+            detail="announce URL לא תקין — צריך להתחיל ב-http:// או https://")
+
+    base = (QBT_DL_ROOT / "complete").resolve()
+    name = (req.name or "").strip().strip("/")
+    if not name:
+        raise HTTPException(status_code=400, detail="חסר שם פריט")
+    target = (base / name).resolve()
+    if base != target and base not in target.parents:
+        raise HTTPException(status_code=400, detail="נתיב לא חוקי")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"הפריט לא נמצא: {name}")
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name.split("/")[-1]) or "download"
+    tmpdir = tempfile.mkdtemp()
+    out = Path(tmpdir) / (safe + ".torrent")
+    cmd = ["mktorrent", "-a", ann, "-o", str(out)]
+    if req.private:
+        cmd.append("-p")
+    cmd.append(str(target))
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(status_code=504, detail="יצירת הטורנט ארכה יותר מדי")
+    if proc.returncode != 0 or not out.exists():
+        err = (proc.stderr.decode("utf-8", "ignore")[:200] or "שגיאה").strip()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail="mktorrent נכשל: " + err)
+
+    data = out.read_bytes()
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    return Response(content=data, media_type="application/x-bittorrent",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.torrent"'})
 
 
 @api.get("/content/relink")
@@ -6016,6 +6722,61 @@ MEDIA_SESSION_GRACE = int(os.environ.get("MEDIA_SESSION_GRACE", "30"))
 _media_sessions_locks: dict = {}
 _media_gen_counter = itertools.count(1)
 
+# ── רענון ה-salt של סשני המדיה ────────────────────────────────────────────────
+# ראה FINDING_server_salt.md. בקצרה: salt של MTProto תקף 30 דקות + 30 חסד,
+# ו-pyrogram לא מרענן אותו מראש — GetFutureSalts לא נקראת בספרייה כלל, וה-
+# salt מתוקן רק בתגובה ל-BadServerSalt. ping נשלח עם wait_response=False
+# ולכן BadServerSalt שמגיע בתשובה לו נזרק בשקט, כך שסשן לא פעיל אינו מתקן
+# את עצמו לעולם והתיקון נופל על הבקשה האמיתית הראשונה — של צופה.
+#
+# תוקן במעלה הזרם ב-kurigram PR #464. כאן עושים את אותו דבר מבחוץ, בלי
+# לגעת בספרייה: מבקשים salts עתידיים ומציבים את מי שתקף כרגע.
+#
+# המונים נחשפים ב-/debug/caches כדי שיהיה אפשר לאמת שזה באמת עובד ולא
+# להאמין שזה עובד.
+SALT_REFRESH_EVERY = int(os.environ.get("MEDIA_SALT_REFRESH", "600"))
+_salt_stats = {"ok": 0, "fail": 0, "last_err": ""}
+
+
+async def _salt_refresh_loop():
+    """מציב לכל סשן מדיה חי את ה-salt שתקף כרגע.
+
+    כל חריגה נתפסת ונספרת: הלולאה הזאת היא שיפור, ואם היא נכשלת המצב חוזר
+    להיות בדיוק מה שהיה לפניה. היא לא נוגעת בבריכות ולא סוגרת כלום.
+    """
+    while True:
+        await asyncio.sleep(SALT_REFRESH_EVERY)
+        try:
+            pools = [(k, list(v.get("pool") or []))
+                     for k, v in list(_media_sessions.items())]
+        except Exception:
+            continue
+        for _key, sessions in pools:
+            for sess in sessions:
+                try:
+                    r = await asyncio.wait_for(
+                        sess.invoke(functions.GetFutureSalts(num=4)), timeout=20)
+                    now = time.time()
+                    picked = None
+                    for fs in (getattr(r, "salts", None) or []):
+                        if fs.valid_since <= now < fs.valid_until:
+                            picked = fs.salt
+                            break
+                    if picked is not None:
+                        sess.salt = picked
+                        _salt_stats["ok"] += 1
+                    else:
+                        # השרת ענה אבל אין salt תקף כרגע ברשימה. לא שגיאה,
+                        # אבל גם לא הצלחה — נספר בנפרד כדי שלא ייראה כמו כן.
+                        _salt_stats["fail"] += 1
+                        _salt_stats["last_err"] = "no valid salt in reply"
+                except Exception as e:
+                    _salt_stats["fail"] += 1
+                    _salt_stats["last_err"] = f"{type(e).__name__}: {e}"[:140]
+                # פיזור: 84 בקשות בבת אחת הן בדיוק סוג הפרץ שהכל כאן
+                # מנסה להימנע ממנו.
+                await asyncio.sleep(0.15)
+
 def _media_lock(key):
     lk = _media_sessions_locks.get(key)
     if lk is None:
@@ -6059,6 +6820,19 @@ async def _retire_pool(pool):
 
 
 _media_building: set = set()
+
+# ── תקרה על קצב הפלת בריכות ──────────────────────────────────────────────────
+# נמדד ביומן: 250 חיבורי טלגרם נפתחו ונסגרו ב-7 שניות, בזמן שבריכה אמורה
+# לחיות 30 דקות. הסיבה היא לולאת משוב — timeout מפיל בריכה, ההפלה בונה
+# חיבורים חדשים, טלגרם מאפס אותם (Connection reset by peer), וזה מייצר עוד
+# timeouts. הסף להפלה הוא שני timeouts בעשר דקות, שתחת עומס הוא רעש רגיל.
+#
+# אם בריכה נבנתה זה עתה ועדיין יש timeouts, הבעיה אינה החיבורים שלנו — הם
+# טריים — ובנייה נוספת רק מוסיפה למה שכבר מציף. בריכה מתה באמת עדיין
+# מתרפאת, לכל היותר אחרי הזמן הזה.
+_pool_dropped_at: dict = {}          # (bot, dc) -> מתי הופלה לאחרונה
+POOL_DROP_COOLDOWN = int(os.environ.get("POOL_DROP_COOLDOWN", "120"))
+_pool_drop_skipped = 0               # נמדד, כדי לדעת כמה סחרור נמנע
 
 async def _fill_pool_bg(client, owner: str, dc_id: int, n: int):
     """משלים בריכה ברקע. הצופה לא ממתין לזה."""
@@ -6159,6 +6933,129 @@ async def get_media_session_pool_gen(client, owner: str, dc_id: int, n: int,
     return result
 
 
+# ── העלאה מקבילה לטלגרם ──────────────────────────────────────────────────
+# Pyrogram מעלה על Session אחד (ארבעה עובדים, תור בעומק 1, מקטעי 512KB),
+# ולכן הקצב נקבע על ידי ההשהיה לדאטה-סנטר ולא על ידי רוחב הפס. נמדד:
+# 1.9 MB/s על קו שנותן הרבה יותר.
+#
+# SaveBigFilePart מקבל מקטעים מחוץ לסדר וממספר חיבורים כל עוד file_id זהה.
+TG_UPLOAD_CONNS = int(os.environ.get("TG_UPLOAD_CONNS", "8"))
+_TG_PART = 512 * 1024          # התקרה של טלגרם למקטע. אי אפשר לחרוג ממנה.
+
+
+async def _upload_parallel(client, path, progress=None):
+    """מעלה קובץ גדול על כמה חיבורים ומחזיר InputFileBig מוכן לשליחה."""
+    size = os.path.getsize(path)
+    total_parts = (size + _TG_PART - 1) // _TG_PART
+    file_id = client.rnd_id()
+    dc_id = await client.storage.dc_id()
+    n = max(1, min(TG_UPLOAD_CONNS, 16, total_parts))
+
+    sessions = []
+    try:
+        for _ in range(n):
+            sessions.append(await _make_media_session(client, dc_id))
+        if not sessions:
+            raise RuntimeError("לא נוצר אף חיבור")
+
+        q = asyncio.Queue(maxsize=len(sessions) * 2)
+        sent = 0
+        errors = []
+
+        async def worker(sess):
+            nonlocal sent
+            while True:
+                item = await q.get()
+                if item is None:
+                    return
+                idx, chunk = item
+                for attempt in range(5):
+                    try:
+                        await sess.invoke(functions.upload.SaveBigFilePart(
+                            file_id=file_id, file_part=idx,
+                            file_total_parts=total_parts, bytes=chunk))
+                        break
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 0.5)
+                    except Exception as e:          # ניתוק רגעי — ננסה שוב
+                        if attempt == 4:
+                            # ולא מתעלמים, כמו ש-Pyrogram עושה: מקטע חסר
+                            # פירושו קובץ פגום שנראה כאילו הצליח.
+                            errors.append(e)
+                            return
+                        await asyncio.sleep(0.4 * (attempt + 1))
+                sent += len(chunk)
+                if progress:
+                    try:
+                        progress(sent, size)
+                    except Exception:
+                        pass
+
+        tasks = [asyncio.create_task(worker(s)) for s in sessions]
+        try:
+            with open(path, "rb") as fp:
+                idx = 0
+                while True:
+                    if errors:
+                        break
+                    chunk = fp.read(_TG_PART)
+                    if not chunk:
+                        break
+                    await q.put((idx, chunk))
+                    idx += 1
+        finally:
+            # put_nowait ולא await: אם עובד כבר מת (מקטע שנכשל), תור מלא
+            # היה תוקע את ה-finally לנצח. סנטינל שנפל מטופל ע"י ה-wait
+            # והביטול שאחריו.
+            for _ in tasks:
+                try:
+                    q.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+            _done, pending = await asyncio.wait(tasks, timeout=60)
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if errors:
+            raise errors[0]
+        if sent < size:
+            raise RuntimeError(
+                f"עלו {sent} מתוך {size} בייט — לא שולחים קובץ חסר")
+        return raw_types.InputFileBig(
+            id=file_id, parts=total_parts, name=os.path.basename(str(path)))
+    finally:
+        for s in sessions:
+            try:
+                await s.stop()
+            except Exception:
+                pass
+
+
+async def _send_video_parallel(client, chat, path, *, caption, filename,
+                               duration, width, height, thumb, progress):
+    """מעלה במקביל ושולח. זורק אם משהו לא הסתדר — הקורא נופל למסלול הישן."""
+    big = await _upload_parallel(client, path, progress=progress)
+    thumb_in = None
+    if thumb:
+        # התמונה זעירה; המסלול הרגיל של Pyrogram מספיק לה בהחלט.
+        try:
+            thumb_in = await client.save_file(thumb)
+        except Exception:
+            thumb_in = None
+    attrs = [
+        raw_types.DocumentAttributeVideo(
+            supports_streaming=True, duration=int(duration or 0),
+            w=int(width or 0), h=int(height or 0)),
+        raw_types.DocumentAttributeFilename(file_name=filename),
+    ]
+    media = raw_types.InputMediaUploadedDocument(
+        mime_type="video/mp4", file=big, thumb=thumb_in, attributes=attrs)
+    return await client.invoke(functions.messages.SendMedia(
+        peer=await client.resolve_peer(chat), media=media,
+        message=(caption or "")[:1000], random_id=client.rnd_id()))
+
+
 async def get_media_session_pool(client, owner: str, dc_id: int, n: int) -> list:
     pool, _gen = await get_media_session_pool_gen(client, owner, dc_id, n)
     return pool
@@ -6170,12 +7067,24 @@ async def drop_media_sessions(owner: str, dc_id: int, gen=None):
     gen: הדור שהקורא עבד מולו. אם הבריכה כבר הוחלפה בינתיים (דור אחר) לא
     נוגעים בה — היא של מישהו אחר וכנראה תקינה.
     """
+    global _pool_drop_skipped
     key = (owner, dc_id)
+    # ראה fix_pool_thrash.py: בריכה שהופלה לפני רגע לא תופל שוב. בנייה
+    # חוזרת על חיבורים טריים לא יכולה לתקן כלום, והיא המנוע של הסחרור.
+    _since = time.time() - _pool_dropped_at.get(key, 0.0)
+    if _since < POOL_DROP_COOLDOWN:
+        _pool_drop_skipped += 1
+        if _pool_drop_skipped % 20 == 1:
+            log.warning("בריכה %s/%s הופלה לפני %.0fש — מדלג על הפלה נוספת "
+                        "(נמנעו %d עד כה)", owner, dc_id, _since,
+                        _pool_drop_skipped)
+        return
     async with _media_lock(key):
         ent = _media_sessions.get(key)
         if ent is None or (gen is not None and ent["gen"] != gen):
             return
         _media_sessions.pop(key, None)
+    _pool_dropped_at[key] = time.time()
     asyncio.create_task(_retire_pool(ent["pool"]))
 
 
@@ -6271,9 +7180,11 @@ async def startup():
     asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
     asyncio.create_task(_hls_fix_reaper())   # סוגר ffmpeg של ערוצים ללא צופים
+    asyncio.create_task(_vt_reaper())   # [fix_vod_transcode]  # סוגר ffmpeg של VOD ללא צופים
     asyncio.create_task(peer_retry_loop())   # מחזיר לפעולה בוטים ששכחו את הערוץ
     asyncio.create_task(revive_stream_pool())  # מרים מחדש בוטים עם session תקוע
     asyncio.create_task(pool_health_loop())    # בודק *כל* בוט, גם מי שלא נחנק
+    asyncio.create_task(_salt_refresh_loop())  # salt תקף בלי לזרוק סשנים
     asyncio.create_task(reap_idle_sessions())
     asyncio.create_task(backup_session_periodically())
     asyncio.create_task(staged_bot_startup())
@@ -6518,13 +7429,26 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
         thumb = await _loop.run_in_executor(
             None, _saved_thumb, path, min(10, max(1, _dur // 10)) if _dur else 1)
 
-        await bot["client"].send_video(
-            "me", str(path), caption=caption or filename,
-            file_name=filename, duration=_dur,
-            width=int(meta.get("width") or 0),
-            height=int(meta.get("height") or 0),
-            thumb=thumb or None, supports_streaming=True,
-            progress=_progress)
+        # קודם המסלול המקביל; אם הוא נכשל מכל סיבה — המסלול המקורי.
+        # במקרה הגרוע זה איטי כמו קודם, לא שבור.
+        try:
+            await _send_video_parallel(
+                bot["client"], "me", path,
+                caption=caption or filename, filename=filename,
+                duration=_dur, width=int(meta.get("width") or 0),
+                height=int(meta.get("height") or 0),
+                thumb=thumb or None, progress=_progress)
+        except Exception as _e:
+            log.warning("העלאה מקבילה נכשלה (%s) — נופל למסלול הרגיל",
+                        _e)
+            job.update(sent=0, pct=0, started_tg=time.time())
+            await bot["client"].send_video(
+                "me", str(path), caption=caption or filename,
+                file_name=filename, duration=_dur,
+                width=int(meta.get("width") or 0),
+                height=int(meta.get("height") or 0),
+                thumb=thumb or None, supports_streaming=True,
+                progress=_progress)
         job.update(stage="done", pct=100, done_at=time.time())
         log.info("📤 הועלה ל'הודעות שמורות': %s (%.1fMB)", filename, total / 1048576)
     except asyncio.CancelledError:
@@ -7129,6 +8053,9 @@ async def debug_caches():
         "media_sessions_pools": len(_media_sessions),
         "media_sessions_locks": len(_media_sessions_locks),
         "media_sessions_total_conns": media_conns,
+        "salt_ok": _salt_stats["ok"],
+        "salt_fail": _salt_stats["fail"],
+        "salt_last_err": _salt_stats["last_err"],
         "media_building": len(_media_building),
         "saved_jobs": len(_saved_jobs),
         "saved_tasks": len(_saved_tasks),
@@ -7480,7 +8407,212 @@ _vf_cache: dict = {}          # (chat,msg) -> (זמן, מידע)
 _VF_CACHE_MAX = 40            # כל כותרת ~2MB; תקרה כדי לא לנפח את הזיכרון
 _VF_SEG_TARGET = float(os.environ.get("VODFIX_SEG", "10"))
 _VF_ABR = os.environ.get("VODFIX_AUDIO_BITRATE", "192k")
+
+# [fix_vh_cache]
+# ── מטמון מקטעי /vh על הדיסק ──────────────────────────────────────────────
+# המרה בזמן אמת עולה 4–8 שניות למקטע של עשר שניות (נמדד). בלי מטמון
+# המחיר הזה נגבה מכל צופה ומכל קפיצה אחורה, ולכן הוא נגבה כאן פעם אחת.
+_VF_CACHE_DIR = Path(os.environ.get("VODFIX_CACHE_DIR", "/var/cache/zovex-vh"))
+_VF_CACHE_MAX = int(float(os.environ.get("VODFIX_CACHE_GB", "20")) * (1 << 30))
+_VF_READAHEAD = int(os.environ.get("VODFIX_READAHEAD", "3"))
+_VF_MAX_ENCODERS = int(os.environ.get("VODFIX_MAX_ENCODERS", "3"))
+_vf_build_locks: dict = {}       # (chat,msg,seg) -> Lock, נמחק כשמשתחרר
+_vf_readahead: set = set()       # (chat,msg,seg) בתהליך קידום מראש
+_vf_encode_sem = None
+_vf_sweep_at = 0.0
+
+
+def _vf_sem():
+    """נוצר בפעם הראשונה ולא ברמת המודול: Semaphore נקשר ללופ שבו הוא
+    נוצר, ויצירה לפני שהלופ עלה קושרת אותו ללופ הלא נכון."""
+    global _vf_encode_sem
+    if _vf_encode_sem is None:
+        _vf_encode_sem = asyncio.Semaphore(_VF_MAX_ENCODERS)
+    return _vf_encode_sem
+
+
+def _vf_cache_path(chat: int, msg: int, seg: int) -> Path:
+    return _VF_CACHE_DIR / f"{chat}_{msg}" / f"s{seg}.ts"
+
+
+def _vf_cache_sweep() -> None:
+    """מפנה מקום לפי הנגיעה האחרונה. רץ לכל היותר פעם בדקה, אחרת היינו
+    סורקים את כל הדיסק בכל בקשת מקטע."""
+    global _vf_sweep_at
+    now = time.time()
+    if now - _vf_sweep_at < 60:
+        return
+    _vf_sweep_at = now
+    try:
+        files, total = [], 0
+        for p in _VF_CACHE_DIR.rglob("s*.ts"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, p))
+            total += st.st_size
+        if total <= _VF_CACHE_MAX:
+            return
+        files.sort()
+        freed = 0
+        for _, size, p in files:
+            try:
+                p.unlink()
+            except OSError:
+                continue
+            total -= size
+            freed += 1
+            if total <= _VF_CACHE_MAX * 0.9:
+                break
+        log.info("vodfix: מטמון — נמחקו %d מקטעים, נשאר %.1fGB",
+                 freed, total / (1 << 30))
+    except Exception as e:
+        log.warning("vodfix: ניקוי מטמון נכשל: %s", e)
+
+
+def _vf_cached_response(path: Path):
+    """מגיש מקטע מהדיסק עם Content-Length אמיתי. עד עכשיו התשובה הייתה
+    chunked בלי אורך, כי הבייטים נוצרו תוך כדי."""
+    size = path.stat().st_size
+
+    def gen():
+        with open(path, "rb") as fh:
+            while True:
+                b = fh.read(65536)
+                if not b:
+                    break
+                yield b
+
+    return StreamingResponse(gen(), media_type="video/mp2t",
+                             headers={"Content-Length": str(size),
+                                      "Cache-Control": "no-store",
+                                      **CORS_MEDIA})
+
+
+async def _vf_build_to_cache(chat: int, msg: int, seg: int,
+                             args: list, dest: Path) -> bool:
+    """מקודד מקטע אחד לקובץ. כותב ל-.part ומעביר בשם רק אחרי שה-ffmpeg
+    יצא בהצלחה — קובץ חלקי במטמון היה נראה כמו הצלחה לנצח."""
+    key = (chat, msg, seg)
+    lock = _vf_build_locks.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            if dest.exists():
+                return True
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + ".part")
+            proc = None
+            written = 0
+            async with _vf_sem():
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *args, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE)
+                except FileNotFoundError:
+                    raise HTTPException(500, "ffmpeg לא מותקן בשרת")
+                try:
+                    with open(tmp, "wb") as fh:
+                        while True:
+                            chunk = await proc.stdout.read(65536)
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            written += len(chunk)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    await proc.wait()
+                finally:
+                    if proc.returncode is None:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+            err = b""
+            try:
+                err = (await proc.stderr.read())[-300:]
+            except Exception:
+                pass
+            if proc.returncode != 0 or written == 0:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                log.warning("vodfix: מקטע %s של %s/%s נכשל (קוד %s): %s",
+                            seg, chat, msg, proc.returncode,
+                            err.decode("utf-8", "replace").strip())
+                return False
+            os.replace(tmp, dest)
+            _vf_cache_sweep()
+            return True
+    finally:
+        # בלי הניקוי הזה המילון גדל בערך אחד לכל מקטע שאי פעם נתבקש
+        # ולא משתחרר לעולם — בדיוק סוג הצמיחה שמצטברת לאורך ימי ריצה.
+        if not lock.locked():
+            _vf_build_locks.pop(key, None)
+
+
+def _vf_schedule_readahead(chat: int, msg: int, seg: int, info: dict) -> None:
+    """מקדם את המקטעים הבאים ברקע. זה מה שמבטל את התקיעות בהתחלה:
+    נמדד שהנגן מדביק את הבאפר בעשרים השניות הראשונות ואז מתייצב."""
+    if _VF_READAHEAD <= 0:
+        return
+    segs = info.get("segments") or []
+    for nxt in range(seg + 1, min(seg + 1 + _VF_READAHEAD, len(segs))):
+        key = (chat, msg, nxt)
+        if key in _vf_readahead:
+            continue
+        dest = _vf_cache_path(chat, msg, nxt)
+        if dest.exists():
+            continue
+        _vf_readahead.add(key)
+
+        async def run(nxt=nxt, key=key, dest=dest):
+            try:
+                await _vf_build_to_cache(
+                    chat, msg, nxt, _vf_seg_args(chat, msg, info, nxt), dest)
+            except Exception as e:
+                log.warning("vodfix: קידום מראש של מקטע %s נכשל: %s", nxt, e)
+            finally:
+                _vf_readahead.discard(key)
+
+        try:
+            asyncio.create_task(run())
+        except RuntimeError:
+            _vf_readahead.discard(key)
 _VF_BROWSER_AUDIO = {"mp4a", ".mp3", "Opus", "opus", "fLaC"}
+
+# [fix_vh_video]
+# קודקי וידאו כפי שהם מופיעים ב-stsd. MPEG-4 Part 2 (Xvid/DivX) נשמר
+# ב-MP4 בתור "mp4v" — וזה מה שיש בסמולוויל.
+_VF_VIDEO_FOURCC = ("avc1", "avc3", "avc4", "hvc1", "hev1", "dvh1", "dvhe",
+                    "dva1", "dvav", "mp4v", "s263", "h263", "vp08", "vp09",
+                    "av01", "mjpg", "jpeg", "SVQ3", "cvid", "div3", "DIV3",
+                    "DX50", "XVID", "xvid", "3iv2", "FMP4")
+# /vh מגיש MPEG-TS, ולכן "נתמך" כאן פירושו: גם הדפדפן מפענח אותו וגם
+# המפרק של shaka/mux.js יודע להוציא אותו מ-TS. בפועל זה H.264 בלבד.
+# HEVC היה עובר את הדפדפן בחלק מהמכשירים אבל לא את המפרק, ולכן הוא
+# מומר גם הוא.
+_VF_BROWSER_VIDEO = {"avc1", "avc3", "avc4"}
+_VF_X264_PRESET = os.environ.get("VODFIX_X264_PRESET", "veryfast")
+_VF_X264_CRF = os.environ.get("VODFIX_X264_CRF", "23")
+_VF_VIDEO_THREADS = os.environ.get("VODFIX_VIDEO_THREADS", "2")
+
+
+def _vf_vcodec_args(info):
+    """ארגומנטי הווידאו למקטע. copy כשמותר, H.264 כשחייבים.
+
+    ‎-g/-keyint_min גדולים ובלי זיהוי חיתוכי סצנה: כל מקטע מתחיל בפריים
+    מפתח ממילא (‎-ss לפני הקלט), ופריים מפתח נוסף בתוך מקטע של 10 שניות
+    רק מבזבז סיביות. הקפיצה בסרט נעשית בין מקטעים ולא בתוכם.
+    """
+    if info.get("video_ok", True):
+        return ["-c:v", "copy"]
+    return ["-c:v", "libx264", "-preset", _VF_X264_PRESET,
+            "-crf", _VF_X264_CRF, "-pix_fmt", "yuv420p",
+            "-profile:v", "high", "-level", "4.0",
+            "-sc_threshold", "0", "-g", "250", "-keyint_min", "250",
+            "-threads", _VF_VIDEO_THREADS]
 
 
 def _vf_local_url(chat: int, msg: int) -> str:
@@ -7545,6 +8677,204 @@ def _vf_audio_codecs(moov: bytes):
     return out
 
 
+# [fix_vh_video]
+def _vf_video_codecs(moov: bytes):
+    """שמות קודקי הווידאו, מתוך אותן טבלאות stsd כמו באודיו."""
+    out = []
+
+    def walk(s, e):
+        for typ, o, hdr, size in _mp4_boxes(moov, s, e):
+            end = min(o + size, e)
+            if typ in _MP4_CONTAINERS:
+                walk(o + hdr, end)
+            elif typ == b"stsd":
+                cnt = struct.unpack_from(">I", moov, o + hdr + 4)[0]
+                p = o + hdr + 8
+                for _ in range(min(cnt, 8)):
+                    if p + 8 > end:
+                        break
+                    esz = struct.unpack_from(">I", moov, p)[0]
+                    if esz < 8:
+                        break
+                    fmt = bytes(moov[p + 4:p + 8]).decode("latin1", "replace")
+                    if fmt.startswith(_VF_VIDEO_FOURCC):
+                        out.append(fmt)
+                    p += esz
+    walk(0, len(moov))
+    return out
+
+
+def _ebml_vint(buf, p, keep):
+    b = buf[p]
+    if b == 0:
+        raise ValueError("vint לא תקין")
+    n = 1
+    while not (b & (0x80 >> (n - 1))):
+        n += 1
+    v = b if keep else b & ((0x80 >> (n - 1)) - 1)
+    for i in range(1, n):
+        v = (v << 8) | buf[p + i]
+    return v, p + n
+
+
+def _ebml_elems(buf, p, end):
+    """(מזהה, היסט-תוכן, גודל) לכל אלמנט ברמה אחת."""
+    while p < end - 1:
+        try:
+            eid, q = _ebml_vint(buf, p, True)
+            size, q = _ebml_vint(buf, q, False)
+        except Exception:
+            return
+        yield eid, q, size
+        p = q + size
+
+
+async def _mkv_duration(chat: int, msg: int):
+    """אורך הסרט בשניות מתוך כותרת ה-Matroska, או None.
+
+    נקרא שתי בקשות Range קטנות: 64KB מההתחלה כדי למצוא את SeekHead
+    ואת המיקום של Info, ואז Info עצמו. נמדד על קובץ של 935MB: 3 שניות.
+    בלי זה הנגן מציג 0:00 / 0:00 ואי אפשר לדעת כמה זמן הסרט.
+    """
+    try:
+        url = _vf_local_url(chat, msg)
+        head = await _vf_fetch(url, 0, 65535)
+        seg = None
+        for eid, off, _ in _ebml_elems(head, 0, len(head)):
+            if eid == 0x18538067:          # Segment
+                seg = off
+                break
+        if seg is None:
+            return None
+        info_at = None
+        for eid, off, size in _ebml_elems(head, seg, len(head)):
+            if eid != 0x114D9B74:          # SeekHead
+                continue
+            for e2, o2, s2 in _ebml_elems(head, off, off + size):
+                if e2 != 0x4DBB:           # Seek
+                    continue
+                sid = spos = None
+                for e3, o3, s3 in _ebml_elems(head, o2, o2 + s2):
+                    val = int.from_bytes(head[o3:o3 + s3], "big")
+                    if e3 == 0x53AB:
+                        sid = val
+                    elif e3 == 0x53AC:
+                        spos = val
+                if sid == 0x1549A966:      # Info
+                    info_at = spos
+            break
+        # יש קבצים בלי SeekHead — שם Info יושב ישר אחרי ההתחלה וכבר נקרא.
+        blob, base = (head, seg) if info_at is None else (
+            await _vf_fetch(url, seg + info_at, seg + info_at + 4095), 0)
+        scale, dur = 1000000, None
+        for eid, off, size in _ebml_elems(blob, base, len(blob)):
+            if eid != 0x1549A966:
+                continue
+            for e2, o2, s2 in _ebml_elems(blob, off, off + size):
+                if e2 == 0x2AD7B1:         # TimecodeScale
+                    scale = int.from_bytes(blob[o2:o2 + s2], "big")
+                elif e2 == 0x4489:         # Duration (float)
+                    raw = bytes(blob[o2:o2 + s2])
+                    if len(raw) in (4, 8):
+                        dur = struct.unpack(">f" if len(raw) == 4 else ">d",
+                                            raw)[0]
+            break
+        if not dur:
+            return None
+        return round(dur * scale / 1e9, 3)
+    except Exception as e:
+        log.warning("vodinfo: קריאת אורך MKV נכשלה: %s", e)
+        return None
+
+
+# קודקי קול שאנדרואיד אינו מחויב לפענח. אנדרואיד לא מחייב יצרנים לכלול
+# מפענח Dolby/DTS, וברוב הטלפונים הוא פשוט לא קיים — ExoPlayer מדלג על
+# הרצועה בשקט ומקבלים וידאו בלי קול. כל השאר (AAC, MP3, Opus, Vorbis,
+# FLAC, PCM) מפוענח בכל מכשיר.
+_MKV_HARD_AUDIO = ("A_AC3", "A_EAC3", "A_DTS", "A_TRUEHD", "A_MLP")
+
+
+async def _mkv_audio_codecs(chat: int, msg: int):
+    """שמות קודקי הקול מתוך Tracks של Matroska, או [] אם לא ניתן לברר."""
+    try:
+        url = _vf_local_url(chat, msg)
+        head = await _vf_fetch(url, 0, 65535)
+        seg = None
+        for eid, off, _ in _ebml_elems(head, 0, len(head)):
+            if eid == 0x18538067:              # Segment
+                seg = off
+                break
+        if seg is None:
+            return []
+        tracks_at = None
+        for eid, off, size in _ebml_elems(head, seg, len(head)):
+            if eid != 0x114D9B74:              # SeekHead
+                continue
+            for e2, o2, s2 in _ebml_elems(head, off, off + size):
+                if e2 != 0x4DBB:               # Seek
+                    continue
+                sid = spos = None
+                for e3, o3, s3 in _ebml_elems(head, o2, o2 + s2):
+                    val = int.from_bytes(head[o3:o3 + s3], "big")
+                    if e3 == 0x53AB:
+                        sid = val
+                    elif e3 == 0x53AC:
+                        spos = val
+                if sid == 0x1654AE6B:          # Tracks
+                    tracks_at = spos
+            break
+        # בלי SeekHead — Tracks יושב ליד ההתחלה וכבר נקרא.
+        blob, base_off = (head, seg) if tracks_at is None else (
+            await _vf_fetch(url, seg + tracks_at, seg + tracks_at + 65535), 0)
+        out = []
+        for eid, off, size in _ebml_elems(blob, base_off, len(blob)):
+            if eid != 0x1654AE6B:
+                continue
+            for e2, o2, s2 in _ebml_elems(blob, off, off + size):
+                if e2 != 0xAE:                 # TrackEntry
+                    continue
+                ttype = codec = None
+                for e3, o3, s3 in _ebml_elems(blob, o2, o2 + s2):
+                    if e3 == 0x83:             # TrackType
+                        ttype = int.from_bytes(blob[o3:o3 + s3], "big")
+                    elif e3 == 0x86:           # CodecID
+                        codec = bytes(blob[o3:o3 + s3]).decode(
+                            "latin1", "replace").rstrip("\x00")
+                if ttype == 2 and codec:
+                    out.append(codec)
+            break
+        return out
+    except Exception as e:
+        log.warning("vodinfo: קריאת רצועות MKV נכשלה: %s", e)
+        return []
+
+
+async def _vf_sniff_container(chat: int, msg: int) -> str:
+    """שם המכולה מ-16 הבתים הראשונים. נקרא רק אחרי שהזיהוי כ-MP4 נכשל."""
+    head = await _vf_fetch(_vf_local_url(chat, msg), 0, 15)
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        # EBML. DocType יושב בתוך ה-header הראשון, ולכן 1KB מספיק כדי
+        # להפריד webm (שדפדפנים מנגנים) מ-matroska (שלא).
+        try:
+            more = await _vf_fetch(_vf_local_url(chat, msg), 0, 1023)
+        except Exception:
+            more = head
+        return "webm" if b"webm" in more[:1024] else "matroska"
+    if head[:4] == b"RIFF" and head[8:12] == b"AVI ":
+        return "avi"
+    if head[:3] == b"FLV":
+        return "flv"
+    if head[:4] == b"OggS":
+        return "ogg"
+    if head[:4] == b"\x30\x26\xb2\x75":
+        return "asf"
+    if head[:4] == b"\x00\x00\x01\xba":
+        return "mpeg-ps"
+    if head[:1] == b"\x47":
+        return "mpeg-ts"
+    return "unknown"
+
+
 async def _vf_header_for(chat: int, msg: int):
     """הכותרת המתוקנת והמידע על הקובץ. נבנה פעם אחת ונשמר.
 
@@ -7603,9 +8933,16 @@ async def _vf_header_for(chat: int, msg: int):
     info = {"size": n, "moov_at_end": moov_start + len(moov) == n,
             "moov_start": moov_start, "moov_len": len(moov),
             "duration": _mp4_duration(moov),
-            "audio": _vf_audio_codecs(moov), "header": None,
+            "audio": _vf_audio_codecs(moov),
+            "video": _vf_video_codecs(moov),   # [fix_vh_video]
+            "header": None,
             "body_start": 0, "body_len": 0, "segments": None}
     info["audio_ok"] = any(c in _VF_BROWSER_AUDIO for c in info["audio"])
+    # [fix_vh_video]
+    # בלי רצועת וידאו מזוהה לא ממירים כלום — שינוי התנהגות בלי סיבה הוא
+    # הדרך הבטוחה לשבור פריטים שעבדו.
+    info["video_ok"] = (not info["video"]
+                        or any(c in _VF_BROWSER_VIDEO for c in info["video"]))
 
     if info["moov_at_end"]:
         try:
@@ -7691,6 +9028,50 @@ async def vodfix_faststart(chat_id: int, message_id: int, request: Request,
                              media_type="video/mp4", headers=headers)
 
 
+# [fix_vh_cache]
+def _vf_seg_args(chat_id: int, message_id: int, info: dict, seg: int) -> list:
+    """פקודת ה-ffmpeg למקטע אחד. הועברה לכאן מתוך vodfix_segment כדי
+    שגם הקידום-מראש יוכל לבנות מקטע שעוד לא נתבקש."""
+    start, dur = info["segments"][seg]
+    # קלט: /fs אם ה-moov הוזז (הכותרת בזיכרון, ולכן ffmpeg לא מושך את הקצה
+    # מטלגרם בכל סגמנט), אחרת הזרם הרגיל.
+    iexp = int(time.time()) + SIGN_TTL
+    isig = _stream_sig(str(chat_id), str(message_id), iexp) if SIGN_SECRET else ""
+    q = f"?exp={iexp}&sig={isig}" if SIGN_SECRET else ""
+    route = "fs" if info["header"] else "stream"
+    src = f"http://127.0.0.1:{PORT}/{route}/{chat_id}/{message_id}{q}"
+
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        # -ss ו--to שניהם לפני הקלט: ffmpeg קופץ ישר לנקודה בבקשת טווח
+        # וקורא רק עד הסוף הדרוש. `-to` ולא `-t`, כי מול -copyts המשך נמדד
+        # על ציר הזמן המקורי — `-t` היה מסיים לפני נקודת ההתחלה ומוציא
+        # קובץ ריק (נבדק: "Output file is empty, nothing was encoded").
+        "-ss", f"{start:.3f}", "-to", f"{start + dur:.3f}", "-i", src,
+        "-map", "0:v:0", "-map", "0:a:0?",   # מסלול תמונת השער נשאר בחוץ
+        # [fix_vh_video]  copy כברירת מחדל, H.264 רק לקודק שהדפדפן לא מפענח
+        *_vf_vcodec_args(info),
+        "-c:a", "aac", "-ac", "2", "-b:a", _VF_ABR, "-ar", "48000",
+        # -copyts שומר את חותמות הזמן המקוריות, ולכן הסגמנטים מתחברים
+        # ברצף אצל הנגן. תוספת -output_ts_offset כאן הייתה מוסיפה את ההיסט
+        # פעם שנייה ומזיזה כל סגמנט קדימה פי שתיים.
+        #
+        # make_non_negative ולא disabled: מקודד ה-AAC מוסיף priming של
+        # ~21ms, ולכן החבילה הראשונה של המקטע הראשון יוצאת עם חותמת זמן
+        # שלילית. שדה ה-PTS ב-MPEG-TS הוא 33 סיביות בלי סימן, אז המינוס
+        # נעטף ונכתב כ-95443.696 (‎2**33/90000). הנגן ראה וידאו ב-0 וקול
+        # ב-95,443, לא הצליח ליישר, ונתקע בטעינה אחרי כשתי שניות — כך
+        # נראתה התקלה בונסדיי באפליקציה.
+        #
+        # make_non_negative מזיז את כל הרצועות באותו דלתא ורק כשיש חותמת
+        # שלילית, ולכן יחס קול/תמונה נשמר. נמדד: s1 ו-s2 יוצאים זהים
+        # בייט-בבייט לפני ואחרי — רק המקטע הראשון משתנה.
+        "-copyts", "-avoid_negative_ts", "make_non_negative",
+        "-muxdelay", "0", "-muxpreload", "0",
+        "-f", "mpegts", "pipe:1",
+    ]
+
+
 @api.get("/vh/{chat_id}/{message_id}/index.m3u8")
 async def vodfix_playlist(chat_id: int, message_id: int, request: Request,
                           exp: int = 0, sig: str = ""):
@@ -7760,42 +9141,26 @@ async def vodfix_segment(chat_id: int, message_id: int, seg: int,
         raise HTTPException(404, "אין סגמנט כזה")
     start, dur = segs[seg]
 
-    # קלט: /fs אם ה-moov הוזז (הכותרת בזיכרון, ולכן ffmpeg לא מושך את הקצה
-    # מטלגרם בכל סגמנט), אחרת הזרם הרגיל.
-    iexp = int(time.time()) + SIGN_TTL
-    isig = _stream_sig(str(chat_id), str(message_id), iexp) if SIGN_SECRET else ""
-    q = f"?exp={iexp}&sig={isig}" if SIGN_SECRET else ""
-    route = "fs" if info["header"] else "stream"
-    src = f"http://127.0.0.1:{PORT}/{route}/{chat_id}/{message_id}{q}"
+    # [fix_vh_cache]
+    # רק תוכן שבאמת מומר נכנס למטמון. ב-copy אין מה לחסוך במעבד, וקאשינג
+    # שלו היה ממלא את הדיסק בכל מה שמישהו צפה בו.
+    if not info.get("video_ok", True):
+        dest = _vf_cache_path(chat_id, message_id, seg)
+        if dest.exists():
+            try:
+                os.utime(dest, None)      # נגיעה אחרונה, בשביל הניקוי
+            except OSError:
+                pass
+        else:
+            ok = await _vf_build_to_cache(
+                chat_id, message_id, seg,
+                _vf_seg_args(chat_id, message_id, info, seg), dest)
+            if not ok:
+                raise HTTPException(500, "בניית המקטע נכשלה")
+        _vf_schedule_readahead(chat_id, message_id, seg, info)
+        return _vf_cached_response(dest)
 
-    args = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        # -ss ו--to שניהם לפני הקלט: ffmpeg קופץ ישר לנקודה בבקשת טווח
-        # וקורא רק עד הסוף הדרוש. `-to` ולא `-t`, כי מול -copyts המשך נמדד
-        # על ציר הזמן המקורי — `-t` היה מסיים לפני נקודת ההתחלה ומוציא
-        # קובץ ריק (נבדק: "Output file is empty, nothing was encoded").
-        "-ss", f"{start:.3f}", "-to", f"{start + dur:.3f}", "-i", src,
-        "-map", "0:v:0", "-map", "0:a:0?",   # מסלול תמונת השער נשאר בחוץ
-        "-c:v", "copy",
-        "-c:a", "aac", "-ac", "2", "-b:a", _VF_ABR, "-ar", "48000",
-        # -copyts שומר את חותמות הזמן המקוריות, ולכן הסגמנטים מתחברים
-        # ברצף אצל הנגן. תוספת -output_ts_offset כאן הייתה מוסיפה את ההיסט
-        # פעם שנייה ומזיזה כל סגמנט קדימה פי שתיים.
-        #
-        # make_non_negative ולא disabled: מקודד ה-AAC מוסיף priming של
-        # ~21ms, ולכן החבילה הראשונה של המקטע הראשון יוצאת עם חותמת זמן
-        # שלילית. שדה ה-PTS ב-MPEG-TS הוא 33 סיביות בלי סימן, אז המינוס
-        # נעטף ונכתב כ-95443.696 (‎2**33/90000). הנגן ראה וידאו ב-0 וקול
-        # ב-95,443, לא הצליח ליישר, ונתקע בטעינה אחרי כשתי שניות — כך
-        # נראתה התקלה בונסדיי באפליקציה.
-        #
-        # make_non_negative מזיז את כל הרצועות באותו דלתא ורק כשיש חותמת
-        # שלילית, ולכן יחס קול/תמונה נשמר. נמדד: s1 ו-s2 יוצאים זהים
-        # בייט-בבייט לפני ואחרי — רק המקטע הראשון משתנה.
-        "-copyts", "-avoid_negative_ts", "make_non_negative",
-        "-muxdelay", "0", "-muxpreload", "0",
-        "-f", "mpegts", "pipe:1",
-    ]
+    args = _vf_seg_args(chat_id, message_id, info, seg)
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE,
@@ -7830,16 +9195,225 @@ async def vodfix_segment(chat_id: int, message_id: int, seg: int,
                                       **CORS_MEDIA})
 
 
+# [fix_vod_transcode]
+# ── VOD transcode: ffmpeg ל-HLS לקבצים שהדפדפן לא תומך בהם (AVI ועוד) ────────
+_VT_DIR = Path(os.environ.get("VT_DIR", "/tmp/zovex-vt"))
+_VT_IDLE = int(os.environ.get("VT_IDLE_SEC", "120"))
+_VT_MAX = int(os.environ.get("VT_MAX_CONCURRENT", "2"))
+_vt: dict = {}                       # key -> {"proc","dir","last"}
+_vt_lock = asyncio.Lock()
+
+
+def _vt_key(chat_id: int, message_id: int) -> str:
+    return f"{chat_id}_{message_id}"
+
+
+async def _vt_video_args(src: str) -> list:
+    """‎-c:v copy כשהווידאו כבר תקין לדפדפן, אחרת קידוד מלא.
+
+    ראה fix_vt_copy_video.py. זו ההבחנה שב-Jellyfin נקראת Direct Stream
+    מול Transcode: קובץ MKV עם h264 תקין צריך שנמיר לו רק את הקול.
+    """
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,pix_fmt",
+            "-of", "default=nw=1:nk=1", src,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), timeout=60)
+        f = out.decode("utf-8", "replace").split()
+    except Exception as e:
+        # ffprobe חסר, קלט איטי, כל דבר — נופלים לקידוד המלא. הוא עובד
+        # על הכול, ולכן זו הבחירה הבטוחה כשאין ידיעה.
+        log.warning("vt: ffprobe נכשל (%s) — מקודד מחדש", e)
+        f = []
+    if len(f) >= 2 and f[0] == "h264" and f[1] == "yuv420p":
+        log.info("vt: %s — וידאו מועתק כמו שהוא", f[0])
+        return ["-c:v", "copy"]
+    if f:
+        log.info("vt: %s/%s — מקודד וידאו מחדש", f[0], f[1] if len(f) > 1 else "?")
+    return [
+            "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main",
+            "-pix_fmt", "yuv420p", "-vf", "scale=min(1280\,iw):-2",
+    ]
+
+
+async def _vt_start(chat_id: int, message_id: int):
+    """מפעיל (או מחזיר קיים) ffmpeg שממיר את הקובץ ל-HLS/fMP4 מקומי."""
+    key = _vt_key(chat_id, message_id)
+    async with _vt_lock:
+        ent = _vt.get(key)
+        if ent and ent["proc"].returncode is None:
+            ent["last"] = time.time()
+            return ent
+        alive = sum(1 for e in _vt.values() if e["proc"].returncode is None)
+        if alive >= _VT_MAX and not (ent and ent["proc"].returncode is None):
+            return None                   # תקרה — לא מעמיסים על השרת
+        outdir = _VT_DIR / key
+        try:
+            shutil.rmtree(outdir, ignore_errors=True)
+            outdir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log.error("vt: יצירת תיקייה נכשלה - %s", e)
+            return None
+        src = _vf_local_url(chat_id, message_id)
+        _vt_vargs = await _vt_video_args(src)
+        args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-reconnect", "1", "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1", "-reconnect_delay_max", "10",
+            "-i", src,
+            # AVI מכיל בדרך כלל וידאו mpeg4/xvid ואודיו mp3/ac3 — אף אחד
+            # מהם לא נתמך בדפדפן, ולכן מקודדים את שניהם. veryfast כדי לא
+            # לחנוק את המעבד, וסקייל תקרה כדי שסרט אחד לא ישתלט על השרת.
+            *_vt_vargs,
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+            "-f", "hls", "-hls_time", "4", "-hls_list_size", "0",
+            "-hls_playlist_type", "event",
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", str(outdir / "s%d.m4s"),
+            str(outdir / "index.m3u8"),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+        except FileNotFoundError:
+            log.error("vt: ffmpeg לא מותקן")
+            return None
+        ent = {"proc": proc, "dir": outdir, "last": time.time()}
+        _vt[key] = ent
+        log.info("vt: התחלת המרה %s", key)
+        return ent
+
+
+async def _vt_reaper():
+    """סוגר ffmpeg של פריטים שאיש כבר לא צופה בהם."""
+    while True:
+        await asyncio.sleep(30)
+        now = time.time()
+        for key, ent in list(_vt.items()):
+            if now - ent["last"] < _VT_IDLE:
+                continue
+            try:
+                if ent["proc"].returncode is None:
+                    ent["proc"].kill()
+            except Exception:
+                pass
+            shutil.rmtree(ent["dir"], ignore_errors=True)
+            _vt.pop(key, None)
+            log.info("vt: נסגר פריט לא פעיל %s", key)
+
+
+@api.get("/vt/{chat_id}/{message_id}/index.m3u8")
+async def vt_playlist(chat_id: int, message_id: int, request: Request,
+                      exp: int = 0, sig: str = ""):
+    check_hotlink(request)
+    _vf_check_sig(chat_id, message_id, exp, sig)
+    ent = await _vt_start(chat_id, message_id)
+    if ent is None:
+        raise HTTPException(503, "vt: עומס — נסה שוב בעוד רגע")
+    ent["last"] = time.time()
+    idx = ent["dir"] / "index.m3u8"
+    for _ in range(150):                  # עד ~15 שניות למקטעים ראשונים
+        if idx.exists() and idx.read_text(encoding="utf-8", errors="ignore").count(".m4s") >= 1:
+            break
+        if ent["proc"].returncode is not None:
+            raise HTTPException(502, "vt: ffmpeg נכשל")
+        await asyncio.sleep(0.1)
+    else:
+        raise HTTPException(504, "vt: ההמרה לא התחילה בזמן")
+    q = f"?exp={exp}&sig={sig}" if SIGN_SECRET else ""
+    base = f"/vt/{chat_id}/{message_id}"
+    out = []
+    for line in idx.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("#EXT-X-MAP:"):
+            out.append(f'#EXT-X-MAP:URI="{base}/init.mp4{q}"')
+        elif s and not s.startswith("#"):
+            out.append(f"{base}/{s}{q}")
+        else:
+            out.append(line)
+    return Response("\n".join(out) + "\n",
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store", **CORS_MEDIA})
+
+
+@api.get("/vt/{chat_id}/{message_id}/{name}")
+async def vt_segment(chat_id: int, message_id: int, name: str,
+                     request: Request, exp: int = 0, sig: str = ""):
+    check_hotlink(request)
+    _vf_check_sig(chat_id, message_id, exp, sig)
+    if not (name == "init.mp4" or (name.startswith("s") and name.endswith(".m4s"))):
+        raise HTTPException(404, "not found")
+    ent = _vt.get(_vt_key(chat_id, message_id))
+    if not ent:
+        raise HTTPException(404, "vt: לא פעיל")
+    ent["last"] = time.time()
+    f = ent["dir"] / name
+    for _ in range(150):                  # מקטע שעדיין נכתב — ממתינים לו
+        if f.exists():
+            break
+        if ent["proc"].returncode is not None and not f.exists():
+            raise HTTPException(404, "vt: מקטע לא נוצר")
+        await asyncio.sleep(0.1)
+    else:
+        raise HTTPException(504, "vt: מקטע לא מוכן בזמן")
+    return Response(
+        content=f.read_bytes(),
+        media_type="video/mp4" if name == "init.mp4" else "video/iso.segment",
+        headers={"Cache-Control": "public, max-age=60", **CORS_MEDIA})
+
+
 @api.get("/vodinfo/{chat_id}/{message_id}")
 async def vodfix_info(chat_id: int, message_id: int, request: Request,
                       exp: int = 0, sig: str = ""):
     """מה מצב הקובץ ואיזה קישור כדאי לנגן."""
     check_hotlink(request)
     _vf_check_sig(chat_id, message_id, exp, sig)
-    info = await _vf_header_for(chat_id, message_id)
     q = f"?exp={exp}&sig={sig}" if SIGN_SECRET else ""
     base = STREAM_PUBLIC_BASE.rstrip("/") if "STREAM_PUBLIC_BASE" in globals() else ""
-    if info["audio_ok"]:
+    try:
+        info = await _vf_header_for(chat_id, message_id)
+    except HTTPException as _e:
+        # 415 = אין ftyp, כלומר לא MP4 — ראה fix_vodinfo_container.py.
+        # זו לא שגיאה אלא תשובה: הקובץ הזה לא מתנגן ישר בדפדפן, והנגן
+        # צריך לדעת את זה **לפני** שהוא ממתין לשגיאה שלא תגיע.
+        if _e.status_code != 415:
+            raise
+        _cont = await _vf_sniff_container(chat_id, message_id)
+        if _cont == "webm":
+            # EBML כמו MKV, אבל דפדפנים כן מנגנים אותו. שליחה להמרה כאן
+            # הייתה עלות מעבד על קובץ תקין.
+            return {"container": _cont, "browser_ok": True, "audio_ok": True,
+                    "kind": "direct",
+                    "url": f"{base}/stream/{chat_id}/{message_id}{q}"}
+        # האורך נשלח בנפרד: ההמרה ב-/vt זורמת, כלומר הרשימה גדלה תוך כדי
+        # והנגן לא יודע ממנה כמה זמן הסרט. בלי זה מוצג 0:00 / 0:00.
+        _dur = await _mkv_duration(chat_id, message_id) \
+            if _cont in ("matroska", "webm") else None
+        out = {"container": _cont, "browser_ok": False, "audio_ok": False,
+               "kind": "hls",
+               "url": f"{base}/vt/{chat_id}/{message_id}/index.m3u8{q}"}
+        if _dur:
+            out["duration"] = _dur
+        # ── מה שנגן נייטיבי צריך לדעת ─────────────────────────────────
+        # browser_ok הוא פסק דין על דפדפנים, והאפליקציה אינה דפדפן:
+        # ExoPlayer מנגן MKV מצוין, ורק קודקי קול מסוימים מפילים אותו.
+        # ראה fix_vodinfo_audio.py — שימוש ב-browser_ok כדי להחליט עבור
+        # הנגן הנייטיבי שלח להמרה את כל ה-MKV בקטלוג, והתקרה של
+        # VT_MAX_CONCURRENT החזירה 503 לכל צופה שלישי.
+        if _cont in ("matroska", "webm"):
+            _au = await _mkv_audio_codecs(chat_id, message_id)
+            if _au:
+                out["audio"] = _au
+                out["native_ok"] = not any(
+                    c.upper().startswith(_MKV_HARD_AUDIO) for c in _au)
+        return out
+# [fix_vh_video]  גם וידאו שהדפדפן לא מפענח חייב לעבור ב-/vh
+    if info["audio_ok"] and info["video_ok"]:
         # הקול תקין; רק ה-moov אולי צריך הזזה. שני המקרים מוגשים כ-MP4 רגיל
         # ולכן הקפיצה בסרט נשארת מדויקת ולא עולה כלום במעבד.
         play = (f"{base}/fs/{chat_id}/{message_id}{q}" if info["header"]
@@ -7849,6 +9423,7 @@ async def vodfix_info(chat_id: int, message_id: int, request: Request,
         play = f"{base}/vh/{chat_id}/{message_id}/index.m3u8{q}"
         kind = "hls"
     return {"audio": info["audio"], "audio_ok": info["audio_ok"],
+            "video": info["video"], "video_ok": info["video_ok"],  # [fix_vh_video]
             "moov_at_end": info["moov_at_end"],
             "faststart_ready": bool(info["header"]),
             "duration": round(info["duration"], 3),

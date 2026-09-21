@@ -64,6 +64,7 @@
     <button id="tab-support" onclick="showTab('support')">תמיכה <span id="supBadge" class="badge hidden">0</span></button>
     <button id="tab-pool" onclick="showTab('pool')">בוטים</button>
     <button id="tab-import" onclick="showTab('import')">ייבוא ממאגר</button>
+    <button id="tab-notrailer" onclick="showTab('notrailer')">🎬 בלי טריילר</button>
     <button id="tab-stats" onclick="showTab('stats')">📊 סטטיסטיקות</button>
     <button id="tab-admins" onclick="showTab('admins')">מנהלים</button>
   </div>
@@ -82,40 +83,34 @@
         <div id="tmdbRes"></div>
       </div>
 
-      <label>סוג תוכן</label>
-      <select id="f_kind" onchange="toggleSeries()">
-        <option value="movie">סרט</option><option value="series">פרק בסדרה</option>
-      </select>
-
-      <div id="seriesFields" class="hidden">
-        <label>בחר סדרה קיימת (אופציונלי)</label>
-        <select id="f_existing" onchange="pickExisting()"><option value="">— סדרה חדשה —</option></select>
-        <label>שם הסדרה (זהה בכל הפרקים!)</label><input id="f_series">
-        <div class="grid2">
-          <div><label>עונה</label><input id="f_season" type="number" min="1" placeholder="1"></div>
-          <div><label>פרק</label><input id="f_episode" type="number" min="1" placeholder="1"></div>
-        </div>
-        <label>פרק שני (רק אם שני פרקים באותו וידאו — יוצג "פרק 1+2")</label>
-        <input id="f_episode_end" type="number" min="1" placeholder="ריק = פרק אחד רגיל">
-      </div>
-
-      <label id="lbl_title">שם</label>
-      <input id="f_title" placeholder="שם הסרט / למשל: פאודה פרק 1">
-      <label>כתובת URL באנגלית (custom_slug, לא חובה)</label>
-      <input id="f_slug" dir="ltr" placeholder="fauda">
-      <div class="grid2">
-        <div><label>שנה</label><input id="f_year" type="number"></div>
-        <div><label>קטגוריה</label><select id="f_category" onchange="onCatChange()"></select></div>
-      </div>
-      <label>קישור וידאו <span class="muted">(הסוג יזוהה אוטומטית)</span></label>
-      <input id="f_video" dir="ltr" placeholder="קישור סטרימינג / YouTube / Drive / mp4 / Kaltura…" oninput="detectType()">
-      <div id="typeHint" class="muted" style="margin:-4px 0 8px"></div>
-      <label>פוסטר (thumbnail_url)</label><input id="f_thumb" dir="ltr">
-      <label>תקציר</label><textarea id="f_desc"></textarea>
+      <label>1. סוג תוכן</label>
+<select id="f_kind" onchange="toggleSeries()"><option value="movie">סרט</option><option value="series">פרק בסדרה</option></select>
+<div id="seriesFields" class="hidden"><label>2. בחר סדרה קיימת <span class="muted">(השם, הקטגוריה והפוסטר יתמלאו לבד)</span></label>
+<select id="f_existing" onchange="pickExisting()"><option value="">— סדרה חדשה —</option></select>
+<label>שם הסדרה <span class="muted">(זהה בכל הפרקים!)</span></label><input id="f_series">
+<div class="grid2"><div><label>עונה</label><input id="f_season" type="number" min="1" placeholder="1"></div><div><label>פרק <span class="muted">(ריק = הבא בתור)</span></label><input id="f_episode" type="number" min="1" placeholder="אוטומטי"></div></div></div>
+<label>3. קישור וידאו <span style="color:#ff3b30">*</span> <span class="muted">(הסוג יזוהה אוטומטית)</span></label>
+<input id="f_video" dir="ltr" placeholder="הדבק כאן את הקישור" oninput="detectType()">
+<div id="typeHint" class="muted" style="margin:-4px 0 8px"></div>
+<label id="lbl_title">4. שם <span style="color:#ff3b30">*</span></label>
+<input id="f_title" placeholder="שם הסרט / למשל: פאודה פרק 1">
+<label>5. קטגוריה <span style="color:#ff3b30">*</span></label>
+<select id="f_category" onchange="onCatChange()"></select>
+<details style="margin:10px 0 8px"><summary style="cursor:pointer;font-size:12px;font-weight:700;color:#0071e3;padding:6px 0">פרטים נוספים — כמעט תמיד לא צריך</summary>
+<div style="padding-top:6px">
+<div class="grid2"><div><label>שנה</label><input id="f_year" type="number"></div><div><label>פרק שני <span class="muted">(שני פרקים בוידאו אחד)</span></label><input id="f_episode_end" type="number" min="1" placeholder="ריק = פרק אחד"></div></div>
+<label>פוסטר (thumbnail_url)</label><input id="f_thumb" dir="ltr">
+<label>קישור טריילר <span class="muted">(יוטיוב — גובר על האוטומטי)</span></label>
+<input id="f_trailer" dir="ltr" placeholder="https://www.youtube.com/watch?v=… או המזהה בלבד">
+<label>כתובת URL באנגלית <span class="muted">(נוצרת לבד — עדכן רק אם חייב)</span></label><input id="f_slug" dir="ltr" placeholder="נוצר אוטומטית">
+<label>תקציר</label><textarea id="f_desc"></textarea>
+</div></details>
 
       <div id="applyAll" class="row hidden" style="margin-bottom:8px">
         <button class="mini" style="background:#5e5ce6" onclick="applyToSeries('thumbnail_url')">עדכן פוסטר לכל הסדרה</button>
         <button class="mini orange" onclick="applyToSeries('description')">עדכן תקציר לכל הסדרה</button>
+        <button class="mini" style="background:#0a8f5a" onclick="applyToSeries('category')">קבע קטגוריה לכל הסדרה</button>
+        <button class="mini" style="background:#b4532a" onclick="applyToSeries('trailer_url')">עדכן טריילר לכל הסדרה</button>
       </div>
       <div class="row">
         <button onclick="saveItem()" style="flex:1">שמור</button>
@@ -295,6 +290,14 @@
       <button class="mini" onclick="addAdmin()">הוסף</button>
       <div id="adminErr" class="err"></div><div id="adminsList" style="margin-top:8px"></div></div>
 
+    <div class="card"><h2>בוט העלאה מדרייב — מזהים מורשים (Telegram ID)</h2>
+      <div class="muted">מי שברשימה יכול לשלוח לבוט ההעלאה «היי בוט» ואז קישור Google Drive ציבורי, והשרת יוריד את הקובץ ויוסיף לרשימת ההעלאות. מי שלא ברשימה — הבוט מתעלם.</div>
+      <div class="grid2" style="margin-top:8px">
+        <input id="du_id" type="number" placeholder="Telegram ID"><input id="du_name" placeholder="שם (לא חובה)">
+      </div>
+      <button class="mini" onclick="addDriveUp()">הוסף</button>
+      <div id="duErr" class="err"></div><div id="duList" style="margin-top:8px"></div></div>
+
     <div class="card"><h2>גרסת אפליקציה (עדכון מאולץ)</h2>
       <div class="muted">האפליקציה בודקת בהפעלה. גרסה נמוכה מ"מינימלית" → דיאלוג חוסם שמחייב עדכון. נמוכה מ"אחרונה" → הצעה לעדכן.</div>
       <div class="grid2" style="margin-top:8px">
@@ -367,11 +370,12 @@ async function doLogin(){
 
 // ── טאבים ──
 function showTab(n){
-  ["add","manage","cats","live","uploads","support","pool","import","stats","admins"].forEach(x=>{
+  ["add","manage","cats","live","uploads","support","pool","import","stats","admins","notrailer"].forEach(x=>{
     $("pane-"+x).classList.add("hidden"); const t=$("tab-"+x); if(t)t.classList.remove("active");});
   $("pane-"+n).classList.remove("hidden"); $("tab-"+n).classList.add("active");
   if(n!=="import") stopImportPoll();
   if(n==="manage") renderManage();
+  if(n==="notrailer") loadNoTrailer();
   if(n==="cats") renderCats();
   if(n==="live"){ liveReset(); renderLive(); loadRelayHosts(); }
   if(n==="uploads") loadUploads();
@@ -379,7 +383,7 @@ function showTab(n){
   if(n==="pool") loadPool();
   if(n==="import"){ pollImport(); startImportPoll(); loadChannels(); }
   if(n==="stats") loadStats();
-  if(n==="admins"){ loadAdmins(); loadVersion(); loadBans(); }
+  if(n==="admins"){ loadAdmins(); loadDriveUp(); loadVersion(); loadBans(); }
 }
 
 // ── תוכן: טעינה ושמירה מהשרת ──
@@ -510,6 +514,7 @@ function startEdit(id){
   $("f_title").value=m.title||""; $("f_slug").value=m.custom_slug||""; $("f_year").value=m.year||"";
   setCategory(m.category||""); $("f_video").value=m.video_url||m.video_id||"";
   $("f_thumb").value=m.thumbnail_url||""; $("f_desc").value=m.description||"";
+  $("f_trailer").value=m.trailer_url||"";
   $("f_series").value=m.series_name||""; $("f_season").value=m.season_number||""; $("f_episode").value=m.episode_number||"";
   $("f_episode_end").value=m.episode_number_end||"";
   if(m.series_name) $("f_existing").value=m.series_name;   // מסמן שהפרק שייך לסדרה הזו
@@ -521,6 +526,7 @@ function buildEntry(){
   return { title:$("f_title").value.trim(), year:$("f_year").value?parseInt($("f_year").value):null,
     category:$("f_category").value.trim(), description:$("f_desc").value.trim(),
     type:info.type, video_id:info.video_id, video_url:vid, thumbnail_url:$("f_thumb").value.trim(),
+    trailer_url:$("f_trailer").value.trim()||null,
     custom_slug:$("f_slug").value.trim()||null,
     series_name:s?($("f_series").value.trim()||null):null,
     season_number:s&&$("f_season").value?parseInt($("f_season").value):null,
@@ -555,12 +561,26 @@ async function delItem(){
   if(!editingId||!confirm("למחוק?")) return;
   if(await mutate({delete_ids:[editingId]})){ openAdd(); }
 }
+// שדות שאפשר להחיל על כל פרקי הסדרה בלחיצה אחת. הוספת שדה = שורה כאן.
+const SERIES_FIELDS = {
+  thumbnail_url: {label:"פוסטר",   get:()=>$("f_thumb").value.trim()},
+  description:   {label:"תקציר",   get:()=>$("f_desc").value.trim()},
+  category:      {label:"קטגוריה", get:()=>$("f_category").value.trim()},
+  trailer_url:   {label:"טריילר",   get:()=>$("f_trailer").value.trim()},
+};
 async function applyToSeries(field){
   const n=$("f_series").value.trim(); if(!n) return;
-  const val = field==="thumbnail_url"?$("f_thumb").value.trim():$("f_desc").value.trim();
-  if(!confirm(`לעדכן ${field==="thumbnail_url"?"פוסטר":"תקציר"} לכל הפרקים של «${n}»?`)) return;
+  const f=SERIES_FIELDS[field]; if(!f) return;
+  const val=f.get();
+  if(field==="category" && !val){ alert("לא נבחרה קטגוריה"); return; }
   const ups=movies.filter(m=>m.series_name===n).map(m=>({id:m.id,[field]:val}));
-  if(await mutate({upsert:ups})){ $("addMsg").innerHTML='<span class="ok">עודכן לכל הסדרה ✓</span>'; }
+  if(!ups.length){ alert(`לא נמצאו פרקים לסדרה «${n}»`); return; }
+  // מציגים את מספר הפרקים לפני האישור: פעולה שנוגעת ב-70 פריטים צריכה
+  // להראות את זה מראש, לא אחרי.
+  if(!confirm(`לעדכן ${f.label} ל-${ups.length} הפרקים של «${n}»?\n\nערך חדש: ${val||"(ריק)"}`)) return;
+  if(await mutate({upsert:ups})){
+    $("addMsg").innerHTML=`<span class="ok">${f.label} עודכן ל-${ups.length} פרקים ✓</span>`;
+  }
 }
 
 // ── TMDB דרך השרת (המפתח בשרת) ──
@@ -898,6 +918,21 @@ async function addAdmin(){ const id=$("a_id").value,name=$("a_name").value;
   try{ renderAdmins((await panelApi("add",{id:parseInt(id),name})).admins); $("a_id").value="";$("a_name").value="";$("adminErr").textContent="";}
   catch(e){ $("adminErr").textContent=e.message; } }
 async function rmAdmin(id){ try{ renderAdmins((await panelApi("remove",{id})).admins);}catch(e){ alert(e.message); } }
+// ── מעלי דרייב מאושרים ──
+async function driveApi(action,extra){
+  const r=await fetch("/panel/drive-uploaders",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({password:PASS,action,...(extra||{})})});
+  if(!r.ok) throw new Error((await r.json()).detail||r.status); return r.json();
+}
+async function loadDriveUp(){ try{ renderDriveUp((await driveApi("list")).uploaders);}catch(e){ $("duErr").textContent=e.message; } }
+function renderDriveUp(a){ $("duList").innerHTML=(a&&a.length)?a.map(x=>`<div class="item">
+  <div class="meta"><div class="t">${esc(x.name||"—")}</div><div class="s">${x.id}</div></div>
+  <button class="mini gray" onclick="rmDriveUp(${x.id})">הסר</button></div>`).join(""):'<div class="muted">אין מעלי דרייב.</div>'; }
+async function addDriveUp(){ const id=$("du_id").value,name=$("du_name").value;
+  if(!id){ $("duErr").textContent="חסר ID"; return; }
+  try{ renderDriveUp((await driveApi("add",{id:parseInt(id),name})).uploaders); $("du_id").value="";$("du_name").value="";$("duErr").textContent="";}
+  catch(e){ $("duErr").textContent=e.message; } }
+async function rmDriveUp(id){ try{ renderDriveUp((await driveApi("remove",{id})).uploaders);}catch(e){ alert(e.message); } }
 
 // ── חסימת גישה לפי מייל ──
 async function bansApi(action,email,message){
@@ -1139,5 +1174,54 @@ async function saveVersion(){
     $("verMsg").innerHTML='<span class="ok">נשמר ✓</span>';
   }catch(e){ $("verMsg").innerHTML='<span class="err">שמירה נכשלה</span>'; }
 }
+
+// ── תוכן בלי טריילר ─────────────────────────────────────────────────────────
+let _nt = null;
+async function loadNoTrailer(){
+  $("ntMsg").textContent="טוען…"; $("ntList").innerHTML="";
+  try{
+    const r=await fetch("/panel/no-trailer?password="+encodeURIComponent(PASS));
+    if(!r.ok) throw new Error("שגיאה "+r.status);
+    _nt=await r.json();
+    $("ntMsg").innerHTML=`<b>${_nt.counts.movies}</b> סרטים ו-<b>${_nt.counts.series}</b> סדרות בלי טריילר`;
+    renderNoTrailer();
+  }catch(e){ $("ntMsg").innerHTML='<span class="err">'+e.message+'</span>'; }
+}
+function renderNoTrailer(){
+  if(!_nt) return;
+  const q=($("nt_q").value||"").trim().toLowerCase();
+  const hit=s=>!q||String(s||"").toLowerCase().includes(q);
+  const row=(id,title,sub,img)=>`<div class="item">
+      <img src="${img||''}" onerror="this.style.visibility='hidden'">
+      <div class="meta"><div class="t">${esc(title||"—")}</div><div class="s">${esc(sub)}</div></div>
+      <button class="mini sec" onclick="startEdit('${id}');showTab('add')">ערוך</button>
+    </div>`;
+  // תקרה של 300 לכל רשימה: הדפדפן נחנק על אלפי שורות, והסינון למעלה הוא
+  // הדרך להגיע למה שמחפשים.
+  const mv=_nt.movies.filter(m=>hit(m.title)).slice(0,300);
+  const se=_nt.series.filter(s=>hit(s.series_name)).slice(0,300);
+  $("ntList").innerHTML =
+    `<h3 style="margin:14px 0 6px">סדרות (${se.length})</h3>` +
+    (se.map(s=>row(s.id,s.series_name,`${s.episodes} פרקים · ${s.category||""}`+(s.tmdb_id?"":" · ללא tmdb_id"),s.thumbnail_url)).join("")||'<div class="muted">אין</div>') +
+    `<h3 style="margin:18px 0 6px">סרטים (${mv.length})</h3>` +
+    (mv.map(m=>row(m.id,m.title,`${m.year||""} · ${m.category||""}`+(m.tmdb_id?"":" · ללא tmdb_id"),m.thumbnail_url)).join("")||'<div class="muted">אין</div>');
+}
 </script>
-</div></body></html>
+</div>
+<div id="pane-notrailer" class="hidden">
+  <div class="card">
+    <h2>תוכן בלי טריילר</h2>
+    <p class="muted">טריילר אוטומטי מגיע מ-TMDB ודורש <code>tmdb_id</code>. לתוכן
+    ישראלי רבות אין שם טריילר גם כשהמזהה קיים. כאן מה שחסר — לוחצים «ערוך»,
+    מדביקים קישור יוטיוב בשדה «קישור טריילר», ושומרים.</p>
+    <p class="muted">סדרות מקובצות לפי שם: אחרי הזנת קישור בפרק אחד אפשר
+    «עדכן טריילר לכל הסדרה» וזה מכסה את כל הפרקים.</p>
+    <div class="row" style="margin-bottom:8px">
+      <button class="mini" onclick="loadNoTrailer()">רענן</button>
+      <input id="nt_q" placeholder="סינון לפי שם…" oninput="renderNoTrailer()" style="flex:1">
+    </div>
+    <div id="ntMsg" class="muted">טוען…</div>
+    <div id="ntList"></div>
+  </div>
+</div>
+</body></html>
