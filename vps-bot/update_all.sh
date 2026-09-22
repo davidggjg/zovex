@@ -33,7 +33,7 @@ SITE_DIR=$(nginx -T 2>/dev/null | grep -E "^[[:space:]]*root[[:space:]]" \
 DRY=0; [ "${1:-}" = "--check" ] && DRY=1
 
 # פאצ'ים שעורכים main.py (ואחד גם את admin.html), לפי הסדר שבו הם מוחלים
-PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py)
+PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py)
 # כלי אבחון — יורדים אבל לא מורצים
 TOOLS=(who_is_watching.py vodinfo_probe.py)
 
