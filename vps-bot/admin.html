@@ -1008,6 +1008,34 @@ function renderStats(d){
     <div class="muted" style="margin-top:10px">עודכן: ${new Date(d.generated*1000).toLocaleString("he-IL")}${d.cached?" (ממטמון)":""}</div>`;
 }
 
+// [fix_panel_msg_read]
+// ts נשמר כ-datetime.utcnow().isoformat() — בלי סימון אזור זמן. דפדפן
+// קורא מחרוזת כזאת כזמן מקומי, וכל השעות היו מוצגות שלוש שעות אחורה.
+// לכן מוסיפים Z כשאין סיומת אזור, ורק אז מתרגמים לשעון המקומי.
+function tsFmt(s){
+  if(!s) return "";
+  const iso=/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s+"Z";
+  const d=new Date(iso);
+  if(isNaN(d.getTime())) return "";
+  return d.toLocaleString("he-IL",{day:"2-digit",month:"2-digit",
+    year:"2-digit",hour:"2-digit",minute:"2-digit"});
+}
+// [fix_panel_msg_read]
+// מסמן את השיחה כנקראה ברגע שפתחתי אותה. אם הבקשה נכשלה — משאירים
+// את הסימון "חדש", כי עדיף שיישאר ממה שייראה נקרא בלי שנשמר.
+async function markRead(t){
+  if(!t || !t.unread_admin) return;
+  try{
+    const r=await fetch("/feedback/read",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS,user_id:t.user_id})});
+    if(!r.ok) return;
+    const d=await r.json();
+    t.unread_admin=false;
+    renderThreads();
+    updateSupBadge(d.unread||0);
+  }catch(e){}
+}
 let _threads=[], _curThread=null;
 const KIND_HE={support:"תמיכה",review:"חוות דעת",tip:"טיפ"};
 async function loadSupport(){
@@ -1028,7 +1056,8 @@ function renderThreads(){
     const who=last&&last.from==="admin"?"↩ אני: ":"";
     return `<div class="item" style="cursor:pointer" onclick="openThread(${i})">
       <div class="meta"><div class="t">${esc(t.name||"משתמש")} ${t.unread_admin?'<span class="badge">חדש</span>':''}</div>
-      <div class="s">${who}${preview}</div></div></div>`; }).join("");
+      <div class="s">${who}${preview}</div>
+      <div class="s" style="font-size:11px;opacity:.6">${tsFmt(t.updated||(last&&last.ts))}</div></div></div>`; }).join("");
 }
 function openThread(i){
   _curThread=_threads[i]; const t=_curThread;
@@ -1038,7 +1067,7 @@ function openThread(i){
     return `<div style="text-align:${mine?'left':'right'};margin:6px 0">
       <div style="display:inline-block;max-width:85%;padding:8px 10px;border-radius:12px;
         background:${mine?'#0071e3':'#e6e8eb'};color:${mine?'#fff':'#1d1d1f'};text-align:right;white-space:pre-wrap">
-        ${mine?'':kind}${esc(m.text||"")}</div></div>`; }).join("");
+        ${mine?'':kind}${esc(m.text||"")}<div style="font-size:10px;opacity:.6;margin-top:4px;direction:ltr;text-align:${mine?'left':'right'}">${tsFmt(m.ts)}</div></div></div>`; }).join("");
   $("supChat").innerHTML=`
     <div class="toprow"><h2 style="margin:0">${esc(t.name||"משתמש")}</h2>
       <div class="s muted">${esc(t.email||"")}</div></div>
@@ -1046,6 +1075,7 @@ function openThread(i){
     <textarea id="supReply" rows="2" placeholder="כתוב תשובה..."></textarea>
     <button class="mini" style="margin-top:6px" onclick="sendReply()">שלח תשובה</button>
     <div id="supReplyMsg" class="muted" style="margin-top:6px"></div>`;
+  markRead(t);   // [fix_panel_msg_read] נפתחה = נקראה
 }
 async function sendReply(){
   if(!_curThread) return; const text=$("supReply").value.trim();

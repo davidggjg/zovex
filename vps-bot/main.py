@@ -3502,6 +3502,13 @@ def _query_candidates(fname: str) -> list:
       4) השם בלי שנה בסוף. מסננים כפילויות ומחרוזות קצרות מדי."""
     base = clean_name(fname)
     cands = [base]
+    # [fix_upload_read_caption]
+    # בלי שנה בסוף, מיד אחרי השם המלא. כיתוב של ערוץ כותב "שם הסרט (2023)",
+    # והשנה עוברת ל-tmdb_search בשדה נפרד ממילא — בתוך השאילתה היא רעש.
+    _ny = re.sub(r"[\(\[]?\s*\b(19|20)\d{2}\b\s*[\)\]]?\s*$",
+                 "", base).strip(" -–—·.")
+    if _ny and _ny != base:
+        cands.append(_ny)
     # קטע לטיני רציף (מילים באנגלית/ספרות) — עדיף ל-TMDB (בסיס נתונים אנגלי).
     # חייב להכיל אות אמיתית (לא רק ספרות/שנה) כדי לא לחפש "2022" לבד.
     latin = " ".join(re.findall(r"[A-Za-z0-9][A-Za-z0-9'&:!]*", base)).strip()
@@ -3541,6 +3548,46 @@ _YEAR_RE = re.compile(r'(?<!\d)(19\d{2}|20[0-3]\d)(?!\d)')
 _CAP_NOISE = re.compile(r'(איכות|ז[\'׳"]?אנר|סוגה|תרגום|תקציר|הועלה|בלעדי|מנויים|'
                         r'צפיות|שיתוף|קרדיט|quality|genre|subtitle)', re.I)
 
+def _cap_head(caption: str, lines: int = 3) -> str:
+    """שורות הכותרת של הכיתוב בלבד — עד השורה הראשונה של מטא-דאטה.
+
+    לזיהוי פרק צריך רק אותן. התקציר מכיל "בפרק הזה" ודומיו, ו-_HE_EP_ONLY
+    היה קורא את זה כמספר פרק. ראה fix_upload_read_caption.py.
+    """
+    out = []
+    for line in (caption or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if _CAP_NOISE.search(line):
+            break
+        out.append(line)
+        if len(out) >= lines:
+            break
+    return "\n".join(out)
+
+
+def _episode_from_caption(caption: str):
+    """סימון פרק מתוך שורות הכותרת של הכיתוב, עם שם סדרה נקי.
+
+    parse_episode_info לוקח כשם הסדרה את כל מה שלפני הסימון — ובכיתוב
+    של ערוץ זה *שתי* שורות כותרת ביחד, כלומר "הדוב (2022) The Bear".
+    לכן שם הסדרה נלקח מהשורה הראשונה בלבד, בלי שנה בסוף.
+    ראה fix_upload_read_caption.py.
+    """
+    head = _cap_head(caption)
+    if not head:
+        return None
+    ep = parse_episode_info(head)
+    if not ep:
+        return None
+    name = re.sub(r"[\(\[]?\s*\b(19|20)\d{2}\b\s*[\)\]]?\s*$", "",
+                  clean_name(head.splitlines()[0])).strip(" -–—·.")
+    if len(name) >= 2:
+        ep["series"] = _series_alias(name)
+    return ep
+
+
 def _recognition_candidates(caption: str, fname: str):
     """מחזיר (candidates, year, is_trailer) לזיהוי מדויק. מעדיף את שורות הכותרת
     שבכיתוב (שם עברי/אנגלי+שנה) על פני שם הקובץ (שלרוב פחות אמין)."""
@@ -3567,13 +3614,18 @@ def _recognition_candidates(caption: str, fname: str):
     return cands, year, is_trailer
 
 async def recognize_media(caption: str, fname: str):
-    """זיהוי TMDB מתוך כיתוב+שם קובץ, עם שנה. מחזיר (options, year, is_trailer)."""
+    """זיהוי TMDB מתוך כיתוב+שם קובץ, עם שנה.
+
+    מחזיר (query, options, year, is_trailer). query הוא המועמד שהחזיר
+    תוצאות; ואם אף אחד לא החזיר — המועמד ה**ראשון**, כלומר הניחוש הטוב
+    ביותר לשם, ולא האחרון שנוסה. ראה fix_upload_read_caption.py.
+    """
     cands, year, is_trailer = _recognition_candidates(caption, fname)
     for q in cands:
         opts = await tmdb_search(q, year)
         if opts:
-            return opts, year, is_trailer
-    return [], year, is_trailer
+            return q, opts, year, is_trailer
+    return (cands[0] if cands else clean_name(fname)), [], year, is_trailer
 
 async def tmdb_search(query: str, year: str = "") -> list:
     """מחזיר עד 6 תוצאות TMDB (movie/tv). לכל תוצאה: שם עברי לתצוגה (title),
@@ -4191,10 +4243,15 @@ async def on_upload(client: Client, message: Message):
             return
         # הפוגה קצרה בזמן שהתור נעול — מרווח בין העלאות רצופות שמקטין FloodWait
         await asyncio.sleep(1.5)
-    fname = getattr(media, "file_name", None) or (message.caption or "") or ""
+    cap = (message.caption or "").strip()
+    fname = getattr(media, "file_name", None) or cap or ""
     # אם שם הקובץ מכיל סימון פרק (S01E05 / עונה X פרק Y / 1x05) — הוספה אוטומטית
     # כפרק סדרה, בלי TMDB אינטראקטיבי. מתאים להעלאה מרובה (עד 20 קבצים ברצף).
-    ep = parse_episode_info(fname)
+    #
+    # [fix_upload_read_caption]
+    # קודם שם הקובץ, כי שם הסימון הכי אמין; ואם אין בו כלום — שורות
+    # הכותרת של הכיתוב. רק הכותרת ולא התקציר, ראה _cap_head.
+    ep = parse_episode_info(fname) or _episode_from_caption(cap)
     if ep:
         # מניעת כפילות פרק: אותה סדרה+עונה+פרק כבר קיימים (בתוכן או בהעלאות)?
         exist = find_existing_episode(ep["series"], ep["season"], ep["episode"])
@@ -4210,23 +4267,33 @@ async def on_upload(client: Client, message: Message):
             f"✅ פרק נוסף: <b>{ep['series']}</b> — עונה {ep['season']} פרק {ep['episode']}\n"
             f"אשר בפאנל («הוסף הכל») והוסף פוסטר לסדרה.")
         return
-    await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{clean_name(fname) or '—'}</b>...")
-    query, options = await smart_tmdb_search(fname)
+    # [fix_upload_read_caption]
+    # הזיהוי קורא גם את הכיתוב ולא רק את שם הקובץ: בערוץ השם העברי, השם
+    # האנגלי והשנה יושבים בשתי השורות הראשונות של הכיתוב, בזמן ששם הקובץ
+    # הוא לא פעם "video_2023.mkv". recognize_media כבר ידעה לעשות את זה
+    # והייתה פשוט לא בשימוש באף מקום.
+    _guess = (_recognition_candidates(cap, fname)[0] or [clean_name(fname)])[0]
+    await status.edit_text(f"✅ הועלה לערוץ.\n🔎 מחפש ב-TMDB: <b>{_guess or '—'}</b>...")
+    query, options, _year, is_trailer = await recognize_media(cap, fname)
     _pending_uploads[str(channel_msg_id)] = {
         "channel_msg_id": channel_msg_id, "chat_id": message.chat.id,
         "dest_channel": dest_channel,
         "user_id": uid, "fname": fname, "options": options,
         "raw_name": query or fname, "file_unique_id": fuid,
     }
+    # [fix_upload_read_caption] הכיתוב אומר טריילר/קדימון? מזהירים ולא חוסמים:
+    # אם העלית את זה בכוונה, זו ההחלטה שלך.
+    _tr = "⚠️ הכיתוב נראה כמו טריילר/קדימון — ודא שזה הסרט עצמו.\n" \
+        if is_trailer else ""
     if not options:
         # אין זיהוי אוטומטי — נותנים לבחור: שמור בשם הגולמי או הקלד שם ידני
         await status.edit_text(
-            f"⚠️ לא זיהיתי אוטומטית «{query or fname}».\n"
+            f"{_tr}⚠️ לא זיהיתי אוטומטית «{query or fname}».\n"
             f"אפשר לשמור בשם הזה, או להקליד שם אחר לחיפוש:",
             reply_markup=_options_keyboard(channel_msg_id, [], query or fname))
         return
     await status.edit_text(
-        "🎬 מצאתי כמה התאמות — איזו זו? (או 'שם אחר' אם אף אחת לא נכונה)",
+        f"{_tr}🎬 מצאתי כמה התאמות — איזו זו? (או 'שם אחר' אם אף אחת לא נכונה)",
         reply_markup=_options_keyboard(channel_msg_id, options, query))
 
 async def on_select(client: Client, cq: CallbackQuery):
@@ -4480,6 +4547,31 @@ async def feedback_reply(req: FeedbackReplyReq, request: Request):
     asyncio.create_task(send_reply_push(th, text))   # התראה (אם יש טוקן+FCM)
     return {"ok": True}
 
+class FeedbackReadReq(BaseModel):
+    password: str
+    user_id: str
+
+@api.post("/feedback/read")
+async def feedback_read(req: FeedbackReadReq, request: Request):
+    """מסמן שיחה כנקראה כשהמנהל *פותח* אותה, ולא רק כשהוא מגיב.
+
+    עד עכשיו unread_admin התאפס רק ב-/feedback/reply, ולכן הספרה על טאב
+    התמיכה נשארה דלוקה אחרי קריאה בלי מענה. ראה fix_panel_msg_read.py.
+
+    מחזיר גם את המונה הכולל, כדי שהפאנל יוריד את הספרה בלי לטעון הכל
+    מחדש.
+    """
+    check_panel_password(request, req.password)
+    d = load_feedback()
+    th = d.get(req.user_id)
+    if not th:
+        raise HTTPException(status_code=404, detail="לא נמצא")
+    if th.get("unread_admin"):
+        th["unread_admin"] = False
+        save_feedback(d)
+    return {"ok": True,
+            "unread": sum(1 for t in d.values() if t.get("unread_admin"))}
+
 class FeedbackListReq(BaseModel):
     password: str
 
@@ -4721,11 +4813,36 @@ CONTENT_SEED_URL = os.environ.get(
     "CONTENT_SEED_URL",
     "https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json")
 
+# [fix_content_cache]
+# content.json הוא 19MB, וקריאה שלו נמדדה ב-360 עד 820 מילישניות — קריאה
+# מהדיסק ועוד פרסור. בהעלאה אחת הוא נקרא פעמיים-שלוש (בדיקת כפילות,
+# בדיקת פרק קיים, ייחודיות slug), ובהעלאה של 30 קבצים זה 60-90 קריאות
+# מלאות של אותו קובץ שלא השתנה.
+#
+# וזה לא רק איטי: json.loads ו-read_text חוסמות, והן רצות על אותה לולאת
+# אירועים שמגישה וידאו. כל קריאה כזאת מקפיאה את השרת כולו לחצי שנייה.
+#
+# המטמון מפתוח ב-(זמן שינוי, גודל): הקובץ לא השתנה — אין מה לקרוא שוב.
+# ההעתקה הרדודה שמוחזרת נמדדה ב-0.2ms.
+_content_cache = {"key": None, "data": None}
+
+
 def load_content() -> list:
     if CONTENT_FILE.exists():
         try:
-            return json.loads(CONTENT_FILE.read_text(encoding="utf-8"))
+            st = CONTENT_FILE.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            if _content_cache["key"] == key and _content_cache["data"] is not None:
+                # רשימה חדשה עם אותם פריטים: מי שמוסיף או מוחק פריט לא נוגע
+                # במטמון. שינוי של פריט נכתב דרך save_content, וזה מבטל.
+                return list(_content_cache["data"])
+            data = json.loads(CONTENT_FILE.read_text(encoding="utf-8"))
+            _content_cache["key"] = key
+            _content_cache["data"] = data
+            return list(data)
         except Exception:
+            _content_cache["key"] = None
+            _content_cache["data"] = None
             return []
     return []
 
@@ -4807,6 +4924,11 @@ def save_content(arr: list):
     except Exception as e:
         log.warning("גיבוי content נכשל (ממשיכים בשמירה): %s", e)
     _atomic_write_text(CONTENT_FILE, json.dumps(arr, ensure_ascii=False, indent=2))  # [fix_atomic_writes]
+    # [fix_content_cache] הקובץ השתנה — הקריאה הבאה תקרא אותו מחדש.
+    # מבטלים ולא מעדכנים בעיוורון: _normalize_live_flag כבר שינתה את arr,
+    # ומה שנכתב לדיסק הוא מקור האמת.
+    _content_cache["key"] = None
+    _content_cache["data"] = None
     _bump_content_version()
 
 async def seed_content_if_empty():
