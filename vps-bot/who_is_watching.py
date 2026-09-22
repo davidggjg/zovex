@@ -10,6 +10,14 @@
 שמנגן סרט מושך מקטע כל כמה שניות, ולכן "מי ביקש מקטע בדקות האחרונות"
 הוא בדיוק "מי צופה עכשיו".
 
+אבל nginx כותב שורה ליומן רק **כשהבקשה נגמרת**, וניגון ישיר הוא לא פעם
+בקשה אחת ארוכה שנשארת פתוחה דקות ארוכות. צופה כזה לא מופיע ביומן עד
+שהוא מסיים — וכך הספירה יצאה חסרה. לכן נבדקים גם החיבורים הפתוחים ממש
+עכשיו, מ-/proc/net/tcp, ומוצלבים מול מה שאותה כתובת משכה לאחרונה.
+
+זה לא תלוי בהתחברות לחשבון בשום שלב: הספירה היא לפי כתובת רשת, ומשתמש
+בלי חשבון גוגל נספר בדיוק כמו כל אחד אחר.
+
     /stream/<ערוץ>/<הודעה>      ניגון ישיר
     /fs/<ערוץ>/<הודעה>          ניגון ישיר עם כותרת מתוקנת
     /vh/<ערוץ>/<הודעה>/...      מקטעים (קפיצה ו-resume עובדים)
@@ -42,6 +50,9 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/opt/zovex-bot/data"))
 LOG_GLOB = os.environ.get("NGINX_LOG_GLOB", "/var/log/nginx/*access*.log")
 TAIL_BYTES = 12 * 1024 * 1024        # מספיק לשעות, וזול לקרוא
+# ניתן לדריסה רק לצורך בדיקה של הכלי עצמו מול קובץ מזויף
+TCP_FILES = tuple(os.environ.get("PROC_TCP",
+                                 "/proc/net/tcp,/proc/net/tcp6").split(","))
 
 # 1.2.3.4 - - [22/Sep/2026:15:04:05 +0300] "GET /vh/-100.../7170/s3.ts HTTP/1.1" 200 1234
 LINE = re.compile(
@@ -121,10 +132,55 @@ def ffmpeg_now():
     return vt, other
 
 
+def _hex_ip(h):
+    """כתובת מ-/proc/net/tcp: הקסה little-endian, IPv4 או IPv6."""
+    if len(h) == 8:
+        b = bytes.fromhex(h)[::-1]
+        return ".".join(str(x) for x in b)
+    if len(h) == 32:
+        words = [bytes.fromhex(h[i:i + 8])[::-1] for i in range(0, 32, 8)]
+        raw = b"".join(words)
+        if raw[:12] == b"\x00" * 10 + b"\xff\xff":      # IPv4 ממופה
+            return ".".join(str(x) for x in raw[12:])
+        p = [raw[i:i + 2].hex() for i in range(0, 16, 2)]
+        return ":".join(s.lstrip("0") or "0" for s in p)
+    return ""
+
+
+def open_peers(ports=(443, 80), files=("/proc/net/tcp", "/proc/net/tcp6")):
+    """כתובות שיש להן חיבור TCP פתוח לשרת ממש עכשיו.
+
+    זו הבדיקה שהיומן לא יכול לתת: nginx כותב שורה ליומן **כשהבקשה
+    נגמרת**. ניגון ישיר הוא לא פעם בקשה אחת ארוכה שנשארת פתוחה דקות,
+    ולכן הצופה פשוט לא קיים ביומן עד שהוא מסיים. מכאן הוא כן נראה.
+    """
+    peers = set()
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                next(fh, None)
+                for line in fh:
+                    p = line.split()
+                    if len(p) < 4 or p[3] != "01":       # ESTABLISHED
+                        continue
+                    lh, lp = p[1].rsplit(":", 1)
+                    rh, _ = p[2].rsplit(":", 1)
+                    if int(lp, 16) not in ports:
+                        continue
+                    ip = _hex_ip(rh)
+                    if ip and not ip.startswith(("127.", "::1")) and ip != "0.0.0.0":
+                        peers.add(ip)
+        except (OSError, StopIteration):
+            continue
+    return peers
+
+
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--minutes", type=float, default=5)
     ap.add_argument("--full", action="store_true", help="בלי מיסוך IP")
+    ap.add_argument("--lookback", type=float, default=60,
+                    help="כמה דקות אחורה לחפש מה כל חיבור פתוח צופה בו")
     a = ap.parse_args()
 
     logs = [p for p in glob.glob(LOG_GLOB) if not p.endswith(".gz")]
@@ -135,9 +191,11 @@ def main():
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(minutes=a.minutes)
+    since_look = now - timedelta(minutes=max(a.lookback, a.minutes))
     vod = defaultdict(lambda: {"ips": set(), "routes": set(), "last": None,
                                "hits": 0, "bytes": 0})
     live_ips, seen_lines, newest = set(), 0, None
+    last_by_ip = {}          # כתובת → (זמן, מה נצפה) — גם מחוץ לחלון
 
     for path in logs:
         try:
@@ -159,16 +217,27 @@ def main():
                 continue
             if newest is None or ts > newest:
                 newest = ts
-            if ts < since:
+            if ts < since_look:
                 continue
-            seen_lines += 1
             p = m.group("path").split("?")[0]
+            ip = m.group("ip")
             if LIVE.match(p):
-                live_ips.add(m.group("ip"))
+                # שידור חי — נספר בלי להדפיס את הנתיב, שמכיל את כתובת הספק
+                prev = last_by_ip.get(ip)
+                if prev is None or ts > prev[0]:
+                    last_by_ip[ip] = (ts, None)
+                if ts >= since:
+                    live_ips.add(ip)
                 continue
             mm = MEDIA.match(p)
             if not mm:
                 continue
+            prev = last_by_ip.get(ip)
+            if prev is None or ts > prev[0]:
+                last_by_ip[ip] = (ts, (mm.group(2), mm.group(3)))
+            if ts < since:
+                continue
+            seen_lines += 1
             route, chat, msg = mm.group(1), mm.group(2), mm.group(3)
             e = vod[(chat, msg)]
             e["ips"].add(m.group("ip"))
@@ -179,9 +248,24 @@ def main():
                 e["last"] = ts
 
     names = titles()
-    all_ips = set(live_ips)
+    logged_ips = set(live_ips)
     for e in vod.values():
-        all_ips |= e["ips"]
+        logged_ips |= e["ips"]
+
+    # ── מי מחזיק חיבור פתוח ממש עכשיו ────────────────────────────────────
+    # nginx כותב שורה ליומן רק כשהבקשה נגמרת, וניגון ישיר הוא לא פעם בקשה
+    # אחת ארוכה. בלי הבדיקה הזאת צופה כזה פשוט לא מופיע עד שהוא מסיים —
+    # וזה מה שגרם לספירה לצאת חסרה.
+    peers = open_peers(files=TCP_FILES)
+    open_watchers = {}          # כתובת → (לפני כמה שניות נראתה, מה)
+    browsing = 0
+    for ip in peers:
+        ent = last_by_ip.get(ip)
+        if ent is None:
+            browsing += 1       # חיבור פתוח בלי היסטוריית וידאו — גלישה
+            continue
+        open_watchers[ip] = ent
+    all_ips = logged_ips | set(open_watchers)
 
     print(f"── {a.minutes:g} הדקות האחרונות " + "─" * 30)
     # אין ולו שורה אחת שנקראה: או שזה לא היומן הנכון, או שהוא זה עתה
@@ -198,7 +282,8 @@ def main():
                   f"ייתכן שהתאריכון של השרת או היומן אינם מה שחשבתי.")
 
     print(f"צופים ייחודיים: {len(all_ips)}   ·   "
-          f"שידור חי: {len(live_ips)}   ·   VOD: {len(vod)} פריטים")
+          f"שידור חי: {len(live_ips)}   ·   "
+          f"VOD: {he_n(len(vod), 'פריט אחד', '{} פריטים')}")
     print()
 
     if vod:
@@ -213,8 +298,26 @@ def main():
             print(f"      {routes} · לפני {secs} שניות · "
                   f"{e['bytes'] / 1048576:.0f}MB · {who}")
     else:
-        print("אף אחד לא מושך וידאו בטווח הזה.")
+        print("אף אחד לא סיים בקשת וידאו בטווח הזה.")
     print()
+
+    # מי שהיומן לא יכול היה להראות: חיבור פתוח עכשיו, בלי שהבקשה נגמרה.
+    only_open = {ip: v for ip, v in open_watchers.items() if ip not in logged_ips}
+    if only_open:
+        print("חיבור פתוח עכשיו, בלי שורה ביומן (בקשה ארוכה שעוד רצה):")
+        for ip, (ts, key) in sorted(only_open.items(),
+                                    key=lambda kv: kv[1][0], reverse=True):
+            what = "שידור חי" if key is None else (
+                names.get(key) or f"(לא בקטלוג) {key[0]}/{key[1]}")
+            mins = (now - ts).total_seconds() / 60
+            print(f"  {mask(ip, a.full)} · {what} · "
+                  f"נרשם לאחרונה לפני {mins:.0f} דקות")
+        print()
+    if browsing:
+        print(he_n(browsing, "עוד חיבור פתוח אחד",
+                   "עוד {} חיבורים פתוחים")
+              + " בלי היסטוריית וידאו — גלישה באתר, לא צפייה.")
+        print()
 
     vt_procs, other_procs = ffmpeg_now()
     print(f"ffmpeg שרצים עכשיו: {vt_procs + other_procs} "
