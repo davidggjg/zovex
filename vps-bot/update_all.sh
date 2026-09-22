@@ -33,7 +33,7 @@ SITE_DIR=$(nginx -T 2>/dev/null | grep -E "^[[:space:]]*root[[:space:]]" \
 DRY=0; [ "${1:-}" = "--check" ] && DRY=1
 
 # פאצ'ים שעורכים main.py (ואחד גם את admin.html), לפי הסדר שבו הם מוחלים
-PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py)
+PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py fix_panel_pass_header.py)
 # כלי אבחון — יורדים אבל לא מורצים
 TOOLS=(who_is_watching.py vodinfo_probe.py)
 
@@ -170,6 +170,21 @@ echo "════════ 6/6 · מגבה למאגר ═══════�
 # הסקריפט יושב ב-/root ולא ליד main.py, ולכן מחפשים אותו ולא מניחים.
 # בלי הגיבוי הזה main.py ו-admin.html החיים לא מגיעים למאגר, והפאץ' הבא
 # נכתב מול קובץ ישן — זה בדיוק מה ששבר פעם את כל מסלול /vh.
+# סורק הסודות של הגיבוי עודכן בסקירת האבטחה: הוא לא הכיר את מפתחות
+# Gemini/Google, api_hash, מחרוזות session וסיסמת פאנל — ובדיקת המפתח הפרטי
+# שבו לא עבדה מעולם (grep קרא אותה כאופציה). מתקינים את החדש לפני שמריצים,
+# אחרי בדיקת תחביר, ושומרים את הקודם.
+if curl -fsSL -o /tmp/backup_to_git.sh.new "$RAW/backup_to_git.sh" \
+   && bash -n /tmp/backup_to_git.sh.new 2>/dev/null \
+   && grep -q "AQ" /tmp/backup_to_git.sh.new; then
+  [ -f /root/backup_to_git.sh ] && cp /root/backup_to_git.sh /root/backup_to_git.sh.prev
+  install -m 700 /tmp/backup_to_git.sh.new /root/backup_to_git.sh
+  echo "  ✓ סורק הסודות עודכן (הקודם: /root/backup_to_git.sh.prev)"
+else
+  echo "  ⚠ לא הצלחתי לעדכן את סורק הסודות — ממשיך עם הקיים"
+fi
+rm -f /tmp/backup_to_git.sh.new
+
 BK=""
 for c in ./backup_to_git.sh /root/backup_to_git.sh /opt/backup_to_git.sh; do
   [ -f "$c" ] && { BK="$c"; break; }
