@@ -5788,6 +5788,10 @@ def _has_trailer(item: dict, tdb: dict) -> bool:
 async def panel_no_trailer(request: Request, password: str = ""):
     """מה שאין לו טריילר. סדרות מקובצות לפי שם — רשימה של 424 פרקים לאותה
     סדרה אינה רשימת עבודה, היא רעש."""
+    # [fix_panel_pass_header] הסיסמה מגיעה בכותרת, לא בכתובת: ‎?password=
+    # נכתב בגלוי ליומן של nginx בכל פתיחת פאנל. הצורה הישנה עדיין מתקבלת
+    # כדי שפאנל ישן שפתוח בדפדפן לא יישבר באמצע עבודה.
+    password = request.headers.get("x-panel-password") or password
     check_panel_password(request, password)
     tdb = _load_trailers()
     movies, series = [], {}

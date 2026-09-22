@@ -1210,7 +1210,8 @@ let _nt = null;
 async function loadNoTrailer(){
   $("ntMsg").textContent="טוען…"; $("ntList").innerHTML="";
   try{
-    const r=await fetch("/panel/no-trailer?password="+encodeURIComponent(PASS));
+    // [fix_panel_pass_header] בכותרת ולא בכתובת — כתובת נרשמת ביומן של nginx
+    const r=await fetch("/panel/no-trailer",{headers:{"X-Panel-Password":PASS}});
     if(!r.ok) throw new Error("שגיאה "+r.status);
     _nt=await r.json();
     $("ntMsg").innerHTML=`<b>${_nt.counts.movies}</b> סרטים ו-<b>${_nt.counts.series}</b> סדרות בלי טריילר`;
