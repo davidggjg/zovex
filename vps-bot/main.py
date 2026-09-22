@@ -3559,8 +3559,24 @@ def _cap_head(caption: str, lines: int = 3) -> str:
         line = line.strip()
         if not line:
             continue
-        if _CAP_NOISE.search(line):
-            break
+        # [fix_caption_title_cut] אותו תיקון כמו ב-_recognition_candidates:
+        # "הדוב (2022) - תרגום מובנה" בשורה הראשונה היה מפיל את כל הכותרת,
+        # ואיתה את זיהוי הפרק מהכיתוב.
+        #
+        # וכאן, בשונה משם, ממשיכים לשורה הבאה אחרי החיתוך: סימון הפרק
+        # יושב לא פעם בשורה שלישית ("הדוב (2022) - תרגום מובנה" /
+        # "The Bear" / "עונה 2 פרק 5"), ועצירה אחרי החיתוך הייתה מאבדת
+        # אותו. עוצרים רק כששורה שלמה היא מטא-דאטה, כמו "איכות: 1080P" —
+        # ומשם והלאה זה כבר התקציר, שאסור לקרוא ממנו מספרי פרק.
+        _n = _CAP_NOISE.search(line)
+        if _n:
+            _head = line[:_n.start()].strip(" -–—·|:،,")
+            if len(_head) < 2:
+                break
+            out.append(_head)
+            if len(out) >= lines:
+                break
+            continue
         out.append(line)
         if len(out) >= lines:
             break
@@ -3601,7 +3617,20 @@ def _recognition_candidates(caption: str, fname: str):
         line = line.strip()
         if not line:
             continue
-        if _CAP_NOISE.search(line):
+        # [fix_caption_title_cut]
+        # סימון מטא-דאטה בתוך השורה אינו אומר שכל השורה מטא-דאטה. הדפוס
+        # הרגיל בערוצים הוא "שם הסרט (שנה) - תרגום מובנה", ו-"תרגום"
+        # נמצאת ברשימה — ולכן הלולאה נשברה על שורת הכותרת עצמה ורשימת
+        # הכותרות יצאה ריקה. נמדד על כיתוב אמיתי: נשאר רק שם הקובץ,
+        # «המשטרה נפלה על הראש 1 2001 ת מ», ו-TMDB לא מצא כלום.
+        #
+        # לכן חותכים את השורה לפני הסימון ולוקחים את מה שנשאר. אם לא
+        # נשאר כלום — כמו ב-"איכות: 1080P" — עוצרים כמו קודם.
+        _n = _CAP_NOISE.search(line)
+        if _n:
+            _head = line[:_n.start()].strip(" -–—·|:،,")
+            if len(_head) >= 2:
+                title_lines.append(_head)
             break
         title_lines.append(line)
         if len(title_lines) >= 2:
