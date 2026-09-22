@@ -7906,7 +7906,7 @@ async def saved_upload_status(job: str = ""):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:api", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("main:api", host=os.environ.get("BIND_HOST", "127.0.0.1"), port=PORT, log_level="info")
 
 
 # ── החלפת הקובץ של פריט קיים ────────────────────────────────────────────────
