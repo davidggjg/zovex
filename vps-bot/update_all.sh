@@ -33,7 +33,7 @@ SITE_DIR=$(nginx -T 2>/dev/null | grep -E "^[[:space:]]*root[[:space:]]" \
 DRY=0; [ "${1:-}" = "--check" ] && DRY=1
 
 # פאצ'ים שעורכים main.py (ואחד גם את admin.html), לפי הסדר שבו הם מוחלים
-PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py fix_panel_pass_header.py fix_saved_poster.py)
+PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py fix_panel_pass_header.py fix_saved_poster.py fix_custom_poster.py)
 # כלי אבחון — יורדים אבל לא מורצים
 TOOLS=(who_is_watching.py vodinfo_probe.py)
 
@@ -110,6 +110,8 @@ if [ "$UP" -eq 1 ]; then
   chk "גרסת אפליקציה" "http://127.0.0.1:8000/app/version"     200
   # הנתיב החדש של סימון-נקרא: 422 = קיים וחסרים שדות. 404 = הפאץ' לא נכנס.
   chk "סימון הודעה כנקראה" "http://127.0.0.1:8000/feedback/read" "405|422"
+  # נתיב POST בלבד: 405 לבקשת GET = הוא קיים. 404 = הפאץ' לא נכנס.
+  chk "פוסטר משלך"     "http://127.0.0.1:8000/panel/saved-upload/poster" 405
 else
   echo "  ✗ השירות לא ענה תוך דקה"
 fi
