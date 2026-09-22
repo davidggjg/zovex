@@ -202,6 +202,32 @@ function transcodeFixSrc(src) {
 // אותה חתימה של /stream עוברת כמו שהיא, ולכן ה-?exp=&sig= שבקישור תקף גם
 // כאן. התשובה נשמרת בשרת ל-6 שעות, כך שהצופה השני של אותו פריט מקבל
 // אותה מיד.
+// ── למה שואלים יותר מפעם אחת ─────────────────────────────────────────────
+//
+// נמדד מול השרת החי, על מדגם אקראי מהקטלוג: חלק מהקריאות ל-/vodinfo
+// נופלות ב-"Connection reset by peer" אחרי 11.1 שניות — עקבי, אותו זמן
+// בדיוק — ואותם פריטים עונים תוך 2-4 שניות בניסיון חוזר. בקרה של ארבע
+// משיכות מקטע גדולות במקביל עברה במלואה, כלומר זו לא הרשת ולא העומס.
+//
+// כשזה נפל, הנגן נפל אחורה ל-/vh בניחוש — ול-AVI ול-MKV בלי Cues זה
+// נתיב שאינו יכול לנגן. כלומר תקלת רשת חולפת הפכה פריט תקין ל"לא ניתן
+// לנגן". שלושה ניסיונות לפני שמוותרים.
+const VODINFO_TRIES = 3;
+
+async function fetchVodInfo(url) {
+  for (let i = 0; i < VODINFO_TRIES; i++) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) return await r.json();
+      if (r.status >= 400 && r.status < 500) return null;   // תשובה, לא תקלה
+    } catch (_) { /* ניתוק — מנסים שוב */ }
+    if (i < VODINFO_TRIES - 1) {
+      await new Promise(res => setTimeout(res, 700 * (i + 1)));
+    }
+  }
+  return null;
+}
+
 function vodInfoSrc(src) {
   if (!src) return null;
   const m = String(src).match(/^(.*)\/stream\/(-?\d+)\/(\d+)(\?.*)?$/);
@@ -1399,8 +1425,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
     if (!info) return apply(null);
     // ממתינים לתשובה ולא מחליפים פעמיים: החלפה ל-/vh ואז ל-/vt הייתה
     // מקפיצה את הצופה פעמיים, והראשונה ממילא נכשלת על הקבצים האלה.
-    fetch(info)
-      .then(r => (r.ok ? r.json() : null))
+    fetchVodInfo(info)
       .then(d => apply(d && d.url ? d.url : null, d && d.duration))
       .catch(() => apply(null));
   };
@@ -1422,8 +1447,7 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
     const info = vodInfoSrc(rawSrc);
     if (!info) return;
     let alive = true;
-    fetch(info)
-      .then(r => (r.ok ? r.json() : null))
+    fetchVodInfo(info)
       .then(d => { if (alive && d && d.duration) setKnownDuration(d.duration); })
       .catch(() => {});
     return () => { alive = false; };
