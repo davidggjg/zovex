@@ -167,13 +167,20 @@ fi
 
 echo
 echo "════════ 6/6 · מגבה למאגר ════════"
-if [ -x ./backup_to_git.sh ] || [ -f ./backup_to_git.sh ]; then
-  bash ./backup_to_git.sh 2>&1 | tail -4
+# הסקריפט יושב ב-/root ולא ליד main.py, ולכן מחפשים אותו ולא מניחים.
+# בלי הגיבוי הזה main.py ו-admin.html החיים לא מגיעים למאגר, והפאץ' הבא
+# נכתב מול קובץ ישן — זה בדיוק מה ששבר פעם את כל מסלול /vh.
+BK=""
+for c in ./backup_to_git.sh /root/backup_to_git.sh /opt/backup_to_git.sh; do
+  [ -f "$c" ] && { BK="$c"; break; }
+done
+[ -n "$BK" ] || BK=$(find /root /opt -maxdepth 3 -name backup_to_git.sh 2>/dev/null | head -1)
+if [ -n "$BK" ]; then
+  echo "  מריץ $BK"
+  bash "$BK" 2>&1 | tail -4
 else
-  echo "  ⚠ backup_to_git.sh לא ב-/opt/zovex-bot — הגיבוי למאגר לא רץ."
-  echo "    למצוא אותו:  find / -name backup_to_git.sh 2>/dev/null | head -3"
-  echo "    בלעדיו main.py ו-admin.html החיים לא נשמרים למאגר, והפאץ' הבא"
-  echo "    ייכתב מול קובץ ישן — זה כבר שבר פעם את כל מסלול /vh."
+  echo "  ⚠ backup_to_git.sh לא נמצא בשום מקום — הגיבוי למאגר לא רץ."
+  echo "    למצוא:  find / -name backup_to_git.sh 2>/dev/null | head -3"
 fi
 
 echo
