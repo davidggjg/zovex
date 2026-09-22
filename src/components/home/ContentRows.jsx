@@ -228,19 +228,30 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
   const items = useMemo(() => {
     const DAY_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
-    const seen = {};
-    const recent = [];
+    // ── למה יש כאן מיון ───────────────────────────────────────────────
+    //
+    // דווח: "הבאנר לא מתעדכן". הוא אכן לא — הלולאה כאן רצה על הקטלוג
+    // **לפי סדר המערך** ועצרה אחרי שמונה, בלי אף פעם למיין לפי תאריך.
+    // כלומר "שמונה הראשונים שנתקלתי בהם שנוספו ביממה", ולא "שמונה
+    // החדשים ביותר". כל עוד המערך במקרה מסודר מהחדש לישן זה נראה תקין,
+    // ובכל סידור אחר הבאנר מפספס בדיוק את מה שהוא קיים בשבילו.
+    //
+    // נמדד על הקטלוג החי: 335 פריטים נוספו ביממה, והלולאה הישנה בחרה
+    // "קופה ראשית" מלפני 23.3 שעות ו"שתולים" מלפני 20.9 — ודילגה על
+    // "השוטרים" מלפני 4.9 שעות, שפשוט יושב עמוק יותר במערך.
+    //
+    // ועוד פרט: לסדרה, התאריך הקובע הוא של הפרק **החדש ביותר** שלה.
+    // בלי זה פרק ישן יותר של אותה סדרה היה קובע את מקומה בתור.
+    const best = new Map();
     for (const m of movies) {
       if (!m.created_date) continue;
       const t = new Date(m.created_date).getTime();
       if (isNaN(t) || now - t > DAY_MS) continue;
       const key = m.series_name || m.id;
-      if (seen[key]) continue;
-      seen[key] = true;
-      recent.push(m);
-      if (recent.length >= 8) break;
+      const cur = best.get(key);
+      if (!cur || t > cur.t) best.set(key, {t, m});
     }
-    return recent;
+    return [...best.values()].sort((a, b) => b.t - a.t).slice(0, 8).map(x => x.m);
   }, [movies]);
 
   const [index, setIndex] = useState(0);

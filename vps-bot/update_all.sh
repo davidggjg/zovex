@@ -170,7 +170,10 @@ echo "════════ 6/6 · מגבה למאגר ═══════�
 if [ -x ./backup_to_git.sh ] || [ -f ./backup_to_git.sh ]; then
   bash ./backup_to_git.sh 2>&1 | tail -4
 else
-  echo "  ⚠ backup_to_git.sh לא נמצא — דלג"
+  echo "  ⚠ backup_to_git.sh לא ב-/opt/zovex-bot — הגיבוי למאגר לא רץ."
+  echo "    למצוא אותו:  find / -name backup_to_git.sh 2>/dev/null | head -3"
+  echo "    בלעדיו main.py ו-admin.html החיים לא נשמרים למאגר, והפאץ' הבא"
+  echo "    ייכתב מול קובץ ישן — זה כבר שבר פעם את כל מסלול /vh."
 fi
 
 echo
