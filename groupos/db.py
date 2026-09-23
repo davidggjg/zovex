@@ -187,6 +187,71 @@ MIGRATIONS: list[tuple[int, str]] = [
         PRIMARY KEY (chat_id, scope, value)
     );
     """),
+
+    # שלב 4: תזמון, פדרציות ומוניטין.
+    (3, """
+    -- הודעות מתוזמנות. next_run מחושב מראש ולא נגזר בכל סריקה, כדי
+    -- שהלולאה תשלוף עם אינדקס במקום לעבור על כל השורות.
+    CREATE TABLE schedules (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id      INTEGER NOT NULL,
+        name         TEXT    NOT NULL DEFAULT '',
+        kind         TEXT    NOT NULL DEFAULT 'once',
+        spec         TEXT    NOT NULL DEFAULT '',
+        content      TEXT    NOT NULL DEFAULT '',
+        buttons      TEXT,
+        next_run     REAL    NOT NULL,
+        last_run     REAL,
+        runs         INTEGER NOT NULL DEFAULT 0,
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        created_by   INTEGER,
+        created_at   REAL    NOT NULL
+    );
+    CREATE INDEX idx_sched_due ON schedules (enabled, next_run);
+
+    -- פדרציה: קבוצת קבוצות שחולקות חסימות.
+    CREATE TABLE federations (
+        fed_id       TEXT    PRIMARY KEY,
+        name         TEXT    NOT NULL,
+        owner_id     INTEGER NOT NULL,
+        created_at   REAL    NOT NULL
+    );
+
+    CREATE TABLE fed_chats (
+        fed_id       TEXT    NOT NULL,
+        chat_id      INTEGER NOT NULL,
+        joined_at    REAL    NOT NULL,
+        PRIMARY KEY (fed_id, chat_id)
+    );
+    CREATE INDEX idx_fedchats_chat ON fed_chats (chat_id);
+
+    CREATE TABLE fed_admins (
+        fed_id       TEXT    NOT NULL,
+        user_id      INTEGER NOT NULL,
+        PRIMARY KEY (fed_id, user_id)
+    );
+
+    CREATE TABLE fed_bans (
+        fed_id       TEXT    NOT NULL,
+        user_id      INTEGER NOT NULL,
+        reason       TEXT,
+        by_id        INTEGER,
+        ts           REAL    NOT NULL,
+        PRIMARY KEY (fed_id, user_id)
+    );
+
+    -- מוניטין. נקודות נצברות בפעילות ויורדות בעבירות.
+    CREATE TABLE reputation (
+        chat_id      INTEGER NOT NULL,
+        user_id      INTEGER NOT NULL,
+        xp           INTEGER NOT NULL DEFAULT 0,
+        trust        REAL    NOT NULL DEFAULT 0.5,
+        strikes      INTEGER NOT NULL DEFAULT 0,
+        last_xp      REAL    NOT NULL DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+    );
+    CREATE INDEX idx_rep_xp ON reputation (chat_id, xp DESC);
+    """),
 ]
 
 

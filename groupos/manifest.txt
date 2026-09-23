@@ -11,6 +11,7 @@ captcha.py
 content.py
 db.py
 emergency.py
+federation.py
 i18n.py
 locales.py
 locks.py
@@ -19,5 +20,7 @@ panel.py
 permissions.py
 policy.py
 ratelimit.py
+reputation.py
+scheduler.py
 templates.py
 test_core.py

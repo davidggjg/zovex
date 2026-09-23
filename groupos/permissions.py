@@ -82,6 +82,11 @@ PERMISSIONS: dict[str, int] = {
     "chat.reset":      RANK["owner"],
     "broadcast.send":  RANK["owner"],
     "emergency.toggle": RANK["admin"],
+    "schedule.write":  RANK["admin"],
+    # פדרציה נוגעת לקבוצות של אנשים אחרים, ולכן צירוף ועזיבה הם
+    # החלטה של בעל הקבוצה ולא של מנהל תורן
+    "fed.manage":      RANK["owner"],
+    "fed.ban":         RANK["admin"],
 }
 
 

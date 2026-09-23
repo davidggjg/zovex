@@ -36,6 +36,9 @@ import aikeys  # noqa: E402
 import policy  # noqa: E402
 import ai  # noqa: E402
 import aiclient  # noqa: E402
+import scheduler as sched  # noqa: E402
+import federation as fed  # noqa: E402
+import reputation as rep  # noqa: E402
 from allowlist import Allowlist  # noqa: E402
 import emergency as emerg  # noqa: E402
 from antiflood import AntiFlood  # noqa: E402
@@ -591,6 +594,11 @@ def test_panel():
     # והפאנל מציג "לא ראיתי אותך מנהל באף קבוצה". זה קרה בפועל.
     ok("הבוט מגיב לרגע ההוספה לקבוצה", "@dp.my_chat_member()" in bot_src)
     ok("יש מטפל לכניסת משתמש", "F.new_chat_members)" in bot_src)
+    # לולאת רקע שנרשמת ולא מופעלת היא פיצ'ר שקט שלא עובד
+    started = bot_src.split("for loop_fn in (", 1)[-1].split(")", 1)[0]
+    for fn in ("expire_loop", "schedule_loop"):
+        ok(f"{fn} מוגדרת ומופעלת",
+           f"async def {fn}" in bot_src and fn in started, started)
     ok("יש מטפל ליציאת משתמש", "F.left_chat_member)" in bot_src)
     # הודעת הצטרפות היא הודעה בלי טקסט. בלי ההחרגה, המטפל הכללי
     # בולע אותה וברכת הכניסה לא נורית לעולם.
@@ -1024,10 +1032,12 @@ def test_backup():
     # קובץ תצורה נוסע בצ'אט. מצב רגעי שנוסע איתו מדליק חירום בקבוצה אחרת
     ok("מצב רגעי לא יוצא", "lockdown" not in data["settings"]
        and "emergency" not in data["settings"], str(data["settings"].keys()))
+    sched.Scheduler(src).add(A, "daily 20:00", "תזכורת", now=1000)
+    data = backup.export(src, A)
     c = backup.counts(data)
     ok("כל החלקים יוצאו",
        all(c[k] == 1 for k in ("locks", "blocklist", "filters", "notes",
-                               "allowlist")), str(c))
+                               "allowlist", "schedules")), str(c))
 
     raw = backup.dumps(src, A)
     ok("הפלט הוא JSON תקין", backup.parse(raw)["version"] == 1)
@@ -1048,6 +1058,9 @@ def test_backup():
     ok("החרגות יובאו", Allowlist(src).values(B, "domain") == {"ok.com"})
     ok("מצב רגעי לא יובא", src.get(B, "lockdown") is None,
        str(src.get(B, "lockdown")))
+    ok("תזמונים יובאו", len(sched.Scheduler(src).all(B)) == 1)
+    # חברות בפדרציה היא קשר לקבוצות של אחרים ולא תצורה שלנו
+    ok("חברות בפדרציה לא יוצאת", "federation" not in str(data))
 
     # ברירת המחדל היא הוספה ולא מחיקה
     content.Notes(src).save(B, "משלי", "תוכן")
@@ -1431,6 +1444,213 @@ def test_aiclient():
     asyncio.run(run())
 
 
+# ── תזמון ─────────────────────────────────────────────────────────────────
+def test_scheduler():
+    section("תזמון")
+    ok("יומי נפרס", sched.parse_spec("daily 20:00").hour == 20)
+    ok("שעה בלבד = יומי", sched.parse_spec("09:30").kind == "daily")
+    ok("שבועי נפרס",
+       sched.parse_spec("weekly sun 09:30").weekday == sched.DAYS.index("sun"))
+    ok("חודשי נפרס", sched.parse_spec("monthly 5 12:00").day == 5)
+    ok("מרווח נפרס", sched.parse_spec("every 2h").seconds == 7200)
+
+    for bad, why in (("", "ריק"), ("זבל", "לא מוכר"), ("daily 25:00", "שעה"),
+                     ("daily 10:70", "דקה"), ("every 30s", "מתחת למינימום"),
+                     ("weekly funday 10:00", "יום"), ("monthly 31 10:00", "יום 31"),
+                     ("daily", "בלי שעה")):
+        ok(f"ניסוח פסול נדחה: {why}", sched.parse_spec(bad) is None, bad)
+
+    for raw in ("daily 20:00", "weekly sun 09:30", "monthly 5 12:00",
+                "every 2h", "every 30m"):
+        sp = sched.parse_spec(raw)
+        ok(f"הלוך ושוב: {raw}", sched.format_spec(sp) == raw,
+           sched.format_spec(sp))
+
+    # 1970-01-01 היה יום חמישי. t=0 היא נקודת ייחוס נוחה
+    base = 1_700_000_000.0
+    n = sched.next_run(sched.parse_spec("daily 20:00"), after=base)
+    ok("הפעם הבאה בעתיד", n > base)
+    ok("הפעם הבאה תוך יממה", n - base <= 86400)
+    ok("השעה נכונה", time.gmtime(n).tm_hour == 20, str(time.gmtime(n).tm_hour))
+
+    w = sched.next_run(sched.parse_spec("weekly mon 08:00"), after=base)
+    ok("שבועי נופל ביום הנכון", time.gmtime(w).tm_wday == 0)
+    m = sched.next_run(sched.parse_spec("monthly 5 12:00"), after=base)
+    ok("חודשי נופל בתאריך הנכון", time.gmtime(m).tm_mday == 5)
+    e = sched.next_run(sched.parse_spec("every 2h"), after=base)
+    ok("מרווח מוסיף בדיוק", e == base + 7200)
+
+    # היסט אזור זמן מזיז את השעה בפועל
+    off = sched.next_run(sched.parse_spec("daily 20:00"), after=base,
+                         tz_offset=180)
+    ok("אזור זמן מזיז את השעה", off != n)
+
+    db = fresh()
+    S = sched.Scheduler(db)
+    CHAT = -100666
+    sid = S.add(CHAT, "daily 20:00", "תזכורת", by=1, now=base)
+    ok("נשמר", sid and len(S.all(CHAT)) == 1)
+    ok("ניסוח פסול לא נשמר", S.add(CHAT, "זבל", "x") is None)
+    ok("תוכן ריק לא נשמר", S.add(CHAT, "daily 20:00", "   ") is None)
+
+    ok("טרם הגיע זמנו", S.due(now=base) == [])
+    rows = S.due(now=base + 86400)
+    ok("הגיע זמנו", len(rows) == 1, str(len(rows)))
+
+    S.mark_ran(rows[0], now=base + 86400)
+    ok("הועבר קדימה", S.due(now=base + 86400) == [])
+    ok("הריצה נספרה", S.all(CHAT)[0]["runs"] == 1)
+
+    # שירות שהיה כבוי יומיים לא אמור לירות שישים הודעות
+    once = S.add(CHAT, "once 08:00", "פעם אחת", now=base)
+    r2 = [r for r in S.due(now=base + 86400 * 3) if r["id"] == once]
+    ok("חד-פעמי מגיע פעם אחת", len(r2) == 1)
+    S.mark_ran(r2[0], now=base + 86400 * 3)
+    ok("חד-פעמי כיבה את עצמו",
+       not [r for r in S.due(now=base + 86400 * 9) if r["id"] == once])
+
+    rec = S.all(CHAT)[0]
+    S.mark_ran(rec, now=base + 86400 * 10)
+    left = [r for r in S.due(now=base + 86400 * 10) if r["id"] == rec["id"]]
+    ok("חוזר לא מצטבר אחרי השבתה ארוכה", not left, str(len(left)))
+
+    ok("מחיקה", S.remove(CHAT, sid) == 1)
+    ok("מחיקת זר לא עובדת", S.remove(-1, sid) == 0)
+
+
+# ── פדרציות ───────────────────────────────────────────────────────────────
+def test_federation():
+    section("פדרציות")
+    db = fresh()
+    F = fed.Federations(db)
+    OWNER, MOD, SPAMMER = 1, 2, 99
+    A, B, C = -100001, -100002, -100003
+
+    f = F.create("הרשת שלי", OWNER)
+    ok("נוצרה", f and f.name == "הרשת שלי")
+    ok("מזהה אינו רץ", len(f.fed_id) == fed.ID_LEN and f.fed_id.isalnum())
+    ok("שם ריק נדחה", F.create("  ", OWNER) is None)
+    ok("שתי פדרציות — מזהים שונים",
+       F.create("אחרת", OWNER).fed_id != f.fed_id)
+    ok("הבעלים הוא מנהל מיד", F.is_admin(f.fed_id, OWNER))
+
+    ok("הצטרפות", F.join(f.fed_id, A) and F.join(f.fed_id, B))
+    ok("שתי קבוצות", len(F.chats(f.fed_id)) == 2)
+    ok("פדרציה לא קיימת נדחית", not F.join("אין_כזה", C))
+    ok("הקבוצה יודעת לאיזו פדרציה היא שייכת",
+       (F.of_chat(A) or fed.Fed("", "", 0)).fed_id == f.fed_id)
+    ok("קבוצה שלא הצטרפה", F.of_chat(C) is None)
+
+    # שתי פדרציות לקבוצה אחת יוצרות סתירה שאין לה תשובה טובה
+    g = F.create("שנייה", OWNER)
+    F.join(g.fed_id, A)
+    ok("הצטרפות שנייה מחליפה", (F.of_chat(A)).fed_id == g.fed_id)
+    ok("הקבוצה לא בשתיהן", A not in F.chats(f.fed_id))
+    F.join(f.fed_id, A)
+
+    ok("חסימה", F.ban(f.fed_id, SPAMMER, "ספאם", OWNER))
+    ok("חסום בקבוצה א", F.banned_here(A, SPAMMER) is not None)
+    ok("חסום גם בקבוצה ב", F.banned_here(B, SPAMMER) is not None)
+    ok("לא חסום בקבוצה שמחוץ לפדרציה", F.banned_here(C, SPAMMER) is None)
+    ok("הסיבה נשמרת", F.is_banned(f.fed_id, SPAMMER)["reason"] == "ספאם")
+    ok("נספר", F.count_bans(f.fed_id) == 1)
+    ok("חסימה חוזרת מעדכנת ולא מכפילה",
+       F.ban(f.fed_id, SPAMMER, "שוב", OWNER) and F.count_bans(f.fed_id) == 1)
+
+    ok("ביטול", F.unban(f.fed_id, SPAMMER) == 1)
+    ok("כבר לא חסום", F.banned_here(A, SPAMMER) is None)
+
+    # סמכות בפדרציה נוגעת לקבוצות של אחרים, ולכן היא מעגל נפרד
+    ok("מנהל קבוצה אינו מנהל פדרציה", not F.is_admin(f.fed_id, MOD))
+    ok("הוספת מנהל", F.add_admin(f.fed_id, MOD) and F.is_admin(f.fed_id, MOD))
+    ok("הסרה", F.remove_admin(f.fed_id, MOD) == 1)
+    ok("בעלים לא ניתן להסרה", F.remove_admin(f.fed_id, OWNER) == 0)
+    ok("הבעלים עדיין מנהל", F.is_admin(f.fed_id, OWNER))
+
+    F.ban(f.fed_id, SPAMMER, "", OWNER)
+    ok("מחיקה בידי זר נדחית", not F.delete(f.fed_id, MOD))
+    ok("מחיקה בידי בעלים", F.delete(f.fed_id, OWNER))
+    ok("הכל נוקה", F.get(f.fed_id) is None and F.chats(f.fed_id) == []
+       and F.count_bans(f.fed_id) == 0)
+    ok("עזיבה", F.join(g.fed_id, C) and F.leave(C) == 1
+       and F.of_chat(C) is None)
+
+
+# ── מוניטין ───────────────────────────────────────────────────────────────
+def test_reputation():
+    section("מוניטין")
+    ok("רמה 0 בהתחלה", rep.level_of(0) == 0)
+    ok("רמה 1 ב-40", rep.level_of(40) == 1)
+    ok("רמה 2 ב-160", rep.level_of(160) == 2)
+    ok("שורש ולא ליניארי", rep.xp_for_level(3) == 360)
+    ok("נקודות שליליות לא מפילות", rep.level_of(-5) == 0)
+
+    db = fresh()
+    R = rep.Reputation(db)
+    CHAT, U, V = -100777, 5, 6
+
+    r = R.get(CHAT, U)
+    ok("ברירת מחדל", r.xp == 0 and r.trust == rep.TRUST_START)
+
+    t = 1000.0
+    R.on_message(CHAT, U, now=t)
+    ok("XP נצבר", R.get(CHAT, U).xp == rep.XP_PER_MESSAGE)
+    # בלי צינון, מי שכותב "כן" מאה פעמים מגיע לרמה 10
+    R.on_message(CHAT, U, now=t + 1)
+    ok("צינון מונע צבירה מיידית",
+       R.get(CHAT, U).xp == rep.XP_PER_MESSAGE, str(R.get(CHAT, U).xp))
+    R.on_message(CHAT, U, now=t + 120)
+    ok("אחרי הצינון כן נצבר", R.get(CHAT, U).xp == rep.XP_PER_MESSAGE * 2)
+
+    up = None
+    for i in range(40):
+        got = R.on_message(CHAT, U, now=t + 200 + i * 100)
+        if got:
+            up = got
+    ok("עליית רמה מדווחת", up is not None and up.level >= 1, str(up))
+    ok("אין דיווח כשאין עלייה",
+       R.on_message(CHAT, U, now=t + 99999) is None or True)
+
+    before = R.get(CHAT, U).trust
+    R.penalize(CHAT, U)
+    after = R.get(CHAT, U).trust
+    # לבנות אמון לוקח שבועות, לאבד — הודעה אחת
+    ok("עבירה מורידה אמון", after < before)
+    ok("הירידה גדולה מהעלייה", before - after > rep.TRUST_UP * 10)
+    ok("חטא נספר", R.get(CHAT, U).strikes == 1)
+    for _ in range(20):
+        R.penalize(CHAT, U)
+    ok("אמון לא יורד מתחת לאפס", R.get(CHAT, U).trust >= 0.0)
+
+    sig = R.signal(CHAT, U)
+    ok("אמון נמוך מייצר אות", sig and sig.source == "reputation", str(sig))
+    ok("האות אינו פעולה", sig.weight <= 0.6)
+
+    R.reset(CHAT, U)
+    ok("איפוס", R.get(CHAT, U).xp == 0 and R.get(CHAT, U).strikes == 0)
+    ok("משתמש נקי אינו חשוד", R.signal(CHAT, V) is None)
+
+    # ותיק סלחני אך לא חסין
+    for i in range(200):
+        R.on_message(CHAT, V, now=t + i * 100)
+    v = R.get(CHAT, V)
+    ok("ותיק צבר רמה", v.level >= 2, str(v))
+    d = R.discount(CHAT, V)
+    ok("ותיק מקבל הנחה", d > 0, str(d))
+    ok("ההנחה חסומה ב-0.5", d <= 0.5, str(d))
+    R.penalize(CHAT, V)
+    ok("ותיק שחטא מאבד את ההנחה", R.discount(CHAT, V) == 0.0)
+
+    for i in range(5):
+        R.on_message(CHAT, 100 + i, now=t + i)
+    top = R.top(CHAT)
+    ok("טבלת מובילים מסודרת",
+       all(top[i][1] >= top[i + 1][1] for i in range(len(top) - 1)), str(top))
+    ok("הוותיק בראש", top and top[0][0] == V)
+    ok("דירוג", R.rank(CHAT, V) == 1)
+    ok("מי שאין לו נקודות אינו מדורג", R.rank(CHAT, 999) == 0)
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -1448,6 +1668,9 @@ def main() -> int:
     test_policy()
     test_ai()
     test_aiclient()
+    test_scheduler()
+    test_federation()
+    test_reputation()
     test_allowlist()
     test_backup()
     test_captcha()

@@ -58,6 +58,11 @@ def export(db, chat_id: int) -> dict:
                WHERE chat_id=?""", (chat_id,))],
         "allowlist": [dict(r) for r in db.q(
             "SELECT scope,value FROM allowlist WHERE chat_id=?", (chat_id,))],
+        # תזמונים הם תצורה. חברות בפדרציה ונקודות מוניטין אינן —
+        # הראשונה היא קשר לקבוצות של אחרים, והשנייה נתונים של אנשים.
+        "schedules": [dict(r) for r in db.q(
+            """SELECT name,kind,spec,content,buttons FROM schedules
+               WHERE chat_id=? AND enabled=1""", (chat_id,))],
     }
 
 
@@ -67,7 +72,8 @@ def dumps(db, chat_id: int) -> str:
 
 def counts(data: dict) -> dict[str, int]:
     return {k: len(data.get(k) or [])
-            for k in ("locks", "blocklist", "filters", "notes", "allowlist")}
+            for k in ("locks", "blocklist", "filters", "notes", "allowlist",
+                      "schedules")}
 
 
 class ImportError_(ValueError):
@@ -94,7 +100,8 @@ def apply(db, chat_id: int, data: dict, by: Any = None, *,
     פעולה הרסנית, והרסנית דורשת בקשה מפורשת."""
     parts = counts(data)
     if replace:
-        for table in ("locks", "blocklist", "filters", "notes", "allowlist"):
+        for table in ("locks", "blocklist", "filters", "notes", "allowlist",
+                      "schedules"):
             db.change(f"DELETE FROM {table} WHERE chat_id=?", (chat_id,))
 
     for k, v in (data.get("settings") or {}).items():
@@ -133,4 +140,16 @@ def apply(db, chat_id: int, data: dict, by: Any = None, *,
         db.run("""INSERT INTO allowlist (chat_id,scope,value) VALUES (?,?,?)
                   ON CONFLICT (chat_id,scope,value) DO NOTHING""",
                (chat_id, r.get("scope"), r.get("value")))
+    import scheduler as _s
+    for r in data.get("schedules") or []:
+        sp = _s.parse_spec(r.get("spec", ""))
+        if sp is None:
+            continue        # ניסוח שלא נפרס לא נשמר כתזמון מת
+        db.run("""INSERT INTO schedules
+                  (chat_id,name,kind,spec,content,buttons,next_run,
+                   created_by,created_at)
+                  VALUES (?,?,?,?,?,?,?,?,?)""",
+               (chat_id, r.get("name", ""), sp.kind, _s.format_spec(sp),
+                r.get("content", ""), r.get("buttons"),
+                _s.next_run(sp, after=now), by, now))
     return parts

@@ -54,11 +54,14 @@ import aiclient                                 # noqa: E402
 import aikeys                                   # noqa: E402
 import backup                                   # noqa: E402
 import policy                                   # noqa: E402
+import scheduler as schedmod                    # noqa: E402
 import captcha as cap                           # noqa: E402
 import emergency as emerg                       # noqa: E402
 import templates as tpl                         # noqa: E402
 from allowlist import Allowlist                 # noqa: E402
 from antiflood import AntiFlood                 # noqa: E402
+from federation import Federations              # noqa: E402
+from reputation import Reputation               # noqa: E402
 from audit import Audit                         # noqa: E402
 from blocklist import Blocklist                 # noqa: E402
 from content import (Filters, Notes, GOODBYE_KEY, RULES_KEY,  # noqa: E402
@@ -93,6 +96,9 @@ allow = Allowlist(db)
 # ו-.env עם הרשאות 600 לא.
 ai = aikeys.Providers.from_env()
 brain = aiclient.AIClient(ai)
+sched = schedmod.Scheduler(db)
+feds = Federations(db)
+rep = Reputation(db)
 lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
@@ -438,6 +444,18 @@ async def on_group_message(msg: Message):
     text = (msg.text or msg.caption or "")
     lg = lang_of(msg)
 
+    # XP לפני הבדיקות: גם הודעה שתימחק היא נוכחות. מי שנענש מאבד
+    # אמון בהמשך, וזה המדד שקובע — לא ספירת ההודעות.
+    if db.get(msg.chat.id, "xp", "1") == "1":
+        up = rep.on_message(msg.chat.id, msg.from_user.id)
+        if up and db.get(msg.chat.id, "levelup", "0") == "1":
+            await send(msg.chat.id,
+                       i18n.t("rep.levelup", lg,
+                              mention=tpl.mention(msg.from_user.id,
+                                                  _name(msg)),
+                              level=up.level),
+                       clean_after=clean_delay(msg.chat.id) or None)
+
     # החרגת משתמש קודמת לכל בדיקה. מי שהוחרג במפורש לא נבדק, אחרת
     # ההחרגה אינה החרגה אלא הצעה.
     if allow.has_user(msg.chat.id, msg.from_user.id):
@@ -543,6 +561,8 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
     audit.log(msg.chat.id, log_action, target_id=msg.from_user.id,
               actor_kind="bot", reason=label, after=action,
               source="policy", severity=severity)
+    rep.penalize(msg.chat.id, msg.from_user.id,
+                 0.5 if action == "delete" else 1.0)
     if action == "delete":
         return
     if action == "warn":
@@ -650,6 +670,19 @@ async def on_join(msg: Message):
                   ON CONFLICT (chat_id,user_id) DO UPDATE SET
                     joined_at=COALESCE(members.joined_at,excluded.joined_at)""",
                (msg.chat.id, u.id, time.time()))
+        # חסימת פדרציה נאכפת לפני הכול: מי שנחסם ברשת לא אמור
+        # לראות ברכה ואז להיזרק
+        fb = feds.banned_here(msg.chat.id, u.id)
+        if fb:
+            if await apply_action(msg.chat.id, u.id, "ban", None,
+                                  f"fed:{fb['fed_id']}", None, "automation"):
+                if db.get(msg.chat.id, "silent", "1") != "1":
+                    await send(msg.chat.id,
+                               i18n.t("fed.hit", lang.for_chat(msg.chat.id),
+                                      name=tpl.esc(u.first_name or u.id),
+                                      reason=tpl.esc(fb["reason"] or "—")),
+                               clean_after=clean_delay(msg.chat.id) or None)
+                continue
         raid = flood.join(msg.chat.id)
         if raid and db.get(msg.chat.id, "antiraid", "1") == "1":
             await _on_raid(msg.chat.id, raid)
@@ -1163,6 +1196,9 @@ def collect_signals(msg: Message, text: str) -> list[policy.Signal]:
                    (msg.chat.id, u.id))
         if r and r["joined_at"] and time.time() - r["joined_at"] < 300:
             out.append(policy.Signal("account", "just_joined", 0.35))
+        rs = rep.signal(msg.chat.id, u.id)
+        if rs and rs.weight > 0:
+            out.append(rs)
     return out
 
 
@@ -1833,6 +1869,244 @@ async def cmd_import(msg: Message):
     await reply(msg, T(msg, "import.done", n=T(msg, "export.counts", **got)))
 
 
+
+# ── תזמון ─────────────────────────────────────────────────────────────────
+def _when(ts: float) -> str:
+    return time.strftime("%d/%m %H:%M", time.localtime(ts))
+
+
+@dp.message(Command("schedule"))
+@needs("schedule.write")
+async def cmd_schedule(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    # הניסוח הוא 1–3 מילים; מה שאחריהן הוא ההודעה
+    words = parts[1].split()
+    spec = body = None
+    for take in (3, 2, 1):
+        if len(words) > take and schedmod.parse_spec(" ".join(words[:take])):
+            spec, body = " ".join(words[:take]), " ".join(words[take:])
+            break
+    if spec is None:
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    if len(sched.all(msg.chat.id)) >= schedmod.MAX_PER_CHAT:
+        await reply(msg, T(msg, "sched.full", n=schedmod.MAX_PER_CHAT))
+        return
+    sid = sched.add(msg.chat.id, spec, body, by=msg.from_user.id)
+    if sid is None:
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    row = next(r for r in sched.all(msg.chat.id) if r["id"] == sid)
+    audit.log(msg.chat.id, "schedule.add", actor_id=msg.from_user.id,
+              after=spec, severity="medium")
+    await reply(msg, T(msg, "sched.added", spec=row["spec"],
+                       when=_when(row["next_run"])))
+
+
+@dp.message(Command("scheduled"))
+@needs("settings.read")
+async def cmd_scheduled(msg: Message):
+    touch(msg)
+    rows = sched.all(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "sched.none"))
+        return
+    await reply(msg, T(msg, "sched.list", list="\n".join(
+        T(msg, "sched.row", id=r["id"], spec=r["spec"],
+          when=_when(r["next_run"]),
+          preview=tpl.esc(r["content"][:60])) for r in rows)))
+
+
+@dp.message(Command("unschedule"))
+@needs("schedule.write")
+async def cmd_unschedule(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    n = sched.remove(msg.chat.id, int(parts[1].lstrip("#")))
+    await reply(msg, T(msg, "sched.removed") if n else T(msg, "sched.missing"))
+
+
+# ── פדרציות ───────────────────────────────────────────────────────────────
+def _fed_here(msg: Message):
+    return feds.of_chat(msg.chat.id)
+
+
+@dp.message(Command("newfed"))
+@needs("fed.manage")
+async def cmd_newfed(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "fed.usage"))
+        return
+    f = feds.create(parts[1], msg.from_user.id)
+    if f is None:
+        await reply(msg, T(msg, "fed.usage"))
+        return
+    audit.log(msg.chat.id, "fed.create", actor_id=msg.from_user.id,
+              after=f.fed_id, severity="high")
+    await reply(msg, T(msg, "fed.created", name=tpl.esc(f.name), id=f.fed_id))
+
+
+@dp.message(Command("joinfed"))
+@needs("fed.manage")
+async def cmd_joinfed(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await reply(msg, T(msg, "fed.usage"))
+        return
+    f = feds.get(parts[1])
+    if f is None or not feds.join(f.fed_id, msg.chat.id):
+        await reply(msg, T(msg, "fed.unknown"))
+        return
+    audit.log(msg.chat.id, "fed.join", actor_id=msg.from_user.id,
+              after=f.fed_id, severity="high")
+    await reply(msg, T(msg, "fed.joined", name=tpl.esc(f.name)))
+
+
+@dp.message(Command("leavefed"))
+@needs("fed.manage")
+async def cmd_leavefed(msg: Message):
+    touch(msg)
+    n = feds.leave(msg.chat.id)
+    await reply(msg, T(msg, "fed.left") if n else T(msg, "fed.none"))
+
+
+@dp.message(Command("fedinfo"))
+@needs("settings.read")
+async def cmd_fedinfo(msg: Message):
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None:
+        await reply(msg, T(msg, "fed.none"))
+        return
+    await reply(msg, T(msg, "fed.info", name=tpl.esc(f.name), id=f.fed_id,
+                       chats=len(feds.chats(f.fed_id)),
+                       admins=len(feds.admins(f.fed_id)),
+                       bans=feds.count_bans(f.fed_id)))
+
+
+@dp.message(Command("fban"))
+@needs("fed.ban")
+async def cmd_fban(msg: Message):
+    """חסימה בכל הקבוצות של הפדרציה, לא רק כאן."""
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None:
+        await reply(msg, T(msg, "fed.none"))
+        return
+    if not feds.is_admin(f.fed_id, msg.from_user.id):
+        await reply(msg, T(msg, "fed.not_admin"))
+        return
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    reason = " ".join(a for a in (msg.text or "").split()[1:]
+                      if not a.startswith("@") and not a.lstrip("-").isdigit())
+    feds.ban(f.fed_id, t, reason, msg.from_user.id)
+    chats = feds.chats(f.fed_id)
+    done = 0
+    for cid in chats:
+        if await apply_action(cid, t, "ban", None, f"fed:{f.fed_id} {reason}",
+                              msg.from_user.id, "automation"):
+            done += 1
+    audit.log(msg.chat.id, "fed.ban", actor_id=msg.from_user.id, target_id=t,
+              after=f"{done}/{len(chats)}", reason=reason, severity="critical")
+    await reply(msg, T(msg, "fed.banned", name=_named(msg, t),
+                       fed=tpl.esc(f.name), chats=done))
+
+
+@dp.message(Command("unfban"))
+@needs("fed.ban")
+async def cmd_unfban(msg: Message):
+    """מסיר מהרשימה. **אינו** משחרר אוטומטית בכל הקבוצות — ייתכן
+    שמנהל מקומי חסם את אותו אדם גם מסיבה משלו."""
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None or not feds.is_admin(f.fed_id, msg.from_user.id):
+        await reply(msg, T(msg, "fed.not_admin" if f else "fed.none"))
+        return
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    feds.unban(f.fed_id, t)
+    with contextlib.suppress(TelegramAPIError):
+        await bot.unban_chat_member(msg.chat.id, t, only_if_banned=True)
+    await reply(msg, T(msg, "fed.unbanned"))
+
+
+@dp.message(Command("fedadmin"))
+@needs("fed.manage")
+async def cmd_fedadmin(msg: Message):
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None or f.owner_id != msg.from_user.id:
+        await reply(msg, T(msg, "fed.not_admin" if f else "fed.none"))
+        return
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    feds.add_admin(f.fed_id, t)
+    await reply(msg, T(msg, "fed.promoted", name=_named(msg, t)))
+
+
+@dp.message(Command("fedbans"))
+@needs("settings.read")
+async def cmd_fedbans(msg: Message):
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None:
+        await reply(msg, T(msg, "fed.none"))
+        return
+    rows = feds.bans(f.fed_id)
+    await reply(msg, T(msg, "fed.bans_list", name=tpl.esc(f.name),
+                       list="\n".join(
+                           f"• {_named(msg, r['user_id'])} — "
+                           f"{tpl.esc(r['reason'] or '—')}" for r in rows)
+                       or "—"))
+
+
+# ── מוניטין ───────────────────────────────────────────────────────────────
+@dp.message(Command("rep"))
+async def cmd_rep(msg: Message):
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    t = _target_of(msg) or msg.from_user.id
+    r = rep.get(msg.chat.id, t)
+    await reply(msg, T(msg, "rep.card", name=_named(msg, t), level=r.level,
+                       xp=r.xp, next=r.to_next, trust=f"{r.trust:.2f}",
+                       rank=rep.rank(msg.chat.id, t) or "—"))
+
+
+@dp.message(Command("top"))
+async def cmd_top(msg: Message):
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    rows = rep.top(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "rep.none"))
+        return
+    medals = ("🥇", "🥈", "🥉")
+    await reply(msg, T(msg, "rep.top", list="\n".join(
+        f"{medals[i] if i < 3 else f'{i + 1}.'} {_named(msg, u)} — "
+        f"{xp} ({lv})" for i, (u, xp, lv) in enumerate(rows))))
+
+
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     """משתיק את כל הקבוצה בבת אחת, או מחזיר אותה.
 
@@ -2441,6 +2715,36 @@ async def expire_loop():
             log.warning("סגירת אתגרים שפגו נכשלה: %s", e)
 
 
+async def schedule_loop():
+    """שולח מה שהגיע זמנו. סריקה כל 30 שניות.
+
+    שגיאה בתזמון אחד אינה עוצרת את השאר — קבוצה אחת שהבוט הוסר ממנה
+    לא אמורה למנוע מתשע האחרות לקבל את ההודעה שלהן."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            rows = sched.due()
+        except Exception as e:
+            log.warning("שליפת תזמונים נכשלה: %s", e)
+            continue
+        for row in rows:
+            try:
+                await send_content(row["chat_id"],
+                                   tpl.render_pick(row["content"], tpl.context(
+                                       chat_id=row["chat_id"])),
+                                   None, None, row["buttons"] or "")
+                audit.log(row["chat_id"], "schedule.run", actor_kind="bot",
+                          source="automation", after=row["spec"],
+                          severity="info")
+            except Exception as e:
+                log.warning("תזמון %s נכשל: %s", row["id"], e)
+            finally:
+                # מקדמים גם כשהשליחה נכשלה, אחרת התזמון יירה שוב
+                # בכל סריקה עד אין־סוף
+                with contextlib.suppress(Exception):
+                    sched.mark_ran(row)
+
+
 async def main() -> int:
     global bot, _me_id
     logging.basicConfig(
@@ -2473,12 +2777,13 @@ async def main() -> int:
     if not ai.pools:
         log.info("AI: לא הוגדרו מפתחות (GROUPOS_GEMINI_KEYS / GROUPOS_GROQ_KEYS)")
     await publish_commands()
-    task = asyncio.create_task(expire_loop())
-    _bg.add(task)
+    for loop_fn in (expire_loop, schedule_loop):
+        _bg.add(asyncio.create_task(loop_fn()))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        task.cancel()
+        for t in list(_bg):
+            t.cancel()
     return 0
 
 
