@@ -270,8 +270,17 @@ class Db:
         return self.conn.execute(sql, tuple(args)).fetchone()
 
     def run(self, sql: str, args: Iterable = ()) -> int:
+        """מריץ ומחזיר את מזהה השורה החדשה. ל-INSERT."""
         cur = self.conn.execute(sql, tuple(args))
         return cur.lastrowid
+
+    def change(self, sql: str, args: Iterable = ()) -> int:
+        """מריץ ומחזיר **כמה שורות השתנו**. ל-DELETE ול-UPDATE.
+
+        ‎run‎ מחזיר ‎lastrowid‎, ואחרי DELETE הערך הזה הוא שריד מהכתיבה
+        הקודמת — לא אפס, ולא מספר המחוקים. קוד שבדק ‎if run(DELETE...)‎
+        קיבל "הצלחתי" גם כשלא נמחק דבר. זה נתפס בבדיקה."""
+        return self.conn.execute(sql, tuple(args)).rowcount
 
     def many(self, sql: str, rows: Iterable[Iterable]) -> None:
         self.conn.executemany(sql, [tuple(r) for r in rows])

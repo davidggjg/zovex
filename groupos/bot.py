@@ -48,7 +48,12 @@ from aiogram.types import (BotCommand, CallbackQuery, ChatMemberUpdated,
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
+import templates as tpl                         # noqa: E402
+from antiflood import AntiFlood                 # noqa: E402
 from audit import Audit                         # noqa: E402
+from blocklist import Blocklist                 # noqa: E402
+from content import (Filters, Notes, GOODBYE_KEY, RULES_KEY,  # noqa: E402
+                     WELCOME_KEY, parse_buttons)
 from db import Db                               # noqa: E402
 from locks import ACTIONS, LOCK_TYPES, Locks    # noqa: E402
 from moderation import Moderation               # noqa: E402
@@ -69,6 +74,10 @@ perms = Permissions(db)
 audit = Audit(db)
 locks = Locks(db)
 mod = Moderation(db, audit)
+notes = Notes(db)
+filters = Filters(db)
+blocks = Blocklist(db)
+flood = AntiFlood()
 lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
@@ -76,6 +85,8 @@ bot: Optional[Bot] = None
 
 GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
 _admin_cache: dict[int, tuple[float, dict[int, str]]] = {}
+# ברירות המחדל של הגנת ההצפה, לדריסה פר-קבוצה דרך settings
+AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 8, 10, 4, 8
 ADMIN_TTL = 300
 
 
@@ -158,6 +169,11 @@ async def sync_admins(chat_id: int, force: bool = False) -> dict[int, str]:
     out: dict[int, str] = {}
     try:
         for m in await bot.get_chat_administrators(chat_id):
+            # הבוט עצמו ובוטים אחרים אינם מנהלים אנושיים. בלי הסינון
+            # הזה "זוהו 2 מנהלים" בקבוצה שיש בה מנהל אחד — כי הבוט
+            # ספר את עצמו, וזה נראה כאילו אותו אדם נקלט פעמיים.
+            if m.user.is_bot:
+                continue
             role = "owner" if m.status == ChatMemberStatus.CREATOR else "admin"
             out[m.user.id] = role
     except TelegramAPIError as e:
@@ -315,6 +331,20 @@ UNMUTED = ChatPermissions(can_send_messages=True, can_send_audios=True,
                           can_send_other_messages=True,
                           can_add_web_page_previews=True)
 
+# ביטול השבתה הוא **לא** ‎UNMUTED‎. ‎UNMUTED‎ נועד להחזרת משתמש יחיד, ואין
+# בו ‎can_invite_users‎, ‎can_pin_messages‎ ו-‎can_change_info‎ — שלוש
+# הרשאות שקיימות בקבוצה רגילה. שימוש בו כדי "לפתוח" קבוצה השאיר אותה
+# משותקת למחצה: כולם יכלו לכתוב, אף אחד לא יכול היה להזמין או לנעוץ.
+# זה מה שנראה כמו "השבית את הקבוצה בלי אפשרות להחזיר".
+OPEN_CHAT = ChatPermissions(can_send_messages=True, can_send_audios=True,
+                            can_send_documents=True, can_send_photos=True,
+                            can_send_videos=True, can_send_video_notes=True,
+                            can_send_voice_notes=True, can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_invite_users=True, can_pin_messages=True,
+                            can_change_info=False)
+
 
 async def apply_action(chat_id: int, user_id: int, kind: str,
                        duration: Optional[int], reason: str,
@@ -346,37 +376,125 @@ async def apply_action(chat_id: int, user_id: int, kind: str,
     return True
 
 
-@dp.message(F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
+# הודעות שירות (הצטרפות, עזיבה) הן הודעות בלי טקסט, ולכן ‎~F.text‎
+# תופס גם אותן — והמטפל הזה רשום ראשון. בלי ההחרגה המפורשת, ברכת
+# הכניסה לעולם לא הייתה נורית: ההודעה נבלעה כאן.
+@dp.message(F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"),
+            ~F.new_chat_members, ~F.left_chat_member)
 async def on_group_message(msg: Message):
+    """הנתיב החם. כל הודעה בכל קבוצה עוברת כאן, ולכן הסדר הוא לפי מחיר.
+
+    קודם בדיקות בזיכרון (נעילות, הצפה), אחר כך שאילתות (חסימות,
+    פילטרים). הודעה של מנהל יוצאת מוקדם ככל האפשר."""
     touch(msg)
     if msg.from_user is None:
         return
-    # מנהלים אינם נבדקים מול נעילות — זה כלל שכל בוט ניהול מקיים
     await sync_admins(msg.chat.id)
+    # מנהלים ומנחים פטורים מהכול — כלל שכל בוט ניהול מקיים
     if perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["moderator"]:
         return
+
+    text = (msg.text or msg.caption or "")
+    lg = lang_of(msg)
+
+    # 1. נעילות
     hit = locks.check(msg.chat.id, _describe(msg))
-    if not hit:
+    if hit:
+        await _enforce(msg, hit.action, hit.duration,
+                       i18n.t(hit.key, lg), "lock.triggered")
+        return
+
+    # 2. רשימת חסומים. ‎evaded‎ מסמן ניסיון לעקוף ולא הודעה מקרית —
+    # ההבדל חשוב ביומן, כי הוא מבחין בין טעות לבין כוונה.
+    m = blocks.check(msg.chat.id, text) if text else None
+    if m:
+        await _enforce(msg, m.action, None, m.pattern,
+                       "blocklist.evaded" if m.evaded else "blocklist.hit",
+                       severity="medium" if m.evaded else "low")
+        return
+
+    # 3. הצפה
+    fl = _flood_check(msg, text)
+    if fl:
+        act = db.get(msg.chat.id, "flood_action", "mute")
+        dur = _int(db.get(msg.chat.id, "flood_time", "3600"), 3600)
+        await _enforce(msg, act, dur, fl.kind, "flood." + fl.kind,
+                       severity="medium", notice=f"flood.{fl.kind}")
+        return
+
+    # 4. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
+    fh = filters.check(msg.chat.id, text) if text else None
+    if fh:
+        await _run_filter(msg, fh)
+
+
+def _int(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _flood_check(msg: Message, text: str):
+    if db.get(msg.chat.id, "flood", "1") != "1":
+        return None
+    ents = (msg.entities or []) + (msg.caption_entities or [])
+    mentions = sum(1 for e in ents if e.type in ("mention", "text_mention"))
+    return flood.note(
+        msg.chat.id, msg.from_user.id, text, mentions,
+        rate=_int(db.get(msg.chat.id, "flood_rate", ""), AF_RATE),
+        window=float(_int(db.get(msg.chat.id, "flood_window", ""), AF_WINDOW)),
+        repeat=_int(db.get(msg.chat.id, "flood_repeat", ""), AF_REPEAT),
+        mention_max=_int(db.get(msg.chat.id, "flood_mentions", ""), AF_MENTIONS))
+
+
+async def _enforce(msg: Message, action: str, duration: Optional[int],
+                   label: str, log_action: str, *, severity: str = "low",
+                   notice: Optional[str] = None) -> None:
+    """מחיקה, רישום, ענישה והודעה — במקום אחד.
+
+    לפני זה כל מנגנון אכיפה חזר על ארבעת השלבים בעצמו, וזה בדיוק איך
+    שמנגנון שלישי נולד בלי רישום ביומן."""
+    if action == "off":
         return
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
-    audit.log(msg.chat.id, "lock.triggered", target_id=msg.from_user.id,
-              actor_kind="bot", reason=hit.label, after=hit.action,
-              source="policy", severity="low")
-
-    if hit.action == "warn":
-        out = mod.warn(msg.chat.id, msg.from_user.id, None, hit.label, "policy")
+    audit.log(msg.chat.id, log_action, target_id=msg.from_user.id,
+              actor_kind="bot", reason=label, after=action,
+              source="policy", severity=severity)
+    if action == "delete":
+        return
+    if action == "warn":
+        out = mod.warn(msg.chat.id, msg.from_user.id, None, label, "policy")
         if out.threshold_hit:
             await apply_action(msg.chat.id, msg.from_user.id, out.kind,
                                out.duration, out.reason, None)
         if db.get(msg.chat.id, "silent", "1") != "1":
             await send(msg.chat.id,
-                       T(msg, "lock.violation", name=_name(msg),
-                         label=hit.label, n=out.warns),
+                       T(msg, notice or "lock.violation", name=_name(msg),
+                         label=label, n=out.warns),
                        clean_after=clean_delay(msg.chat.id) or None)
-    elif hit.action in ("mute", "ban", "kick"):
-        await apply_action(msg.chat.id, msg.from_user.id, hit.action,
-                           hit.duration, hit.label, None)
+        return
+    if action in ("mute", "ban", "kick", "tmute", "tban"):
+        kind = {"tmute": "mute", "tban": "ban"}.get(action, action)
+        await apply_action(msg.chat.id, msg.from_user.id, kind, duration,
+                           label, None)
+        if notice and db.get(msg.chat.id, "silent", "1") != "1":
+            await send(msg.chat.id, T(msg, notice, name=_name(msg)),
+                       clean_after=clean_delay(msg.chat.id) or None)
+
+
+async def _run_filter(msg: Message, fh) -> None:
+    if fh.action in ("delete", "delete_reply"):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id, msg.message_id)
+    if fh.action in ("reply", "delete_reply") and fh.content:
+        await send_content(msg.chat.id,
+                           tpl.render_pick(fh.content, _ctx(msg)),
+                           None, None, "")
+        return
+    if fh.action in ("warn", "mute", "kick", "ban"):
+        await _enforce(msg, fh.action, None, fh.trigger, "filter.triggered")
 
 
 def _name(msg: Message) -> str:
@@ -412,6 +530,74 @@ async def on_my_status(ev: ChatMemberUpdated):
 
 
 ADMIN_STATUSES = (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+JOINED = (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+          ChatMemberStatus.CREATOR, ChatMemberStatus.RESTRICTED)
+
+
+async def _greet(chat_id: int, user, key: str, joined: bool) -> None:
+    """ברכת כניסה או פרידה. ריק = כבוי, וזו ברירת המחדל.
+
+    בוט שמכריז על כל נכנס בקבוצה של אלף איש הוא רעש, ולכן הוא לא
+    מדבר עד שמנהל ביקש."""
+    raw = db.get(chat_id, key, "") or ""
+    if not raw.strip():
+        return
+    lg = lang.for_chat(chat_id)
+    row = db.one("SELECT title FROM chats WHERE chat_id=?", (chat_id,))
+    n = db.one("SELECT COUNT(*) c FROM members WHERE chat_id=?", (chat_id,))
+    ctx = tpl.context(user_id=user.id, first=user.first_name or "",
+                      last=user.last_name or "", username=user.username or "",
+                      chat_title=(row["title"] if row else "") or "",
+                      chat_id=chat_id, count=(n["c"] if n else 0),
+                      language=lg, rules=db.get(chat_id, RULES_KEY, "") or "")
+    secs = _int(db.get(chat_id, "greet_clean", "0"), 0)
+    await send_content(chat_id, tpl.render_pick(raw, ctx), None, None,
+                       db.get(chat_id, key + "_buttons", "") or "",
+                       clean_after=secs or None)
+
+
+@dp.message(F.new_chat_members)
+async def on_join(msg: Message):
+    """כניסה לקבוצה. גם מונה פשיטה — הצטרפות המונית מתחילה כאן."""
+    register_chat(msg.chat)
+    for u in msg.new_chat_members or []:
+        if u.is_bot:
+            continue
+        db.run("""INSERT INTO members (chat_id,user_id,joined_at,last_msg)
+                  VALUES (?,?,?,0)
+                  ON CONFLICT (chat_id,user_id) DO UPDATE SET
+                    joined_at=COALESCE(members.joined_at,excluded.joined_at)""",
+               (msg.chat.id, u.id, time.time()))
+        raid = flood.join(msg.chat.id)
+        if raid and db.get(msg.chat.id, "antiraid", "1") == "1":
+            await _on_raid(msg.chat.id, raid)
+        await _greet(msg.chat.id, u, WELCOME_KEY, True)
+    if clean_delay(msg.chat.id):
+        _schedule_delete(msg.chat.id, msg.message_id, 5)
+
+
+@dp.message(F.left_chat_member)
+async def on_leave(msg: Message):
+    u = msg.left_chat_member
+    if u and not u.is_bot:
+        await _greet(msg.chat.id, u, GOODBYE_KEY, False)
+    if clean_delay(msg.chat.id):
+        _schedule_delete(msg.chat.id, msg.message_id, 5)
+
+
+async def _on_raid(chat_id: int, raid) -> None:
+    """הצטרפות המונית. משביתים ומודיעים — פעם אחת, לא בכל הצטרפות."""
+    if db.get(chat_id, "lockdown", "0") == "1":
+        return
+    lg = lang.for_chat(chat_id)
+    okay = await set_lockdown(chat_id, True, None)
+    audit.log(chat_id, "raid.detected", actor_kind="bot", source="policy",
+              after=f"{raid.count}/{raid.limit}", severity="critical")
+    if okay:
+        await send(chat_id, i18n.t("raid.detected", lg, n=raid.count))
+    for uid in list((await sync_admins(chat_id)))[:10]:
+        await send(uid, i18n.t("raid.alert", lg, n=raid.count,
+                               chat=_title(chat_id)), is_group=False)
 
 
 @dp.chat_member()
@@ -457,6 +643,319 @@ async def cmd_help(msg: Message):
         await reply(msg, sc.text)
 
 
+# ── תוכן: הערות, פילטרים, חוקים, ברכות ─────────────────────────────────────
+def _ctx(msg: Message, **extra) -> dict:
+    u = msg.from_user
+    return tpl.context(
+        user_id=u.id if u else 0, first=u.first_name if u else "",
+        last=(u.last_name or "") if u else "", username=(u.username or "") if u else "",
+        chat_title=msg.chat.title or "", chat_id=msg.chat.id,
+        language=lang_of(msg), rules=db.get(msg.chat.id, RULES_KEY, "") or "",
+        **extra)
+
+
+def _content_of(msg: Message, args: str) -> tuple[str, Optional[str], Optional[str]]:
+    """‎(טקסט, media_id, media_kind)‎ — מהארגומנטים או מההודעה שהשבת עליה."""
+    src = msg.reply_to_message
+    if src is None:
+        return args, None, None
+    text = args or (src.text or src.caption or "")
+    for attr, kind in (("photo", "photo"), ("video", "video"),
+                       ("animation", "animation"), ("sticker", "sticker"),
+                       ("document", "document"), ("audio", "audio"),
+                       ("voice", "voice")):
+        got = getattr(src, attr, None)
+        if got:
+            fid = got[-1].file_id if attr == "photo" else got.file_id
+            return text, fid, kind
+    return text, None, None
+
+
+async def send_content(chat_id: int, text: str, media_id: Optional[str],
+                       media_kind: Optional[str], buttons: str,
+                       *, clean_after: Optional[int] = None):
+    """שולח הערה/ברכה/תגובת פילטר — טקסט, מדיה וכפתורים כאחד."""
+    rows = parse_buttons(buttons)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, url=u) for t, u in row] for row in rows
+    ]) if rows else None
+    await guard.acquire(chat_id, True)
+    try:
+        if media_id and media_kind:
+            fn = {"photo": bot.send_photo, "video": bot.send_video,
+                  "animation": bot.send_animation, "sticker": bot.send_sticker,
+                  "document": bot.send_document, "audio": bot.send_audio,
+                  "voice": bot.send_voice}[media_kind]
+            kw = {"reply_markup": markup}
+            if media_kind != "sticker":
+                kw["caption"] = text[:1024] or None
+            m = await fn(chat_id, media_id, **kw)
+        else:
+            m = await bot.send_message(chat_id, text, reply_markup=markup)
+    except TelegramAPIError as e:
+        log.warning("שליחת תוכן ל-%s נכשלה: %s", chat_id, e)
+        return None
+    if clean_after:
+        _schedule_delete(chat_id, m.message_id, clean_after)
+    return m
+
+
+@dp.message(Command("save"))
+@needs("notes.write")
+async def cmd_save(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "note.usage"))
+        return
+    name = parts[1]
+    text, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if not notes.save(msg.chat.id, name, text, media_id=mid, media_kind=kind,
+                      by=msg.from_user.id):
+        await reply(msg, T(msg, "note.usage"))
+        return
+    audit.log(msg.chat.id, "note.save", actor_id=msg.from_user.id,
+              after=name, severity="info")
+    await reply(msg, T(msg, "note.saved", name=name))
+
+
+@dp.message(Command("get"))
+@needs("notes.read")
+async def cmd_get(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "note.usage"))
+        return
+    await _send_note(msg, parts[1])
+
+
+async def _send_note(msg: Message, name: str) -> bool:
+    n = notes.get(msg.chat.id, name)
+    if n is None:
+        await reply(msg, T(msg, "note.missing", name=name))
+        return False
+    if n.visibility == "admin" and not perms.check(
+            msg.chat.id, msg.from_user.id, "settings.read"):
+        return False
+    await send_content(msg.chat.id, tpl.render_pick(n.content, _ctx(msg)),
+                       n.media_id, n.media_kind, n.buttons)
+    return True
+
+
+@dp.message(Command("notes"))
+@needs("notes.read")
+async def cmd_notes(msg: Message):
+    touch(msg)
+    admin = bool(perms.check(msg.chat.id, msg.from_user.id, "settings.read"))
+    names = notes.names(msg.chat.id, include_admin=admin)
+    if not names:
+        await reply(msg, T(msg, "note.none"))
+        return
+    await reply(msg, T(msg, "note.list",
+                       list="\n".join(f"• <code>#{n}</code>" for n in names)))
+
+
+@dp.message(Command("clear"))
+@needs("notes.write")
+async def cmd_clear_note(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "note.usage"))
+        return
+    n = notes.delete(msg.chat.id, parts[1])
+    await reply(msg, T(msg, "note.deleted") if n
+                else T(msg, "note.missing", name=parts[1]))
+
+
+@dp.message(Command("filter"))
+@needs("filters.write")
+async def cmd_filter(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "filter.usage"))
+        return
+    trigger = parts[1]
+    content, _, _ = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if not content.strip() or not filters.add(msg.chat.id, trigger, content):
+        await reply(msg, T(msg, "filter.usage"))
+        return
+    audit.log(msg.chat.id, "filter.add", actor_id=msg.from_user.id,
+              after=trigger, severity="info")
+    await reply(msg, T(msg, "filter.saved", trigger=trigger))
+
+
+@dp.message(Command("stop"))
+@needs("filters.write")
+async def cmd_stop(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "filter.usage"))
+        return
+    n = filters.remove(msg.chat.id, parts[1])
+    await reply(msg, T(msg, "filter.removed") if n else T(msg, "filter.none"))
+
+
+@dp.message(Command("filters"))
+@needs("settings.read")
+async def cmd_filters(msg: Message):
+    touch(msg)
+    trg = filters.triggers(msg.chat.id)
+    await reply(msg, T(msg, "filter.list",
+                       list="\n".join(f"• <code>{t}</code>" for t in trg))
+                if trg else T(msg, "filter.none"))
+
+
+@dp.message(Command("addblock"))
+@needs("blocklist.write")
+async def cmd_addblock(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "block.usage"))
+        return
+    # "/addblock regex: ^..." — קידומת בוחרת סוג התאמה
+    raw, kind = parts[1], "word"
+    for pre in ("regex:", "domain:", "substring:"):
+        if raw.lower().startswith(pre):
+            kind, raw = pre[:-1], raw[len(pre):].strip()
+            break
+    if not blocks.add(msg.chat.id, raw, kind):
+        await reply(msg, T(msg, "block.bad_regex" if kind == "regex"
+                           else "block.usage"))
+        return
+    audit.log(msg.chat.id, "blocklist.add", actor_id=msg.from_user.id,
+              after=f"{kind}:{raw}", severity="medium")
+    await reply(msg, T(msg, "block.added", pattern=raw))
+
+
+@dp.message(Command("rmblock"))
+@needs("blocklist.write")
+async def cmd_rmblock(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "block.usage"))
+        return
+    n = blocks.remove(msg.chat.id, parts[1])
+    await reply(msg, T(msg, "block.removed") if n else T(msg, "block.none"))
+
+
+@dp.message(Command("blocklist"))
+@needs("settings.read")
+async def cmd_blocklist(msg: Message):
+    touch(msg)
+    rows = blocks.all(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "block.none"))
+        return
+    await reply(msg, T(msg, "block.list", list="\n".join(
+        f"• <code>{r['pattern']}</code> ({r['kind']})" for r in rows)))
+
+
+@dp.message(Command("rules"))
+async def cmd_rules(msg: Message):
+    touch(msg)
+    txt = db.get(msg.chat.id, RULES_KEY, "") or ""
+    await reply(msg, tpl.render(txt, _ctx(msg)) if txt.strip()
+                else T(msg, "rules.none"))
+
+
+@dp.message(Command("setrules"))
+@needs("rules.write")
+async def cmd_setrules(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    body, _, _ = _content_of(msg, parts[1] if len(parts) > 1 else "")
+    if not body.strip():
+        await reply(msg, T(msg, "rules.usage"))
+        return
+    db.set(msg.chat.id, RULES_KEY, body, msg.from_user.id)
+    audit.log(msg.chat.id, "rules.write", actor_id=msg.from_user.id,
+              severity="medium")
+    await reply(msg, T(msg, "rules.set"))
+
+
+async def _greet_cmd(msg: Message, key: str, cmd: str):
+    parts = (msg.text or "").split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if arg.lower() in ("off", "0", "no"):
+        db.set(msg.chat.id, key, "", msg.from_user.id)
+        await reply(msg, T(msg, "greet.off"))
+        return
+    if not arg and not msg.reply_to_message:
+        cur = db.get(msg.chat.id, key, "") or ""
+        await reply(msg, (tpl.render(cur, _ctx(msg)) if cur else "")
+                    + ("\n\n" if cur else "")
+                    + T(msg, "greet.usage", cmd=cmd,
+                        vars=", ".join("{" + v + "}" for v in tpl.VARIABLES)))
+        return
+    body, _, _ = _content_of(msg, arg)
+    db.set(msg.chat.id, key, body, msg.from_user.id)
+    await reply(msg, T(msg, "greet.set"))
+
+
+@dp.message(Command("welcome"))
+@needs("welcome.write")
+async def cmd_welcome(msg: Message):
+    touch(msg); await _greet_cmd(msg, WELCOME_KEY, "/welcome")
+
+
+@dp.message(Command("goodbye"))
+@needs("welcome.write")
+async def cmd_goodbye(msg: Message):
+    touch(msg); await _greet_cmd(msg, GOODBYE_KEY, "/goodbye")
+
+
+@dp.message(Command("report"))
+async def cmd_report(msg: Message):
+    """דיווח מחבר הקבוצה. לא דורש הרשאה — זו כל הנקודה."""
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    if db.get(msg.chat.id, "reports", "1") != "1":
+        await reply(msg, T(msg, "report.off"))
+        return
+    src = msg.reply_to_message
+    if src is None or src.from_user is None:
+        await reply(msg, T(msg, "report.need_reply"))
+        return
+    reason = " ".join((msg.text or "").split()[1:])
+    audit.log(msg.chat.id, "user.report", actor_id=msg.from_user.id,
+              target_id=src.from_user.id, reason=reason, severity="medium")
+    admins = await sync_admins(msg.chat.id)
+    alert = T(msg, "report.alert",
+              reporter=tpl.mention(msg.from_user.id, _name(msg)),
+              target=tpl.mention(src.from_user.id,
+                                 src.from_user.first_name or "?"),
+              reason=tpl.esc(reason))
+    for uid in list(admins)[:10]:
+        await send(uid, alert, is_group=False)
+    await reply(msg, T(msg, "report.sent"))
+
+
+@dp.message(Command("info"))
+@needs("settings.read")
+async def cmd_info(msg: Message):
+    touch(msg)
+    t = _target_of(msg) or msg.from_user.id
+    r = db.one("""SELECT m.role, m.msg_count, m.joined_at, u.first_name,
+                         u.username
+                  FROM members m LEFT JOIN users u ON u.user_id=m.user_id
+                  WHERE m.chat_id=? AND m.user_id=?""", (msg.chat.id, t))
+    joined = (time.strftime("%d/%m/%Y", time.localtime(r["joined_at"]))
+              if r and r["joined_at"] else "—")
+    await reply(msg, T(msg, "info.card",
+                       name=tpl.esc((r["first_name"] if r else "") or t),
+                       id=t, role=(r["role"] if r else "member"),
+                       msgs=(r["msg_count"] if r else 0),
+                       warns=mod.warn_count(msg.chat.id, t), joined=joined))
+
+
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     """משתיק את כל הקבוצה בבת אחת, או מחזיר אותה.
 
@@ -464,7 +963,7 @@ async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     של כל משתמש בנפרד. לכן זה פועל מיד גם על מי שעוד לא הצטרף, ולכן
     ביטול הוא פעולה אחת ולא מאה."""
     try:
-        await bot.set_chat_permissions(chat_id, MUTED if on else UNMUTED)
+        await bot.set_chat_permissions(chat_id, MUTED if on else OPEN_CHAT)
     except TelegramAPIError as e:
         log.warning("השבתת קבוצה %s נכשלה: %s", chat_id, e)
         return False

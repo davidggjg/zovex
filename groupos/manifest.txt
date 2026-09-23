@@ -1,5 +1,8 @@
+antiflood.py
 audit.py
+blocklist.py
 bot.py
+content.py
 db.py
 i18n.py
 locales.py
@@ -8,4 +11,5 @@ moderation.py
 panel.py
 permissions.py
 ratelimit.py
+templates.py
 test_core.py

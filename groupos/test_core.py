@@ -26,6 +26,10 @@ from moderation import Moderation, parse_policy, format_policy  # noqa: E402
 import panel  # noqa: E402
 import i18n  # noqa: E402
 from ratelimit import RateGuard, GLOBAL_PER_SEC  # noqa: E402
+import templates as tpl  # noqa: E402
+import blocklist as bl  # noqa: E402
+import content  # noqa: E402
+from antiflood import AntiFlood  # noqa: E402
 
 PASS = FAIL = 0
 FAILURES: list[str] = []
@@ -82,6 +86,15 @@ def test_db():
        len(db.q("SELECT 1 FROM settings WHERE chat_id=-100 AND key='welcome_on'")) == 1)
     ok("מפתח חסר מחזיר ברירת מחדל",
        db.get(-100, "אין_כזה", "ברירה") == "ברירה")
+
+    # run מחזיר lastrowid; DELETE חייב להימדד ב-rowcount. קוד שבדק
+    # ‎if run(DELETE...)‎ קיבל "הצלחתי" גם כשלא נמחק דבר — נתפס בבדיקה.
+    db.run("INSERT INTO allowlist (chat_id,scope,value) VALUES (?,?,?)",
+           (-100, "user", "1"))
+    ok("change סופר מחיקה אמיתית",
+       db.change("DELETE FROM allowlist WHERE chat_id=?", (-100,)) == 1)
+    ok("change מחזיר אפס כשאין מה למחוק",
+       db.change("DELETE FROM allowlist WHERE chat_id=?", (-999,)) == 0)
     return db
 
 
@@ -546,6 +559,14 @@ def test_panel():
     # רגילות לבוט שאינו מנהל. בלי הרישום ברגע ההוספה, הבוט יושב בקבוצה
     # והפאנל מציג "לא ראיתי אותך מנהל באף קבוצה". זה קרה בפועל.
     ok("הבוט מגיב לרגע ההוספה לקבוצה", "@dp.my_chat_member()" in bot_src)
+    ok("יש מטפל לכניסת משתמש", "F.new_chat_members)" in bot_src)
+    ok("יש מטפל ליציאת משתמש", "F.left_chat_member)" in bot_src)
+    # הודעת הצטרפות היא הודעה בלי טקסט. בלי ההחרגה, המטפל הכללי
+    # בולע אותה וברכת הכניסה לא נורית לעולם.
+    generic = bot_src.split("async def on_group_message")[0].rsplit("@dp.message", 1)[-1]
+    ok("המטפל הכללי מחריג הודעות שירות",
+       "~F.new_chat_members" in generic and "~F.left_chat_member" in generic,
+       generic.strip()[:120])
     ok("הבוט מגיב לקידום מנהלים", "@dp.chat_member()" in bot_src)
     ok("המסך הריק מפנה ל-/start בקבוצה",
        "/start" in i18n.t("home.empty", "he")
@@ -660,6 +681,173 @@ def test_i18n():
        str(len(i18n.available())))
 
 
+# ── משתנים בהודעות ────────────────────────────────────────────────────────
+def test_templates():
+    section("משתנים בהודעות")
+    ctx = tpl.context(user_id=7, first="דוד", username="david",
+                      chat_title="הקבוצה", chat_id=-100, count=42)
+    ok("שם מוחלף", tpl.render("שלום {user}", ctx) == "שלום דוד")
+    ok("username עם שטרודל", "@david" in tpl.render("{username}", ctx))
+    ok("mention הוא קישור", 'tg://user?id=7' in tpl.render("{mention}", ctx))
+    ok("מונה חברים", tpl.render("{count}", ctx) == "42")
+    ok("משתנה לא מוכר נשאר", tpl.render("{smile}", ctx) == "{smile}")
+    ok("סוגר בודד לא מפיל", isinstance(tpl.render("שלום { ", ctx), str))
+
+    # הזרקת HTML דרך שם משתמש — הבוט שולח ב-HTML
+    evil = tpl.context(user_id=1, first="<b>פריצה</b>")
+    out = tpl.render("שלום {user}", evil)
+    ok("שם עם תגיות עובר בריחה", "&lt;b&gt;" in out and "<b>פריצה" not in out, out)
+    ok("mention נשאר HTML תקין", "<a href=" in tpl.render("{mention}", evil))
+
+    ok("משתנה שאינו בהקשר נשאר", tpl.render("{risk}", {"user": "x"}) == "{risk}")
+    ok("זיהוי משתנים בטקסט",
+       tpl.used("שלום {user}, יש לך {warnings}") == {"user", "warnings"})
+
+    picks = {tpl.pick("א|||ב|||ג") for _ in range(40)}
+    ok("בחירה אקראית מכסה את כל הנוסחים", picks == {"א", "ב", "ג"}, str(picks))
+    ok("בלי מפריד מחזיר את עצמו", tpl.pick("שלום") == "שלום")
+
+
+# ── רשימת חסומים והתחמקויות ───────────────────────────────────────────────
+def test_blocklist():
+    section("רשימת חסומים")
+    rules = [{"pattern": "spam", "kind": "word", "action": "delete"}]
+
+    ok("מילה נחסמת", bl.check_text("this is spam here", rules) is not None)
+    ok("מילה בתוך מילה לא נחסמת",
+       bl.check_text("spammer? no. spamalot", rules) is None or
+       bl.check_text("nospamhere", rules) is None)
+    ok("הודעה נקייה עוברת", bl.check_text("שלום לכולם", rules) is None)
+
+    # ההתחמקויות שספאמרים באמת משתמשים בהן
+    evasions = {
+        "נקודות": "s.p.a.m now",
+        "רווחים": "s p a m",
+        "leetspeak": "5p4m deal",
+        "קירילית": "ѕраm offer",
+        "רוחב אפס": "s\u200bp\u200ba\u200bm",
+        "מקפים": "s-p-a-m",
+    }
+    for name, text in evasions.items():
+        m = bl.check_text(text, rules)
+        ok(f"התחמקות נתפסת: {name}", m is not None, repr(text))
+        if m:
+            ok(f"סומן כהתחמקות: {name}", m.evaded, name)
+
+    # דומיינים
+    dom = [{"pattern": "bad.com", "kind": "domain", "action": "ban"}]
+    ok("דומיין נתפס", bl.check_text("go to https://bad.com/x", dom) is not None)
+    ok("תת-דומיין נתפס", bl.check_text("a.bad.com", dom) is not None)
+    ok("דומיין דומה לא נתפס", bl.check_text("notbad.com", dom) is None)
+    ok("דומיין אחר לא נתפס", bl.check_text("good.com", dom) is None)
+
+    # ביטוי רגולרי שבור של מנהל לא מפיל בדיקת הודעה
+    broken = [{"pattern": "([", "kind": "regex", "action": "delete"}]
+    ok("regex שבור לא מפיל", bl.check_text("כל טקסט", broken) is None)
+
+    rx = [{"pattern": r"\bcrypto\s+deal\b", "kind": "regex", "action": "warn"}]
+    ok("regex תקין עובד", bl.check_text("best CRYPTO  deal", rx) is not None)
+
+    db = fresh()
+    B = bl.Blocklist(db)
+    CHAT = -100321
+    ok("הוספה", B.add(CHAT, "ספאם"))
+    ok("regex שבור לא נשמר", not B.add(CHAT, "([", "regex"))
+    ok("סוג לא מוכר נדחה", not B.add(CHAT, "x", "קסם"))
+    ok("נתפס דרך המסד", B.check(CHAT, "יש כאן ס.פ.א.ם") is not None)
+    ok("בידוד בין קבוצות", B.check(-100999, "ספאם") is None)
+    B.remove(CHAT, "ספאם")
+    ok("הסרה", B.check(CHAT, "ספאם") is None)
+
+
+# ── הערות ופילטרים ────────────────────────────────────────────────────────
+def test_content():
+    section("הערות ופילטרים")
+    db = fresh()
+    N, F = content.Notes(db), content.Filters(db)
+    CHAT = -100654
+
+    ok("שם מנוקה", content.clean_name("#כללי  ") == "כללי")
+    ok("רווחים הופכים לקו תחתון", content.clean_name("שני חלקים") == "שני_חלקים")
+
+    ok("שמירה", N.save(CHAT, "#rules", "החוקים כאן"))
+    ok("הערה ריקה נדחית", not N.save(CHAT, "x", ""))
+    n = N.get(CHAT, "rules")
+    ok("שליפה", n is not None and n.content == "החוקים כאן")
+    ok("שליפה עם סולמית", N.get(CHAT, "#rules") is not None)
+    N.save(CHAT, "rules", "עודכן")
+    ok("שמירה חוזרת דורסת", N.get(CHAT, "rules").content == "עודכן")
+    ok("רשימה", N.names(CHAT) == ["rules"])
+    N.save(CHAT, "פנימי", "רק למנהלים", visibility="admin")
+    ok("הערת מנהלים מוסתרת", "פנימי" not in N.names(CHAT))
+    ok("מנהל רואה אותה", "פנימי" in N.names(CHAT, include_admin=True))
+    ok("מחיקה", N.delete(CHAT, "rules") == 1 and N.get(CHAT, "rules") is None)
+
+    # כפתורים — קלט של משתמש
+    rows = content.parse_buttons("אתר|https://a.com\nרע|javascript:alert(1)")
+    ok("כפתור תקין נשמר", rows == [[("אתר", "https://a.com")]], str(rows))
+    ok("javascript: נזרק",
+       not any("javascript" in u for r in content.parse_buttons(
+           "x|javascript:alert(1)") for _, u in r))
+    ok("tg:// נזרק", content.parse_buttons("x|tg://user?id=1") == [])
+    two = content.parse_buttons("א|https://a.com && ב|https://b.com")
+    ok("שני כפתורים בשורה", len(two) == 1 and len(two[0]) == 2, str(two))
+
+    ok("פילטר נשמר", F.add(CHAT, "שלום", "היי!"))
+    h = F.check(CHAT, "שלום לכולם")
+    ok("פילטר נורה", h is not None and h.content == "היי!")
+    ok("מילה בתוך מילה לא יורה", F.check(CHAT, "שלומי הגיע") is None)
+    ok("הודעה אחרת לא יורה", F.check(CHAT, "מה נשמע") is None)
+    F.add(CHAT, "קנה", "פרסומת", match_kind="substring", action="delete")
+    ok("substring יורה על חלק ממילה", F.check(CHAT, "תקנה עכשיו") is not None)
+    ok("פעולה לא מוכרת נדחית", not F.add(CHAT, "x", "y", action="לרסק"))
+    ok("regex שבור נדחה", not F.add(CHAT, "([", "y", match_kind="regex"))
+    F.remove(CHAT, "שלום")
+    ok("הסרה", F.check(CHAT, "שלום לכולם") is None)
+
+
+# ── הצפה ──────────────────────────────────────────────────────────────────
+def test_antiflood():
+    section("הגנת הצפה")
+    A = AntiFlood()
+    CHAT, U = -100111, 5
+
+    out = [A.note(CHAT, U, f"הודעה {i}", now=100 + i * 0.1, rate=5)
+           for i in range(5)]
+    ok("מתחת לסף לא נורה", not any(out), str(out))
+    hit = A.note(CHAT, U, "עוד אחת", now=100.6, rate=5)
+    ok("קצב נתפס", hit is not None and hit.kind == "rate")
+
+    A2 = AntiFlood()
+    slow = [A2.note(CHAT, U, f"שונה {i}", now=100 + i * 30, rate=5)
+            for i in range(6)]
+    ok("הודעות מפוזרות בזמן לא נתפסות", not any(slow))
+
+    # ספאמר שנשאר מתחת לסף הקצב אבל חוזר על עצמו
+    A3 = AntiFlood()
+    rep = [A3.note(CHAT, U, "אותו טקסט", now=100 + i * 8, rate=50)
+           for i in range(4)]
+    ok("חזרתיות נתפסת גם מתחת לסף הקצב",
+       rep[-1] is not None and rep[-1].kind == "repeat", str(rep))
+
+    A4 = AntiFlood()
+    ok("הצפת תיוגים נתפסת",
+       (A4.note(CHAT, U, "היי", mentions=20, now=1) or
+        type("x", (), {"kind": None})).kind == "mention")
+    ok("תיוג בודד עובר", A4.note(CHAT, 6, "היי @a", mentions=1, now=1) is None)
+
+    A5 = AntiFlood()
+    joins = [A5.join(CHAT, now=100 + i, count=10) for i in range(10)]
+    ok("הצטרפות המונית נתפסת",
+       joins[-1] is not None and joins[-1].kind == "raid")
+    ok("הצטרפות בודדת לא", AntiFlood().join(CHAT, now=1, count=10) is None)
+
+    A6 = AntiFlood()
+    for u in range(6000):
+        A6.note(CHAT, u, "x", now=1)
+    ok("תקרת זיכרון נאכפת", A6.stats()["users"] <= 5000, str(A6.stats()))
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -669,6 +857,10 @@ def main() -> int:
     test_locks()
     test_moderation()
     test_panel()
+    test_templates()
+    test_blocklist()
+    test_content()
+    test_antiflood()
     test_manifest()
     test_i18n()
     test_flow()

@@ -167,7 +167,7 @@ class Permissions:
 
     def revoke_override(self, chat_id: int, role: str, permission: str) -> None:
         """מסיר דריסה ומחזיר את ברירת המחדל."""
-        self.db.run("""DELETE FROM role_grants
+        self.db.change("""DELETE FROM role_grants
                        WHERE chat_id=? AND role=? AND permission=?""",
                     (chat_id, role, permission))
 

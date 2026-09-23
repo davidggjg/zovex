@@ -175,7 +175,7 @@ class Locks:
         if action not in ACTIONS:
             raise ValueError(f"פעולה לא מוכרת: {action}")
         if action == "off":
-            self.db.run("DELETE FROM locks WHERE chat_id=? AND lock_type=?",
+            self.db.change("DELETE FROM locks WHERE chat_id=? AND lock_type=?",
                         (chat_id, lock))
             return
         self.db.run("""INSERT INTO locks (chat_id,lock_type,action,duration)
