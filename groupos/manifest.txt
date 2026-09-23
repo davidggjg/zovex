@@ -2,8 +2,10 @@ antiflood.py
 audit.py
 blocklist.py
 bot.py
+captcha.py
 content.py
 db.py
+emergency.py
 i18n.py
 locales.py
 locks.py

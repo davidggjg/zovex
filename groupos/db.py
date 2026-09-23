@@ -304,6 +304,15 @@ class Db:
                       updated_by=excluded.updated_by""",
                  (chat_id, key, str(value), time.time(), by))
 
+    def unset(self, chat_id: int, key: str) -> int:
+        """מוחק דריסה מקומית. הקבוצה חוזרת לרשת ברירת המחדל הגלובלית.
+
+        זה **לא** אותו דבר כמו ‎set(chat_id, key, "")‎: ערך ריק הוא
+        דריסה שאומרת "כבוי", ומחיקה אומרת "לא נקבע כאן". מצב חירום
+        צריך את ההבחנה הזאת כדי לשחזר בדיוק את מה שהיה."""
+        return self.change("DELETE FROM settings WHERE chat_id=? AND key=?",
+                           (chat_id, key))
+
     def close(self) -> None:
         c = getattr(self._local, "conn", None)
         if c is not None:

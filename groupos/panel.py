@@ -103,8 +103,12 @@ def main_menu(chat_id: int, title: str, stats: dict,
          (i18n.t("menu.warns", lang), cb(chat_id, "warns"))],
         [(i18n.t("menu.audit", lang), cb(chat_id, "audit")),
          (i18n.t("menu.settings", lang), cb(chat_id, "settings"))],
-        [(i18n.t("menu.lockdown", lang), cb(chat_id, "ldown"))],
-        [(i18n.t("menu.language", lang), cb(chat_id, "lang"))],
+        # הכפתור אומר מה הלחיצה **תעשה**, לא מה המצב. כפתור שכתוב בו
+        # "השבתה" בקבוצה שכבר מושבתת נראה כמו כפתור שלא עבד.
+        [(i18n.t("menu.lockdown_on" if stats.get("lockdown")
+                 else "menu.lockdown", lang), cb(chat_id, "ldown"))],
+        [(i18n.t("menu.security", lang), cb(chat_id, "sec")),
+         (i18n.t("menu.language", lang), cb(chat_id, "lang"))],
         [(i18n.t("menu.groups", lang), "g:0:home")],
     ]
     return Screen(txt, rows)
@@ -242,6 +246,49 @@ def welcome_screen() -> Screen:
     return Screen("<b>GroupOS</b>\n\n🌐 Choose your language", rows)
 
 
+def security_screen(chat_id: int, rows_state: list[tuple[str, bool]],
+                    numbers: dict, lang: str = i18n.DEFAULT) -> Screen:
+    """מה מגן על הקבוצה עכשיו, בשורה אחת לכל הגנה.
+
+    מסך שמראה רק "הכול תקין" חסר ערך. כאן כל הגנה מופיעה עם מצבה,
+    גם כשהיא כבויה — כי הכבויה היא זו שמעניינת."""
+    on, off = i18n.t("on", lang), i18n.t("off", lang)
+    lines = [f"{'🟢' if v else '⚪'} {i18n.t(k, lang)} — {on if v else off}"
+             for k, v in rows_state]
+    txt = (head("sec.title", lang) + "\n\n" + "\n".join(lines) + "\n\n"
+           + i18n.t("sec.locks", lang, n=numbers.get("locks", 0)) + "\n"
+           + i18n.t("sec.blocks", lang, n=numbers.get("blocks", 0)) + "\n"
+           + i18n.t("sec.pending", lang, n=numbers.get("pending", 0)) + "\n"
+           + i18n.t("sec.events", lang, n=numbers.get("events", 0)))
+    rows = [
+        [(i18n.t("menu.emergency", lang), cb(chat_id, "emerg"))],
+        [(i18n.t("sec.captcha", lang) + ": "
+          + (on if numbers.get("captcha") else off), cb(chat_id, "tgl", "captcha")),
+         (i18n.t("sec.flood", lang) + ": "
+          + (on if numbers.get("flood") else off), cb(chat_id, "tgl", "flood"))],
+        [(i18n.t("sec.antiraid", lang) + ": "
+          + (on if numbers.get("antiraid") else off), cb(chat_id, "tgl", "antiraid")),
+         (i18n.t("sec.reports", lang) + ": "
+          + (on if numbers.get("reports") else off), cb(chat_id, "tgl", "reports"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
+    ]
+    return Screen(txt, rows)
+
+
+def captcha_screen(challenge, lang: str = i18n.DEFAULT) -> Screen:
+    """האתגר עצמו. הכפתורים נושאים את התשובה, ולכן הם קצרים בכוונה."""
+    secs = max(0, int(challenge.deadline - __import__("time").time()))
+    if challenge.kind == "button":
+        txt = i18n.t("captcha.prompt", lang, mention="{mention}", secs=secs)
+        rows = [[(i18n.t("captcha.button", lang),
+                  f"c:{challenge.user_id}:ok")]]
+        return Screen(txt, rows)
+    key = "captcha.prompt_math" if challenge.kind == "math" else "captcha.prompt_emoji"
+    txt = i18n.t(key, lang, mention="{mention}", q=challenge.prompt, secs=secs)
+    rows = [[(c, f"c:{challenge.user_id}:{c}") for c in challenge.choices]]
+    return Screen(txt, rows)
+
+
 # הפקודות: שם והרשאה. התיאור מגיע מ-i18n לפי מפתח ‎cmd.<שם>‎, כי אותה
 # רשימה מזינה גם את ‎/help‎ וגם את תפריט ✏️ של טלגרם — שם התיאור נרשם
 # בנפרד לכל שפה.
@@ -283,6 +330,10 @@ COMMANDS: list[tuple[str, str]] = [
     ("goodbye",  "welcome.write"),
     ("report",   ""),
     ("info",     "settings.read"),
+    ("emergency", "emergency.toggle"),
+    ("captcha",   "settings.write"),
+    ("security",  "settings.read"),
+    ("delall",    "chat.purge"),
     ("id",     ""),
     ("health", ""),
 ]

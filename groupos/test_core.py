@@ -29,6 +29,9 @@ from ratelimit import RateGuard, GLOBAL_PER_SEC  # noqa: E402
 import templates as tpl  # noqa: E402
 import blocklist as bl  # noqa: E402
 import content  # noqa: E402
+import re as _re_mod  # noqa: E402
+import captcha as cap  # noqa: E402
+import emergency as emerg  # noqa: E402
 from antiflood import AntiFlood  # noqa: E402
 
 PASS = FAIL = 0
@@ -848,6 +851,97 @@ def test_antiflood():
     ok("תקרת זיכרון נאכפת", A6.stats()["users"] <= 5000, str(A6.stats()))
 
 
+# ── אימות נכנסים ──────────────────────────────────────────────────────────
+def test_captcha():
+    section("אימות נכנסים")
+    CHAT, U = -100222, 77
+
+    b = cap.build(CHAT, U, "button", now=0, timeout=60)
+    ok("כפתור: תשובה אחת", b.choices == ["ok"] and b.answer == "ok")
+    ok("דדליין נקבע", b.deadline == 60)
+    ok("טרם פג", not b.expired(now=59))
+    ok("פג בזמן", b.expired(now=60))
+    ok("זמן מינימלי נאכף", cap.build(CHAT, U, "button", timeout=0, now=0).deadline >= 10)
+
+    m = cap.build(CHAT, U, "math", now=0)
+    ok("תרגיל: התשובה בין האפשרויות", m.answer in m.choices)
+    ok("תרגיל: ארבע אפשרויות", len(m.choices) == 4, str(m.choices))
+    ok("תרגיל: בלי כפילויות", len(set(m.choices)) == 4)
+    nums = [int(x) for x in _re_mod.findall(r"\d+", m.prompt)]
+    ok("תרגיל: התשובה נכונה", sum(nums) == int(m.answer), m.prompt)
+
+    e = cap.build(CHAT, U, "emoji", now=0)
+    ok("אימוג'י: התשובה בין האפשרויות", e.answer in e.choices)
+    ok("אימוג'י: בלי כפילויות", len(set(e.choices)) == 4)
+
+    P = cap.Pending()
+    P.add(cap.build(CHAT, U, "button", tries=2, now=time.time()))
+    ok("ממתין", P.waiting(CHAT, U))
+    ok("תשובה נכונה עוברת", P.answer(CHAT, U, "ok") == "ok")
+    ok("אחרי הצלחה לא ממתין", not P.waiting(CHAT, U))
+    ok("תשובה לאתגר שנסגר", P.answer(CHAT, U, "ok") == "gone")
+
+    P.add(cap.build(CHAT, U, "math", tries=2, now=time.time()))
+    ch = P.get(CHAT, U)
+    wrong = next(c for c in ch.choices if c != ch.answer)
+    ok("ניסיון ראשון שגוי מאפשר עוד", P.answer(CHAT, U, wrong) == "retry")
+    ok("ניסיון אחרון שגוי מכשיל", P.answer(CHAT, U, wrong) == "fail")
+    ok("אחרי כישלון האתגר נסגר", not P.waiting(CHAT, U))
+
+    # אתגר שפג חייב להיסגר לבד — הנכנס מושתק כל עוד הוא פתוח
+    P2 = cap.Pending()
+    P2.add(cap.build(CHAT, 1, "button", timeout=10, now=0))
+    P2.add(cap.build(CHAT, 2, "button", timeout=10, now=1000))
+    gone = P2.expired(now=100)
+    ok("פג נאסף", len(gone) == 1 and gone[0].user_id == 1, str(len(gone)))
+    ok("שלא פג נשאר", P2.waiting(CHAT, 2))
+    ok("שנאסף הוסר", not P2.waiting(CHAT, 1))
+    ok("ספירה לפי קבוצה", P2.count(CHAT) == 1)
+
+
+# ── מצב חירום ─────────────────────────────────────────────────────────────
+def test_emergency():
+    section("מצב חירום")
+    db = fresh()
+    CHAT = -100333
+
+    db.set(CHAT, "flood", "0")
+    db.set(CHAT, "silent", "1")
+    ok("כבוי מלכתחילה", not emerg.is_on(db, CHAT))
+
+    emerg.enable(db, CHAT, 5)
+    ok("הופעל", emerg.is_on(db, CHAT))
+    ok("הצפה הופעלה", db.get(CHAT, "flood") == "1")
+    ok("אימות הופעל", db.get(CHAT, "captcha") == "1")
+    ok("סף ההצפה הוקשח", int(db.get(CHAT, "flood_rate")) < 8)
+    ok("מצב שקט כובה", db.get(CHAT, "silent") == "0")
+    ok("הפעלה כפולה לא עושה כלום", emerg.enable(db, CHAT, 5) == {})
+
+    emerg.disable(db, CHAT, 5)
+    ok("כובה", not emerg.is_on(db, CHAT))
+    # השחזור חייב להיות מדויק, אחרת מנהל יפחד ללחוץ
+    ok("הצפה חזרה לכבוי", db.get(CHAT, "flood") == "0")
+    ok("מצב שקט חזר", db.get(CHAT, "silent") == "1")
+    ok("מפתח שלא היה קיים לא נשאר",
+       db.get(CHAT, "captcha_kind") is None, str(db.get(CHAT, "captcha_kind")))
+    ok("כיבוי כפול לא מפיל", not emerg.disable(db, CHAT, 5))
+
+    # הרכב מותאם לקבוצה
+    db.set(CHAT, "emergency_preset", '{"flood_rate": "2"}')
+    emerg.enable(db, CHAT, 5)
+    ok("דריסה פר-קבוצה נלקחת", db.get(CHAT, "flood_rate") == "2")
+    emerg.disable(db, CHAT, 5)
+    db.set(CHAT, "emergency_preset", "{לא json")
+    ok("הרכב פגום לא מונע הפעלה", emerg.enable(db, CHAT, 5) != {})
+    emerg.disable(db, CHAT, 5)
+
+    st = emerg.status(db, CHAT)
+    ok("מרכז האבטחה מחזיר את כל ההגנות", len(st) == len(emerg.PROTECTIONS))
+    ok("לכל הגנה יש שם מתורגם",
+       all(i18n.t(k, "en") != k for k, _ in st),
+       str([k for k, _ in st if i18n.t(k, "en") == k]))
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -861,6 +955,8 @@ def main() -> int:
     test_blocklist()
     test_content()
     test_antiflood()
+    test_captcha()
+    test_emergency()
     test_manifest()
     test_i18n()
     test_flow()

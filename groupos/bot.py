@@ -48,6 +48,8 @@ from aiogram.types import (BotCommand, CallbackQuery, ChatMemberUpdated,
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
+import captcha as cap                           # noqa: E402
+import emergency as emerg                       # noqa: E402
 import templates as tpl                         # noqa: E402
 from antiflood import AntiFlood                 # noqa: E402
 from audit import Audit                         # noqa: E402
@@ -78,6 +80,7 @@ notes = Notes(db)
 filters = Filters(db)
 blocks = Blocklist(db)
 flood = AntiFlood()
+pending = cap.Pending()
 lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
@@ -87,6 +90,9 @@ GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
 _admin_cache: dict[int, tuple[float, dict[int, str]]] = {}
 # ברירות המחדל של הגנת ההצפה, לדריסה פר-קבוצה דרך settings
 AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 8, 10, 4, 8
+# תקרת מחיקה בפעולה אחת. כל מחיקה היא קריאת API, ומחיקה של 5000
+# הודעות תתקע את הבוט לכל הקבוצות האחרות לדקות.
+PURGE_MAX = 200
 ADMIN_TTL = 300
 
 
@@ -571,6 +577,10 @@ async def on_join(msg: Message):
         raid = flood.join(msg.chat.id)
         if raid and db.get(msg.chat.id, "antiraid", "1") == "1":
             await _on_raid(msg.chat.id, raid)
+        if db.get(msg.chat.id, "captcha", "0") == "1":
+            # האימות קודם לברכה: אין טעם לברך מי שעוד לא הוכח כאדם
+            if await _start_captcha(msg.chat.id, u):
+                continue
         await _greet(msg.chat.id, u, WELCOME_KEY, True)
     if clean_delay(msg.chat.id):
         _schedule_delete(msg.chat.id, msg.message_id, 5)
@@ -583,6 +593,89 @@ async def on_leave(msg: Message):
         await _greet(msg.chat.id, u, GOODBYE_KEY, False)
     if clean_delay(msg.chat.id):
         _schedule_delete(msg.chat.id, msg.message_id, 5)
+
+
+async def _start_captcha(chat_id: int, user) -> bool:
+    """משתיק את הנכנס ושולח אתגר. מחזיר האם האתגר נשלח.
+
+    ההשתקה **קודמת** להודעה. אם השליחה תיכשל ברשת, עדיף משתמש מושתק
+    שמנהל ישחרר מאשר ספאמר שנכנס בלי שנבדק."""
+    try:
+        await bot.restrict_chat_member(chat_id, user.id, MUTED)
+    except TelegramAPIError as e:
+        log.warning("השתקת נכנס ב-%s נכשלה: %s", chat_id, e)
+        return False
+    ch = cap.build(chat_id, user.id,
+                   db.get(chat_id, "captcha_kind", "button"),
+                   timeout=_int(db.get(chat_id, "captcha_time", ""), 120),
+                   tries=_int(db.get(chat_id, "captcha_tries", ""), 3))
+    lg = lang.for_chat(chat_id)
+    sc = panel.captcha_screen(ch, lg)
+    text = sc.text.replace("{mention}",
+                           tpl.mention(user.id, user.first_name or "?"))
+    m = await send(chat_id, text, markup=kb(sc))
+    ch.message_id = m.message_id if m else None
+    pending.add(ch)
+    audit.log(chat_id, "captcha.sent", target_id=user.id, actor_kind="bot",
+              source="policy", after=ch.kind, severity="info")
+    return True
+
+
+async def _captcha_done(ch, passed: bool) -> None:
+    """סוגר אתגר: משחרר או מעניש, ומנקה את ההודעה."""
+    lg = lang.for_chat(ch.chat_id)
+    if ch.message_id:
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(ch.chat_id, ch.message_id)
+    if passed:
+        with contextlib.suppress(TelegramAPIError):
+            await bot.restrict_chat_member(ch.chat_id, ch.user_id, UNMUTED)
+        audit.log(ch.chat_id, "captcha.passed", target_id=ch.user_id,
+                  actor_kind="bot", source="policy", severity="info")
+        row = db.one("SELECT first_name,username FROM users WHERE user_id=?",
+                     (ch.user_id,))
+        u = type("U", (), {"id": ch.user_id,
+                           "first_name": (row["first_name"] if row else ""),
+                           "last_name": "",
+                           "username": (row["username"] if row else "")})
+        await _greet(ch.chat_id, u, WELCOME_KEY, True)
+        return
+    action = db.get(ch.chat_id, "captcha_fail", "kick")
+    audit.log(ch.chat_id, "captcha.failed", target_id=ch.user_id,
+              actor_kind="bot", source="policy", after=action, severity="medium")
+    if action in ("kick", "ban", "mute"):
+        await apply_action(ch.chat_id, ch.user_id, action, None,
+                           "captcha", None, "policy")
+
+
+@dp.callback_query(F.data.startswith("c:"))
+async def on_captcha(q: CallbackQuery):
+    """‎c:<user_id>:<תשובה>‎. רק בעל האתגר יכול לענות עליו."""
+    parts = (q.data or "").split(":", 2)
+    if len(parts) < 3:
+        return
+    try:
+        owner = int(parts[1])
+    except ValueError:
+        return
+    lg = lang.for_chat(q.message.chat.id)
+    if q.from_user.id != owner:
+        await q.answer(i18n.t("captcha.not_yours", lg), show_alert=True)
+        return
+    ch = pending.get(q.message.chat.id, owner)
+    res = pending.answer(q.message.chat.id, owner, parts[2])
+    if res == "gone":
+        await q.answer()
+        return
+    if res == "ok":
+        await q.answer(i18n.t("captcha.ok", lg))
+        await _captcha_done(ch, True)
+        return
+    if res == "retry":
+        await q.answer(i18n.t("captcha.retry", lg, n=ch.tries), show_alert=True)
+        return
+    await q.answer(i18n.t("captcha.fail", lg), show_alert=True)
+    await _captcha_done(ch, False)
 
 
 async def _on_raid(chat_id: int, raid) -> None:
@@ -956,6 +1049,91 @@ async def cmd_info(msg: Message):
                        warns=mod.warn_count(msg.chat.id, t), joined=joined))
 
 
+@dp.message(Command("emergency"))
+@needs("emergency.toggle")
+async def cmd_emergency(msg: Message):
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    want = not emerg.is_on(db, msg.chat.id) if arg not in ("on", "off") \
+        else (arg == "on")
+    if want:
+        if not emerg.enable(db, msg.chat.id, msg.from_user.id):
+            await reply(msg, T(msg, "emergency.already"))
+            return
+        audit.log(msg.chat.id, "emergency.on", actor_id=msg.from_user.id,
+                  severity="critical")
+        await reply(msg, T(msg, "emergency.on"))
+        return
+    if not emerg.disable(db, msg.chat.id, msg.from_user.id):
+        await reply(msg, T(msg, "emergency.not_on"))
+        return
+    audit.log(msg.chat.id, "emergency.off", actor_id=msg.from_user.id,
+              severity="high")
+    await reply(msg, T(msg, "emergency.off"))
+
+
+@dp.message(Command("captcha"))
+@needs("settings.write")
+async def cmd_captcha(msg: Message):
+    """‎/captcha on|off|button|math|emoji‎."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    if arg in ("on", "off"):
+        db.set(msg.chat.id, "captcha", "1" if arg == "on" else "0",
+               msg.from_user.id)
+    elif arg in cap.KINDS:
+        db.set(msg.chat.id, "captcha_kind", arg, msg.from_user.id)
+        db.set(msg.chat.id, "captcha", "1", msg.from_user.id)
+    elif arg:
+        await reply(msg, T(msg, "captcha.settings",
+                           kind=db.get(msg.chat.id, "captcha_kind", "button"),
+                           secs=db.get(msg.chat.id, "captcha_time", "120"),
+                           tries=db.get(msg.chat.id, "captcha_tries", "3"),
+                           action=db.get(msg.chat.id, "captcha_fail", "kick")))
+        return
+    await reply(msg, T(msg, "captcha.settings",
+                       kind=db.get(msg.chat.id, "captcha_kind", "button"),
+                       secs=db.get(msg.chat.id, "captcha_time", "120"),
+                       tries=db.get(msg.chat.id, "captcha_tries", "3"),
+                       action=db.get(msg.chat.id, "captcha_fail", "kick")))
+
+
+@dp.message(Command("security"))
+@needs("settings.read")
+async def cmd_security(msg: Message):
+    touch(msg)
+    sc = panel.security_screen(msg.chat.id, emerg.status(db, msg.chat.id),
+                               _sec_numbers(msg.chat.id), lang_of(msg))
+    await reply(msg, sc.text)
+
+
+@dp.message(Command("delall"))
+@needs("chat.purge")
+async def cmd_delall(msg: Message):
+    """מוחק את ההודעות האחרונות של מי שהשבת עליו.
+
+    טלגרם אינה נותנת "מחק הכול ממשתמש". מה שאפשר הוא לעבור על טווח
+    מזהים אחורה ולמחוק את שלו — ולכן הטווח חסום, אחרת זו לולאה של
+    אלפי קריאות API על קבוצה אחת."""
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    start = msg.reply_to_message.message_id
+    n = 0
+    for mid in range(start, max(start - PURGE_MAX, 0), -1):
+        try:
+            await bot.delete_message(msg.chat.id, mid)
+            n += 1
+        except TelegramAPIError:
+            continue
+    audit.log(msg.chat.id, "chat.purge_user", actor_id=msg.from_user.id,
+              target_id=t, after=n, severity="high")
+    await send(msg.chat.id, T(msg, "purge.by_user", n=n,
+                              name=tpl.esc(_name(msg))), clean_after=10)
+
+
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     """משתיק את כל הקבוצה בבת אחת, או מחזיר אותה.
 
@@ -1254,12 +1432,23 @@ async def cmd_warns(msg: Message):
 async def cmd_purge(msg: Message):
     """מוחק מההודעה שהשבת עליה ועד הפקודה."""
     touch(msg)
-    if not msg.reply_to_message:
-        await reply(msg, T(msg, "purge.need_reply"))
+    args = (msg.text or "").split()[1:]
+    count = _int(args[0], 0) if args else 0
+    if count:
+        if count > PURGE_MAX:
+            await reply(msg, T(msg, "purge.too_many", n=PURGE_MAX))
+            return
+        first = max(msg.message_id - count, 1)
+    elif msg.reply_to_message:
+        first = msg.reply_to_message.message_id
+        if msg.message_id - first > PURGE_MAX:
+            await reply(msg, T(msg, "purge.too_many", n=PURGE_MAX))
+            return
+    else:
+        await reply(msg, T(msg, "purge.usage"))
         return
-    start = msg.reply_to_message.message_id
     n = 0
-    for mid in range(start, msg.message_id + 1):
+    for mid in range(first, msg.message_id + 1):
         with contextlib.suppress(TelegramAPIError):
             await bot.delete_message(msg.chat.id, mid)
             n += 1
@@ -1297,6 +1486,7 @@ def _stats(chat_id: int) -> dict:
         "actions_today": (db.one("""SELECT COUNT(*) c FROM audit_log
                                     WHERE chat_id=? AND ts>?""",
                                  (chat_id, day)) or {"c": 0})["c"],
+        "lockdown": db.get(chat_id, "lockdown", "0") == "1",
     }
 
 
@@ -1336,7 +1526,27 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
             "silent": db.get(chat_id, "silent", "1")}, lg)
     if name == "lang":
         return panel.language_screen(chat_id, lg)
+    if name == "sec":
+        return panel.security_screen(chat_id, emerg.status(db, chat_id),
+                                     _sec_numbers(chat_id), lg)
     return None
+
+
+def _sec_numbers(chat_id: int) -> dict:
+    day = time.time() - 86400
+    return {
+        "locks": len(locks.get_all(chat_id)),
+        "blocks": len(blocks.all(chat_id)),
+        "pending": pending.count(chat_id),
+        "events": (db.one("""SELECT COUNT(*) c FROM audit_log
+                             WHERE chat_id=? AND ts>? AND severity IN
+                               ('medium','high','critical')""",
+                          (chat_id, day)) or {"c": 0})["c"],
+        "captcha": db.get(chat_id, "captcha", "0") == "1",
+        "flood": db.get(chat_id, "flood", "1") == "1",
+        "antiraid": db.get(chat_id, "antiraid", "1") == "1",
+        "reports": db.get(chat_id, "reports", "1") == "1",
+    }
 
 
 @dp.callback_query(F.data.startswith("g:"))
@@ -1393,6 +1603,41 @@ async def on_callback(q: CallbackQuery):
                   after=f"{arg}×{n}", source="button", severity="medium")
         await _edit(q, _screen_for(chat_id, "locks", ""))
         await q.answer(i18n.t("locks.bulk", lg, n=n))
+        return
+
+    if name == "tgl":
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in ("captcha", "flood", "antiraid", "reports"):
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        cur = db.get(chat_id, arg, "1" if arg != "captcha" else "0") == "1"
+        db.set(chat_id, arg, "0" if cur else "1", q.from_user.id)
+        audit.log(chat_id, "settings.write", actor_id=q.from_user.id,
+                  before=f"{arg}={int(cur)}", after=f"{arg}={int(not cur)}",
+                  source="button", severity="medium")
+        await _edit(q, _screen_for(chat_id, "sec", ""))
+        await q.answer(i18n.t("saved", lg))
+        return
+
+    if name == "emerg":
+        if not perms.check(chat_id, q.from_user.id, "emergency.toggle"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if emerg.is_on(db, chat_id):
+            emerg.disable(db, chat_id, q.from_user.id)
+            audit.log(chat_id, "emergency.off", actor_id=q.from_user.id,
+                      source="button", severity="high")
+            note = "emergency.off"
+        else:
+            emerg.enable(db, chat_id, q.from_user.id)
+            audit.log(chat_id, "emergency.on", actor_id=q.from_user.id,
+                      source="button", severity="critical")
+            note = "emergency.on"
+        await _edit(q, _screen_for(chat_id, "sec", ""))
+        await q.answer(i18n.t(note, lg).replace("<b>", "").replace("</b>", "")
+                       .split("\n")[0], show_alert=True)
         return
 
     if name == "ldown":
@@ -1485,6 +1730,15 @@ async def expire_loop():
                 mod.lift(s["chat_id"], s["user_id"], s["kind"], None)
         except Exception as e:
             log.warning("שחרור ענישות נכשל: %s", e)
+        try:
+            # אתגר שפג אינו "עוד מעט": הנכנס מושתק כל עוד הוא פתוח,
+            # ולכן ההכרעה חייבת לקרות גם אם אף אחד לא לחץ דבר.
+            for ch in pending.expired():
+                audit.log(ch.chat_id, "captcha.timeout", target_id=ch.user_id,
+                          actor_kind="bot", source="policy", severity="low")
+                await _captcha_done(ch, False)
+        except Exception as e:
+            log.warning("סגירת אתגרים שפגו נכשלה: %s", e)
 
 
 async def main() -> int:
