@@ -35,6 +35,9 @@ import backup  # noqa: E402
 import aikeys  # noqa: E402
 import policy  # noqa: E402
 import disabling  # noqa: E402
+import automation as auto  # noqa: E402
+import linksec  # noqa: E402
+import analytics  # noqa: E402
 import ai  # noqa: E402
 import aiclient  # noqa: E402
 import scheduler as sched  # noqa: E402
@@ -1682,6 +1685,146 @@ def test_disabling():
     ok("ברירת מחדל: לא מוחקים", not disabling.delete_mode(db, CHAT))
 
 
+# ── אוטומציה ──────────────────────────────────────────────────────────────
+def test_automation():
+    section("אוטומציה")
+    r = auto.parse_rule("when:join if:is_new & has_link then:captcha,alert")
+    ok("כלל נפרס", r and r.event == "join", str(r))
+    ok("שני תנאים", len(r.conds) == 2)
+    ok("שתי פעולות", r.actions == ("captcha", "alert"))
+    ok("הלוך ושוב", auto.parse_rule(auto.format_rule(r)) == r,
+       auto.format_rule(r))
+
+    ok("משך קריא נפרס",
+       auto.parse_rule("when:join if:account_age<7d then:captcha"
+                       ).conds[0].value == 604800)
+    ok("מספר רגיל נפרס",
+       auto.parse_rule("when:message if:risk>0.8 then:delete").conds[0].value == 0.8)
+    ok("בוליאני לבדו",
+       auto.parse_rule("when:message if:has_link then:delete").conds[0].value == 1.0)
+    ok("בלי תנאים מותר",
+       auto.parse_rule("when:raid then:emergency").conds == ())
+
+    for bad, why in (("", "ריק"), ("when:קסם then:delete", "אירוע"),
+                     ("when:join then:להתפוצץ", "פעולה"),
+                     ("when:join if:קסם>1 then:delete", "שדה"),
+                     ("when:join if:risk>הרבה then:delete", "ערך"),
+                     ("when:join", "בלי פעולה")):
+        ok(f"כלל פסול נדחה: {why}", auto.parse_rule(bad) is None, bad)
+
+    # תנאי שלא הובן הופך כלל לרחב מדי — עדיף לדחות אותו
+    ok("תנאי שבור פוסל את הכלל",
+       auto.parse_rule("when:message if:has_link & קסם>1 then:ban") is None)
+
+    rules = auto.parse_rules(
+        "when:join if:is_new then:captcha | when:message if:risk>0.9 then:ban")
+    ok("שני כללים", len(rules) == 2)
+    ok("שורה פסולה מדולגת",
+       len(auto.parse_rules("זבל | when:join then:alert")) == 1)
+    ok("תקרת כללים",
+       len(auto.parse_rules("\n".join(["when:join then:log"] * 50)))
+       == auto.MAX_RULES)
+    ok("תקרת פעולות",
+       len(auto.parse_rule("when:join then:log,alert,delete,warn,ban").actions)
+       <= auto.MAX_ACTIONS)
+
+    facts = {"is_new": True, "risk": 0.95, "account_age": 3600}
+    ok("כלל שמתאים נורה", "captcha" in auto.run(rules, "join", facts))
+    ok("אירוע אחר לא", auto.run(rules, "leave", facts) == [])
+    ok("סיכון גבוה יורה", "ban" in auto.run(rules, "message", facts))
+    ok("סיכון נמוך לא",
+       auto.run(rules, "message", {"risk": 0.1}) == [])
+    ok("שדה חסר אינו מתקיים", auto.run(rules, "message", {}) == [])
+    ok("בלי כפילויות",
+       auto.run(auto.parse_rules("when:join then:log|when:join then:log"),
+                "join", {}) == ["log"])
+    ok("הסבר מציג את הכלל",
+       auto.explain(rules, "join", facts)[0].startswith("when:join"))
+
+
+# ── אבטחת קישורים ─────────────────────────────────────────────────────────
+def test_linksec():
+    section("אבטחת קישורים")
+    ok("בלי קישור אין אותות", linksec.inspect("שלום לכולם") == [])
+    ok("קישור רגיל נקי",
+       linksec.inspect("ראו https://github.com/x") == [])
+
+    def kinds(txt, **kw):
+        return {s.kind for s in linksec.inspect(txt, **kw)}
+
+    ok("מקצר נתפס", "shortener" in kinds("לחצו https://bit.ly/abc"))
+    ok("IP נתפס", "raw_ip" in kinds("http://185.23.1.9/x"))
+    ok("סיומת זולה נתפסת", "cheap_tld" in kinds("http://prize.tk"))
+    # ‎https://telegram.org@evil.com‎ — הקצה הוא evil, לא telegram
+    ok("יוזר בכתובת נתפס",
+       "userinfo" in kinds("https://telegram.org@evil.com/login"))
+    ok("פורט חריג נתפס", "odd_port" in kinds("http://site.com:8081/x"))
+
+    ok("התחזות נתפסת", "lookalike" in kinds("https://telegrarn.org/login"))
+    ok("שם מוכר בתוך דומיין אחר",
+       "lookalike" in kinds("https://telegram-org-login.com"))
+    ok("האמיתי אינו התחזות", linksec.lookalike("telegram.org") is None)
+    ok("תת-דומיין אמיתי אינו התחזות",
+       linksec.lookalike("web.telegram.org") is None)
+    ok("דומיין רחוק אינו התחזות", linksec.lookalike("github.com") is None)
+
+    # דחיפות לבדה אינה כלום; ליד קישור חשוד היא הדפוס
+    ok("דחיפות לבדה לא מייצרת אות", linksec.inspect("מהרו! רק היום!") == [])
+    ok("דחיפות ליד קישור חשוד כן",
+       "urgency" in kinds("מהרו רק היום https://bit.ly/x"))
+
+    ok("דומיין מוחרג אינו נבדק",
+       linksec.inspect("https://bit.ly/x", allowed={"bit.ly"}) == [])
+    ok("החרגה לא מכסה אחר",
+       linksec.inspect("https://tinyurl.com/x", allowed={"bit.ly"}) != [])
+
+    sig = linksec.inspect("https://telegrarn.org")[0]
+    ok("האות נושא מקור link", sig.source == "link")
+    ok("התחזות שוקלת כבד", sig.weight >= 0.8, str(sig.weight))
+
+
+# ── אנליטיקה ──────────────────────────────────────────────────────────────
+def test_analytics():
+    section("אנליטיקה")
+    db = fresh()
+    a = Audit(db)
+    CHAT = -100999
+    t = 1_700_000_000.0
+
+    for _ in range(3):
+        a.log(CHAT, "user.ban", target_id=1, severity="high")
+    db.run("UPDATE audit_log SET ts=? WHERE chat_id=?", (t - 3600, CHAT))
+    for _ in range(9):
+        a.log(CHAT, "user.ban", target_id=2, severity="high")
+    db.run("UPDATE audit_log SET ts=? WHERE chat_id=? AND ts>?",
+           (t - 100, CHAT, t - 1800))
+
+    rep_ = analytics.report(db, CHAT, "today", now=t)
+    ok("הפעולה נספרה", rep_["actions"]["an.bans"][0] == 12,
+       str(rep_["actions"]))
+    ok("סך הכול", rep_["total"] == 12)
+
+    # מספר לבדו אינו אומר כלום — ההשוואה היא מה שהופך אותו לידיעה
+    db.run("UPDATE audit_log SET ts=? WHERE target_id=1", (t - 90000,))
+    rep2 = analytics.report(db, CHAT, "today", now=t)
+    ok("תקופה קודמת מופרדת", rep2["actions"]["an.bans"][0] == 9)
+    ok("שינוי מחושב", rep2["actions"]["an.bans"][1] == 200,
+       str(rep2["actions"]["an.bans"]))
+
+    ok("בלי היסטוריה אין אחוז", analytics._delta(5, 0) == 100)
+    ok("אפס מול אפס", analytics._delta(0, 0) is None)
+    ok("ירידה שלילית", analytics._delta(5, 10) == -50)
+
+    empty = analytics.report(db, -1, "today", now=t)
+    ok("קבוצה ריקה לא מפילה", empty["total"] == 0 and empty["members"] == 0)
+    ok("טווח לא מוכר נופל ליום",
+       analytics.report(db, CHAT, "קסם", now=t)["span"] == "קסם")
+
+    top = analytics.top_offenders(db, CHAT, "week", now=t)
+    ok("עברייני השבוע", top and top[0][0] == 2, str(top))
+    ok("שעות עמוסות", isinstance(analytics.busiest_hours(db, CHAT, now=t), list))
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -1698,6 +1841,9 @@ def main() -> int:
     test_aikeys()
     test_policy()
     test_disabling()
+    test_automation()
+    test_linksec()
+    test_analytics()
     test_ai()
     test_aiclient()
     test_scheduler()

@@ -2,8 +2,10 @@ ai.py
 aiclient.py
 aikeys.py
 allowlist.py
+analytics.py
 antiflood.py
 audit.py
+automation.py
 backup.py
 blocklist.py
 bot.py
@@ -14,6 +16,7 @@ disabling.py
 emergency.py
 federation.py
 i18n.py
+linksec.py
 locales.py
 locks.py
 moderation.py

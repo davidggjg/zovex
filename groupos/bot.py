@@ -53,7 +53,10 @@ import ai as aimod                              # noqa: E402
 import aiclient                                 # noqa: E402
 import aikeys                                   # noqa: E402
 import backup                                   # noqa: E402
+import analytics                                # noqa: E402
+import automation as auto                       # noqa: E402
 import disabling                                # noqa: E402
+import linksec                                  # noqa: E402
 import policy                                   # noqa: E402
 import scheduler as schedmod                    # noqa: E402
 import captcha as cap                           # noqa: E402
@@ -522,7 +525,14 @@ async def on_group_message(msg: Message):
                                    notice="ai.verdict")
                     return
 
-    # 5. קיצור ‎#שם‎ להערה. לפני הפילטרים, כי הוא מפורש יותר.
+    # 5. אוטומציות של הקבוצה. אחרי הבדיקות, כי הן צורכות את ‎risk‎
+    #    שנגזר מהן.
+    if await run_automation(msg, "message",
+                            _facts(msg, text, policy.risk_of(
+                                collect_signals(msg, text)))):
+        return
+
+    # 6. קיצור ‎#שם‎ להערה. לפני הפילטרים, כי הוא מפורש יותר.
     if text.startswith("#") and len(text) > 1:
         n = notes.get(msg.chat.id, text[1:].split()[0])
         if n is not None and n.visibility == "public":
@@ -531,7 +541,7 @@ async def on_group_message(msg: Message):
                                n.media_id, n.media_kind, n.buttons)
             return
 
-    # 6. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
+    # 7. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
     fh = filters.check(msg.chat.id, text) if text else None
     if fh:
         await _run_filter(msg, fh)
@@ -1226,6 +1236,9 @@ def collect_signals(msg: Message, text: str) -> list[policy.Signal]:
         rs = rep.signal(msg.chat.id, u.id)
         if rs and rs.weight > 0:
             out.append(rs)
+    if text:
+        out.extend(linksec.inspect(
+            text, allowed=allow.values(msg.chat.id, "domain")))
     return out
 
 
@@ -2446,6 +2459,215 @@ async def cmd_blockmode(msg: Message):
            (parts[1].lower(), msg.chat.id))
     db.set(msg.chat.id, "block_action", parts[1].lower(), msg.from_user.id)
     await reply(msg, T(msg, "set.done", key="block_action", value=parts[1].lower()))
+
+
+
+# ── אוטומציות ─────────────────────────────────────────────────────────────
+@dp.message(Command("automation"))
+@needs("settings.read")
+async def cmd_automation(msg: Message):
+    touch(msg)
+    rules = auto.rules_for(db, msg.chat.id)
+    if not rules:
+        await reply(msg, T(msg, "auto.none"))
+        return
+    await reply(msg, T(msg, "auto.list", list="\n".join(
+        f"<code>#{i + 1}</code> {tpl.esc(auto.format_rule(r))}"
+        for i, r in enumerate(rules))))
+
+
+@dp.message(Command("addauto"))
+@needs("automation.write")
+async def cmd_addauto(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    rule = auto.parse_rule(parts[1]) if len(parts) > 1 else None
+    if rule is None:
+        await reply(msg, T(msg, "auto.bad",
+                           events=", ".join(auto.EVENTS),
+                           fields=", ".join(auto.FIELDS),
+                           actions=", ".join(auto.ACTIONS)))
+        return
+    cur = auto.rules_for(db, msg.chat.id)
+    if len(cur) >= auto.MAX_RULES:
+        await reply(msg, T(msg, "auto.full", n=auto.MAX_RULES))
+        return
+    cur.append(rule)
+    db.set(msg.chat.id, "automation",
+           "\n".join(auto.format_rule(r) for r in cur), msg.from_user.id)
+    audit.log(msg.chat.id, "automation.add", actor_id=msg.from_user.id,
+              after=auto.format_rule(rule), severity="high")
+    await reply(msg, T(msg, "auto.added", rule=tpl.esc(auto.format_rule(rule))))
+
+
+@dp.message(Command("rmauto"))
+@needs("automation.write")
+async def cmd_rmauto(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    cur = auto.rules_for(db, msg.chat.id)
+    if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
+        await reply(msg, T(msg, "auto.none") if not cur
+                    else T(msg, "auto.bad", events=", ".join(auto.EVENTS),
+                           fields=", ".join(auto.FIELDS),
+                           actions=", ".join(auto.ACTIONS)))
+        return
+    i = int(parts[1].lstrip("#")) - 1
+    if not 0 <= i < len(cur):
+        await reply(msg, T(msg, "auto.none"))
+        return
+    cur.pop(i)
+    db.set(msg.chat.id, "automation",
+           "\n".join(auto.format_rule(r) for r in cur), msg.from_user.id)
+    await reply(msg, T(msg, "auto.removed"))
+
+
+def _facts(msg: Message, text: str, risk: float = 0.0) -> dict:
+    """העובדות שאוטומציה יכולה לבדוק. נבנות פעם אחת ולא לכל כלל."""
+    u = msg.from_user
+    r = db.one("SELECT joined_at FROM members WHERE chat_id=? AND user_id=?",
+               (msg.chat.id, u.id)) if u else None
+    age = (time.time() - r["joined_at"]) if r and r["joined_at"] else 10 ** 9
+    rp = rep.get(msg.chat.id, u.id) if u else None
+    ents = (msg.entities or []) + (msg.caption_entities or [])
+    return {
+        "risk": risk,
+        "account_age": int(age),
+        "is_new": age < 86400,
+        "warns": mod.warn_count(msg.chat.id, u.id) if u else 0,
+        "level": rp.level if rp else 0,
+        "trust": rp.trust if rp else 0.5,
+        "xp": rp.xp if rp else 0,
+        "msg_len": len(text),
+        "mentions": sum(1 for e in ents
+                        if e.type in ("mention", "text_mention")),
+        "links": len(linksec.find(text)),
+        "has_link": bool(linksec.find(text)),
+        "has_media": bool(_describe(msg)["media_kind"]),
+        "is_forward": bool(msg.forward_origin),
+        "has_button": bool(msg.reply_markup),
+    }
+
+
+async def run_automation(msg: Message, event: str, facts: dict) -> bool:
+    """מבצע את מה שהאוטומציה ביקשה. מחזיר האם ההודעה טופלה.
+
+    האוטומציה **מבקשת**; הביצוע כאן, ולכן אפשר לוודא בנקודה אחת שמה
+    שנעשה הוא מה שהבוט בכלל רשאי לעשות בקבוצה."""
+    rules = auto.rules_for(db, msg.chat.id)
+    if not rules:
+        return False
+    acts = auto.run(rules, event, facts)
+    if not acts:
+        return False
+    audit.log(msg.chat.id, "automation.fired", actor_kind="bot",
+              source="automation", target_id=msg.from_user.id if msg.from_user
+              else None, after=",".join(acts),
+              reason="; ".join(auto.explain(rules, event, facts)),
+              severity="medium")
+    handled = False
+    for a in acts:
+        if a == "log":
+            continue
+        if a == "alert":
+            for uid in list(await sync_admins(msg.chat.id))[:10]:
+                await send(uid, i18n.t("auto.fired", lang.for_chat(msg.chat.id),
+                                       rules="; ".join(
+                                           auto.explain(rules, event, facts))),
+                           is_group=False)
+        elif a == "lockdown":
+            await set_lockdown(msg.chat.id, True, None)
+        elif a == "emergency":
+            emerg.enable(db, msg.chat.id, None)
+        elif a == "captcha" and msg.from_user:
+            await _start_captcha(msg.chat.id, msg.from_user)
+            handled = True
+        elif a in ("delete", "warn", "mute", "kick", "ban"):
+            await _enforce(msg, a, None, "automation", "automation.action",
+                           severity="medium")
+            handled = True
+    return handled
+
+
+# ── אנליטיקה ──────────────────────────────────────────────────────────────
+@dp.message(Command("analytics"))
+@needs("settings.read")
+async def cmd_analytics(msg: Message):
+    touch(msg)
+    span = ((msg.text or "").split() + [""])[1].lower()
+    if span not in analytics.RANGES:
+        span = "today"
+    rp = analytics.report(db, msg.chat.id, span)
+    lines = [T(msg, "an.title", chat=tpl.esc(msg.chat.title or ""), span=span),
+             "", T(msg, "an.members", n=rp["members"])]
+    for key, (n, d) in (("an.joined", rp["joined"]), ("an.active", rp["active"])):
+        lines.append(T(msg, key, n=n) + (f" ({d:+d}%)" if d is not None else ""))
+    if rp["actions"]:
+        lines.append("")
+        for label, (n, d) in sorted(rp["actions"].items(),
+                                    key=lambda kv: -kv[1][0]):
+            lines.append(T(msg, "an.row", label=T(msg, label), n=n,
+                           delta=f" ({d:+d}%)" if d is not None else ""))
+    else:
+        lines += ["", T(msg, "an.nothing")]
+    top = analytics.top_offenders(db, msg.chat.id, span)
+    if top:
+        lines.append(T(msg, "an.offenders", list="\n".join(
+            f"• {_named(msg, u)} — {n}" for u, n in top)))
+    await reply(msg, "\n".join(lines))
+
+
+# ── הפצה ──────────────────────────────────────────────────────────────────
+@dp.message(Command("broadcast"))
+@needs("broadcast.send")
+async def cmd_broadcast(msg: Message):
+    """שליחה לכל הקבוצות שאתה מנהל. תצוגה מקדימה לפני, תמיד."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await reply(msg, T(msg, "bc.usage"))
+        return
+    body = parts[1].strip()
+    preview = body.lower().startswith("preview")
+    if preview:
+        body = body[len("preview"):].strip()
+    groups = my_groups(msg.from_user.id)
+    if not groups or not body:
+        await reply(msg, T(msg, "bc.none") if not groups else T(msg, "bc.usage"))
+        return
+    if preview:
+        await reply(msg, T(msg, "bc.preview", n=len(groups),
+                           chats="\n".join(f"• {tpl.esc(t)}"
+                                           for _, t in groups[:20]),
+                           body=tpl.esc(body)))
+        return
+    okay = 0
+    for cid, _ in groups:
+        if await send(cid, tpl.render(body, tpl.context(chat_id=cid))):
+            okay += 1
+    audit.log(msg.chat.id, "broadcast.send", actor_id=msg.from_user.id,
+              after=f"{okay}/{len(groups)}", severity="high")
+    await reply(msg, T(msg, "bc.sent", ok=okay, n=len(groups)))
+
+
+@dp.message(Command("linkcheck"))
+@needs("settings.read")
+async def cmd_linkcheck(msg: Message):
+    touch(msg)
+    src = msg.reply_to_message
+    text = (src.text or src.caption or "") if src else \
+        (msg.text or "").split(maxsplit=1)[-1]
+    sigs = linksec.inspect(text, allowed=allow.values(msg.chat.id, "domain"))
+    res = policy.simulate(sigs, policy.rules_for(db, msg.chat.id))
+    if not sigs:
+        await reply(msg, T(msg, "sim.none"))
+        return
+    lines = "\n".join(T(msg, "sim.signal", source=s["source"], kind=s["kind"],
+                        weight=int(s["weight"] * 100),
+                        detail=f" · {tpl.esc(s['detail'])}" if s["detail"] else "")
+                      for s in res["signals"])
+    await reply(msg, T(msg, "sim.result", risk=int(res["risk"] * 100),
+                       action=res["action"], dur="", signals=lines))
 
 
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:

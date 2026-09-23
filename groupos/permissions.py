@@ -87,6 +87,7 @@ PERMISSIONS: dict[str, int] = {
     # החלטה של בעל הקבוצה ולא של מנהל תורן
     "fed.manage":      RANK["owner"],
     "fed.ban":         RANK["admin"],
+    "automation.write": RANK["admin"],
 }
 
 
