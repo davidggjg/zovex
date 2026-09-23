@@ -1052,7 +1052,7 @@ def test_backup():
 def test_aikeys():
     section("בריכת מפתחות AI")
     ok("מיסוך מסתיר את האמצע",
-       aikeys.mask("AQ.Ab8RN6IftAOMZdVEEdI0pt03") == "AQ.A…pt03")
+       aikeys.mask("AQ.EXAMPLEKEYNOTREAL0123456789") == "AQ.E…6789")
     ok("מפתח קצר לא נחשף", aikeys.mask("abc") == "…")
     ok("ריק לא מפיל", aikeys.mask("") == "…")
 
