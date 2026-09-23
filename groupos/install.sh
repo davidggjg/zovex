@@ -21,8 +21,11 @@ set -uo pipefail
 DIR=/opt/groupos
 BRANCH="claude/hls-relay-schema-port-ll8xiz"
 RAW="https://raw.githubusercontent.com/davidggjg/zovex/$BRANCH/groupos"
-FILES=(db.py permissions.py audit.py ratelimit.py bot.py test_core.py
-       README.md requirements.txt)
+# רשימת הקבצים מגיעה מ-manifest.txt שבמאגר ולא מכאן. הרשימה הקשיחה
+# שהייתה כאן פספסה שלושה מודולים חדשים — ההתקנה "הצליחה" והבוט עלה
+# בלי הפאנל. עכשיו קובץ חדש נכנס ל-manifest ומגיע מעצמו, ויש בדיקה
+# שנכשלת אם מודול קיים חסר ממנו.
+EXTRA=(README.md requirements.txt manifest.txt)
 SVC=/etc/systemd/system/groupos.service
 MODE=${1:-}
 ARG_TOKEN=""
@@ -31,7 +34,16 @@ if [ "$MODE" = "--token" ]; then ARG_TOKEN=${2:-}; MODE=""; fi
 echo "════════ 1/5 · מוריד ════════"
 mkdir -p "$DIR/data"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+if ! curl -fsSL -o "$TMP/manifest.txt" "$RAW/manifest.txt"; then
+  echo "  ✗ manifest.txt לא ירד"; exit 1
+fi
+mapfile -t FILES < <(grep -E '^[A-Za-z0-9_]+\.py$' "$TMP/manifest.txt")
+if [ ${#FILES[@]} -lt 5 ]; then
+  echo "  ✗ manifest.txt נראה פגום (${#FILES[@]} קבצים)"; exit 1
+fi
+FILES+=("${EXTRA[@]}")
 for f in "${FILES[@]}"; do
+  [ "$f" = "manifest.txt" ] && continue
   if ! curl -fsSL -o "$TMP/$f" "$RAW/$f"; then
     echo "  ✗ $f לא ירד"; exit 1
   fi
@@ -42,6 +54,29 @@ for f in "${FILES[@]}"; do
   esac
   echo "  ✓ $f"
 done
+
+# כל מודול מקומי ש-bot.py מייבא חייב להיות בין הקבצים שירדו. בלי זה
+# המתקין "מצליח" והשירות נופל על ImportError בהפעלה הראשונה.
+MISSING=$(cd "$TMP" && python3 - <<'PYEOF'
+import ast, os
+need = set()
+for n in ast.walk(ast.parse(open("bot.py", encoding="utf-8").read())):
+    if isinstance(n, ast.Import):
+        need |= {a.name.split(".")[0] for a in n.names}
+    elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
+        need.add(n.module.split(".")[0])
+have = {f[:-3] for f in os.listdir(".") if f.endswith(".py")}
+import sys
+std = set(sys.stdlib_module_names) | {"aiogram"}
+print(" ".join(sorted(need - have - std)))
+PYEOF
+)
+if [ -n "$MISSING" ]; then
+  echo "  ✗ חסרים מודולים ש-bot.py מייבא: $MISSING"
+  echo "    (הם כנראה לא רשומים ב-manifest.txt)"
+  exit 1
+fi
+echo "  ✓ כל מה ש-bot.py מייבא נמצא"
 
 echo
 echo "════════ 2/5 · בודק לפני שנוגעים בשירות ════════"
@@ -63,7 +98,7 @@ else
 fi
 
 # רק עכשיו, אחרי שהכול נבדק, מחליפים את הקוד החי
-cp "$TMP"/*.py "$TMP"/*.md "$TMP"/requirements.txt "$DIR/"
+cp "$TMP"/*.py "$TMP"/*.md "$TMP"/requirements.txt "$TMP"/manifest.txt "$DIR/"
 echo "  ✓ הקוד הוחלף ב-$DIR"
 
 if [ "$MODE" = "--update" ]; then

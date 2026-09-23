@@ -24,6 +24,7 @@ from permissions import Permissions, RANK  # noqa: E402
 from locks import Locks, LOCK_TYPES, ACTIONS, detect  # noqa: E402
 from moderation import Moderation, parse_policy, format_policy  # noqa: E402
 import panel  # noqa: E402
+import i18n  # noqa: E402
 from ratelimit import RateGuard, GLOBAL_PER_SEC  # noqa: E402
 
 PASS = FAIL = 0
@@ -475,6 +476,136 @@ def test_panel():
     missing = referenced - handled
     ok("כל מסך שהפאנל מפנה אליו מטופל במתאם", not missing, str(missing))
 
+    # ── פקודות ורב-לשוניות ────────────────────────────────────────────────
+    names = [n for n, _ in panel.COMMANDS]
+    ok("אין פקודה כפולה", len(names) == len(set(names)),
+       str([n for n in names if names.count(n) > 1]))
+    ok("כל שם פקודה חוקי לטלגרם",
+       all(_re.fullmatch(r"[a-z0-9_]{1,32}", n) for n in names),
+       str([n for n in names if not _re.fullmatch(r"[a-z0-9_]{1,32}", n)]))
+
+    # פקודה שמוצהרת ואינה רשומה במתאם היא כפתור מת בתפריט ✏️
+    declared = set(_re.findall(r'Command\("(\w+)"\)', bot_src))
+    declared |= {"start"} if "CommandStart()" in bot_src else set()
+    ok("כל פקודה מוצהרת קיימת במתאם", not (set(names) - declared),
+       str(set(names) - declared))
+    ok("כל פקודה במתאם מופיעה בתפריט", not (declared - set(names)),
+       str(declared - set(names)))
+
+    for lg in ("he", "en"):
+        holes = [n for n in names if i18n.t(f"cmd.{n}", lg) == f"cmd.{n}"]
+        ok(f"לכל פקודה יש תיאור ב-{lg}", not holes, str(holes))
+    ok("תיאור פקודה נכנס ב-256 תווים",
+       all(len(d) <= 256 for _, d in panel.command_list("he")))
+
+    # כל מסך חייב להיבנות בכל שפה, גם כזו שהמילון שלה חלקי
+    for lg in i18n.STRINGS:
+        built = {
+            "home": panel.home([(CHAT, "קבוצה")], lg),
+            "main": panel.main_menu(CHAT, "קבוצה", {"members": 5}, lg),
+            "locks": panel.locks_groups(CHAT, {}, lg),
+            "lockg": panel.locks_in_group(CHAT, "מדיה",
+                                          [("photo", "תמונות", "ban")], lg),
+            "warns": panel.warns_screen(CHAT, "3:mute:3600", [], lg),
+            "audit": panel.audit_screen(CHAT, [], lambda t: "12:00", lg),
+            "settings": panel.settings_screen(CHAT, {"autoclean": "0"}, lg),
+            "lang": panel.language_screen(CHAT, lg),
+            "help": panel.help_screen(lg),
+        }
+        empty = [n for n, sc in built.items() if not sc.text.strip()]
+        ok(f"כל המסכים נבנים ב-{lg}", not empty, str(empty))
+        bad = [c for sc in built.values() for c in sc.all_callbacks()
+               if panel.parse_cb(c) is None or len(c.encode()) > panel.CB_MAX]
+        ok(f"כל הכפתורים תקפים ב-{lg}", not bad, str(bad))
+
+    ok("בורר השפה מסמן את הנוכחית",
+       any("●" in lbl for row in panel.language_screen(CHAT, "en").rows
+           for lbl, _ in row))
+    ok("בורר השפה מציע כל שפה שיש לה מילון",
+       {c for c in i18n.STRINGS} <=
+       {panel.parse_cb(c)[2] for row in panel.language_screen(CHAT, "he").rows
+        for _, c in row if panel.parse_cb(c)[1] == "setlang"})
+    ok("מסך השפה נכתב בשפה הנוכחית",
+       "Language" in panel.language_screen(CHAT, "en").text)
+
+
+
+
+# ── manifest ולכידות ההתקנה ───────────────────────────────────────────────
+def test_manifest():
+    section("manifest")
+    here = os.path.dirname(os.path.abspath(__file__))
+    mf = os.path.join(here, "manifest.txt")
+    ok("manifest קיים", os.path.exists(mf))
+    listed = {l.strip() for l in open(mf, encoding="utf-8") if l.strip()}
+    on_disk = {f for f in os.listdir(here) if f.endswith(".py")}
+    missing = on_disk - listed
+    ok("כל מודול קיים רשום ב-manifest", not missing, str(missing))
+    ghosts = {f for f in listed if f.endswith(".py")} - on_disk
+    ok("אין ב-manifest קבצים שלא קיימים", not ghosts, str(ghosts))
+
+    # כל מה ש-bot.py מייבא מקומית חייב להיות ב-manifest — זה הבאג
+    # שהפיל את ההתקנה: שלושה מודולים חדשים לא הגיעו לשרת.
+    import ast as _ast
+    need = set()
+    for n in _ast.walk(_ast.parse(open(os.path.join(here, "bot.py"),
+                                       encoding="utf-8").read())):
+        if isinstance(n, _ast.Import):
+            need |= {a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, _ast.ImportFrom) and n.module and n.level == 0:
+            need.add(n.module.split(".")[0])
+    local = {f[:-3] for f in on_disk}
+    ok("כל ייבוא מקומי של bot.py רשום ב-manifest",
+       all(f"{m}.py" in listed for m in (need & local)),
+       str([m for m in (need & local) if f"{m}.py" not in listed]))
+
+
+# ── שפות ──────────────────────────────────────────────────────────────────
+def test_i18n():
+    section("שפות")
+    ok("נרמול קוד שפה", i18n.normalize("he-IL") == "he")
+    ok("קו תחתון גם", i18n.normalize("pt_BR") == "pt")
+    ok("שפה לא מוכרת נופלת לברירת מחדל",
+       i18n.normalize("קלינגונית") == i18n.DEFAULT)
+    ok("None נופל לברירת מחדל", i18n.normalize(None) == i18n.DEFAULT)
+
+    ok("עברית RTL", i18n.is_rtl("he"))
+    ok("ערבית RTL", i18n.is_rtl("ar"))
+    ok("אנגלית LTR", not i18n.is_rtl("en"))
+    ok("רוסית LTR", not i18n.is_rtl("ru"))
+
+    ok("תרגום קיים", i18n.t("menu.locks", "he") == "🔒 נעילות")
+    ok("תרגום באנגלית", i18n.t("menu.locks", "en") == "🔒 Locks")
+    ok("תרגום בערבית", "الأقفال" in i18n.t("menu.locks", "ar"))
+    ok("חסר בערבית נופל לאנגלית",
+       i18n.t("help.title", "ar") == i18n.t("help.title", "en"))
+    ok("מפתח לא קיים מחזיר את עצמו",
+       i18n.t("אין.כזה.מפתח", "he") == "אין.כזה.מפתח")
+
+    ok("החלפת משתנה", i18n.t("warn.count", "he", n=3) == "אזהרות פתוחות: 3")
+    ok("משתנה חסר לא מפיל", isinstance(i18n.t("warn.count", "he"), str))
+
+    # כל מפתח שמופיע באנגלית חייב להופיע בעברית ולהפך — אחרת יש טקסט
+    # שאף פעם לא יוצג בשפה שהיא ברירת המחדל
+    he, en = set(i18n.STRINGS["he"]), set(i18n.STRINGS["en"])
+    ok("עברית ואנגלית מכסות את אותם מפתחות", he == en,
+       f"רק בעברית: {he-en} · רק באנגלית: {en-he}")
+
+    cov = i18n.coverage()
+    ok("עברית מכסה 100%", cov["he"] == 100.0, str(cov))
+    ok("אנגלית מכסה 100%", cov["en"] == 100.0, str(cov))
+    ok("לכל שפה יש שם לתצוגה",
+       all(c in i18n.LANG_NAMES for c in i18n.STRINGS),
+       str([c for c in i18n.STRINGS if c not in i18n.LANG_NAMES]))
+
+    db = fresh()
+    L = i18n.Lang(db)
+    CHAT = -100888
+    ok("ברירת מחדל לקבוצה", L.for_chat(CHAT) == "he")
+    ok("שפת המשתמש כשאין לקבוצה", L.for_user(CHAT, 1, "ru") == "ru")
+    L.set_chat(CHAT, "en")
+    ok("שפת הקבוצה מנצחת", L.for_user(CHAT, 1, "ru") == "en")
+    ok("נשמר", L.for_chat(CHAT) == "en")
 
 
 def main() -> int:
@@ -486,6 +617,8 @@ def main() -> int:
     test_locks()
     test_moderation()
     test_panel()
+    test_manifest()
+    test_i18n()
     test_flow()
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

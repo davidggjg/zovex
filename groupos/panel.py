@@ -28,16 +28,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import i18n
 from locks import ACTIONS, GROUPS, LOCK_TYPES
 from moderation import format_policy, parse_policy
 
 CB_MAX = 64          # מגבלת טלגרם למזהה כפתור, בבייטים
 
-ACTION_LABEL = {
-    "off": "כבוי", "delete": "מחיקה", "warn": "אזהרה", "mute": "השתקה",
-    "kick": "הרחקה", "ban": "חסימה", "tmute": "השתקה זמנית",
-    "tban": "חסימה זמנית",
-}
+def action_label(action: str, lang: str = i18n.DEFAULT) -> str:
+    return i18n.t(f"act.{action}", lang)
+
+
+# שמות הפעולות בעברית, לשימושים שאין להם הקשר של שפה
+ACTION_LABEL = {a: action_label(a) for a in ACTIONS}
 # מחזור הלחיצות על נעילה. לא כל שמונה הפעולות — ארבע שמכסות כמעט הכול,
 # והשאר נגישות מהמסך המפורט. תפריט עם שמונה אפשרויות לכל נעילה הוא
 # בדיוק סוג העומס שהפאנל הזה נועד למנוע.
@@ -72,73 +74,80 @@ def parse_cb(data: str) -> Optional[tuple[int, str, str]]:
 
 
 # ── המסכים ────────────────────────────────────────────────────────────────
-def home(groups: list[tuple[int, str]]) -> Screen:
+def head(key: str, lang: str, extra: str = "") -> str:
+    """כותרת מסך. הודגשה במקום אחד, כדי שהתרגום יישאר טקסט נקי."""
+    return f"<b>{i18n.t(key, lang)}{extra}</b>"
+
+
+def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT) -> Screen:
     """רשימת הקבוצות שהמשתמש מנהל."""
+    title = head("home.title", lang)
     if not groups:
-        return Screen(
-            "<b>GroupOS</b>\n\n"
-            "עוד לא ראיתי אותך מנהל באף קבוצה.\n\n"
-            "הוסף אותי לקבוצה, תן לי הרשאות ניהול, ושלח שם הודעה אחת — "
-            "ואז חזור לכאן.")
-    rows = [[(f"👥 {title[:28]}", cb(cid, "main"))] for cid, title in groups]
+        return Screen(f"{title}\n\n" + i18n.t("home.empty", lang))
+    rows = [[(f"👥 {name[:28]}", cb(cid, "main"))] for cid, name in groups]
     return Screen(
-        f"<b>GroupOS</b>\n\nהקבוצות שלך ({len(groups)}):\n"
-        "בחר קבוצה כדי לנהל אותה מכאן, בלי לשלוח פקודות בקבוצה עצמה.",
-        rows)
+        f"{title}\n\n" + i18n.t("home.groups", lang, n=len(groups)) + "\n"
+        + i18n.t("home.hint", lang), rows)
 
 
-def main_menu(chat_id: int, title: str, stats: dict) -> Screen:
-    txt = (f"<b>{title}</b>\n\n"
-           f"חברים במעקב: {stats.get('members', 0)}\n"
-           f"נעילות פעילות: {stats.get('locks', 0)}\n"
-           f"אזהרות פתוחות: {stats.get('warns', 0)}\n"
-           f"פעולות היום: {stats.get('actions_today', 0)}")
+def main_menu(chat_id: int, title: str, stats: dict,
+              lang: str = i18n.DEFAULT) -> Screen:
+    txt = f"<b>{title}</b>\n\n" + "\n".join(
+        f"{i18n.t(key, lang)}: {stats.get(field, 0)}"
+        for key, field in (("stat.members", "members"),
+                           ("stat.locks", "locks"),
+                           ("stat.warns", "warns"),
+                           ("stat.today", "actions_today")))
     rows = [
-        [("🔒 נעילות", cb(chat_id, "locks")),
-         ("⚠️ אזהרות", cb(chat_id, "warns"))],
-        [("📋 יומן", cb(chat_id, "audit")),
-         ("⚙️ הגדרות", cb(chat_id, "settings"))],
-        [("↩︎ לרשימת הקבוצות", "g:0:home")],
+        [(i18n.t("menu.locks", lang), cb(chat_id, "locks")),
+         (i18n.t("menu.warns", lang), cb(chat_id, "warns"))],
+        [(i18n.t("menu.audit", lang), cb(chat_id, "audit")),
+         (i18n.t("menu.settings", lang), cb(chat_id, "settings"))],
+        [(i18n.t("menu.language", lang), cb(chat_id, "lang"))],
+        [(i18n.t("menu.groups", lang), "g:0:home")],
     ]
     return Screen(txt, rows)
 
 
-def locks_groups(chat_id: int, counts: dict[str, int]) -> Screen:
-    txt = ("<b>נעילות</b>\n\n"
-           "נעילה קובעת מה מותר לשלוח בקבוצה.\n"
-           "לחיצה על סוג מחליפה את הפעולה שלו.")
+def locks_groups(chat_id: int, counts: dict[str, int],
+                 lang: str = i18n.DEFAULT) -> Screen:
+    txt = head("locks.title", lang) + "\n\n" + i18n.t("locks.hint", lang)
     rows = [[(f"{g} ({counts.get(g, 0)})", cb(chat_id, "lockg", g))]
             for g in GROUPS]
-    rows.append([("↩︎ חזרה", cb(chat_id, "main"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(txt, rows)
 
 
 def locks_in_group(chat_id: int, group: str,
-                   items: list[tuple[str, str, str]]) -> Screen:
+                   items: list[tuple[str, str, str]],
+                   lang: str = i18n.DEFAULT) -> Screen:
     """items: [(מפתח, שם, פעולה נוכחית)]"""
-    txt = (f"<b>נעילות · {group}</b>\n\n"
-           "לחיצה מחליפה: כבוי ← מחיקה ← אזהרה ← השתקה ← חסימה")
+    txt = (head("locks.title", lang, f" · {group}")
+           + "\n\n" + i18n.t("locks.cycle", lang))
     rows = []
     for key, label, action in items:
         mark = "🔴" if action != "off" else "⚪"
-        suffix = f" · {ACTION_LABEL[action]}" if action != "off" else ""
+        suffix = f" · {action_label(action, lang)}" if action != "off" else ""
         rows.append([(f"{mark} {label}{suffix}", cb(chat_id, "lock", key))])
-    rows.append([("↩︎ חזרה", cb(chat_id, "locks"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "locks"))])
     return Screen(txt, rows)
 
 
-def warns_screen(chat_id: int, policy_raw: str, top: list[tuple[int, str, int]]) -> Screen:
+def warns_screen(chat_id: int, policy_raw: str,
+                 top: list[tuple[int, str, int]],
+                 lang: str = i18n.DEFAULT) -> Screen:
     pol = parse_policy(policy_raw)
-    txt = ("<b>אזהרות</b>\n\n"
-           f"המדיניות בקבוצה:\n{format_policy(pol) or 'אין מדיניות'}\n")
+    txt = (head("warns.title", lang) + "\n\n"
+           + i18n.t("warns.policy", lang) + "\n"
+           + (format_policy(pol) or i18n.t("warns.none", lang)) + "\n")
     if top:
-        txt += "\nהכי הרבה אזהרות פתוחות:\n" + "\n".join(
+        txt += "\n" + i18n.t("warns.top", lang) + "\n" + "\n".join(
             f"• {name} — {n}" for _, name, n in top)
     rows = [
         [("3 · 5 · 7", cb(chat_id, "wpol", "a")),
          ("2 · 4 · 6", cb(chat_id, "wpol", "b")),
-         ("רק אזהרות", cb(chat_id, "wpol", "c"))],
-        [("↩︎ חזרה", cb(chat_id, "main"))],
+         (i18n.t("warns.preset_c", lang), cb(chat_id, "wpol", "c"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
     ]
     return Screen(txt, rows)
 
@@ -150,30 +159,34 @@ WARN_PRESETS = {
 }
 
 
-def audit_screen(chat_id: int, rows_data: list[dict], fmt_time) -> Screen:
+def audit_screen(chat_id: int, rows_data: list[dict], fmt_time,
+                 lang: str = i18n.DEFAULT) -> Screen:
     if not rows_data:
-        txt = "<b>יומן</b>\n\nאין עדיין פעולות."
+        txt = head("audit.empty", lang) + "\n\n" + i18n.t("audit.none", lang)
     else:
-        txt = "<b>יומן · עשר אחרונות</b>\n\n" + "\n".join(
+        txt = head("audit.title", lang) + "\n\n" + "\n".join(
             f"<code>{fmt_time(r['ts'])}</code> {r['action']}"
             + (f" ← {r['target_id']}" if r["target_id"] else "")
             for r in rows_data)
-    return Screen(txt, [[("↩︎ חזרה", cb(chat_id, "main"))]])
+    return Screen(txt, [[(i18n.t("menu.back", lang), cb(chat_id, "main"))]])
 
 
-def settings_screen(chat_id: int, current: dict) -> Screen:
+def settings_screen(chat_id: int, current: dict,
+                    lang: str = i18n.DEFAULT) -> Screen:
     clean = current.get("autoclean", "30")
     silent = current.get("silent", "1") == "1"
-    txt = ("<b>הגדרות</b>\n\n"
-           "<b>ניקוי אוטומטי</b> — אחרי כמה שניות למחוק את הפקודה ואת "
-           "התשובה של הבוט מהקבוצה. זה מה ששומר על הקבוצה נקייה.\n\n"
-           "<b>מצב שקט</b> — כשהוא פעיל, פעולה אוטומטית מוחקת בלי להודיע "
-           "בקבוצה. הכל נרשם ביומן.")
+    on, off = i18n.t("settings.on", lang), i18n.t("settings.off", lang)
+    txt = (head("settings.title", lang) + "\n\n"
+           + i18n.t("settings.clean_help", lang) + "\n\n"
+           + i18n.t("settings.silent_help", lang))
+    clean_txt = (i18n.t("settings.seconds", lang, n=clean)
+                 if clean != "0" else off)
     rows = [
-        [("ניקוי: " + (f"{clean} שניות" if clean != "0" else "כבוי"),
+        [(f"{i18n.t('settings.clean', lang)}: {clean_txt}",
           cb(chat_id, "clean"))],
-        [("מצב שקט: " + ("פעיל" if silent else "כבוי"), cb(chat_id, "silent"))],
-        [("↩︎ חזרה", cb(chat_id, "main"))],
+        [(f"{i18n.t('settings.silent', lang)}: {on if silent else off}",
+          cb(chat_id, "silent"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
     ]
     return Screen(txt, rows)
 
@@ -186,3 +199,58 @@ def next_in_cycle(cycle: tuple, current: str) -> str:
         return cycle[(cycle.index(current) + 1) % len(cycle)]
     except ValueError:
         return cycle[0]
+
+
+def language_screen(chat_id: int, current: str) -> Screen:
+    """בורר השפה. סימון על הנוכחית, כי בלעדיו אי אפשר לדעת מה פעיל.
+
+    המסך הזה נכתב תמיד בשפה הנוכחית — אחרת מי שבחר שפה שאינו מבין
+    נשאר בלי דרך חזרה."""
+    txt = (head("lang.title", current) + "\n\n"
+           + i18n.t("lang.hint", current))
+    rows, line = [], []
+    for code, name in i18n.available():
+        mark = "● " if code == current else ""
+        line.append((f"{mark}{name}", cb(chat_id, "setlang", code)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", current), cb(chat_id, "main"))])
+    return Screen(txt, rows)
+
+
+# הפקודות: שם והרשאה. התיאור מגיע מ-i18n לפי מפתח ‎cmd.<שם>‎, כי אותה
+# רשימה מזינה גם את ‎/help‎ וגם את תפריט ✏️ של טלגרם — שם התיאור נרשם
+# בנפרד לכל שפה.
+COMMANDS: list[tuple[str, str]] = [
+    ("start",  ""),
+    ("help",   ""),
+    ("ban",    "user.ban"),
+    ("unban",  "user.unban"),
+    ("mute",   "user.mute"),
+    ("unmute", "user.unmute"),
+    ("kick",   "user.kick"),
+    ("warn",   "user.warn"),
+    ("unwarn", "user.unwarn"),
+    ("warns",  "user.warn"),
+    ("purge",  "chat.purge"),
+    ("role",   "roles.assign"),
+    ("lang",   "settings.write"),
+    ("id",     ""),
+    ("health", ""),
+]
+
+
+def command_list(lang: str = "he") -> list[tuple[str, str]]:
+    """‎[(שם, תיאור)]‎ בשפה המבוקשת, לרישום בתפריט של טלגרם."""
+    return [(name, i18n.t(f"cmd.{name}", lang)) for name, _ in COMMANDS]
+
+
+def help_screen(lang: str = i18n.DEFAULT) -> Screen:
+    lines = [head("help.title", lang), ""]
+    for name, perm in COMMANDS:
+        tail = f"  <i>{perm}</i>" if perm else ""
+        lines.append(f"/{name} — {i18n.t(f'cmd.{name}', lang)}{tail}")
+    lines += ["", i18n.t("help.hint", lang)]
+    return Screen("\n".join(lines))

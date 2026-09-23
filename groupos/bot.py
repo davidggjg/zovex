@@ -41,10 +41,11 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (CallbackQuery, ChatPermissions,
+from aiogram.types import (BotCommand, CallbackQuery, ChatPermissions,
                            InlineKeyboardButton, InlineKeyboardMarkup, Message)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
 from audit import Audit                         # noqa: E402
 from db import Db                               # noqa: E402
@@ -67,6 +68,7 @@ perms = Permissions(db)
 audit = Audit(db)
 locks = Locks(db)
 mod = Moderation(db, audit)
+lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
 bot: Optional[Bot] = None
@@ -114,6 +116,21 @@ def clean_delay(chat_id: int) -> int:
         return int(db.get(chat_id, "autoclean", "30"))
     except (TypeError, ValueError):
         return 30
+
+
+def lang_of(msg: Message) -> str:
+    """שפת הקבוצה אם נקבעה, אחרת שפת הטלגרם של מי ששלח.
+
+    בפרטי אין קבוצה, ולכן שפת המשתמש היא היחידה שקיימת."""
+    u = msg.from_user
+    code = u.language_code if u else None
+    if msg.chat.type == ChatType.PRIVATE:
+        return i18n.normalize(code)
+    return lang.for_user(msg.chat.id, u.id if u else 0, code)
+
+
+def T(msg: Message, key: str, **kw) -> str:
+    return i18n.t(key, lang_of(msg), **kw)
 
 
 async def reply(msg: Message, text: str, markup=None) -> Optional[Message]:
@@ -199,14 +216,13 @@ def needs(permission: str):
             if msg.from_user is None:
                 return
             if msg.chat.type == ChatType.PRIVATE:
-                await reply(msg, "הפקודה הזאת עובדת בתוך קבוצה. "
-                                 "לניהול מכאן שלח /start.")
+                await reply(msg, T(msg, "err.group_only"))
                 return
             await sync_admins(msg.chat.id)
             d = perms.check(msg.chat.id, msg.from_user.id, permission,
                             _target_of(msg))
             if not d:
-                await reply(msg, f"אין לך הרשאה לזה — {d.reason}.")
+                await reply(msg, T(msg, "err.no_permission", reason=d.reason))
                 audit.log(msg.chat.id, "permission.denied",
                           actor_id=msg.from_user.id, reason=d.reason,
                           after=permission, severity="low")
@@ -317,8 +333,8 @@ async def on_group_message(msg: Message):
                                out.duration, out.reason, None)
         if db.get(msg.chat.id, "silent", "1") != "1":
             await send(msg.chat.id,
-                       f"{_name(msg)} — {hit.label} אסורים כאן. "
-                       f"אזהרה {out.warns}.",
+                       T(msg, "lock.violation", name=_name(msg),
+                         label=hit.label, n=out.warns),
                        clean_after=clean_delay(msg.chat.id) or None)
     elif hit.action in ("mute", "ban", "kick"):
         await apply_action(msg.chat.id, msg.from_user.id, hit.action,
@@ -335,26 +351,52 @@ def _name(msg: Message) -> str:
 async def cmd_start(msg: Message):
     touch(msg)
     if msg.chat.type == ChatType.PRIVATE:
-        sc = panel.home(my_groups(msg.from_user.id))
+        sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
     else:
         await sync_admins(msg.chat.id, force=True)
-        await reply(msg, "GroupOS מחובר. לניהול — שלח לי /start בפרטי.")
+        await reply(msg, T(msg, "start.group"))
+
+
+@dp.message(Command("help"))
+async def cmd_help(msg: Message):
+    """כל הפקודות, בשפה של הצ'אט. בפרטי לא נמחק — שם זה אמור להישאר."""
+    touch(msg)
+    sc = panel.help_screen(lang_of(msg))
+    if msg.chat.type == ChatType.PRIVATE:
+        await send(msg.chat.id, sc.text, is_group=False)
+    else:
+        await reply(msg, sc.text)
+
+
+@dp.message(Command("lang"))
+async def cmd_lang(msg: Message):
+    """בורר השפה. בקבוצה — למנהלים בלבד, כי זה משנה לכולם."""
+    touch(msg)
+    if msg.chat.type == ChatType.PRIVATE:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    await sync_admins(msg.chat.id)
+    if not perms.check(msg.chat.id, msg.from_user.id, "settings.write"):
+        await reply(msg, T(msg, "err.need_admin"))
+        return
+    sc = panel.language_screen(msg.chat.id, lang.for_chat(msg.chat.id))
+    await reply(msg, sc.text, markup=kb(sc))
 
 
 @dp.message(Command("id"))
 async def cmd_id(msg: Message):
     touch(msg)
     t = _target_of(msg) or (msg.from_user.id if msg.from_user else 0)
-    await reply(msg, f"משתמש: <code>{t}</code>\nצ'אט: <code>{msg.chat.id}</code>")
+    await reply(msg, T(msg, "id.line", user=t, chat=msg.chat.id))
 
 
 @dp.message(Command("health"))
 async def cmd_health(msg: Message):
     touch(msg)
     s = guard.stats()
-    await reply(msg, f"סכימה v{db.version} · שליחות {s['calls']} · "
-                     f"המתנה ממוצעת {s['avg_wait_ms']}ms")
+    await reply(msg, T(msg, "health.line", v=db.version, calls=s["calls"],
+                       ms=s["avg_wait_ms"]))
 
 
 def _parse_duration(txt: str) -> Optional[int]:
@@ -368,18 +410,20 @@ def _parse_duration(txt: str) -> Optional[int]:
 async def _mod_cmd(msg: Message, kind: str, perm: str):
     target = _target_of(msg)
     if target is None:
-        await reply(msg, "צריך להשיב להודעה של מי שרוצים לטפל בו.")
+        await reply(msg, T(msg, "err.need_reply"))
         return
     args = (msg.text or "").split()[1:]
     dur = _parse_duration(args[0]) if args else None
     reason = " ".join(args[1:] if dur else args) or ""
     okay = await apply_action(msg.chat.id, target, kind, dur, reason,
                               msg.from_user.id, "command")
-    if okay:
-        lbl = {"mute": "הושתק", "ban": "נחסם", "kick": "הורחק"}[kind]
-        await reply(msg, f"{lbl}." + (f" סיבה: {reason}" if reason else ""))
-    else:
-        await reply(msg, "הפעולה נכשלה — כנראה שאין לי הרשאה מתאימה בקבוצה.")
+    if not okay:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    lbl = T(msg, {"mute": "act.muted", "ban": "act.banned",
+                  "kick": "act.kicked"}[kind])
+    tail = T(msg, "act.reason", reason=reason) if reason else ""
+    await reply(msg, f"{lbl}.{tail}")
 
 
 @dp.message(Command("ban"))
@@ -406,12 +450,12 @@ async def cmd_unban(msg: Message):
     touch(msg)
     t = _target_of(msg)
     if t is None:
-        await reply(msg, "צריך להשיב להודעה.")
+        await reply(msg, T(msg, "err.need_reply"))
         return
     with contextlib.suppress(TelegramAPIError):
         await bot.unban_chat_member(msg.chat.id, t, only_if_banned=True)
     mod.lift(msg.chat.id, t, "ban", msg.from_user.id)
-    await reply(msg, "החסימה הוסרה.")
+    await reply(msg, T(msg, "act.unbanned"))
 
 
 @dp.message(Command("unmute"))
@@ -420,12 +464,12 @@ async def cmd_unmute(msg: Message):
     touch(msg)
     t = _target_of(msg)
     if t is None:
-        await reply(msg, "צריך להשיב להודעה.")
+        await reply(msg, T(msg, "err.need_reply"))
         return
     with contextlib.suppress(TelegramAPIError):
         await bot.restrict_chat_member(msg.chat.id, t, UNMUTED)
     mod.lift(msg.chat.id, t, "mute", msg.from_user.id)
-    await reply(msg, "ההשתקה הוסרה.")
+    await reply(msg, T(msg, "act.unmuted"))
 
 
 @dp.message(Command("warn"))
@@ -434,17 +478,18 @@ async def cmd_warn(msg: Message):
     touch(msg)
     t = _target_of(msg)
     if t is None:
-        await reply(msg, "צריך להשיב להודעה.")
+        await reply(msg, T(msg, "err.need_reply"))
         return
     reason = " ".join((msg.text or "").split()[1:])
     out = mod.warn(msg.chat.id, t, msg.from_user.id, reason, "command")
     if out.threshold_hit:
         await apply_action(msg.chat.id, t, out.kind, out.duration,
                            out.reason, msg.from_user.id, "policy")
-        await reply(msg, f"אזהרה {out.warns}. הופעל: {out.label}.")
+        await reply(msg, T(msg, "warn.triggered", n=out.warns,
+                           action=out.label))
     else:
-        await reply(msg, f"אזהרה {out.warns}."
-                         + (f" סיבה: {reason}" if reason else ""))
+        tail = T(msg, "act.reason", reason=reason) if reason else ""
+        await reply(msg, T(msg, "warn.added", n=out.warns) + tail)
 
 
 @dp.message(Command("unwarn"))
@@ -453,10 +498,10 @@ async def cmd_unwarn(msg: Message):
     touch(msg)
     t = _target_of(msg)
     if t is None:
-        await reply(msg, "צריך להשיב להודעה.")
+        await reply(msg, T(msg, "err.need_reply"))
         return
     n = mod.unwarn(msg.chat.id, t, msg.from_user.id)
-    await reply(msg, f"בוטלה אזהרה. נשארו {n}.")
+    await reply(msg, T(msg, "warn.removed", n=n))
 
 
 @dp.message(Command("warns"))
@@ -465,7 +510,7 @@ async def cmd_warns(msg: Message):
     touch(msg)
     t = _target_of(msg) or msg.from_user.id
     n = mod.warn_count(msg.chat.id, t)
-    await reply(msg, f"אזהרות פתוחות: {n}")
+    await reply(msg, T(msg, "warn.count", n=n))
 
 
 @dp.message(Command("purge"))
@@ -474,7 +519,7 @@ async def cmd_purge(msg: Message):
     """מוחק מההודעה שהשבת עליה ועד הפקודה."""
     touch(msg)
     if not msg.reply_to_message:
-        await reply(msg, "השב להודעה שממנה להתחיל למחוק.")
+        await reply(msg, T(msg, "purge.need_reply"))
         return
     start = msg.reply_to_message.message_id
     n = 0
@@ -484,7 +529,7 @@ async def cmd_purge(msg: Message):
             n += 1
     audit.log(msg.chat.id, "chat.purge", actor_id=msg.from_user.id,
               after=n, severity="medium")
-    await send(msg.chat.id, f"נמחקו {n} הודעות.", clean_after=10)
+    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10)
 
 
 @dp.message(Command("role"))
@@ -494,13 +539,13 @@ async def cmd_role(msg: Message):
     target = _target_of(msg)
     parts = (msg.text or "").split()
     if target is None or len(parts) < 2 or parts[1] not in RANK:
-        await reply(msg, "השב להודעה ובחר: " + ", ".join(RANK))
+        await reply(msg, T(msg, "role.pick", roles=", ".join(RANK)))
         return
     old = perms.role_of(msg.chat.id, target)
     perms.set_role(msg.chat.id, target, parts[1])
     audit.log(msg.chat.id, "role.change", actor_id=msg.from_user.id,
               target_id=target, before=old, after=parts[1], severity="medium")
-    await reply(msg, f"התפקיד: {old} ← {parts[1]}")
+    await reply(msg, T(msg, "role.changed", before=old, after=parts[1]))
 
 
 # ── הפאנל הפרטי ────────────────────────────────────────────────────────────
@@ -525,30 +570,36 @@ def _title(chat_id: int) -> str:
 
 
 def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
+    lg = lang.for_chat(chat_id)
     if name == "main":
-        return panel.main_menu(chat_id, _title(chat_id), _stats(chat_id))
+        return panel.main_menu(chat_id, _title(chat_id), _stats(chat_id), lg)
     if name == "locks":
         by = locks.by_group(chat_id)
         counts = {g: sum(1 for _, _, a in items if a != "off")
                   for g, items in by.items()}
-        return panel.locks_groups(chat_id, counts)
+        return panel.locks_groups(chat_id, counts, lg)
     if name == "lockg":
-        return panel.locks_in_group(chat_id, arg, locks.by_group(chat_id)[arg])
+        if arg not in locks.by_group(chat_id):
+            return None
+        return panel.locks_in_group(chat_id, arg,
+                                    locks.by_group(chat_id)[arg], lg)
     if name == "warns":
         top = [(r["user_id"], r["user_id"], r["c"]) for r in db.q(
             """SELECT user_id, COUNT(*) c FROM warnings
                WHERE chat_id=? AND revoked_at IS NULL
                GROUP BY user_id ORDER BY c DESC LIMIT 5""", (chat_id,))]
         return panel.warns_screen(
-            chat_id, db.get(chat_id, "warn_policy", ""), top)
+            chat_id, db.get(chat_id, "warn_policy", ""), top, lg)
     if name == "audit":
         return panel.audit_screen(
             chat_id, audit.recent(chat_id, 10),
-            lambda t: time.strftime("%d/%m %H:%M", time.localtime(t)))
+            lambda t: time.strftime("%d/%m %H:%M", time.localtime(t)), lg)
     if name == "settings":
         return panel.settings_screen(chat_id, {
             "autoclean": db.get(chat_id, "autoclean", "30"),
-            "silent": db.get(chat_id, "silent", "1")})
+            "silent": db.get(chat_id, "silent", "1")}, lg)
+    if name == "lang":
+        return panel.language_screen(chat_id, lg)
     return None
 
 
@@ -556,23 +607,28 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
 async def on_callback(q: CallbackQuery):
     parsed = panel.parse_cb(q.data or "")
     if parsed is None:
-        await q.answer("כפתור לא מוכר")
+        await q.answer(i18n.t("btn.unknown", i18n.normalize(
+            q.from_user.language_code)))
         return
     chat_id, name, arg = parsed
+    lg = (lang.for_chat(chat_id) if chat_id
+          else i18n.normalize(q.from_user.language_code))
 
     if name == "home":
-        sc = panel.home(my_groups(q.from_user.id))
-        await _edit(q, sc)
+        await _edit(q, panel.home(my_groups(q.from_user.id), lg))
         return
 
     # כל לחיצה נבדקת מחדש. מי שהודח מהניהול לא ימשיך לנהל דרך מסך פתוח.
     if not perms.check(chat_id, q.from_user.id, "settings.read"):
-        await q.answer("אין לך הרשאה לנהל את הקבוצה הזאת", show_alert=True)
+        await q.answer(i18n.t("err.not_your_group", lg), show_alert=True)
         return
 
     if name == "lock":
         if not perms.check(chat_id, q.from_user.id, "locks.write"):
-            await q.answer("נדרש admin", show_alert=True)
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in LOCK_TYPES:
+            await q.answer(i18n.t("btn.unknown", lg))
             return
         cur = locks.get_all(chat_id).get(arg, ("off", None))[0]
         nxt = panel.next_in_cycle(panel.CYCLE, cur)
@@ -580,27 +636,35 @@ async def on_callback(q: CallbackQuery):
         audit.log(chat_id, "lock.change", actor_id=q.from_user.id,
                   before=f"{arg}={cur}", after=f"{arg}={nxt}",
                   source="button", severity="info")
-        if arg not in LOCK_TYPES:
-            await q.answer("נעילה לא מוכרת")
-            return
-        grp = LOCK_TYPES[arg][1]
-        await _edit(q, _screen_for(chat_id, "lockg", grp))
-        await q.answer(panel.ACTION_LABEL[nxt])
+        await _edit(q, _screen_for(chat_id, "lockg", LOCK_TYPES[arg][1]))
+        await q.answer(panel.action_label(nxt, lg))
         return
 
     if name == "wpol":
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
-            await q.answer("נדרש admin", show_alert=True)
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
         db.set(chat_id, "warn_policy", panel.WARN_PRESETS.get(arg, ""),
                q.from_user.id)
         await _edit(q, _screen_for(chat_id, "warns", ""))
-        await q.answer("המדיניות עודכנה")
+        await q.answer(i18n.t("policy.updated", lg))
+        return
+
+    if name == "setlang":
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        lang.set_chat(chat_id, arg)
+        audit.log(chat_id, "lang.change", actor_id=q.from_user.id,
+                  before=lg, after=i18n.normalize(arg),
+                  source="button", severity="info")
+        await _edit(q, _screen_for(chat_id, "lang", ""))
+        await q.answer(i18n.t("lang.set", arg))
         return
 
     if name in ("clean", "silent"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
-            await q.answer("נדרש admin", show_alert=True)
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
         if name == "clean":
             cur = db.get(chat_id, "autoclean", "30")
@@ -611,12 +675,12 @@ async def on_callback(q: CallbackQuery):
                    "0" if db.get(chat_id, "silent", "1") == "1" else "1",
                    q.from_user.id)
         await _edit(q, _screen_for(chat_id, "settings", ""))
-        await q.answer("נשמר")
+        await q.answer(i18n.t("saved", lg))
         return
 
     sc = _screen_for(chat_id, name, arg)
     if sc is None:
-        await q.answer("מסך לא מוכר")
+        await q.answer(i18n.t("screen.unknown", lg))
         return
     await _edit(q, sc)
     await q.answer()
@@ -625,6 +689,22 @@ async def on_callback(q: CallbackQuery):
 async def _edit(q: CallbackQuery, sc: panel.Screen) -> None:
     with contextlib.suppress(TelegramAPIError):
         await q.message.edit_text(sc.text, reply_markup=kb(sc))
+
+
+# ── תפריט הפקודות של טלגרם ─────────────────────────────────────────────────
+async def publish_commands() -> None:
+    """רושם את הפקודות בתפריט ✏️, פעם אחת לכל שפה.
+
+    טלגרם בוחרת לכל משתמש את הרשימה לפי שפת הממשק שלו, ונופלת לברירת
+    המחדל כשאין התאמה. לכן ברירת המחדל נרשמת **בלי** ‎language_code‎,
+    ואחריה כל שפה שיש לה מילון."""
+    for code in [None] + [c for c in i18n.STRINGS if c != i18n.DEFAULT]:
+        items = [BotCommand(command=n, description=d[:256])
+                 for n, d in panel.command_list(code or i18n.DEFAULT)]
+        try:
+            await bot.set_my_commands(items, language_code=code)
+        except TelegramAPIError as e:
+            log.warning("רישום פקודות ל-%s נכשל: %s", code or "ברירת מחדל", e)
 
 
 # ── רקע ────────────────────────────────────────────────────────────────────
@@ -665,6 +745,7 @@ async def main() -> int:
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML), **kw)
     me = await bot.get_me()
     log.info("GroupOS עלה כ-@%s · סכימה v%s", me.username, db.version)
+    await publish_commands()
     task = asyncio.create_task(expire_loop())
     _bg.add(task)
     try:
