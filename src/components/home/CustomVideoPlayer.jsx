@@ -285,6 +285,40 @@ function formatTime(secs) {
 // מדווח duration=Infinity ולא NaN/0 — ואז שורת ההתקדמות "תקועה" על 0/0
 // ולא נשמרת התקדמות בכלל. הפונקציה הזו מנסה למצוא משך זמן שמיש גם במקרה כזה,
 // דרך טווח ה-seekable שכן מתעדכן תוך כדי הזרמה.
+// כשה-moov (טבלת האינדקס של MP4) יושב בסוף הקובץ, הדפדפן חייב למשוך אותו
+// מהסוף לפני שהוא יודע את אורך הסרט. בטלפון על רשת איטית זה לוקח זמן, ועד
+// שזה קורה `v.currentTime = X` פשוט לא נתפס — הסרט "נשאר איפה שהוא".
+// לכן זוכרים את היעד ומחילים אותו ברגע שהנגן מסוגל לקפוץ.
+function canSeekNow(v) {
+  if (!v || v.readyState < 1) return false;
+  try {
+    if (v.seekable && v.seekable.length > 0) return true;
+  } catch {}
+  return Number.isFinite(v.duration) && v.duration > 0;
+}
+
+export function seekTo(v, target) {
+  if (!v || !Number.isFinite(target) || target < 0) return false;
+  if (canSeekNow(v)) {
+    try { v.currentTime = target; return true; } catch {}
+    return false;
+  }
+  // עוד לא אפשר — נזכור ונבצע כשאפשר, ולא נשתוק
+  const apply = () => {
+    if (!canSeekNow(v)) return;
+    try { v.currentTime = target; } catch {}
+    v.removeEventListener("loadedmetadata", apply);
+    v.removeEventListener("durationchange", apply);
+    v.removeEventListener("canplay", apply);
+    v.removeEventListener("progress", apply);
+  };
+  v.addEventListener("loadedmetadata", apply);
+  v.addEventListener("durationchange", apply);
+  v.addEventListener("canplay", apply);
+  v.addEventListener("progress", apply);
+  return false;
+}
+
 function getUsableDuration(v) {
   if (!v) return 0;
   if (Number.isFinite(v.duration) && v.duration > 0) return v.duration;
@@ -421,6 +455,8 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [pipSupported, setPipSupported] = useState(false);
   const progressRef = useRef(null);
+  // נגיעה בפס לפני שהאורך ידוע — נשמרת כאן ומוחלת כשהאורך מגיע
+  const pendingRatio = useRef(null);
 
   useEffect(() => {
     setPipSupported(!!(document.pictureInPictureEnabled || document.webkitSupportsPresentationMode));
@@ -494,13 +530,49 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
   const seek = useCallback((e) => {
     const v = videoRef.current;
     const bar = progressRef.current;
-    if (!v || !bar || !duration) return;
+    if (!v || !bar) return;
     const rect = bar.getBoundingClientRect();
-    const x = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
-    const ratio = Math.max(0, Math.min(1, x / rect.width));
-    v.currentTime = ratio * duration;
-    setCurrentTime(ratio * duration);
+    const raw = (e.clientX ?? e.touches?.[0]?.clientX ?? e.changedTouches?.[0]?.clientX);
+    if (!Number.isFinite(raw)) return;
+    const ratio = Math.max(0, Math.min(1, (raw - rect.left) / rect.width));
+    // כאן נבלעה הנגיעה: כל עוד האורך אינו ידוע (‎moov בסוף קובץ גדול על רשת
+    // איטית — בטלפון זה שניות ארוכות) התנאי הקודם עשה return, והמשתמש נגע
+    // בפס ושום דבר לא קרה. עכשיו זוכרים את היחס ומחילים אותו ברגע שהאורך
+    // מגיע, אז הנגיעה אף פעם לא הולכת לאיבוד.
+    if (!duration) {
+      pendingRatio.current = ratio;
+      return;
+    }
+    pendingRatio.current = null;
+    const target = ratio * duration;
+    seekTo(v, target);
+    setCurrentTime(target);
   }, [videoRef, duration]);
+
+  // היחס שנשמר בזמן שהאורך לא היה ידוע — מוחל ברגע שהוא נודע
+  useEffect(() => {
+    if (!duration || pendingRatio.current == null) return;
+    const v = videoRef.current;
+    const target = pendingRatio.current * duration;
+    pendingRatio.current = null;
+    if (v) { seekTo(v, target); setCurrentTime(target); }
+  }, [duration, videoRef]);
+
+  // שחרור הגרירה חייב להיות על החלון ולא על הפס: מי שמתחיל לגרור ומרים את
+  // האצבע מחוץ לפס לא מפעיל onMouseUp/onTouchEnd של הפס, dragging נשאר
+  // true — ואז הפס מפסיק לעקוב אחרי הסרט ונראה תקוע.
+  useEffect(() => {
+    if (!dragging) return;
+    const stop = () => setDragging(false);
+    window.addEventListener("mouseup", stop);
+    window.addEventListener("touchend", stop);
+    window.addEventListener("touchcancel", stop);
+    return () => {
+      window.removeEventListener("mouseup", stop);
+      window.removeEventListener("touchend", stop);
+      window.removeEventListener("touchcancel", stop);
+    };
+  }, [dragging]);
 
   const goFullscreen = () => {
     const v = videoRef.current;
@@ -579,7 +651,8 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
     }}>
       {/* progress bar — לא רלוונטי בשידור חי */}
       {!isLive && (
-        <div style={{ marginBottom: 16, padding: "8px 0", cursor: "pointer" }}
+        <div style={{ marginBottom: 8, padding: "16px 0", cursor: "pointer",
+                      touchAction: "none" }}
           ref={progressRef}
           onClick={seek}
           onMouseDown={(e) => { setDragging(true); seek(e); }}
@@ -589,9 +662,9 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
           onTouchMove={(e) => { if (dragging) seek(e); }}
           onTouchEnd={() => setDragging(false)}
         >
-          <div style={{ width: "100%", height: 3, background: "rgba(255,255,255,0.25)", borderRadius: 3, position: "relative" }}>
+          <div style={{ width: "100%", height: 5, background: "rgba(255,255,255,0.25)", borderRadius: 3, position: "relative" }}>
             <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${progress}%`, background: "#e91e8c", borderRadius: 3 }} />
-            <div style={{ position: "absolute", top: "50%", left: `${progress}%`, transform: "translate(-50%,-50%)", width: 13, height: 13, borderRadius: "50%", background: "#e91e8c", boxShadow: "0 0 6px rgba(233,30,140,0.7)" }} />
+            <div style={{ position: "absolute", top: "50%", left: `${progress}%`, transform: "translate(-50%,-50%)", width: 16, height: 16, borderRadius: "50%", background: "#e91e8c", boxShadow: "0 0 6px rgba(233,30,140,0.7)" }} />
           </div>
         </div>
       )}
@@ -1121,7 +1194,9 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
 
   const handleSkip = useCallback((side) => {
     const v = videoElRef.current;
-    if (v) v.currentTime = Math.max(0, v.currentTime + (side === "forward" ? 10 : -10));
+    // seekTo ולא השמה ישירה: כשהנגן עוד לא יודע את אורך הסרט (moov בסוף
+    // הקובץ, רשת איטית) השמה ישירה נבלעת בשקט והדילוג פשוט לא קורה.
+    if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? 10 : -10)));
     setSkipAnim(side);
     setTimeout(() => setSkipAnim(null), 700);
   }, []);
@@ -1297,7 +1372,9 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
 
   const handleSkip = useCallback((side) => {
     const v = videoElRef.current;
-    if (v) v.currentTime = Math.max(0, v.currentTime + (side === "forward" ? 10 : -10));
+    // seekTo ולא השמה ישירה: כשהנגן עוד לא יודע את אורך הסרט (moov בסוף
+    // הקובץ, רשת איטית) השמה ישירה נבלעת בשקט והדילוג פשוט לא קורה.
+    if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? 10 : -10)));
     setSkipAnim(side);
     setTimeout(() => setSkipAnim(null), 700);
   }, []);
