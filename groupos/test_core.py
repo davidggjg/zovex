@@ -31,6 +31,8 @@ import blocklist as bl  # noqa: E402
 import content  # noqa: E402
 import re as _re_mod  # noqa: E402
 import captcha as cap  # noqa: E402
+import backup  # noqa: E402
+from allowlist import Allowlist  # noqa: E402
 import emergency as emerg  # noqa: E402
 from antiflood import AntiFlood  # noqa: E402
 
@@ -517,6 +519,11 @@ def test_panel():
     # פקודה שמוצהרת ואינה רשומה במתאם היא כפתור מת בתפריט ✏️
     declared = set(_re.findall(r'Command\("(\w+)"\)', bot_src))
     declared |= {"start"} if "CommandStart()" in bot_src else set()
+    # הווריאציות נרשמות בלולאה מטבלה, ולכן אינן נראות כ-Command("x")
+    tbl = bot_src.split("MOD_VARIANTS = (", 1)
+    if len(tbl) > 1:
+        declared |= set(_re.findall(r'\("(\w+)", "\w+", "[\w.]+"',
+                                    tbl[1].split(")\n", 1)[0]))
     ok("כל פקודה מוצהרת קיימת במתאם", not (set(names) - declared),
        str(set(names) - declared))
     ok("כל פקודה במתאם מופיעה בתפריט", not (declared - set(names)),
@@ -527,6 +534,14 @@ def test_panel():
         ok(f"לכל פקודה יש תיאור ב-{lg}", not holes, str(holes))
     ok("תיאור פקודה נכנס ב-256 תווים",
        all(len(d) <= 256 for _, d in panel.command_list("he")))
+    # טלגרם דוחה הודעה מעל 4096 תווים — כלומר /help פשוט לא עונה
+    for lg in ("he", "en"):
+        pages = panel.help_pages(lg)
+        long = [len(p) for p in pages if len(p) > panel.TG_LIMIT]
+        ok(f"כל עמוד עזרה נכנס בתקרת טלגרם ב-{lg}", not long, str(long))
+        joined = "\n".join(pages)
+        gone = [n for n, _ in panel.COMMANDS if f"/{n} —" not in joined]
+        ok(f"כל הפקודות מופיעות בעזרה ב-{lg}", not gone, str(gone))
 
     # כל מסך חייב להיבנות בכל שפה, גם כזו שהמילון שלה חלקי
     for lg in i18n.STRINGS:
@@ -942,6 +957,95 @@ def test_emergency():
        str([k for k, _ in st if i18n.t(k, "en") == k]))
 
 
+# ── החרגות ────────────────────────────────────────────────────────────────
+def test_allowlist():
+    section("החרגות")
+    db = fresh()
+    A = Allowlist(db)
+    CHAT = -100444
+
+    ok("הוספת משתמש", A.add(CHAT, "user", "123"))
+    ok("משתמש מוחרג", A.has_user(CHAT, 123))
+    ok("אחר לא מוחרג", not A.has_user(CHAT, 124))
+    ok("תחום לא מוכר נדחה", not A.add(CHAT, "קסם", "x"))
+    ok("ערך ריק נדחה", not A.add(CHAT, "user", "   "))
+
+    A.add(CHAT, "domain", "https://Example.COM/path")
+    ok("דומיין מנוקה מפרוטוקול ונתיב",
+       A.values(CHAT, "domain") == {"example.com"},
+       str(A.values(CHAT, "domain")))
+    ok("דומיין מותר עובר", A.domains_ok(CHAT, {"example.com"}))
+    ok("תת-דומיין מותר עובר", A.domains_ok(CHAT, {"cdn.example.com"}))
+    ok("דומיין אחר לא", not A.domains_ok(CHAT, {"evil.com"}))
+    # ההחרגה חייבת לחול על **כל** הדומיינים, אחרת היא דרך לעקוף נעילה
+    ok("קישור מותר יחד עם אסור אינו עובר",
+       not A.domains_ok(CHAT, {"example.com", "evil.com"}))
+    ok("בלי דומיינים אין החרגה", not A.domains_ok(CHAT, set()))
+    ok("בידוד בין קבוצות", not A.has_user(-100999, 123))
+
+    ok("הסרה", A.remove(CHAT, "user", "123") == 1)
+    ok("הוסר", not A.has_user(CHAT, 123))
+    ok("הסרה חוזרת מחזירה אפס", A.remove(CHAT, "user", "123") == 0)
+
+
+# ── ייצוא וייבוא ──────────────────────────────────────────────────────────
+def test_backup():
+    section("ייצוא וייבוא")
+    src = fresh()
+    A, B = -100777, -100888
+
+    src.set(A, "welcome", "ברוך הבא {mention}")
+    src.set(A, "lockdown", "1")          # מצב רגעי — אסור שייצא
+    src.set(A, "emergency", "1")
+    from locks import Locks as _L
+    _L(src).set(A, "url", "ban")
+    bl_mod = __import__("blocklist")
+    bl_mod.Blocklist(src).add(A, "ספאם")
+    content.Filters(src).add(A, "שלום", "היי")
+    content.Notes(src).save(A, "rules", "החוקים")
+    Allowlist(src).add(A, "domain", "ok.com")
+
+    data = backup.export(src, A)
+    ok("גרסה נשמרת", data["version"] == backup.FORMAT_VERSION)
+    ok("הגדרות יוצאו", data["settings"].get("welcome", "").startswith("ברוך"))
+    # קובץ תצורה נוסע בצ'אט. מצב רגעי שנוסע איתו מדליק חירום בקבוצה אחרת
+    ok("מצב רגעי לא יוצא", "lockdown" not in data["settings"]
+       and "emergency" not in data["settings"], str(data["settings"].keys()))
+    c = backup.counts(data)
+    ok("כל החלקים יוצאו",
+       all(c[k] == 1 for k in ("locks", "blocklist", "filters", "notes",
+                               "allowlist")), str(c))
+
+    raw = backup.dumps(src, A)
+    ok("הפלט הוא JSON תקין", backup.parse(raw)["version"] == 1)
+
+    for bad, why in (("לא json בכלל", "bad_json"),
+                     ('{"version": 99}', "bad_version"),
+                     ('[1,2,3]', "bad_json")):
+        try:
+            backup.parse(bad)
+            ok(f"קובץ פסול נדחה ({why})", False)
+        except backup.ImportError_ as e:
+            ok(f"קובץ פסול נדחה ({why})", str(e) == why, str(e))
+
+    backup.apply(src, B, backup.parse(raw), 1)
+    ok("הגדרות יובאו", src.get(B, "welcome", "").startswith("ברוך"))
+    ok("נעילות יובאו", _L(src).get_all(B).get("url", ("", 0))[0] == "ban")
+    ok("הערות יובאו", content.Notes(src).get(B, "rules") is not None)
+    ok("החרגות יובאו", Allowlist(src).values(B, "domain") == {"ok.com"})
+    ok("מצב רגעי לא יובא", src.get(B, "lockdown") is None,
+       str(src.get(B, "lockdown")))
+
+    # ברירת המחדל היא הוספה ולא מחיקה
+    content.Notes(src).save(B, "משלי", "תוכן")
+    backup.apply(src, B, backup.parse(raw), 1)
+    ok("ייבוא רגיל לא מוחק קיים",
+       content.Notes(src).get(B, "משלי") is not None)
+    backup.apply(src, B, backup.parse(raw), 1, replace=True)
+    ok("ייבוא מחליף כן מוחק",
+       content.Notes(src).get(B, "משלי") is None)
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -955,6 +1059,8 @@ def main() -> int:
     test_blocklist()
     test_content()
     test_antiflood()
+    test_allowlist()
+    test_backup()
     test_captcha()
     test_emergency()
     test_manifest()

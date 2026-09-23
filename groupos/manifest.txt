@@ -1,5 +1,7 @@
+allowlist.py
 antiflood.py
 audit.py
+backup.py
 blocklist.py
 bot.py
 captcha.py

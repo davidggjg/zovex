@@ -140,14 +140,21 @@ class Moderation:
                        after=n, severity="info")
         return n
 
-    def reset_warns(self, chat_id: int, user_id: int, by: Optional[int]) -> None:
-        self.db.run("""UPDATE warnings SET revoked_at=?
-                       WHERE chat_id=? AND user_id=? AND revoked_at IS NULL""",
-                    (time.time(), chat_id, user_id))
+    def reset_warns(self, chat_id: int, user_id: int,
+                    by: Optional[int]) -> int:
+        """מבטל את כל האזהרות הפתוחות ומחזיר **כמה** בוטלו.
+
+        המספר אינו קישוט: "האזהרות אופסו" בלי מספר לא אומר למנהל אם
+        היו שם שלוש אזהרות או אף אחת."""
+        n = self.db.change("""UPDATE warnings SET revoked_at=?
+                              WHERE chat_id=? AND user_id=?
+                                AND revoked_at IS NULL""",
+                           (time.time(), chat_id, user_id))
         self.db.run("UPDATE members SET warns=0 WHERE chat_id=? AND user_id=?",
                     (chat_id, user_id))
         self.audit.log(chat_id, "user.warns_reset", actor_id=by,
-                       target_id=user_id, severity="info")
+                       target_id=user_id, after=n, severity="info")
+        return n
 
     def history(self, chat_id: int, user_id: int) -> list[dict]:
         return [dict(r) for r in self.db.q(

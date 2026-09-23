@@ -330,6 +330,39 @@ COMMANDS: list[tuple[str, str]] = [
     ("goodbye",  "welcome.write"),
     ("report",   ""),
     ("info",     "settings.read"),
+    ("sban",     "user.ban"),
+    ("dban",     "user.ban"),
+    ("smute",    "user.mute"),
+    ("dmute",    "user.mute"),
+    ("skick",    "user.kick"),
+    ("dkick",    "user.kick"),
+    ("resetwarns", "user.unwarn"),
+    ("warnings", "user.warn"),
+    ("warnlimit", "settings.write"),
+    ("promote",  "roles.assign"),
+    ("demote",   "roles.assign"),
+    ("adminlist", ""),
+    ("roles",    "settings.read"),
+    ("link",     "settings.read"),
+    ("settitle", "settings.write"),
+    ("setdesc",  "settings.write"),
+    ("pinned",   ""),
+    ("setflood", "settings.write"),
+    ("floodaction", "settings.write"),
+    ("antiraid", "settings.write"),
+    ("reports",  "settings.write"),
+    ("silent",   "settings.write"),
+    ("setclean", "settings.write"),
+    ("cleanservice", "settings.write"),
+    ("allow",    "settings.write"),
+    ("unallow",  "settings.write"),
+    ("allowlist", "settings.read"),
+    ("stats",    "settings.read"),
+    ("actions",  "audit.read"),
+    ("locktypes", ""),
+    ("vars",     ""),
+    ("export",   "chat.export"),
+    ("import",   "chat.import"),
     ("emergency", "emergency.toggle"),
     ("captcha",   "settings.write"),
     ("security",  "settings.read"),
@@ -344,10 +377,35 @@ def command_list(lang: str = "he") -> list[tuple[str, str]]:
     return [(name, i18n.t(f"cmd.{name}", lang)) for name, _ in COMMANDS]
 
 
+TG_LIMIT = 4096          # תקרת אורך הודעה בטלגרם
+HELP_CHUNK = 3500        # מתחת לתקרה, עם מרווח לתגיות ולתרגום ארוך
+
+
+def help_pages(lang: str = i18n.DEFAULT) -> list[str]:
+    """העזרה, מפוצלת להודעות שנכנסות בתקרת טלגרם.
+
+    עם 76 פקודות טקסט אחד חורג מ-4096 תווים, וטלגרם דוחה אותו —
+    כלומר ‎/help‎ פשוט לא היה עונה. הפיצול הוא לפי שורות שלמות, כי
+    חיתוך באמצע שורה קוטע פקודה."""
+    head_txt = head("help.title", lang)
+    rows = [f"/{name} — {i18n.t(f'cmd.{name}', lang)}"
+            + (f"  <i>{perm}</i>" if perm else "")
+            for name, perm in COMMANDS]
+    hint = i18n.t("help.hint", lang)
+
+    pages, cur = [], [head_txt, ""]
+    size = len(head_txt) + 1
+    for line in rows:
+        if size + len(line) + 1 > HELP_CHUNK:
+            pages.append("\n".join(cur))
+            cur, size = [], 0
+        cur.append(line)
+        size += len(line) + 1
+    cur += ["", hint]
+    pages.append("\n".join(cur))
+    return [p for p in pages if p.strip()]
+
+
 def help_screen(lang: str = i18n.DEFAULT) -> Screen:
-    lines = [head("help.title", lang), ""]
-    for name, perm in COMMANDS:
-        tail = f"  <i>{perm}</i>" if perm else ""
-        lines.append(f"/{name} — {i18n.t(f'cmd.{name}', lang)}{tail}")
-    lines += ["", i18n.t("help.hint", lang)]
-    return Screen("\n".join(lines))
+    """העמוד הראשון בלבד. מי ששולח ‎/help‎ מקבל את כל העמודים."""
+    return Screen(help_pages(lang)[0])
