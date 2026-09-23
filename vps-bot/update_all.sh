@@ -20,10 +20,22 @@
 #     bash update_all.sh             העדכון עצמו
 # ──────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+SELF=$(readlink -f "$0")
 cd /opt/zovex-bot || { echo "❌ /opt/zovex-bot לא נמצא"; exit 1; }
 
 BRANCH="claude/hls-relay-schema-port-ll8xiz"
 RAW="https://raw.githubusercontent.com/davidggjg/zovex/$BRANCH/vps-bot"
+
+# הסקריפט מעדכן את עצמו קודם. רשימת הפאצ'ים יושבת כאן, ועותק ישן על השרת
+# "עבר בהצלחה" בלי לדעת על פאצ'ים חדשים — וכך הם פשוט לא הוחלו.
+if [ -z "${ZOVEX_SELF_UPDATED:-}" ] \
+   && curl -fsSL -o /tmp/update_all.sh.new "$RAW/update_all.sh" \
+   && bash -n /tmp/update_all.sh.new \
+   && ! cmp -s /tmp/update_all.sh.new "$SELF"; then
+  cp /tmp/update_all.sh.new /opt/zovex-bot/update_all.sh
+  echo "↻ יש גרסה חדשה של update_all.sh — מריץ אותה"
+  ZOVEX_SELF_UPDATED=1 exec bash /opt/zovex-bot/update_all.sh "$@"
+fi
 # איפה האתר באמת יושב — נשאל את nginx ולא נניח. פריסה לתיקייה שאיש
 # אינו מגיש הייתה "מצליחה" בשקט ולא משנה כלום.
 SITE_DIR=$(nginx -T 2>/dev/null | grep -E "^[[:space:]]*root[[:space:]]" \
