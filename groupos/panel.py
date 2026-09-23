@@ -106,7 +106,8 @@ def main_menu(chat_id: int, title: str, stats: dict,
         # הכפתור אומר מה הלחיצה **תעשה**, לא מה המצב. כפתור שכתוב בו
         # "השבתה" בקבוצה שכבר מושבתת נראה כמו כפתור שלא עבד.
         [(i18n.t("menu.lockdown_on" if stats.get("lockdown")
-                 else "menu.lockdown", lang), cb(chat_id, "ldown"))],
+                 else "menu.lockdown", lang), cb(chat_id, "ldown")),
+         (i18n.t("sw.title", lang), cb(chat_id, "sws"))],
         [(i18n.t("menu.security", lang), cb(chat_id, "sec")),
          (i18n.t("menu.language", lang), cb(chat_id, "lang"))],
         [(i18n.t("menu.groups", lang), "g:0:home")],
@@ -246,6 +247,62 @@ def welcome_screen() -> Screen:
     return Screen("<b>GroupOS</b>\n\n🌐 Choose your language", rows)
 
 
+# ── המתגים ────────────────────────────────────────────────────────────────
+# כל הגדרה של כן/לא במקום אחד. (מפתח, ברירת מחדל, מפתח תרגום)
+#
+# הבעיה שזה פותר: ‎/lockdown‎ בלי ארגומנט היה **מחליף** מצב. מנהל שלא
+# זכר איפה הוא עומד לחץ פעמיים וחזר בדיוק לאותו מקום, ונראה היה
+# שפקודת הכיבוי "לא נלחצה". פקודה לעולם אינה מחליפה בעיוורון: היא
+# מציגה מצב ונותנת שני כפתורים.
+SWITCHES: tuple[tuple[str, str, str], ...] = (
+    ("captcha",      "0", "sec.captcha"),
+    ("flood",        "1", "sec.flood"),
+    ("antiraid",     "1", "sec.antiraid"),
+    ("reports",      "1", "sec.reports"),
+    ("ai",           "0", "sec.ai"),
+    ("silent",       "1", "settings.silent"),
+    ("cleanservice", "0", "cmd.cleanservice"),
+    ("xp",           "1", "sw.xp"),
+    ("levelup",      "0", "sw.levelup"),
+    ("privatenotes", "0", "sw.privatenotes"),
+    ("lockwarns",    "0", "sw.lockwarns"),
+    ("welcome_on",   "1", "sw.welcome"),
+    ("goodbye_on",   "1", "sw.goodbye"),
+)
+
+SWITCH_KEYS = {k for k, _, _ in SWITCHES}
+SWITCH_DEFAULT = {k: d for k, d, _ in SWITCHES}
+
+
+def switches_screen(chat_id: int, values: dict,
+                    lang: str = i18n.DEFAULT) -> Screen:
+    """כל המתגים, כל אחד עם מצבו. לחיצה מחליפה — ורואים את התוצאה."""
+    rows, line = [], []
+    for key, default, label in SWITCHES:
+        on = values.get(key, default) == "1"
+        line.append((("🟢 " if on else "⚪ ") + i18n.t(label, lang),
+                     cb(chat_id, "sw", key)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(head("sw.title", lang) + "\n\n" + i18n.t("sw.hint", lang),
+                  rows)
+
+
+def switch_screen(chat_id: int, key: str, on: bool,
+                  lang: str = i18n.DEFAULT) -> Screen:
+    """מתג בודד, לתשובה על פקודה. שני כפתורים מפורשים ולא החלפה."""
+    label = next((l for k, _, l in SWITCHES if k == key), key)
+    txt = (f"<b>{i18n.t(label, lang)}</b>\n"
+           + i18n.t("sw.now", lang,
+                    state=i18n.t("on" if on else "off", lang)))
+    rows = [[("✅ " + i18n.t("sw.enable", lang), cb(chat_id, "sw1", key)),
+             ("⛔ " + i18n.t("sw.disable", lang), cb(chat_id, "sw0", key))]]
+    return Screen(txt, rows)
+
+
 def security_screen(chat_id: int, rows_state: list[tuple[str, bool]],
                     numbers: dict, lang: str = i18n.DEFAULT) -> Screen:
     """מה מגן על הקבוצה עכשיו, בשורה אחת לכל הגנה.
@@ -380,6 +437,30 @@ COMMANDS: list[tuple[str, str]] = [
     ("fedbans",    "settings.read"),
     ("rep",        ""),
     ("top",        ""),
+    ("disable",   "settings.write"),
+    ("enable",    "settings.write"),
+    ("disabled",  "settings.read"),
+    ("dwarn",     "user.warn"),
+    ("swarn",     "user.warn"),
+    ("spurge",    "chat.purge"),
+    ("purgefrom", "chat.purge"),
+    ("purgeto",   "chat.purge"),
+    ("stopall",   "filters.write"),
+    ("rmblockall", "blocklist.write"),
+    ("rmallowall", "settings.write"),
+    ("admincache", "settings.read"),
+    ("approve",   "settings.write"),
+    ("unapprove", "settings.write"),
+    ("approved",  "settings.read"),
+    ("setwelcome", "welcome.write"),
+    ("setgoodbye", "welcome.write"),
+    ("captchatime", "settings.write"),
+    ("captchatries", "settings.write"),
+    ("captchafail", "settings.write"),
+    ("blockmode",  "blocklist.write"),
+    ("setwarnmode", "settings.write"),
+    ("echo",      "chat.say"),
+    ("settings", "settings.read"),
     ("ai",       "settings.write"),
     ("aikeys",   "settings.read"),
     ("emergency", "emergency.toggle"),

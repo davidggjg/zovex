@@ -34,6 +34,7 @@ import captcha as cap  # noqa: E402
 import backup  # noqa: E402
 import aikeys  # noqa: E402
 import policy  # noqa: E402
+import disabling  # noqa: E402
 import ai  # noqa: E402
 import aiclient  # noqa: E402
 import scheduler as sched  # noqa: E402
@@ -509,9 +510,10 @@ def test_panel():
     panel_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   "panel.py"), encoding="utf-8").read()
     referenced = set(_re.findall(r'cb\([^,]+, "(\w+)"', panel_src)) | {"home"}
-    handled = set(_re.findall(r'name == "(\w+)"', bot_src)) | \
-              set(_re.findall(r'name in \("(\w+)", "(\w+)"\)', bot_src)[0]
-                  if _re.findall(r'name in \("(\w+)", "(\w+)"\)', bot_src) else [])
+    handled = set(_re.findall(r'name == "(\w+)"', bot_src))
+    # ‎name in ("a", "b", "c")‎ — כל מספר של פריטים, לא רק שניים
+    for grp in _re.findall(r'name in \(([^)]+)\)', bot_src):
+        handled |= set(_re.findall(r'"(\w+)"', grp))
     missing = referenced - handled
     ok("כל מסך שהפאנל מפנה אליו מטופל במתאם", not missing, str(missing))
 
@@ -1651,6 +1653,35 @@ def test_reputation():
     ok("מי שאין לו נקודות אינו מדורג", R.rank(CHAT, 999) == 0)
 
 
+# ── כיבוי פקודות ──────────────────────────────────────────────────────────
+def test_disabling():
+    section("כיבוי פקודות")
+    db = fresh()
+    CHAT = -100888
+
+    ok("בהתחלה אין מכובות", disabling.disabled(db, CHAT) == set())
+    ok("כיבוי", disabling.disable(db, CHAT, "rules"))
+    ok("מכובה", disabling.is_disabled(db, CHAT, "rules"))
+    ok("סלאש מוביל מנוקה", disabling.disable(db, CHAT, "/info")
+       and disabling.is_disabled(db, CHAT, "info"))
+    ok("אחרת לא מושפעת", not disabling.is_disabled(db, CHAT, "ban"))
+    ok("בידוד בין קבוצות", not disabling.is_disabled(db, -1, "rules"))
+
+    # קבוצה שכיבתה את /settings נשארת בלי דרך להדליק בחזרה
+    for guard in disabling.PROTECTED:
+        ok(f"/{guard} מוגן מכיבוי", not disabling.disable(db, CHAT, guard))
+        ok(f"/{guard} עדיין פועלת", not disabling.is_disabled(db, CHAT, guard))
+
+    ok("הפעלה", disabling.enable(db, CHAT, "rules")
+       and not disabling.is_disabled(db, CHAT, "rules"))
+    ok("הפעלת מה שלא כובה", not disabling.enable(db, CHAT, "אין_כזה"))
+    disabling.disable(db, CHAT, "a"); disabling.disable(db, CHAT, "b")
+    ok("enable all מנקה הכול", disabling.enable(db, CHAT, "all")
+       and disabling.disabled(db, CHAT) == set())
+    ok("שם ריק נדחה", not disabling.disable(db, CHAT, "  "))
+    ok("ברירת מחדל: לא מוחקים", not disabling.delete_mode(db, CHAT))
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -1666,6 +1697,7 @@ def main() -> int:
     test_antiflood()
     test_aikeys()
     test_policy()
+    test_disabling()
     test_ai()
     test_aiclient()
     test_scheduler()
