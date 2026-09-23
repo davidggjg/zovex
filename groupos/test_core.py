@@ -33,6 +33,7 @@ import re as _re_mod  # noqa: E402
 import captcha as cap  # noqa: E402
 import backup  # noqa: E402
 import aikeys  # noqa: E402
+import policy  # noqa: E402
 from allowlist import Allowlist  # noqa: E402
 import emergency as emerg  # noqa: E402
 from antiflood import AntiFlood  # noqa: E402
@@ -1137,6 +1138,97 @@ def test_aikeys():
     ok("בלי משתני סביבה אין בריכות", aikeys.Providers.from_env({}).pools == {})
 
 
+# ── מנוע המדיניות ─────────────────────────────────────────────────────────
+def test_policy():
+    section("מנוע המדיניות")
+    S = policy.Signal
+
+    ok("בלי אותות אין סיכון", policy.risk_of([]) == 0.0)
+    ok("אות בודד", policy.risk_of([S("ai", "spam", 0.6)]) == 0.6)
+
+    # שלושה חלשים חייבים לעלות על אחד בינוני — זה כל הרעיון
+    weak = policy.risk_of([S("account", "new", 0.3), S("flood", "repeat", 0.3),
+                           S("ai", "link", 0.3)])
+    ok("שלושה חלשים מצטברים", weak > 0.6, str(weak))
+    ok("אחד בינוני נמוך מהם", 0.5 < weak and policy.risk_of([S("ai", "x", 0.5)]) < weak)
+
+    # סכום היה עובר 100% ומאבד משמעות
+    many = policy.risk_of([S("ai", "x", 0.5) for _ in range(6)])
+    ok("הצבירה לא עוברת 1", many < 1.0 and many > 0.9, str(many))
+    ok("אות מלא מגיע ל-1", policy.risk_of([S("blocklist", "x", 1.0)]) == 1.0)
+    ok("משקל שלילי מתעלמים ממנו",
+       policy.risk_of([S("ai", "x", -5)]) == 0.0)
+    ok("משקל מעל 1 נחתך", policy.risk_of([S("ai", "x", 9)]) == 1.0)
+
+    d = policy.decide([S("ai", "scam", 0.95)])
+    ok("סיכון גבוה → חסימה", d.action == "ban", d.action)
+    ok("ההחלטה אמיתית", bool(d))
+    d2 = policy.decide([S("ai", "spam", 0.75)])
+    ok("סיכון בינוני → השתקה", d2.action == "mute" and d2.duration == 3600)
+    ok("סיכון נמוך → מחיקה", policy.decide([S("flood", "rate", 0.35)]).action == "delete")
+    quiet = policy.decide([S("ai", "maybe", 0.1)])
+    ok("סיכון זניח → כלום", quiet.action == "none" and not quiet)
+
+    # ההסבר הוא מה שמנהל רואה כששואל "למה"
+    e = policy.decide([S("ai", "scam", 0.9, "הבטחה כספית"),
+                       S("account", "new", 0.4)]).explain()
+    ok("ההסבר נושא אחוז", e.startswith("9") or e.startswith("10"), e)
+    ok("ההסבר מונה את האותות", "ai:scam" in e and "account:new" in e, e)
+    ok("ההסבר מסודר לפי משקל", e.index("ai:scam") < e.index("account:new"), e)
+
+    # כלל שמוגבל למקור
+    only_ai = [policy.Rule(0.5, "ban", None, ("ai",))]
+    ok("כלל מוגבל חל על המקור שלו",
+       policy.decide([S("ai", "x", 0.8)], only_ai).action == "ban")
+    ok("כלל מוגבל לא חל על מקור אחר",
+       policy.decide([S("flood", "x", 0.8)], only_ai).action == "none")
+
+    # שני כללים שמתאימים הם סולם, לא סתירה
+    both = [policy.Rule(0.3, "delete"), policy.Rule(0.6, "ban")]
+    ok("החמור מנצח", policy.decide([S("ai", "x", 0.7)], both).action == "ban")
+    ok("הקל חל לבדו", policy.decide([S("ai", "x", 0.4)], both).action == "delete")
+
+    # ניסוח — מנהל עורך אותו בטלגרם
+    r = policy.parse_rules("0.9:ban, 0.7:mute:3600, 0.5:warn")
+    ok("שלושה כללים נפרסו", len(r) == 3, str(len(r)))
+    ok("מסודרים מהחמור לקל", [x.threshold for x in r] == [0.9, 0.7, 0.5])
+    ok("משך נשמר", r[1].duration == 3600)
+    ok("הלוך ושוב", policy.parse_rules(policy.format_rules(r)) == r)
+
+    src = policy.parse_rules("0.5:ban:0:ai|flood")
+    ok("מקורות נפרסים", src and src[0].sources == ("ai", "flood"), str(src))
+    ok("מקור לא מוכר נזרק",
+       policy.parse_rules("0.5:ban:0:קסם")[0].sources == ())
+
+    # כלל אחד עם טעות לא אמור להשבית מדיניות שלמה
+    mixed = policy.parse_rules("0.9:ban, זבל, 0.5:קסם, 9:ban, 0.3:delete")
+    ok("שורות פסולות מדולגות",
+       [x.action for x in mixed] == ["ban", "delete"], str(mixed))
+    ok("סף מחוץ לטווח נדחה", policy.parse_rules("2.0:ban") == [])
+    ok("ריק מחזיר ריק", policy.parse_rules("") == [])
+
+    db = fresh()
+    CHAT = -100555
+    ok("בלי הגדרה — ברירת המחדל",
+       policy.rules_for(db, CHAT) == list(policy.DEFAULT_RULES))
+    db.set(CHAT, "policy_rules", "0.8:kick")
+    got = policy.rules_for(db, CHAT)
+    ok("הגדרת הקבוצה מנצחת", len(got) == 1 and got[0].action == "kick")
+    db.set(CHAT, "policy_rules", "זבל מוחלט")
+    ok("מדיניות פגומה נופלת לברירת מחדל",
+       policy.rules_for(db, CHAT) == list(policy.DEFAULT_RULES))
+
+    # הסימולטור — לראות לפני שמפעילים
+    sim = policy.simulate([S("ai", "scam", 0.95, "הבטחת רווח"),
+                           S("account", "new", 0.4)])
+    ok("הסימולטור מחזיר פעולה", sim["action"] == "ban")
+    ok("הסימולטור מחזיר אחוז", sim["risk"] > 0.9)
+    ok("הסימולטור מפרט אותות", len(sim["signals"]) == 2)
+    ok("הסימולטור מראה איזה כלל", sim["rule"] and "ban" in sim["rule"])
+    ok("סימולציה נקייה לא מפעילה כלום",
+       policy.simulate([])["action"] == "none")
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -1151,6 +1243,7 @@ def main() -> int:
     test_content()
     test_antiflood()
     test_aikeys()
+    test_policy()
     test_allowlist()
     test_backup()
     test_captcha()

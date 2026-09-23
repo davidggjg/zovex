@@ -15,6 +15,7 @@ locks.py
 moderation.py
 panel.py
 permissions.py
+policy.py
 ratelimit.py
 templates.py
 test_core.py

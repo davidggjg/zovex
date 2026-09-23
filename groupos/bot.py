@@ -51,6 +51,7 @@ import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
 import aikeys                                   # noqa: E402
 import backup                                   # noqa: E402
+import policy                                   # noqa: E402
 import captcha as cap                           # noqa: E402
 import emergency as emerg                       # noqa: E402
 import templates as tpl                         # noqa: E402
@@ -1111,6 +1112,91 @@ async def cmd_info(msg: Message):
                        id=t, role=(r["role"] if r else "member"),
                        msgs=(r["msg_count"] if r else 0),
                        warns=mod.warn_count(msg.chat.id, t), joined=joined))
+
+
+# ── אותות: מה שכל מזהה אומר על הודעה, בלי להחליט בעצמו ────────────────
+def collect_signals(msg: Message, text: str) -> list[policy.Signal]:
+    """כל המזהים מדווחים. אף אחד מהם לא מחליט — זה תפקיד ה-Policy.
+
+    המשקלים כאן הם ברירת מחדל שמרנית: נעילה שהמנהל הגדיר במפורש
+    שוקלת יותר מחשד התנהגותי, כי היא **כלל** ולא ניחוש."""
+    out: list[policy.Signal] = []
+    hit = locks.check(msg.chat.id, _describe(msg))
+    if hit:
+        out.append(policy.Signal("lock", hit.lock, 0.8))
+    m = blocks.check(msg.chat.id, text) if text else None
+    if m:
+        # ניסיון עקיפה שוקל יותר מהפרה ישירה: מי שפיזר אותיות ידע
+        out.append(policy.Signal("blocklist", m.kind,
+                                 0.95 if m.evaded else 0.75,
+                                 "עקיפה" if m.evaded else m.pattern[:24]))
+    fh = filters.check(msg.chat.id, text) if text else None
+    if fh and fh.action not in ("reply", "delete_reply"):
+        out.append(policy.Signal("filter", fh.trigger[:24], 0.5))
+    u = msg.from_user
+    if u:
+        w = mod.warn_count(msg.chat.id, u.id)
+        if w:
+            out.append(policy.Signal("reputation", "warnings",
+                                     min(0.15 * w, 0.6), str(w)))
+        r = db.one("SELECT joined_at FROM members WHERE chat_id=? AND user_id=?",
+                   (msg.chat.id, u.id))
+        if r and r["joined_at"] and time.time() - r["joined_at"] < 300:
+            out.append(policy.Signal("account", "just_joined", 0.35))
+    return out
+
+
+@dp.message(Command("policy"))
+@needs("settings.write")
+async def cmd_policy(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "policy.current",
+                           rules=policy.format_rules(
+                               policy.rules_for(db, msg.chat.id))))
+        return
+    arg = parts[1].strip()
+    if arg.lower() in ("reset", "default"):
+        db.unset(msg.chat.id, "policy_rules")
+        await reply(msg, T(msg, "policy.reset"))
+        return
+    rules = policy.parse_rules(arg)
+    if not rules:
+        await reply(msg, T(msg, "policy.bad"))
+        return
+    db.set(msg.chat.id, "policy_rules", policy.format_rules(rules),
+           msg.from_user.id)
+    audit.log(msg.chat.id, "policy.write", actor_id=msg.from_user.id,
+              after=policy.format_rules(rules), severity="high")
+    await reply(msg, T(msg, "policy.set", rules=policy.format_rules(rules)))
+
+
+@dp.message(Command("simulate"))
+@needs("settings.read")
+async def cmd_simulate(msg: Message):
+    """מה היה קורה להודעה הזאת. בלי לעשות לה כלום.
+
+    מדיניות אבטחה שמופעלת בלי לראות מה היא עושה היא הדרך המהירה
+    ביותר לחסום חצי קבוצה בטעות."""
+    touch(msg)
+    src = msg.reply_to_message
+    if src is None:
+        await reply(msg, T(msg, "sim.usage"))
+        return
+    text = src.text or src.caption or ""
+    sigs = collect_signals(src, text)
+    res = policy.simulate(sigs, policy.rules_for(db, msg.chat.id))
+    if not sigs:
+        await reply(msg, T(msg, "sim.none"))
+        return
+    lines = "\n".join(T(msg, "sim.signal", source=s["source"], kind=s["kind"],
+                        weight=int(s["weight"] * 100),
+                        detail=f" · {tpl.esc(s['detail'])}" if s["detail"] else "")
+                      for s in res["signals"])
+    dur = f" ({res['duration']}s)" if res["duration"] else ""
+    await reply(msg, T(msg, "sim.result", risk=int(res["risk"] * 100),
+                       action=res["action"], dur=dur, signals=lines))
 
 
 @dp.message(Command("aikeys"))
