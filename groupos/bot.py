@@ -49,6 +49,8 @@ from aiogram.types import (BufferedInputFile, BotCommand, CallbackQuery,
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
+import ai as aimod                              # noqa: E402
+import aiclient                                 # noqa: E402
 import aikeys                                   # noqa: E402
 import backup                                   # noqa: E402
 import policy                                   # noqa: E402
@@ -90,6 +92,7 @@ allow = Allowlist(db)
 # המפתחות נטענים ממשתני סביבה בלבד ולעולם לא מהמסד: מסד עובר בגיבוי,
 # ו-.env עם הרשאות 600 לא.
 ai = aikeys.Providers.from_env()
+brain = aiclient.AIClient(ai)
 lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
@@ -470,7 +473,23 @@ async def on_group_message(msg: Message):
                        severity="medium", notice=f"flood.{fl.kind}")
         return
 
-    # 4. קיצור ‎#שם‎ להערה. לפני הפילטרים, כי הוא מפורש יותר.
+    # 4. ניתוח תוכן. אחרון מבין הבדיקות, כי הוא היחיד שעולה כסף
+    #    ולוקח זמן — ומיותר כשמנגנון זול כבר הכריע.
+    if db.get(msg.chat.id, "ai", "0") == "1" and ai.pools:
+        sigs = collect_signals(msg, text)
+        if aimod.worth_asking(text, existing=sigs):
+            v = await brain.analyze(text, lang=lg)
+            sig = v.signal()
+            if sig:
+                sigs.append(sig)
+                d = policy.decide(sigs, policy.rules_for(db, msg.chat.id))
+                if d:
+                    await _enforce(msg, d.action, d.duration, d.explain(),
+                                   "ai.action", severity="medium",
+                                   notice="ai.verdict")
+                    return
+
+    # 5. קיצור ‎#שם‎ להערה. לפני הפילטרים, כי הוא מפורש יותר.
     if text.startswith("#") and len(text) > 1:
         n = notes.get(msg.chat.id, text[1:].split()[0])
         if n is not None and n.visibility == "public":
@@ -479,7 +498,7 @@ async def on_group_message(msg: Message):
                                n.media_id, n.media_kind, n.buttons)
             return
 
-    # 5. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
+    # 6. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
     fh = filters.check(msg.chat.id, text) if text else None
     if fh:
         await _run_filter(msg, fh)
@@ -542,7 +561,8 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
         await apply_action(msg.chat.id, msg.from_user.id, kind, duration,
                            label, None)
         if notice and db.get(msg.chat.id, "silent", "1") != "1":
-            await send(msg.chat.id, T(msg, notice, name=_name(msg)),
+            await send(msg.chat.id,
+                       T(msg, notice, name=_name(msg), label=label),
                        clean_after=clean_delay(msg.chat.id) or None)
 
 
@@ -1197,6 +1217,35 @@ async def cmd_simulate(msg: Message):
     dur = f" ({res['duration']}s)" if res["duration"] else ""
     await reply(msg, T(msg, "sim.result", risk=int(res["risk"] * 100),
                        action=res["action"], dur=dur, signals=lines))
+
+
+@dp.message(Command("ai"))
+@needs("settings.write")
+async def cmd_ai(msg: Message):
+    """הדלקה וכיבוי של ניתוח התוכן, עם אמירה מפורשת מה נשלח החוצה."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "ai", "0") == "1"
+    if arg == "on":
+        if not ai.pools:
+            await reply(msg, T(msg, "ai.no_keys"))
+            return
+        db.set(msg.chat.id, "ai", "1", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="ai=1", severity="high")
+        await reply(msg, T(msg, "ai.on_set", state=T(msg, "on"))
+                    + "\n\n" + T(msg, "ai.privacy"))
+        return
+    if arg == "off":
+        db.set(msg.chat.id, "ai", "0", msg.from_user.id)
+        await reply(msg, T(msg, "ai.on_set", state=T(msg, "off")))
+        return
+    st = brain.stats()
+    await reply(msg, T(msg, "ai.on_set", state=T(msg, "on" if cur else "off"))
+                + "\n" + T(msg, "ai.stats", calls=st["calls"],
+                           failures=st["failures"], size=st["cache"]["size"],
+                           hit_rate=st["cache"]["hit_rate"])
+                + "\n\n" + T(msg, "ai.privacy"))
 
 
 @dp.message(Command("aikeys"))
@@ -2196,6 +2245,7 @@ def _sec_numbers(chat_id: int) -> dict:
         "flood": db.get(chat_id, "flood", "1") == "1",
         "antiraid": db.get(chat_id, "antiraid", "1") == "1",
         "reports": db.get(chat_id, "reports", "1") == "1",
+        "ai": db.get(chat_id, "ai", "0") == "1",
     }
 
 
@@ -2259,7 +2309,7 @@ async def on_callback(q: CallbackQuery):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
-        if arg not in ("captcha", "flood", "antiraid", "reports"):
+        if arg not in ("captcha", "flood", "antiraid", "reports", "ai"):
             await q.answer(i18n.t("btn.unknown", lg))
             return
         cur = db.get(chat_id, arg, "1" if arg != "captcha" else "0") == "1"

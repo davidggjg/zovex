@@ -38,6 +38,7 @@ PRESET: dict[str, str] = {
     "flood_action":   "mute",
     "silent":         "0",    # בחירום רוצים לראות מה קורה
     "newuser_links":  "1",    # נכנס חדש לא שולח קישורים
+    "ai":             "1",    # בחירום שווה לשלם על ניתוח
 }
 
 SNAPSHOT_KEY = "_emergency_before"
@@ -49,6 +50,7 @@ PROTECTIONS = (
     ("flood",     "1", "sec.flood"),
     ("antiraid",  "1", "sec.antiraid"),
     ("reports",   "1", "sec.reports"),
+    ("ai",        "0", "sec.ai"),
     ("lockdown",  "0", "sec.lockdown"),
     ("emergency", "0", "sec.emergency"),
 )

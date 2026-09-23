@@ -270,6 +270,8 @@ def security_screen(chat_id: int, rows_state: list[tuple[str, bool]],
           + (on if numbers.get("antiraid") else off), cb(chat_id, "tgl", "antiraid")),
          (i18n.t("sec.reports", lang) + ": "
           + (on if numbers.get("reports") else off), cb(chat_id, "tgl", "reports"))],
+        [(i18n.t("sec.ai", lang) + ": "
+          + (on if numbers.get("ai") else off), cb(chat_id, "tgl", "ai"))],
         [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
     ]
     return Screen(txt, rows)
@@ -365,6 +367,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("import",   "chat.import"),
     ("policy",   "settings.write"),
     ("simulate", "settings.read"),
+    ("ai",       "settings.write"),
     ("aikeys",   "settings.read"),
     ("emergency", "emergency.toggle"),
     ("captcha",   "settings.write"),

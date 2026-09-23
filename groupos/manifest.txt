@@ -1,3 +1,5 @@
+ai.py
+aiclient.py
 aikeys.py
 allowlist.py
 antiflood.py
