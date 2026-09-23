@@ -32,6 +32,7 @@ import content  # noqa: E402
 import re as _re_mod  # noqa: E402
 import captcha as cap  # noqa: E402
 import backup  # noqa: E402
+import aikeys  # noqa: E402
 from allowlist import Allowlist  # noqa: E402
 import emergency as emerg  # noqa: E402
 from antiflood import AntiFlood  # noqa: E402
@@ -1046,6 +1047,96 @@ def test_backup():
        content.Notes(src).get(B, "משלי") is None)
 
 
+# ── בריכת מפתחות ──────────────────────────────────────────────────────────
+def test_aikeys():
+    section("בריכת מפתחות AI")
+    ok("מיסוך מסתיר את האמצע",
+       aikeys.mask("AQ.Ab8RN6IftAOMZdVEEdI0pt03") == "AQ.A…pt03")
+    ok("מפתח קצר לא נחשף", aikeys.mask("abc") == "…")
+    ok("ריק לא מפיל", aikeys.mask("") == "…")
+
+    # מי שמדביק חמישה מפתחות עושה את זה פעם אחת, ולרוב לא בפורמט אחד
+    for raw, why in (("a,b,c", "פסיקים"), ("a b c", "רווחים"),
+                     ("a\nb\nc", "שורות"), ("a; b;c", "מעורב"),
+                     ('"a", "b", "c"', "מרכאות")):
+        ok(f"פיצול לפי {why}", aikeys.split_keys(raw) == ["a", "b", "c"],
+           str(aikeys.split_keys(raw)))
+    ok("כפילויות נזרקות", aikeys.split_keys("a,b,a") == ["a", "b"])
+    ok("ריק מחזיר רשימה ריקה", aikeys.split_keys("") == [])
+
+    P = aikeys.KeyPool("test", ["k1", "k2", "k3"])
+    got = [P.acquire(now=100 + i) for i in range(3)]
+    ok("סבב על כל המפתחות", set(got) == {"k1", "k2", "k3"}, str(got))
+    ok("אחרי סבב חוזרים להתחלה", P.acquire(now=110) in {"k1", "k2", "k3"})
+
+    # 429 חייב להוציא את המפתח מהסבב, אחרת כל בקשה שנייה נכשלת שוב
+    P2 = aikeys.KeyPool("t", ["a", "b"])
+    wait = P2.fail("a", status=429, now=100)
+    ok("429 מצנן", wait == aikeys.COOLDOWN_START, str(wait))
+    ok("המצונן לא נבחר", P2.acquire(now=101) == "b")
+    ok("אחרי הצינון הוא חוזר",
+       P2.acquire(now=100 + wait + 1) in ("a", "b"))
+
+    ok("צינון עולה", P2.fail("a", status=429, now=200) == aikeys.COOLDOWN_START * 2)
+    ok("Retry-After מנצח",
+       P2.fail("a", status=429, retry_after=5, now=300) == 5.0)
+    ok("צינון חסום בתקרה",
+       P2.fail("a", status=429, retry_after=99999, now=400) == aikeys.COOLDOWN_MAX)
+
+    # בלי איפוס, מפתח שנחסם פעם אחת נשאר בתקרה לנצח
+    P2.ok("a")
+    ok("הצלחה מאפסת את הצינון",
+       P2.fail("a", status=429, now=500) == aikeys.COOLDOWN_START)
+
+    # מפתח שבוטל לא יתקן את עצמו — ניסיון חוזר עליו שורף כל בקשה
+    P3 = aikeys.KeyPool("t", ["x", "y"])
+    P3.fail("x", status=401, now=1)
+    ok("401 מוציא לגמרי", P3.acquire(now=99999) == "y")
+    ok("מת נספר", P3.stats(now=1)["dead"] == 1)
+    ok("החייאה ידנית מחזירה", P3.revive() == 1 and P3.acquire(now=2) in ("x", "y"))
+
+    ok("400 אינו מצנן", aikeys.KeyPool("t", ["z"]).fail("z", status=400) == 0.0)
+    ok("500 כן מצנן", aikeys.KeyPool("t", ["z"]).fail("z", status=500) > 0)
+    ok("מפתח לא מוכר לא מפיל", P3.fail("אין_כזה", status=429) == 0.0)
+
+    # תקרה יומית
+    P4 = aikeys.KeyPool("t", ["a"], rpd=2)
+    P4.acquire(now=1000); P4.acquire(now=1001)
+    ok("תקרה יומית נאכפת", P4.acquire(now=1002) is None)
+    ok("יום חדש מאפס", P4.acquire(now=1002 + aikeys.DAY) == "a")
+
+    # אין מפתחות — אסור לקרוס, צריך להחזיר None
+    ok("בריכה ריקה מחזירה None", aikeys.KeyPool("t", []).acquire() is None)
+
+    # הסטטיסטיקה נשלחת לפאנל ולוגים — אסור שיהיה בה מפתח
+    st = aikeys.KeyPool("t", ["SUPERSECRETKEY123456"]).stats(now=1)
+    ok("הסטטיסטיקה לא חושפת מפתח",
+       "SUPERSECRETKEY123456" not in str(st), str(st))
+
+    # כמה ספקים
+    env = {"GROUPOS_GEMINI_KEYS": "g1,g2", "GROUPOS_GROQ_KEYS": "q1,q2,q3"}
+    PR = aikeys.Providers.from_env(env)
+    ok("שתי בריכות נטענו", set(PR.pools) == {"gemini", "groq"})
+    ok("התקציב מחושב",
+       PR.budget() == 2 * aikeys.FREE_RPD["gemini"] + 3 * aikeys.FREE_RPD["groq"],
+       str(PR.budget()))
+    first = PR.pick(now=1)
+    ok("ברירת המחדל היא groq", first and first[0] == "groq", str(first))
+    ok("העדפה מכובדת", (PR.pick("gemini", now=1) or ("", ""))[0] == "gemini")
+
+    # נפילת ספק שלם חייבת ליפול לספק הבא, לא להפיל את הפיצ'ר
+    for k in ("q1", "q2", "q3"):
+        PR.fail("groq", k, status=429, now=1)
+    nxt = PR.pick(now=2)
+    ok("ספק שנפל מפנה לבא", nxt and nxt[0] == "gemini", str(nxt))
+    for k in ("g1", "g2"):
+        PR.fail("gemini", k, status=429, now=2)
+    ok("כשאין כלום מחזירים None", PR.pick(now=3) is None)
+    ok("ready משקף", not PR.ready(now=3) and PR.ready(now=99999))
+
+    ok("בלי משתני סביבה אין בריכות", aikeys.Providers.from_env({}).pools == {})
+
+
 def main() -> int:
     print("בדיקות ליבה — GroupOS שלב 1")
     test_db()
@@ -1059,6 +1150,7 @@ def main() -> int:
     test_blocklist()
     test_content()
     test_antiflood()
+    test_aikeys()
     test_allowlist()
     test_backup()
     test_captcha()

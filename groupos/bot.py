@@ -49,6 +49,7 @@ from aiogram.types import (BufferedInputFile, BotCommand, CallbackQuery,
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
+import aikeys                                   # noqa: E402
 import backup                                   # noqa: E402
 import captcha as cap                           # noqa: E402
 import emergency as emerg                       # noqa: E402
@@ -85,6 +86,9 @@ blocks = Blocklist(db)
 flood = AntiFlood()
 pending = cap.Pending()
 allow = Allowlist(db)
+# המפתחות נטענים ממשתני סביבה בלבד ולעולם לא מהמסד: מסד עובר בגיבוי,
+# ו-.env עם הרשאות 600 לא.
+ai = aikeys.Providers.from_env()
 lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
@@ -1107,6 +1111,32 @@ async def cmd_info(msg: Message):
                        id=t, role=(r["role"] if r else "member"),
                        msgs=(r["msg_count"] if r else 0),
                        warns=mod.warn_count(msg.chat.id, t), joined=joined))
+
+
+@dp.message(Command("aikeys"))
+@needs("settings.read")
+async def cmd_aikeys(msg: Message):
+    """מצב הבריכה. בלי לחשוף מפתח — רק ארבעה תווים מכל קצה."""
+    touch(msg)
+    pools = ai.stats()
+    if not pools:
+        await reply(msg, T(msg, "ai.none"))
+        return
+    lg = lang_of(msg)
+    parts = []
+    for p in pools:
+        lines = [T(msg, "ai.pool", provider=p["provider"], keys=p["keys"],
+                   available=p["available"], cooling=p["cooling"],
+                   dead=p["dead"], used=p["used_today"])]
+        for k in p["detail"]:
+            state = (i18n.t("ai.state_dead", lg) if k["dead"]
+                     else i18n.t("ai.state_cool", lg, n=k["cooling_for"])
+                     if k["cooling_for"] else i18n.t("ai.state_ok", lg))
+            lines.append(T(msg, "ai.key", key=k["key"], used=k["used"],
+                           state=state))
+        parts.append("\n".join(lines))
+    await reply(msg, "\n\n".join(parts)
+                + T(msg, "ai.budget", n=ai.budget()))
 
 
 @dp.message(Command("emergency"))
@@ -2301,6 +2331,11 @@ async def main() -> int:
     me = await bot.get_me()
     _me_id = me.id
     log.info("GroupOS עלה כ-@%s · סכימה v%s", me.username, db.version)
+    for p in ai.stats():
+        log.info("AI %s: %d מפתחות · תקציב %s", p["provider"], p["keys"],
+                 p["budget"] or "לא ידוע")
+    if not ai.pools:
+        log.info("AI: לא הוגדרו מפתחות (GROUPOS_GEMINI_KEYS / GROUPOS_GROQ_KEYS)")
     await publish_commands()
     task = asyncio.create_task(expire_loop())
     _bg.add(task)

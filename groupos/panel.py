@@ -363,6 +363,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("vars",     ""),
     ("export",   "chat.export"),
     ("import",   "chat.import"),
+    ("aikeys",   "settings.read"),
     ("emergency", "emergency.toggle"),
     ("captcha",   "settings.write"),
     ("security",  "settings.read"),
