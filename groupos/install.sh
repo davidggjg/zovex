@@ -72,15 +72,39 @@ fi
 echo
 echo "════════ 3/5 · טוקן ════════"
 ENV="$DIR/.env"
-if [ -n "${GROUPOS_TOKEN:-}" ]; then
-  TOK="$GROUPOS_TOKEN"
-elif [ -f "$ENV" ] && grep -q '^GROUPOS_TOKEN=' "$ENV"; then
-  TOK=$(grep '^GROUPOS_TOKEN=' "$ENV" | cut -d= -f2-)
-  echo "  ● משתמש בטוקן הקיים"
-else
-  read -rp "  הדבק את הטוקן מ-BotFather: " TOK
+
+# טוקן של טלגרם הוא מספר, נקודתיים, ולפחות 30 תווים. בלי הבדיקה הזאת
+# משתנה סביבה ישן — או טקסט מציין-מקום שהודבק פעם — נלקח **בשקט**,
+# וההתקנה נכשלת רק בשלב האחרון בלי לומר למה. זה בדיוק מה שקרה.
+valid_token() { printf '%s' "$1" | grep -qE '^[0-9]{6,}:[A-Za-z0-9_-]{30,}$'; }
+mask() { printf '%s' "$1" | sed -E 's/^([0-9]+:.{4}).*(.{4})$/\1…\2/'; }
+
+TOK=""
+SRC=""
+if [ -n "${GROUPOS_TOKEN:-}" ] && valid_token "$GROUPOS_TOKEN"; then
+  TOK="$GROUPOS_TOKEN"; SRC="ממשתנה הסביבה"
+elif [ -n "${GROUPOS_TOKEN:-}" ]; then
+  echo "  ⚠ משתנה הסביבה GROUPOS_TOKEN אינו נראה כמו טוקן — מתעלם ממנו."
+  echo "    (לנקות אותו:  unset GROUPOS_TOKEN)"
 fi
-[ -n "$TOK" ] || { echo "  ✗ בלי טוקן אין מה להתקין"; exit 1; }
+if [ -z "$TOK" ] && [ -f "$ENV" ]; then
+  EXIST=$(grep '^GROUPOS_TOKEN=' "$ENV" 2>/dev/null | cut -d= -f2-)
+  if valid_token "$EXIST"; then
+    TOK="$EXIST"; SRC="מהקובץ הקיים"
+  elif [ -n "$EXIST" ]; then
+    echo "  ⚠ הטוקן שב-.env אינו תקין — נחליף אותו."
+  fi
+fi
+while [ -z "$TOK" ]; do
+  # /dev/tty ולא stdin: כך השאלה עובדת גם כשהסקריפט מגיע דרך צינור
+  printf "  הדבק את הטוקן מ-BotFather: " > /dev/tty
+  read -r TOK < /dev/tty || { echo; echo "  ✗ אין קלט"; exit 1; }
+  if ! valid_token "$TOK"; then
+    echo "  ✗ זה לא נראה כמו טוקן. הצורה היא 123456789:AA..." > /dev/tty
+    TOK=""
+  fi
+done
+echo "  ✓ טוקן $(mask "$TOK") ${SRC:-שהוזן עכשיו}"
 
 # 600: רק root קורא. הטוקן לעולם לא נכנס למאגר ולא ליומני מערכת.
 umask 077
