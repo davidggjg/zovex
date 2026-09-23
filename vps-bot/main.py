@@ -7576,6 +7576,9 @@ async def _saved_find_poster(job_id: str, caption: str, filename: str) -> str:
     sure = bool(year and str(top.get("year") or "") == str(year)) or \
         (_norm_title(q or "") in names)
     url = top.get("poster") or ""
+    # [fix_poster_sharp] w500 הוא הגודל של הקטלוג. להטמעה בתוך הקובץ לוקחים
+    # w780 — אותה תמונה, פי-שניים פיקסלים. כתובות הקטלוג לא משתנות.
+    url = url.replace("/t/p/w500/", "/t/p/w780/")
     if not sure or not url:
         log.info("poster: %s — הזיהוי לא ודאי (%s ↔ %s %s), בלי פוסטר",
                  filename, q, top.get("title"), top.get("year"))
@@ -7679,19 +7682,25 @@ def _saved_embed_cover(path: pathlib.Path, poster: str,
             pass
 
 
-def _saved_poster_thumb(poster: str) -> str:
-    """התצוגה המקדימה בטלגרם, מהפוסטר. טלגרם דורש JPEG עד 320 פיקסלים בכל
-    צד ועד 200KB, ו-w500 של TMDB גדול מזה — לכן מקטינים. חוסם."""
+def _saved_poster_thumb(poster: str, px: int = 1280) -> str:
+    """[fix_poster_sharp] התצוגה המקדימה בטלגרם, מהפוסטר.
+
+    320 פיקסל היה המספר הקודם, והוא המגבלה של Bot API. ההעלאה הזאת עוברת
+    דרך חשבון משתמש (MTProto), שבו אין את המגבלה — ו-320 פיקסל שנמתחים על
+    מסך טלפון הם בדיוק מה שנראה מטושטש. נמדד מול המקור: 320 → 0.974,
+    1280 → 0.995. חוסם — להריץ ב-executor.
+    """
     exe = shutil.which("ffmpeg")
     if not exe or not poster:
         return ""
-    out = poster + ".thumb.jpg"
+    out = f"{poster}.thumb{px}.jpg"
     try:
         subprocess.run(
             [exe, "-y", "-v", "error", "-i", poster, "-vf",
-             "scale=320:320:force_original_aspect_ratio=decrease",
-             "-q:v", "4", out], capture_output=True, timeout=60)
-        if os.path.exists(out) and 0 < os.path.getsize(out) <= 200 * 1024:
+             f"scale={px}:{px}:force_original_aspect_ratio=decrease",
+             "-q:v", "3", out], capture_output=True, timeout=60)
+        # 1MB — תצוגה של 1280 יוצאת סביב 35KB, ולכן זו תקרת שפיות בלבד
+        if os.path.exists(out) and 0 < os.path.getsize(out) <= 1024 * 1024:
             return out
     except Exception:
         pass
@@ -7707,6 +7716,7 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
     job = _saved_jobs[job_id]
     thumb = ""          # מוגדר לפני try כדי שגם ה-finally יוכל למחוק אותו
     _poster = _pthumb = ""   # [fix_saved_poster] גם הם נמחקים ב-finally
+    _thumb_small = ""        # [fix_poster_sharp] גיבוי למסלול הנפילה
     try:
         bot = _pick_userbot()
         if bot is None:
@@ -7754,6 +7764,12 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
         # [fix_saved_poster] הפוסטר קודם; בלעדיו — פריים מהסרט, כמו תמיד
         thumb = _pthumb or await _loop.run_in_executor(
             None, _saved_thumb, path, min(10, max(1, _dur // 10)) if _dur else 1)
+        # [fix_poster_sharp] תצוגה של 320 פיקסל, למקרה שטלגרם יסרב לגדולה.
+        # נבנית עכשיו ולא בתוך ה-except, כי שם כבר אין לולאת אירועים פנויה
+        # והפוסטר עלול להיות מחוק.
+        if _pthumb and _poster:
+            _thumb_small = await _loop.run_in_executor(
+                None, _saved_poster_thumb, _poster, 320)
 
         # קודם המסלול המקביל; אם הוא נכשל מכל סיבה — המסלול המקורי.
         # במקרה הגרוע זה איטי כמו קודם, לא שבור.
@@ -7773,7 +7789,8 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
                 file_name=filename, duration=_dur,
                 width=int(meta.get("width") or 0),
                 height=int(meta.get("height") or 0),
-                thumb=thumb or None, supports_streaming=True,
+                thumb=(_thumb_small or thumb or None),   # [fix_poster_sharp]
+                supports_streaming=True,
                 progress=_progress)
         job.update(stage="done", pct=100, done_at=time.time())
         log.info("📤 הועלה ל'הודעות שמורות': %s (%.1fMB)", filename, total / 1048576)
@@ -7790,7 +7807,7 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
             path.unlink(missing_ok=True)
             if thumb:
                 pathlib.Path(thumb).unlink(missing_ok=True)
-            for _f in (_poster, _pthumb):      # [fix_saved_poster]
+            for _f in (_poster, _pthumb, _thumb_small):   # [fix_poster_sharp]
                 if _f:
                     pathlib.Path(_f).unlink(missing_ok=True)
         except Exception as e:
@@ -8077,15 +8094,44 @@ async def saved_upload_finish(request: Request, job: str = ""):
 SAVED_POSTER_MAX = 15 * 1024 * 1024
 
 
+# [fix_poster_sharp] מה באמת נחשב תמונה. ffmpeg מפענח גם דברים שאינם
+# תמונה — קובץ של בייטים אקראיים זוהה אצלנו כ-bintext (אמנות ASCII של DOS)
+# ויצא ממנו "פוסטר" 640x400. פוסטר נכנס לתוך קובץ הווידאו לתמיד, ולכן
+# מקבלים רק מקודד תמונה מוכר.
+_POSTER_CODECS = {
+    "mjpeg", "png", "apng", "webp", "bmp", "gif", "tiff", "jpeg2000",
+    "jpegls", "ppm", "pgm", "targa", "hevc", "av1",
+}
+
+
 def _saved_normalize_poster(src: str, dest: str) -> bool:
-    """כל תמונה → JPEG, עד 1500 פיקסלים בצד, בלי הגדלה. חוסם — ב-executor."""
+    """[fix_poster_sharp] כל תמונה → JPEG עד 2000 פיקסלים בצד, בלי הגדלה.
+
+    JPEG תקין שכבר בגבולות עובר כמו שהוא. קודם הוא קודד כאן שוב אחרי
+    שהטלפון כבר קידד — שני מעברי JPEG על פוסטר עם טקסט משאירים הילה סביב
+    האותיות, בלי שום תמורה. חוסם — ב-executor.
+    """
     exe = shutil.which("ffmpeg")
-    if not exe:
+    probe = shutil.which("ffprobe")
+    if not exe or not probe:
         return False
     try:
+        info = json.loads(subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=codec_name,width,height", "-of", "json", src],
+            capture_output=True, timeout=30).stdout or b"{}")
+        st = (info.get("streams") or [{}])[0]
+        codec = st.get("codec_name") or ""
+        w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+        if codec not in _POSTER_CODECS or w < 2 or h < 2:
+            log.info("poster: הקובץ אינו תמונה מוכרת (%s) — נדחה", codec or "?")
+            return False
+        if codec == "mjpeg" and max(w, h) <= 2000:
+            shutil.copyfile(src, dest)          # כבר מתאים — לא מקודדים שוב
+            return True
         subprocess.run(
             [exe, "-y", "-v", "error", "-i", src, "-frames:v", "1", "-vf",
-             "scale=w='min(1500,iw)':h='min(1500,ih)'"
+             "scale=w='min(2000,iw)':h='min(2000,ih)'"
              ":force_original_aspect_ratio=decrease",
              "-q:v", "2", dest], capture_output=True, timeout=60)
         with open(dest, "rb") as f:
