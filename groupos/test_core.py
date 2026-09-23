@@ -534,6 +534,7 @@ def test_panel():
 # ── manifest ולכידות ההתקנה ───────────────────────────────────────────────
 def test_manifest():
     section("manifest")
+    import re as _re
     here = os.path.dirname(os.path.abspath(__file__))
     mf = os.path.join(here, "manifest.txt")
     ok("manifest קיים", os.path.exists(mf))
@@ -558,6 +559,21 @@ def test_manifest():
     ok("כל ייבוא מקומי של bot.py רשום ב-manifest",
        all(f"{m}.py" in listed for m in (need & local)),
        str([m for m in (need & local) if f"{m}.py" not in listed]))
+
+    # המתקין חייב להשאיר עותק של עצמו ב-DIR. בלי זה הפקודה שכתובה
+    # ב-README ובמסך הסיום נכשלת ב-"No such file or directory" — וזה קרה.
+    ins = open(os.path.join(here, "install.sh"), encoding="utf-8").read()
+    ok("install.sh מוריד את עצמו", "install.sh" in
+       (ins.split("EXTRA=(", 1)[1].split(")", 1)[0] if "EXTRA=(" in ins else ""))
+    ok("install.sh מעתיק את עצמו ל-DIR", '"$DIR/install.sh"' in ins)
+
+    # כל נתיב שהמתקין וה-README מבטיחים חייב להיות נתיב שהמתקין יוצר
+    promised = set(_re.findall(r"/opt/groupos/([A-Za-z0-9_.]+)", ins + open(
+        os.path.join(here, "README.md"), encoding="utf-8").read()))
+    delivered = set(listed) | {"install.sh", "README.md", "requirements.txt",
+                               "manifest.txt", "data", ".env"}
+    ok("כל קובץ שמבטיחים ב-/opt/groupos באמת מותקן",
+       not (promised - delivered), str(promised - delivered))
 
 
 # ── שפות ──────────────────────────────────────────────────────────────────

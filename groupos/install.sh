@@ -7,7 +7,7 @@
 #
 # מה הוא עושה:
 #   1. מוריד את הקוד מהמאגר ובודק שכל קובץ נטען כפייתון תקין
-#   2. מריץ את 57 הבדיקות **לפני** שהוא נוגע בשירות
+#   2. מריץ את כל הבדיקות **לפני** שהוא נוגע בשירות
 #   3. שומר את הטוקן ב-.env עם הרשאות 600 בלבד
 #   4. מתקין שירות systemd שעולה מחדש לבד ומוגבל במשאבים
 #   5. מוודא שהבוט באמת ענה לטלגרם, ולא רק ש"השירות רץ"
@@ -25,7 +25,11 @@ RAW="https://raw.githubusercontent.com/davidggjg/zovex/$BRANCH/groupos"
 # שהייתה כאן פספסה שלושה מודולים חדשים — ההתקנה "הצליחה" והבוט עלה
 # בלי הפאנל. עכשיו קובץ חדש נכנס ל-manifest ומגיע מעצמו, ויש בדיקה
 # שנכשלת אם מודול קיים חסר ממנו.
-EXTRA=(README.md requirements.txt manifest.txt)
+#
+# install.sh נמצא ברשימה כי המתקין חייב להשאיר עותק של עצמו ב-$DIR.
+# בלי זה ‎bash /opt/groupos/install.sh --update‎ — מה שכתוב ב-README
+# ובמסך הסיום — נכשל ב-"No such file or directory".
+EXTRA=(README.md requirements.txt manifest.txt install.sh)
 SVC=/etc/systemd/system/groupos.service
 MODE=${1:-}
 ARG_TOKEN=""
@@ -99,6 +103,12 @@ fi
 
 # רק עכשיו, אחרי שהכול נבדק, מחליפים את הקוד החי
 cp "$TMP"/*.py "$TMP"/*.md "$TMP"/requirements.txt "$TMP"/manifest.txt "$DIR/"
+# עותק של המתקין עצמו, דרך שם זמני ו-mv: זה החלפת inode ולא כתיבה
+# לתוך הקובץ. bash קורא סקריפט תוך כדי ריצה, ולכן כתיבה ישירה לקובץ
+# שרץ כרגע הייתה יכולה לשבור את ההרצה באמצע.
+cp "$TMP/install.sh" "$DIR/.install.sh.new" && \
+  mv -f "$DIR/.install.sh.new" "$DIR/install.sh" && \
+  chmod 755 "$DIR/install.sh"
 echo "  ✓ הקוד הוחלף ב-$DIR"
 
 if [ "$MODE" = "--update" ]; then
