@@ -59,6 +59,15 @@ for f in "${PATCHES[@]}" "${TOOLS[@]}"; do
 done
 if curl -fsSL -o /tmp/zovex-site.tgz "$RAW/site.tgz" && tar tzf /tmp/zovex-site.tgz >/dev/null 2>&1; then
   echo "  ✓ site.tgz ($(du -h /tmp/zovex-site.tgz | cut -f1))"
+# החבילה חייבת להיות בנויה לשורש ולא ל-GitHub Pages. `npm run build` מייצר
+# base=/zovex/, ואתר כזה מוגש מהשרת בלי שגיאה אחת — הנכסים אפילו נטענים —
+# אבל הנתב לא מוצא מסלול והמסך נשאר לבן. `npm run build:vps` הוא הנכון.
+# נבדק לפני שנוגעים באתר החי, כי אחרי זה כבר אין מי שיגלה את זה חוץ מהמשתמשים.
+if tar xzOf /tmp/zovex-site.tgz ./index.html | grep -q 'src="/zovex/assets/'; then
+  echo "  ✗ החבילה נבנתה ל-GitHub Pages (base=/zovex/) ולא לשרת."
+  echo "    היא הייתה נותנת מסך לבן. לא נוגעים באתר."
+  exit 1
+fi
 else
   echo "  ✗ site.tgz לא ירד או פגום"; exit 1
 fi
