@@ -26,20 +26,27 @@
 
 יש בדיקה שאוכפת את זה דרך ה-AST, לא לפי מוסכמה.
 
-## הרצה
+## התקנה
 
 ```bash
-pip install aiogram
-export GROUPOS_TOKEN="הטוקן מ-BotFather"
-export GROUPOS_DB=/opt/groupos/data/groupos.db
-python3 bot.py
+curl -fsSL -o /tmp/gos.sh https://raw.githubusercontent.com/davidggjg/zovex/claude/hls-relay-schema-port-ll8xiz/groupos/install.sh
+bash /tmp/gos.sh
 ```
 
-שרת Bot API מקומי (מומלץ — מחזיר נתיב מקומי לקבצים במקום להוריד אותם):
+המתקין מוריד, **מריץ את הבדיקות לפני שהוא נוגע בשירות**, שומר את הטוקן
+ב-`.env` עם הרשאות 600, מתקין שירות systemd עם תקרות זיכרון ומעבד,
+ומוודא שהבוט באמת ענה לטלגרם — לא רק ש"השירות רץ".
+
+עדכון קוד בלבד, בלי לגעת בטוקן:
 
 ```bash
-export GROUPOS_API_BASE="http://127.0.0.1:8081"
+bash /opt/groupos/install.sh --update
 ```
+
+שרת Bot API מקומי (מומלץ — מחזיר נתיב מקומי לקבצים במקום להוריד אותם)
+מוגדר דרך `GROUPOS_API_BASE` ב-`.env`.
+
+**הטוקן לעולם לא נכנס למאגר.** הוא יושב רק ב-`/opt/groupos/.env`.
 
 ## בדיקות
 
