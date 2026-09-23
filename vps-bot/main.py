@@ -7550,15 +7550,185 @@ def _saved_thumb(path, when):
     return ""
 
 
+# ── [fix_saved_poster] פוסטר מוטמע בקובץ ─────────────────────────────────
+# ראה fix_saved_poster.py. כל פונקציה כאן נכשלת "בשקט" — מחזירה ריק/False
+# ומשאירה את ההעלאה בדיוק כמו שהייתה בלי הפאץ'.
+_POSTER_MIN_FREE = 512 * 1024 * 1024
+
+
+async def _saved_find_poster(job_id: str, caption: str, filename: str) -> str:
+    """פוסטר מ-TMDB — רק כשהזיהוי חד-משמעי.
+
+    פוסטר שגוי שמוטמע בתוך הקובץ נשאר בו לתמיד ועובר עם כל העברה, ולכן
+    בספק לא מטמיעים כלום. "חד-משמעי" = השנה מהכיתוב תואמת לתוצאה, או
+    שהשם שחיפשנו הוא בדיוק שם התוצאה.
+    """
+    try:
+        q, opts, year, _tr = await recognize_media(caption or "", filename or "")
+    except Exception as e:
+        log.warning("poster: זיהוי נכשל: %s", e)
+        return ""
+    if not opts:
+        return ""
+    top = opts[0]
+    names = {_norm_title(top.get(k) or "") for k in ("title", "original", "en_title")}
+    names.discard("")
+    sure = bool(year and str(top.get("year") or "") == str(year)) or \
+        (_norm_title(q or "") in names)
+    url = top.get("poster") or ""
+    if not sure or not url:
+        log.info("poster: %s — הזיהוי לא ודאי (%s ↔ %s %s), בלי פוסטר",
+                 filename, q, top.get("title"), top.get("year"))
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=20) as cx:
+            r = await cx.get(url)
+        if r.status_code != 200 or r.content[:3] != b"\xff\xd8\xff":
+            return ""
+        dest = SAVED_TMP_DIR / f"{job_id}.poster.jpg"
+        dest.write_bytes(r.content)
+        log.info("poster: %s ← %s (%s)", filename, top.get("title"), top.get("year"))
+        return str(dest)
+    except Exception as e:
+        log.warning("poster: הורדת הפוסטר נכשלה: %s", e)
+        return ""
+
+
+def _saved_probe_streams(probe: str, path: str) -> dict:
+    out = subprocess.run(
+        [probe, "-v", "error", "-show_entries",
+         "stream=codec_type:stream_disposition=attached_pic:format=duration",
+         "-of", "json", path],
+        capture_output=True, timeout=120).stdout
+    return json.loads(out or b"{}")
+
+
+def _saved_embed_cover(path: pathlib.Path, poster: str,
+                       replace: bool = False) -> bool:
+    """מטמיע את הפוסטר כעטיפה בתוך הקובץ, בלי לקודד מחדש. חוסם — ב-executor.
+
+    MP4: covr במטא־דאטה, לא רצועה. MKV: קובץ מצורף, לא רצועה. כל כישלון
+    משאיר את המקור כמו שהוא.
+    """
+    exe, probe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    ext = path.suffix.lower()
+    if not exe or not probe or ext not in (".mp4", ".m4v", ".mov", ".mkv"):
+        return False
+    tmp = path.with_name(path.name + ".cover" + ext)
+    try:
+        size = path.stat().st_size
+        if shutil.disk_usage(path.parent).free < size + _POSTER_MIN_FREE:
+            log.warning("poster: אין מקום לעותק של %s — בלי הטמעה", path.name)
+            return False
+        info = _saved_probe_streams(probe, str(path))
+        streams = info.get("streams") or []
+        has_cover = any((s.get("disposition") or {}).get("attached_pic")
+                        for s in streams)
+        if has_cover and not replace:
+            return False                   # כבר יש עטיפה — לא נוגעים בה
+        # [fix_custom_poster] רק וידאו שאינו עטיפה. עטיפה קיימת שמוחלפת לא
+        # נספרת — היא בדיוק מה שיוצא מהקובץ.
+        n_video = sum(1 for s in streams if s.get("codec_type") == "video"
+                      and not (s.get("disposition") or {}).get("attached_pic"))
+        n_audio = sum(1 for s in streams if s.get("codec_type") == "audio")
+        n_att = sum(1 for s in streams if s.get("codec_type") == "attachment")
+        dur0 = float((info.get("format") or {}).get("duration") or 0)
+        if ext == ".mkv":
+            # המטא־דאטה מכוונת לקובץ המצורף החדש בלבד (t:N). ‎-metadata:s:t
+            # בלי מספר היה דורס גם את הגופנים של הכתוביות, שכבר מצורפים.
+            # [fix_custom_poster] בהחלפה: ‎0:V‎ = וידאו שאינו עטיפה. ב-MKV
+            # עטיפה היא קובץ מצורף שמופיע כווידאו, וגופנים נשארים ב-‎0:t‎.
+            keep = (["-map", "0:V", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
+                    if has_cover else ["-map", "0"])
+            cmd = [exe, "-v", "error", "-y", "-i", str(path), *keep,
+                   "-c", "copy", "-attach", poster,
+                   f"-metadata:s:t:{n_att}", "mimetype=image/jpeg",
+                   f"-metadata:s:t:{n_att}", "filename=cover.jpg", str(tmp)]
+        else:
+            cmd = [exe, "-v", "error", "-y", "-i", str(path), "-i", poster,
+                   "-map", "0:V", "-map", "0:a?", "-map", "0:s?", "-map", "1",
+                   "-c", "copy", f"-disposition:v:{n_video}", "attached_pic",
+                   "-movflags", "+faststart", str(tmp)]
+        r = subprocess.run(cmd, capture_output=True, timeout=1800)
+        if r.returncode != 0 or not tmp.exists():
+            log.warning("poster: ffmpeg נכשל על %s: %s", path.name,
+                        (r.stderr or b"")[-200:].decode("utf-8", "replace"))
+            return False
+        # לא מחליפים את המקור עד שמוכח שלא אבד בו כלום
+        after = _saved_probe_streams(probe, str(tmp))
+        st2 = after.get("streams") or []
+        v2 = sum(1 for s in st2 if s.get("codec_type") == "video"
+                 and not (s.get("disposition") or {}).get("attached_pic"))
+        a2 = sum(1 for s in st2 if s.get("codec_type") == "audio")
+        dur2 = float((after.get("format") or {}).get("duration") or 0)
+        if v2 != n_video or a2 != n_audio or tmp.stat().st_size < size * 0.99 \
+                or (dur0 and abs(dur2 - dur0) > 1.5):
+            log.warning("poster: התוצאה של %s לא תואמת למקור — לא מחליפים "
+                        "(וידאו %s→%s, קול %s→%s, משך %.1f→%.1f)",
+                        path.name, n_video, v2, n_audio, a2, dur0, dur2)
+            return False
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        log.warning("poster: הטמעה נכשלה על %s: %s", path.name, e)
+        return False
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _saved_poster_thumb(poster: str) -> str:
+    """התצוגה המקדימה בטלגרם, מהפוסטר. טלגרם דורש JPEG עד 320 פיקסלים בכל
+    צד ועד 200KB, ו-w500 של TMDB גדול מזה — לכן מקטינים. חוסם."""
+    exe = shutil.which("ffmpeg")
+    if not exe or not poster:
+        return ""
+    out = poster + ".thumb.jpg"
+    try:
+        subprocess.run(
+            [exe, "-y", "-v", "error", "-i", poster, "-vf",
+             "scale=320:320:force_original_aspect_ratio=decrease",
+             "-q:v", "4", out], capture_output=True, timeout=60)
+        if os.path.exists(out) and 0 < os.path.getsize(out) <= 200 * 1024:
+            return out
+    except Exception:
+        pass
+    try:
+        os.unlink(out)
+    except OSError:
+        pass
+    return ""
+
+
 async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: str):
     """שלב ②: מעלה מהשרת לטלגרם, ומוחק את הקובץ הזמני בכל מקרה."""
     job = _saved_jobs[job_id]
     thumb = ""          # מוגדר לפני try כדי שגם ה-finally יוכל למחוק אותו
+    _poster = _pthumb = ""   # [fix_saved_poster] גם הם נמחקים ב-finally
     try:
         bot = _pick_userbot()
         if bot is None:
             raise RuntimeError("אין חשבון משתמש מחובר בשרת "
                                "(רק חשבון יכול לשלוח ל'הודעות שמורות')")
+        # [fix_saved_poster] פוסטר מוטמע בתוך הקובץ, ותצוגה מקדימה ממנו.
+        # לפני שמודדים את הגודל, כי ההטמעה משנה אותו. כל כישלון כאן משאיר
+        # את ההעלאה בדיוק כמו קודם: פריים מהסרט.
+        try:
+            # [fix_custom_poster] פוסטר שבחרת קודם; רק בלעדיו — TMDB
+            _mine = job.get("custom_poster") or ""
+            if _mine and not os.path.exists(_mine):
+                _mine = ""
+            _poster = _mine or await _saved_find_poster(job_id, caption, filename)
+            if _poster:
+                _pl = asyncio.get_running_loop()
+                if await _pl.run_in_executor(None, _saved_embed_cover, path, _poster,
+                                             bool(_mine)):
+                    job["poster"] = "embedded"
+                _pthumb = await _pl.run_in_executor(None, _saved_poster_thumb, _poster)
+        except Exception as _pe:
+            log.warning("poster: %s", _pe)
         total = path.stat().st_size
         job.update(stage="telegram", pct=0, sent=0, total=total,
                    started_tg=time.time())
@@ -7581,7 +7751,8 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
                 if not meta.get(k):
                     meta[k] = v
         _dur = int(meta.get("duration") or 0)
-        thumb = await _loop.run_in_executor(
+        # [fix_saved_poster] הפוסטר קודם; בלעדיו — פריים מהסרט, כמו תמיד
+        thumb = _pthumb or await _loop.run_in_executor(
             None, _saved_thumb, path, min(10, max(1, _dur // 10)) if _dur else 1)
 
         # קודם המסלול המקביל; אם הוא נכשל מכל סיבה — המסלול המקורי.
@@ -7619,6 +7790,9 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
             path.unlink(missing_ok=True)
             if thumb:
                 pathlib.Path(thumb).unlink(missing_ok=True)
+            for _f in (_poster, _pthumb):      # [fix_saved_poster]
+                if _f:
+                    pathlib.Path(_f).unlink(missing_ok=True)
         except Exception as e:
             log.warning("מחיקת קובץ זמני נכשלה: %s", e)
 
@@ -7765,7 +7939,8 @@ def _saved_pwrite(path, offset, data):
 
 def _saved_public(job):
     """רשומת המשימה בלי השדות הפנימיים — set אינו ניתן להמרה ל-JSON."""
-    return {k: v for k, v in job.items() if k not in ("parts", "path")}
+    return {k: v for k, v in job.items()
+            if k not in ("parts", "path", "custom_poster")}
 
 
 @api.post("/panel/saved-upload/begin")
@@ -7894,6 +8069,66 @@ async def saved_upload_finish(request: Request, job: str = ""):
     _saved_tasks.add(_t)
     _t.add_done_callback(_saved_tasks.discard)
     return {"ok": True, "job": job, "size": size}
+
+
+# ── [fix_custom_poster] פוסטר שבחרת בעצמך ──────────────────────────────────
+# ראה fix_custom_poster.py. נשלח אחרי begin ולפני finish, ונשמר ליד הקובץ
+# הזמני. _saved_send מעדיף אותו על פני TMDB ומוחק אותו בסוף.
+SAVED_POSTER_MAX = 15 * 1024 * 1024
+
+
+def _saved_normalize_poster(src: str, dest: str) -> bool:
+    """כל תמונה → JPEG, עד 1500 פיקסלים בצד, בלי הגדלה. חוסם — ב-executor."""
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return False
+    try:
+        subprocess.run(
+            [exe, "-y", "-v", "error", "-i", src, "-frames:v", "1", "-vf",
+             "scale=w='min(1500,iw)':h='min(1500,ih)'"
+             ":force_original_aspect_ratio=decrease",
+             "-q:v", "2", dest], capture_output=True, timeout=60)
+        with open(dest, "rb") as f:
+            return f.read(3) == b"\xff\xd8\xff"
+    except Exception:
+        return False
+
+
+@api.post("/panel/saved-upload/poster")
+async def saved_upload_poster(request: Request, job: str = ""):
+    _check_upload_code(request, request.headers.get("x-upload-code", ""))
+    j = _saved_jobs.get(job)
+    if not j or "path" not in j:
+        raise HTTPException(status_code=404, detail="משימה לא נמצאה")
+    if j.get("stage") != "receiving":
+        raise HTTPException(status_code=409,
+                            detail="הסרטון כבר בדרך לטלגרם — מאוחר מדי לפוסטר")
+    if int(request.headers.get("content-length") or 0) > SAVED_POSTER_MAX:
+        raise HTTPException(status_code=413, detail="התמונה גדולה מ-15MB")
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > SAVED_POSTER_MAX:
+            raise HTTPException(status_code=413, detail="התמונה גדולה מ-15MB")
+    if not data:
+        raise HTTPException(status_code=400, detail="התקבלה תמונה ריקה")
+    # job הוא מפתח קיים ב-_saved_jobs (hex שהשרת יצר), ולכן בטוח כשם קובץ
+    SAVED_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    src = SAVED_TMP_DIR / f"{job}.mine.src"
+    dest = SAVED_TMP_DIR / f"{job}.mine.jpg"
+    src.write_bytes(bytes(data))
+    try:
+        ok = await asyncio.get_running_loop().run_in_executor(
+            None, _saved_normalize_poster, str(src), str(dest))
+    finally:
+        src.unlink(missing_ok=True)
+    if not ok:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=400,
+                            detail="לא הצלחתי לקרוא את התמונה — נסה JPG או PNG")
+    j["custom_poster"] = str(dest)
+    log.info("poster: פוסטר משלך למשימה %s (%d KB)", job, len(data) // 1024)
+    return {"ok": True}
 
 
 @api.get("/panel/saved-upload/status")
