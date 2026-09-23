@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 from functools import wraps
@@ -42,6 +43,10 @@ from permissions import Permissions, RANK  # noqa: E402
 from ratelimit import RateGuard  # noqa: E402
 
 log = logging.getLogger("groupos")
+
+# קוד יציאה 78 = EX_CONFIG. ה-systemd unit מורה לא להפעיל מחדש עליו,
+# כי טוקן שגוי לא יתקן את עצמו בניסיון ה-12 — הוא רק שורף מעבד.
+EX_CONFIG = 78
 
 TOKEN = os.environ.get("GROUPOS_TOKEN", "").strip()
 # שרת Bot API מקומי — מחזיר נתיב מקומי לקבצים במקום להוריד אותם,
@@ -224,8 +229,17 @@ async def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not TOKEN:
-        print("❌ חסר GROUPOS_TOKEN")
-        return 1
+        log.error("חסר GROUPOS_TOKEN. ערוך את /opt/groupos/.env")
+        return EX_CONFIG
+    if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", TOKEN):
+        # הודעה שאומרת *מה* לא בסדר. "Token is invalid" של aiogram
+        # לא מגלה שמה שיושב שם הוא טקסט מציין-מקום עם רווחים.
+        shown = TOKEN[:12] + "…" if len(TOKEN) > 12 else TOKEN
+        log.error("הטוקן ב-GROUPOS_TOKEN אינו בצורה של טוקן טלגרם.")
+        log.error("  מה שנמצא: %r (%d תווים)", shown, len(TOKEN))
+        log.error("  הצורה הנכונה: 123456789:AA...")
+        log.error("  לתיקון:  bash /opt/groupos/install.sh --token <הטוקן>")
+        return EX_CONFIG
     kw = {}
     if API_BASE:
         from aiogram.client.telegram import TelegramAPIServer

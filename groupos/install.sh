@@ -13,7 +13,7 @@
 #   5. מוודא שהבוט באמת ענה לטלגרם, ולא רק ש"השירות רץ"
 #
 #   bash install.sh                      התקנה או עדכון
-#   GROUPOS_TOKEN=... bash install.sh    עם טוקן מראש, בלי שאלה
+#   bash install.sh --token 123:AA...    הטוקן בשורת הפקודה, בלי שאלה
 #   bash install.sh --update             רק קוד, בלי לגעת בטוקן ובשירות
 # ──────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -25,6 +25,8 @@ FILES=(db.py permissions.py audit.py ratelimit.py bot.py test_core.py
        README.md requirements.txt)
 SVC=/etc/systemd/system/groupos.service
 MODE=${1:-}
+ARG_TOKEN=""
+if [ "$MODE" = "--token" ]; then ARG_TOKEN=${2:-}; MODE=""; fi
 
 echo "════════ 1/5 · מוריד ════════"
 mkdir -p "$DIR/data"
@@ -81,7 +83,14 @@ mask() { printf '%s' "$1" | sed -E 's/^([0-9]+:.{4}).*(.{4})$/\1…\2/'; }
 
 TOK=""
 SRC=""
-if [ -n "${GROUPOS_TOKEN:-}" ] && valid_token "$GROUPOS_TOKEN"; then
+if [ -n "$ARG_TOKEN" ]; then
+  if valid_token "$ARG_TOKEN"; then
+    TOK="$ARG_TOKEN"; SRC="מהפקודה"
+  else
+    echo "  ✗ הטוקן שבפקודה אינו בצורה הנכונה: 123456789:AA..."; exit 1
+  fi
+fi
+if [ -z "$TOK" ] && [ -n "${GROUPOS_TOKEN:-}" ] && valid_token "$GROUPOS_TOKEN"; then
   TOK="$GROUPOS_TOKEN"; SRC="ממשתנה הסביבה"
 elif [ -n "${GROUPOS_TOKEN:-}" ]; then
   echo "  ⚠ משתנה הסביבה GROUPOS_TOKEN אינו נראה כמו טוקן — מתעלם ממנו."
@@ -133,6 +142,12 @@ EnvironmentFile=$ENV
 ExecStart=/usr/bin/python3 $DIR/bot.py
 Restart=always
 RestartSec=5
+# 78 = EX_CONFIG. טוקן שגוי לא יתקן את עצמו בניסיון ה-12, ולולאת
+# הפעלה-מחדש על שרת שמזרים וידאו שורפת מעבד לחינם. נמדד: 9.35 שניות
+# מעבד ב-11 ניסיונות, לפני שהתקרה הזאת נוספה.
+RestartPreventExitStatus=78
+StartLimitIntervalSec=120
+StartLimitBurst=5
 # תקרות: הבוט הזה חולק שרת עם הזרמת וידאו. אם הוא ידלוף זיכרון או
 # יתחיל לטרוף מעבד, systemd יעצור אותו לפני שהצופים ירגישו.
 MemoryMax=768M
@@ -157,6 +172,11 @@ for i in $(seq 1 20); do
   sleep 1
   if journalctl -u groupos --since "-2 min" 2>/dev/null | grep -q "GroupOS עלה כ-@"; then
     OKAY=1; break
+  fi
+  if journalctl -u groupos --since "-2 min" 2>/dev/null | grep -q "אינו בצורה של טוקן"; then
+    echo "  ✗ הטוקן ב-.env אינו תקין. הרץ:"
+    echo "      bash /opt/groupos/install.sh --token <הטוקן מ-BotFather>"
+    exit 1
   fi
   if journalctl -u groupos --since "-2 min" 2>/dev/null | grep -qE "Unauthorized|TokenValidationError"; then
     echo "  ✗ טלגרם דחתה את הטוקן. בדוק אותו מול BotFather."
