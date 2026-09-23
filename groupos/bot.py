@@ -41,8 +41,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (BotCommand, CallbackQuery, ChatPermissions,
-                           InlineKeyboardButton, InlineKeyboardMarkup, Message)
+from aiogram.types import (BotCommand, CallbackQuery, ChatMemberUpdated,
+                           ChatPermissions, InlineKeyboardButton,
+                           InlineKeyboardMarkup, Message)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n                                     # noqa: E402
@@ -173,6 +174,41 @@ async def sync_admins(chat_id: int, force: bool = False) -> dict[int, str]:
     return out
 
 
+# ההרשאות שהבוט צריך בקבוצה כדי לאכוף משהו. בלעדיהן הוא יזהה הפרה
+# ולא יוכל לעשות איתה כלום — ועדיף לומר את זה מראש מאשר להיכשל בשקט.
+NEEDED_RIGHTS = (
+    ("can_delete_messages", "right.delete"),
+    ("can_restrict_members", "right.restrict"),
+)
+_me_id: Optional[int] = None
+
+
+async def bot_rights(chat_id: int) -> tuple[bool, list[str]]:
+    """‎(האם מנהל, מפתחות ההרשאות החסרות)‎."""
+    if _me_id is None:
+        return False, [k for _, k in NEEDED_RIGHTS]
+    try:
+        m = await bot.get_chat_member(chat_id, _me_id)
+    except TelegramAPIError as e:
+        log.warning("בדיקת ההרשאות שלי ב-%s נכשלה: %s", chat_id, e)
+        return False, [k for _, k in NEEDED_RIGHTS]
+    if m.status != ChatMemberStatus.ADMINISTRATOR:
+        return False, [k for _, k in NEEDED_RIGHTS]
+    return True, [k for attr, k in NEEDED_RIGHTS if not getattr(m, attr, False)]
+
+
+async def group_status(chat_id: int, lg: str) -> str:
+    """מה חסר כדי שהבוט יעבוד כאן. תשובה אחת שאומרת את כל האמת."""
+    admins = await sync_admins(chat_id, force=True)
+    is_admin, missing = await bot_rights(chat_id)
+    if not is_admin:
+        return i18n.t("status.not_admin", lg, n=len(admins))
+    if missing:
+        return i18n.t("status.missing", lg,
+                      list="\n".join("• " + i18n.t(k, lg) for k in missing))
+    return i18n.t("status.ready", lg, n=len(admins))
+
+
 def my_groups(user_id: int) -> list[tuple[int, str]]:
     return [(r["chat_id"], r["title"] or str(r["chat_id"])) for r in db.q(
         """SELECT c.chat_id, c.title FROM chats c
@@ -182,6 +218,15 @@ def my_groups(user_id: int) -> list[tuple[int, str]]:
 
 
 # ── רישום ──────────────────────────────────────────────────────────────────
+def register_chat(chat) -> None:
+    """הקבוצה נכנסת למסד. נקרא גם מהודעה וגם מרגע ההוספה לקבוצה."""
+    db.run("""INSERT INTO chats (chat_id,title,username,type,added_at)
+              VALUES (?,?,?,?,?)
+              ON CONFLICT (chat_id) DO UPDATE SET
+                title=excluded.title, username=excluded.username, active=1""",
+           (chat.id, chat.title or "", chat.username, chat.type, time.time()))
+
+
 def touch(msg: Message) -> None:
     now = time.time()
     u = msg.from_user
@@ -196,12 +241,7 @@ def touch(msg: Message) -> None:
            (u.id, u.username, u.first_name or "", u.language_code,
             1 if u.is_bot else 0, now, now))
     if msg.chat.type in GROUP_TYPES:
-        db.run("""INSERT INTO chats (chat_id,title,username,type,added_at)
-                  VALUES (?,?,?,?,?)
-                  ON CONFLICT (chat_id) DO UPDATE SET
-                    title=excluded.title, username=excluded.username, active=1""",
-               (msg.chat.id, msg.chat.title or "", msg.chat.username,
-                msg.chat.type, now))
+        register_chat(msg.chat)
         db.run("""INSERT INTO members (chat_id,user_id,msg_count,last_msg)
                   VALUES (?,?,1,?)
                   ON CONFLICT (chat_id,user_id) DO UPDATE SET
@@ -346,6 +386,52 @@ def _name(msg: Message) -> str:
     return f"@{u.username}" if u and u.username else (u.first_name if u else "משתמש")
 
 
+# ── הצטרפות ושינויי מנהלים ─────────────────────────────────────────────────
+@dp.my_chat_member()
+async def on_my_status(ev: ChatMemberUpdated):
+    """הרגע שבו הבוט נוסף לקבוצה או קודם למנהל.
+
+    בלי זה הקבוצה נרשמת רק כשמישהו שולח בה הודעה — וכל עוד הבוט אינו
+    מנהל, טלגרם לא מוסרת לו הודעות רגילות כלל. כך נוצר מצב שבו הבוט
+    בקבוצה, המשתמש מנהל בה, והפאנל הפרטי מציג "לא ראיתי אותך מנהל
+    באף קבוצה". זה בדיוק מה שקרה."""
+    if ev.chat.type not in GROUP_TYPES:
+        return
+    new = ev.new_chat_member.status
+    if new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        db.run("UPDATE chats SET active=0 WHERE chat_id=?", (ev.chat.id,))
+        log.info("הוסרתי מ-%s", ev.chat.id)
+        return
+    register_chat(ev.chat)
+    admins = await sync_admins(ev.chat.id, force=True)
+    audit.log(ev.chat.id, "bot.status", actor_kind="bot", source="system",
+              before=ev.old_chat_member.status, after=new, severity="info")
+    log.info("מצבי ב-%s: %s · %d מנהלים", ev.chat.id, new, len(admins))
+    if new == ChatMemberStatus.ADMINISTRATOR:
+        lg = lang.for_chat(ev.chat.id)
+        await send(ev.chat.id, await group_status(ev.chat.id, lg),
+                   clean_after=clean_delay(ev.chat.id) or None)
+
+
+ADMIN_STATUSES = (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+
+
+@dp.chat_member()
+async def on_member_change(ev: ChatMemberUpdated):
+    """קידום או הורדה של משתמש. מרענן את המטמון מיד במקום לחכות לפקיעה.
+
+    רק שינוי שנוגע לניהול מפעיל שליפה מחדש. בקבוצה פעילה כל הצטרפות
+    ועזיבה מגיעות לכאן, ו-getChatAdministrators על כל אחת מהן היא בזבוז
+    מכסה על מידע שלא השתנה."""
+    if ev.chat.type not in GROUP_TYPES:
+        return
+    touched = {ev.old_chat_member.status, ev.new_chat_member.status}
+    if not touched & set(ADMIN_STATUSES):
+        return
+    _admin_cache.pop(ev.chat.id, None)
+    await sync_admins(ev.chat.id, force=True)
+
+
 # ── פקודות בקבוצה ──────────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
@@ -354,8 +440,7 @@ async def cmd_start(msg: Message):
         sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
     else:
-        await sync_admins(msg.chat.id, force=True)
-        await reply(msg, T(msg, "start.group"))
+        await reply(msg, await group_status(msg.chat.id, lang_of(msg)))
 
 
 @dp.message(Command("help"))
@@ -721,7 +806,7 @@ async def expire_loop():
 
 
 async def main() -> int:
-    global bot
+    global bot, _me_id
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -744,6 +829,7 @@ async def main() -> int:
         log.info("שרת Bot API מקומי: %s", API_BASE)
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML), **kw)
     me = await bot.get_me()
+    _me_id = me.id
     log.info("GroupOS עלה כ-@%s · סכימה v%s", me.username, db.version)
     await publish_commands()
     task = asyncio.create_task(expire_loop())

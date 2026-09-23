@@ -528,6 +528,15 @@ def test_panel():
     ok("מסך השפה נכתב בשפה הנוכחית",
        "Language" in panel.language_screen(CHAT, "en").text)
 
+    # הקבוצה נרשמה רק כשהגיעה ממנה הודעה — וטלגרם לא מוסרת הודעות
+    # רגילות לבוט שאינו מנהל. בלי הרישום ברגע ההוספה, הבוט יושב בקבוצה
+    # והפאנל מציג "לא ראיתי אותך מנהל באף קבוצה". זה קרה בפועל.
+    ok("הבוט מגיב לרגע ההוספה לקבוצה", "@dp.my_chat_member()" in bot_src)
+    ok("הבוט מגיב לקידום מנהלים", "@dp.chat_member()" in bot_src)
+    ok("המסך הריק מפנה ל-/start בקבוצה",
+       "/start" in i18n.t("home.empty", "he")
+       and "/start" in i18n.t("home.empty", "en"))
+
 
 
 
