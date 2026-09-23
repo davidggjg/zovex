@@ -103,6 +103,7 @@ def main_menu(chat_id: int, title: str, stats: dict,
          (i18n.t("menu.warns", lang), cb(chat_id, "warns"))],
         [(i18n.t("menu.audit", lang), cb(chat_id, "audit")),
          (i18n.t("menu.settings", lang), cb(chat_id, "settings"))],
+        [(i18n.t("menu.lockdown", lang), cb(chat_id, "ldown"))],
         [(i18n.t("menu.language", lang), cb(chat_id, "lang"))],
         [(i18n.t("menu.groups", lang), "g:0:home")],
     ]
@@ -112,23 +113,28 @@ def main_menu(chat_id: int, title: str, stats: dict,
 def locks_groups(chat_id: int, counts: dict[str, int],
                  lang: str = i18n.DEFAULT) -> Screen:
     txt = head("locks.title", lang) + "\n\n" + i18n.t("locks.hint", lang)
-    rows = [[(f"{g} ({counts.get(g, 0)})", cb(chat_id, "lockg", g))]
-            for g in GROUPS]
+    rows = [[(f"{i18n.t('group.' + g, lang)} ({counts.get(g, 0)})",
+              cb(chat_id, "lockg", g))] for g in GROUPS]
+    # נעילה או פתיחה של הכול בלחיצה אחת. כשמתחיל ספאם, אף אחד לא
+    # עובר על 32 כפתורים אחד-אחד.
+    rows.append([(i18n.t("locks.all_on", lang), cb(chat_id, "lockall", "on")),
+                 (i18n.t("locks.all_off", lang), cb(chat_id, "lockall", "off"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(txt, rows)
 
 
 def locks_in_group(chat_id: int, group: str,
-                   items: list[tuple[str, str, str]],
+                   items: list[tuple[str, str]],
                    lang: str = i18n.DEFAULT) -> Screen:
-    """items: [(מפתח, שם, פעולה נוכחית)]"""
-    txt = (head("locks.title", lang, f" · {group}")
+    """items: [(מפתח, פעולה נוכחית)]. השם מתורגם כאן ולא מגיע מוכן."""
+    txt = (head("locks.title", lang, f" · {i18n.t('group.' + group, lang)}")
            + "\n\n" + i18n.t("locks.cycle", lang))
     rows = []
-    for key, label, action in items:
+    for key, action in items:
         mark = "🔴" if action != "off" else "⚪"
         suffix = f" · {action_label(action, lang)}" if action != "off" else ""
-        rows.append([(f"{mark} {label}{suffix}", cb(chat_id, "lock", key))])
+        rows.append([(f"{mark} {i18n.t('lock.' + key, lang)}{suffix}",
+                      cb(chat_id, "lock", key))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "locks"))])
     return Screen(txt, rows)
 
@@ -212,12 +218,28 @@ def language_screen(chat_id: int, current: str) -> Screen:
     for code, name in i18n.available():
         mark = "● " if code == current else ""
         line.append((f"{mark}{name}", cb(chat_id, "setlang", code)))
-        if len(line) == 2:
+        if len(line) == 3:
             rows.append(line); line = []
     if line:
         rows.append(line)
     rows.append([(i18n.t("menu.back", current), cb(chat_id, "main"))])
     return Screen(txt, rows)
+
+
+def welcome_screen() -> Screen:
+    """המסך הראשון שמשתמש חדש רואה — בחירת שפה.
+
+    הוא מוצג לפני כל טקסט אחר, ולכן אי אפשר לכתוב אותו בשפה אחת:
+    השורה העליונה היא שם השפה בשפה עצמה. מי שלא קרא עברית מימיו
+    עדיין מזהה את "English" או "العربية" ברשימה."""
+    rows, line = [], []
+    for code, name in i18n.available():
+        line.append((name, cb(0, "pick", code)))
+        if len(line) == 3:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    return Screen("<b>GroupOS</b>\n\n🌐 Choose your language", rows)
 
 
 # הפקודות: שם והרשאה. התיאור מגיע מ-i18n לפי מפתח ‎cmd.<שם>‎, כי אותה
@@ -226,6 +248,14 @@ def language_screen(chat_id: int, current: str) -> Screen:
 COMMANDS: list[tuple[str, str]] = [
     ("start",  ""),
     ("help",   ""),
+    ("lock",     "locks.write"),
+    ("unlock",   "locks.write"),
+    ("locks",    "settings.read"),
+    ("lockdown", "chat.lockdown"),
+    ("say",      "chat.say"),
+    ("del",      "msg.delete"),
+    ("pin",      "chat.pin"),
+    ("unpin",    "chat.pin"),
     ("ban",    "user.ban"),
     ("unban",  "user.unban"),
     ("mute",   "user.mute"),

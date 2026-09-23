@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from audit import Audit          # noqa: E402
 from db import Db, MIGRATIONS    # noqa: E402
 from permissions import Permissions, RANK  # noqa: E402
-from locks import Locks, LOCK_TYPES, ACTIONS, detect  # noqa: E402
+from locks import Locks, LOCK_TYPES, GROUPS, ACTIONS, detect  # noqa: E402
 from moderation import Moderation, parse_policy, format_policy  # noqa: E402
 import panel  # noqa: E402
 import i18n  # noqa: E402
@@ -279,8 +279,13 @@ def test_flow():
 def test_locks():
     section("נעילות")
     ok("כל סוג נעילה שייך לקבוצה מוכרת",
-       all(g in ("מדיה", "קישורים", "אינטראקציה", "טקסט")
-           for _, g in LOCK_TYPES.values()))
+       all(g in GROUPS for g in LOCK_TYPES.values()),
+       str([g for g in LOCK_TYPES.values() if g not in GROUPS]))
+    # שם קשיח בקוד הוא מה שנועל בוט לשפה אחת. כאן השם הוא מפתח תרגום.
+    holes = [k for k in LOCK_TYPES if i18n.t(f"lock.{k}", "en") == f"lock.{k}"]
+    ok("לכל סוג נעילה יש שם מתורגם", not holes, str(holes))
+    gholes = [g for g in GROUPS if i18n.t(f"group.{g}", "en") == f"group.{g}"]
+    ok("לכל קבוצת נעילות יש שם מתורגם", not gholes, str(gholes))
 
     d = detect({"text": "תראו את זה https://example.com"})
     ok("קישור מזוהה", "url" in d, str(d))
@@ -315,7 +320,7 @@ def test_locks():
     L.set(CHAT, "url", "delete")
     h = L.check(CHAT, {"text": "בואו http://x.com"})
     ok("נעילת קישורים תופסת", h is not None and h.action == "delete")
-    ok("שם הנעילה בעברית", h.label == "קישורים", h.label)
+    ok("הפגיעה נושאת מפתח ולא שם", h.lock == "url" and h.key == "lock.url")
     ok("הודעה נקייה עוברת", L.check(CHAT, {"text": "שלום"}) is None)
 
     # החמורה מנצחת
@@ -344,6 +349,13 @@ def test_locks():
     grp = L.by_group(CHAT)
     ok("תצוגה מקובצת מחזירה את כל הסוגים",
        sum(len(v) for v in grp.values()) == len(LOCK_TYPES))
+
+    # נעילה גורפת: מה שמנהל מחפש כשמתחיל ספאם
+    n = L.set_many(CHAT, "delete")
+    ok("נעילת הכול נועלת את כל הסוגים",
+       n == len(LOCK_TYPES) and len(L.get_all(CHAT)) == len(LOCK_TYPES))
+    L.set_many(CHAT, "off")
+    ok("פתיחת הכול מנקה", L.get_all(CHAT) == {})
 
 
 # ── מדיניות אזהרות ────────────────────────────────────────────────────────
@@ -421,9 +433,8 @@ def test_panel():
         "home": panel.home([(CHAT, "קבוצה לבדיקה")]),
         "main": panel.main_menu(CHAT, "קבוצה", {"members": 5}),
         "locks": panel.locks_groups(CHAT, {}),
-        "lockg": panel.locks_in_group(CHAT, "מדיה",
-                                      [("photo", "תמונות", "off"),
-                                       ("video", "סרטונים", "ban")]),
+        "lockg": panel.locks_in_group(CHAT, "media",
+                                      [("photo", "off"), ("video", "ban")]),
         "warns": panel.warns_screen(CHAT, "3:mute:3600", [(1, "דוד", 2)]),
         "audit": panel.audit_screen(CHAT, [], lambda t: "12:00"),
         "settings": panel.settings_screen(CHAT, {"autoclean": "30"}),
@@ -434,13 +445,16 @@ def test_panel():
                if panel.parse_cb(c) is None or len(c.encode()) > panel.CB_MAX]
         ok(f"מסך {name}: כל הכפתורים תקפים", not bad, str(bad))
 
+    # "דרך חזרה" נמדדת לפי היעד ולא לפי מילה, כי הטקסט תלוי שפה
     for name in ("main", "locks", "lockg", "warns", "audit", "settings"):
-        has_back = any("חזרה" in lbl or "לרשימת" in lbl
-                       for row in screens[name].rows for lbl, _ in row)
-        ok(f"מסך {name}: יש דרך חזרה", has_back)
+        dests = {panel.parse_cb(c)[1] for c in screens[name].all_callbacks()
+                 if panel.parse_cb(c)}
+        ok(f"מסך {name}: יש דרך חזרה",
+           bool(dests & {"main", "locks", "home"}), str(dests))
 
-    ok("מסך ריק מסביר מה לעשות",
-       "הוסף אותי לקבוצה" in panel.home([]).text)
+    for lg in ("he", "en"):
+        ok(f"מסך ריק מסביר מה לעשות ב-{lg}",
+           "/start" in panel.home([], lg).text)
 
     # מחזור הלחיצות חייב לכסות פעולות אמיתיות ולחזור להתחלה
     ok("מחזור הנעילה מכיל רק פעולות מוכרות",
@@ -504,8 +518,8 @@ def test_panel():
             "home": panel.home([(CHAT, "קבוצה")], lg),
             "main": panel.main_menu(CHAT, "קבוצה", {"members": 5}, lg),
             "locks": panel.locks_groups(CHAT, {}, lg),
-            "lockg": panel.locks_in_group(CHAT, "מדיה",
-                                          [("photo", "תמונות", "ban")], lg),
+            "lockg": panel.locks_in_group(CHAT, "media",
+                                          [("photo", "ban")], lg),
             "warns": panel.warns_screen(CHAT, "3:mute:3600", [], lg),
             "audit": panel.audit_screen(CHAT, [], lambda t: "12:00", lg),
             "settings": panel.settings_screen(CHAT, {"autoclean": "0"}, lg),
@@ -603,7 +617,8 @@ def test_i18n():
     ok("תרגום באנגלית", i18n.t("menu.locks", "en") == "🔒 Locks")
     ok("תרגום בערבית", "الأقفال" in i18n.t("menu.locks", "ar"))
     ok("חסר בערבית נופל לאנגלית",
-       i18n.t("help.title", "ar") == i18n.t("help.title", "en"))
+       i18n.t("help.hint", "ar") == i18n.t("help.hint", "en")
+       and "help.hint" not in i18n.STRINGS["ar"])
     ok("מפתח לא קיים מחזיר את עצמו",
        i18n.t("אין.כזה.מפתח", "he") == "אין.כזה.מפתח")
 
@@ -626,11 +641,23 @@ def test_i18n():
     db = fresh()
     L = i18n.Lang(db)
     CHAT = -100888
-    ok("ברירת מחדל לקבוצה", L.for_chat(CHAT) == "he")
-    ok("שפת המשתמש כשאין לקבוצה", L.for_user(CHAT, 1, "ru") == "ru")
-    L.set_chat(CHAT, "en")
-    ok("שפת הקבוצה מנצחת", L.for_user(CHAT, 1, "ru") == "en")
-    ok("נשמר", L.for_chat(CHAT) == "en")
+    # ברירת המחדל היא אנגלית ולא עברית: בוט שמיועד לעולם לא מניח
+    # שמי שפנה אליו קורא עברית
+    ok("ברירת המחדל היא אנגלית", i18n.DEFAULT == "en")
+    ok("שפה לא נתמכת נופלת לאנגלית", i18n.normalize("th") == "en")
+    ok("טרם נבחרה שפה", L.chosen(CHAT) is None)
+    ok("בלי בחירה — ברירת מחדל", L.for_chat(CHAT) == "en")
+    ok("שפת המשתמש כשאין לקבוצה", L.resolve(CHAT, "ru") == "ru")
+    L.set_chat(CHAT, "he")
+    ok("שפת הקבוצה מנצחת", L.resolve(CHAT, "ru") == "he")
+    ok("נשמר", L.for_chat(CHAT) == "he" and L.chosen(CHAT) == "he")
+
+    # כל שפה שמוצעת בבורר חייבת לכסות את CORE
+    for code, _ in i18n.available():
+        holes = [k for k in i18n.CORE if k not in i18n.STRINGS[code]]
+        ok(f"{code} מכסה את הליבה", not holes, str(holes[:5]))
+    ok("יש לפחות שמונה שפות מוצעות", len(i18n.available()) >= 8,
+       str(len(i18n.available())))
 
 
 def main() -> int:

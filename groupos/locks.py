@@ -32,47 +32,27 @@ from typing import Any, Optional
 
 ACTIONS = ("off", "delete", "warn", "mute", "kick", "ban", "tmute", "tban")
 
-# סוגי נעילה. המפתח הוא מה שנשמר במסד; הערך הוא (שם בעברית, קבוצה).
-LOCK_TYPES: dict[str, tuple[str, str]] = {
+# סוגי נעילה. המפתח הוא מה שנשמר במסד, והערך הוא הקבוצה שאליה הוא שייך.
+# **השמות אינם כאן.** הם מפתחות תרגום ‎lock.<מפתח>‎ ב-i18n, כי הבוט הזה
+# לא מיועד לדוברי עברית בלבד — ושם קשיח בקוד הוא בדיוק מה שנועל שפה.
+LOCK_TYPES: dict[str, str] = {
     # מדיה
-    "photo":       ("תמונות", "מדיה"),
-    "video":       ("סרטונים", "מדיה"),
-    "gif":         ("GIF", "מדיה"),
-    "sticker":     ("מדבקות", "מדיה"),
-    "premium_sticker": ("מדבקות פרימיום", "מדיה"),
-    "audio":       ("קבצי שמע", "מדיה"),
-    "voice":       ("הודעות קוליות", "מדיה"),
-    "video_note":  ("הודעות וידאו", "מדיה"),
-    "document":    ("קבצים", "מדיה"),
-    "album":       ("אלבומים", "מדיה"),
+    "photo": "media", "video": "media", "gif": "media", "sticker": "media",
+    "premium_sticker": "media", "audio": "media", "voice": "media",
+    "video_note": "media", "document": "media", "album": "media",
     # קישורים והפניות
-    "url":         ("קישורים", "קישורים"),
-    "invite":      ("קישורי הזמנה", "קישורים"),
-    "mention":     ("תיוג משתמשים", "קישורים"),
-    "forward":     ("הודעות מועברות", "קישורים"),
-    "email":       ("כתובות מייל", "קישורים"),
-    "phone":       ("מספרי טלפון", "קישורים"),
+    "url": "links", "invite": "links", "mention": "links", "forward": "links",
+    "email": "links", "phone": "links",
     # אינטראקציה
-    "command":     ("פקודות", "אינטראקציה"),
-    "bot":         ("בוטים", "אינטראקציה"),
-    "button":      ("כפתורים", "אינטראקציה"),
-    "poll":        ("סקרים", "אינטראקציה"),
-    "game":        ("משחקים", "אינטראקציה"),
-    "contact":     ("אנשי קשר", "אינטראקציה"),
-    "location":    ("מיקום", "אינטראקציה"),
-    "anonchannel": ("הודעות מערוץ", "אינטראקציה"),
+    "command": "interaction", "bot": "interaction", "button": "interaction",
+    "poll": "interaction", "game": "interaction", "contact": "interaction",
+    "location": "interaction", "anonchannel": "interaction",
     # טקסט
-    "hashtag":     ("האשטגים", "טקסט"),
-    "cashtag":     ("סימני מניה", "טקסט"),
-    "cjk":         ("סינית ויפנית", "טקסט"),
-    "cyrillic":    ("קירילית", "טקסט"),
-    "arabic":      ("ערבית", "טקסט"),
-    "emoji_only":  ("הודעות אימוג'י בלבד", "טקסט"),
-    "caps":        ("צעקות באותיות גדולות", "טקסט"),
-    "long":        ("הודעות ארוכות מאוד", "טקסט"),
+    "hashtag": "text", "cashtag": "text", "cjk": "text", "cyrillic": "text",
+    "arabic": "text", "emoji_only": "text", "caps": "text", "long": "text",
 }
 
-GROUPS = ("מדיה", "קישורים", "אינטראקציה", "טקסט")
+GROUPS = ("media", "links", "interaction", "text")
 
 # ── זיהוי ─────────────────────────────────────────────────────────────────
 _RX_URL = re.compile(
@@ -97,10 +77,14 @@ LONG_CHARS = 1500
 
 @dataclass(frozen=True)
 class Hit:
+    """מה נורה. ‎lock‎ הוא מפתח — מי שמציג אותו מתרגם אותו לשפה שלו."""
     lock: str
     action: str
-    label: str
     duration: Optional[int] = None
+
+    @property
+    def key(self) -> str:
+        return f"lock.{self.lock}"
 
 
 def detect(msg: dict) -> set[str]:
@@ -214,12 +198,23 @@ class Locks:
             return None
         best = max(fired, key=lambda l: ACTIONS.index(active[l][0]))
         action, dur = active[best]
-        return Hit(best, action, LOCK_TYPES[best][0], dur)
+        return Hit(best, action, dur)
 
-    def by_group(self, chat_id: int) -> dict[str, list[tuple[str, str, str]]]:
-        """לתצוגה בפאנל: {קבוצה: [(מפתח, שם, פעולה)]}"""
+    def by_group(self, chat_id: int) -> dict[str, list[tuple[str, str]]]:
+        """לתצוגה בפאנל: {קבוצה: [(מפתח, פעולה)]}. השם מתורגם בתצוגה."""
         active = self.get_all(chat_id)
         out: dict[str, list] = {g: [] for g in GROUPS}
-        for key, (label, grp) in LOCK_TYPES.items():
-            out[grp].append((key, label, active.get(key, ("off", None))[0]))
+        for key, grp in LOCK_TYPES.items():
+            out[grp].append((key, active.get(key, ("off", None))[0]))
         return out
+
+    def set_many(self, chat_id: int, action: str,
+                 only: Optional[set[str]] = None) -> int:
+        """נעילה או פתיחה של כל הסוגים בבת אחת. מחזיר כמה שונו.
+
+        ‎/lockall‎ ו-‎/unlockall‎ הן הפקודות שמנהל מחפש כשמתחיל ספאם,
+        ולחיצה על 32 כפתורים בזה אחר זה אינה תשובה."""
+        keys = [k for k in LOCK_TYPES if only is None or k in only]
+        for k in keys:
+            self.set(chat_id, k, action)
+        return len(keys)

@@ -50,7 +50,7 @@ import i18n                                     # noqa: E402
 import panel                                    # noqa: E402
 from audit import Audit                         # noqa: E402
 from db import Db                               # noqa: E402
-from locks import LOCK_TYPES, Locks             # noqa: E402
+from locks import ACTIONS, LOCK_TYPES, Locks    # noqa: E402
 from moderation import Moderation               # noqa: E402
 from permissions import Permissions, RANK       # noqa: E402
 from ratelimit import RateGuard                 # noqa: E402
@@ -120,14 +120,12 @@ def clean_delay(chat_id: int) -> int:
 
 
 def lang_of(msg: Message) -> str:
-    """שפת הקבוצה אם נקבעה, אחרת שפת הטלגרם של מי ששלח.
+    """השפה שנקבעה לצ'אט הזה, אחרת שפת הטלגרם של מי ששלח, אחרת אנגלית.
 
-    בפרטי אין קבוצה, ולכן שפת המשתמש היא היחידה שקיימת."""
+    בצ'אט פרטי ‎chat_id‎ שווה ל-‎user_id‎, ולכן אותה שורה במסד מחזיקה
+    גם את שפת הקבוצה וגם את השפה שמשתמש בחר לעצמו."""
     u = msg.from_user
-    code = u.language_code if u else None
-    if msg.chat.type == ChatType.PRIVATE:
-        return i18n.normalize(code)
-    return lang.for_user(msg.chat.id, u.id if u else 0, code)
+    return lang.resolve(msg.chat.id, u.language_code if u else None)
 
 
 def T(msg: Message, key: str, **kw) -> str:
@@ -437,7 +435,12 @@ async def on_member_change(ev: ChatMemberUpdated):
 async def cmd_start(msg: Message):
     touch(msg)
     if msg.chat.type == ChatType.PRIVATE:
-        sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
+        # מי שטרם בחר שפה רואה קודם את הבורר. הבוט לא מיועד לישראל
+        # בלבד, ולהניח שהפונה קורא עברית זה לאבד אותו במסך הראשון.
+        if lang.chosen(msg.chat.id) is None:
+            sc = panel.welcome_screen()
+        else:
+            sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
     else:
         await reply(msg, await group_status(msg.chat.id, lang_of(msg)))
@@ -452,6 +455,155 @@ async def cmd_help(msg: Message):
         await send(msg.chat.id, sc.text, is_group=False)
     else:
         await reply(msg, sc.text)
+
+
+async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
+    """משתיק את כל הקבוצה בבת אחת, או מחזיר אותה.
+
+    זה ‎setChatPermissions‎ — הרשאות ברירת המחדל של הצ'אט — ולא השתקה
+    של כל משתמש בנפרד. לכן זה פועל מיד גם על מי שעוד לא הצטרף, ולכן
+    ביטול הוא פעולה אחת ולא מאה."""
+    try:
+        await bot.set_chat_permissions(chat_id, MUTED if on else UNMUTED)
+    except TelegramAPIError as e:
+        log.warning("השבתת קבוצה %s נכשלה: %s", chat_id, e)
+        return False
+    db.set(chat_id, "lockdown", "1" if on else "0", by)
+    audit.log(chat_id, "chat.lockdown", actor_id=by, after="on" if on else "off",
+              severity="high")
+    return True
+
+
+@dp.message(Command("lockdown"))
+@needs("chat.lockdown")
+async def cmd_lockdown(msg: Message):
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "lockdown", "0") == "1"
+    on = not cur if arg not in ("on", "off") else (arg == "on")
+    okay = await set_lockdown(msg.chat.id, on, msg.from_user.id)
+    await reply(msg, T(msg, "lockdown.on" if on else "lockdown.off")
+                if okay else T(msg, "err.failed"))
+
+
+def _lock_arg(msg: Message) -> tuple[Optional[str], str]:
+    """‎(סוג, פעולה)‎ מתוך ‎/lock url ban‎. סוג לא מוכר מחזיר None."""
+    parts = (msg.text or "").split()[1:]
+    if not parts:
+        return None, ""
+    key = parts[0].lower().lstrip("#")
+    action = parts[1].lower() if len(parts) > 1 else ""
+    return (key if key in LOCK_TYPES else None), action
+
+
+async def _lock_cmd(msg: Message, default_action: str):
+    key, action = _lock_arg(msg)
+    lg = lang_of(msg)
+    if key is None:
+        raw = (msg.text or "").split()
+        if len(raw) > 1:
+            await reply(msg, T(msg, "lock.unknown", name=raw[1]))
+            return
+        # רשימת הסוגים במקום "שימוש שגוי": מי ששכח את השם צריך אותו כאן
+        await reply(msg, T(msg, "lock.usage",
+                           types=", ".join(sorted(LOCK_TYPES))))
+        return
+    if action not in ACTIONS:
+        action = default_action
+    locks.set(msg.chat.id, key, action)
+    audit.log(msg.chat.id, "lock.change", actor_id=msg.from_user.id,
+              after=f"{key}={action}", severity="info")
+    await reply(msg, T(msg, "lock.done", name=i18n.t(f"lock.{key}", lg),
+                       action=panel.action_label(action, lg)))
+
+
+@dp.message(Command("lock"))
+@needs("locks.write")
+async def cmd_lock(msg: Message):
+    touch(msg); await _lock_cmd(msg, "delete")
+
+
+@dp.message(Command("unlock"))
+@needs("locks.write")
+async def cmd_unlock(msg: Message):
+    touch(msg); await _lock_cmd(msg, "off")
+
+
+@dp.message(Command("locks"))
+@needs("settings.read")
+async def cmd_locks(msg: Message):
+    touch(msg)
+    lg = lang_of(msg)
+    active = locks.get_all(msg.chat.id)
+    if not active:
+        await reply(msg, T(msg, "locks.state_none"))
+        return
+    lines = "\n".join(
+        f"• {i18n.t(f'lock.{k}', lg)} — {panel.action_label(a, lg)}"
+        for k, (a, _) in sorted(active.items()))
+    await reply(msg, T(msg, "locks.state", list=lines))
+
+
+@dp.message(Command("say"))
+@needs("chat.say")
+async def cmd_say(msg: Message):
+    """הודעה בשם הבוט. הפקודה עצמה נמחקת — אחרת רואים מי כתב אותה."""
+    touch(msg)
+    text = (msg.text or "").split(maxsplit=1)
+    if len(text) < 2 or not text[1].strip():
+        await reply(msg, T(msg, "say.usage"))
+        return
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+    audit.log(msg.chat.id, "chat.say", actor_id=msg.from_user.id,
+              after=text[1][:200], severity="medium")
+    await send(msg.chat.id, text[1])
+
+
+@dp.message(Command("del"))
+@needs("msg.delete")
+async def cmd_del(msg: Message):
+    touch(msg)
+    if not msg.reply_to_message:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await bot.delete_message(msg.chat.id, msg.reply_to_message.message_id)
+    audit.log(msg.chat.id, "msg.delete", actor_id=msg.from_user.id,
+              target_id=(msg.reply_to_message.from_user.id
+                         if msg.reply_to_message.from_user else None),
+              severity="low")
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+
+
+@dp.message(Command("pin"))
+@needs("chat.pin")
+async def cmd_pin(msg: Message):
+    touch(msg)
+    if not msg.reply_to_message:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    try:
+        # שקט: נעיצה שמודיעה לכל חבר בקבוצה היא בדיוק הרעש שהבוט הזה
+        # נועד למנוע. מי שרוצה להודיע — יכתוב הודעה.
+        await bot.pin_chat_message(msg.chat.id,
+                                   msg.reply_to_message.message_id,
+                                   disable_notification=True)
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    audit.log(msg.chat.id, "chat.pin", actor_id=msg.from_user.id,
+              after=msg.reply_to_message.message_id, severity="low")
+    await reply(msg, T(msg, "pin.done"))
+
+
+@dp.message(Command("unpin"))
+@needs("chat.pin")
+async def cmd_unpin(msg: Message):
+    touch(msg)
+    mid = msg.reply_to_message.message_id if msg.reply_to_message else None
+    with contextlib.suppress(TelegramAPIError):
+        await bot.unpin_chat_message(msg.chat.id, message_id=mid)
+    await reply(msg, T(msg, "pin.off"))
 
 
 @dp.message(Command("lang"))
@@ -699,6 +851,14 @@ async def on_callback(q: CallbackQuery):
     lg = (lang.for_chat(chat_id) if chat_id
           else i18n.normalize(q.from_user.language_code))
 
+    if name == "pick":
+        # בחירת שפה אישית בצ'אט הפרטי. chat_id=0 כי עוד אין קבוצה.
+        lang.set_chat(q.message.chat.id, arg)
+        lg = i18n.normalize(arg)
+        await _edit(q, panel.home(my_groups(q.from_user.id), lg))
+        await q.answer(i18n.t("lang.set", lg))
+        return
+
     if name == "home":
         await _edit(q, panel.home(my_groups(q.from_user.id), lg))
         return
@@ -723,6 +883,29 @@ async def on_callback(q: CallbackQuery):
                   source="button", severity="info")
         await _edit(q, _screen_for(chat_id, "lockg", LOCK_TYPES[arg][1]))
         await q.answer(panel.action_label(nxt, lg))
+        return
+
+    if name == "lockall":
+        if not perms.check(chat_id, q.from_user.id, "locks.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        n = locks.set_many(chat_id, "delete" if arg == "on" else "off")
+        audit.log(chat_id, "locks.bulk", actor_id=q.from_user.id,
+                  after=f"{arg}×{n}", source="button", severity="medium")
+        await _edit(q, _screen_for(chat_id, "locks", ""))
+        await q.answer(i18n.t("locks.bulk", lg, n=n))
+        return
+
+    if name == "ldown":
+        if not perms.check(chat_id, q.from_user.id, "chat.lockdown"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        on = db.get(chat_id, "lockdown", "0") != "1"
+        okay = await set_lockdown(chat_id, on, q.from_user.id)
+        await _edit(q, _screen_for(chat_id, "main", ""))
+        key = "lockdown.short_on" if on else "lockdown.short_off"
+        await q.answer(i18n.t(key if okay else "err.failed", lg),
+                       show_alert=True)
         return
 
     if name == "wpol":

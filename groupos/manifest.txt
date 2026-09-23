@@ -2,6 +2,7 @@ audit.py
 bot.py
 db.py
 i18n.py
+locales.py
 locks.py
 moderation.py
 panel.py

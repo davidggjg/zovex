@@ -10,9 +10,13 @@
 
 ## איך נבחרת השפה
 
-    1. שפת הקבוצה, אם המנהל קבע אחת
+    1. השפה שנקבעה במפורש — לקבוצה, או למשתמש בצ'אט הפרטי
     2. שפת הטלגרם של המשתמש
-    3. עברית
+    3. אנגלית
+
+**אנגלית ולא עברית.** מי שהטלגרם שלו בתאילנדית אינו מקבל עברית רק
+מפני שכך נכתב הבוט. ברירת מחדל היא הנחה על המשתמש, ובבוט שמיועד
+לעולם ההנחה הסבירה היחידה היא אנגלית.
 
 ## RTL
 
@@ -27,6 +31,8 @@
 from __future__ import annotations
 
 from typing import Any
+
+from locales import EXTRA
 
 RTL_LANGS = {"he", "ar", "fa", "ur", "yi"}
 
@@ -132,6 +138,70 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn.unknown": "כפתור לא מוכר",
         "screen.unknown": "מסך לא מוכר",
         "err.not_your_group": "אין לך הרשאה לנהל את הקבוצה הזאת",
+        "locks.all_on": "🔒 נעל הכול",
+        "locks.all_off": "🔓 פתח הכול",
+        "locks.bulk": "{n} נעילות עודכנו.",
+        "menu.lockdown": "🚨 השבתת קבוצה",
+        "lockdown.on": "<b>הקבוצה הושבתה.</b>\nרק מנהלים יכולים לכתוב.\nלביטול: /lockdown off",
+        "lockdown.off": "<b>ההשבתה בוטלה.</b>\nהקבוצה חזרה לפעולה.",
+        "lockdown.short_on": "הקבוצה הושבתה",
+        "lockdown.short_off": "ההשבתה בוטלה",
+        "lockdown.state_on": "מושבתת",
+        "lockdown.state_off": "פעילה",
+        "say.usage": "כתוב מה לשלוח: /say ההודעה שלך",
+        "del.done": "נמחק.",
+        "pin.done": "ההודעה נעוצה.",
+        "pin.off": "הנעיצה בוטלה.",
+        "lock.usage": "שימוש: /lock <סוג> [פעולה]\n\nסוגים: {types}",
+        "lock.done": "{name}: {action}",
+        "lock.unknown": "אין נעילה בשם {name}.",
+        "locks.state": "<b>נעילות פעילות</b>\n{list}",
+        "locks.state_none": "אין נעילות פעילות בקבוצה הזאת.",
+        "cmd.lock": "נעילת סוג תוכן",
+        "cmd.unlock": "פתיחת סוג תוכן",
+        "cmd.locks": "אילו נעילות פעילות",
+        "cmd.lockdown": "השבתת הקבוצה כולה",
+        "cmd.say": "שליחת הודעה בשם הבוט",
+        "cmd.del": "מחיקת ההודעה שהשבת עליה",
+        "cmd.pin": "נעיצת הודעה",
+        "cmd.unpin": "ביטול נעיצה",
+        # שמות הנעילות והקבוצות שלהן
+        "group.media": "מדיה",
+        "group.links": "קישורים",
+        "group.interaction": "אינטראקציה",
+        "group.text": "טקסט",
+        "lock.photo": "תמונות",
+        "lock.video": "סרטונים",
+        "lock.gif": "GIF",
+        "lock.sticker": "מדבקות",
+        "lock.premium_sticker": "מדבקות פרימיום",
+        "lock.audio": "קבצי שמע",
+        "lock.voice": "הודעות קוליות",
+        "lock.video_note": "הודעות וידאו",
+        "lock.document": "קבצים",
+        "lock.album": "אלבומים",
+        "lock.url": "קישורים",
+        "lock.invite": "קישורי הזמנה",
+        "lock.mention": "תיוג משתמשים",
+        "lock.forward": "הודעות מועברות",
+        "lock.email": "כתובות מייל",
+        "lock.phone": "מספרי טלפון",
+        "lock.command": "פקודות",
+        "lock.bot": "בוטים",
+        "lock.button": "כפתורים",
+        "lock.poll": "סקרים",
+        "lock.game": "משחקים",
+        "lock.contact": "אנשי קשר",
+        "lock.location": "מיקום",
+        "lock.anonchannel": "הודעות מערוץ",
+        "lock.hashtag": "האשטגים",
+        "lock.cashtag": "סימני מניה",
+        "lock.cjk": "סינית ויפנית",
+        "lock.cyrillic": "קירילית",
+        "lock.arabic": "ערבית",
+        "lock.emoji_only": "הודעות אימוג'י בלבד",
+        "lock.caps": "צעקות באותיות גדולות",
+        "lock.long": "הודעות ארוכות מאוד",
         # תיאורי הפקודות — גם ל-/help וגם לתפריט ✏️ של טלגרם
         "cmd.start": "פתיחת פאנל הניהול",
         "cmd.help": "כל הפקודות",
@@ -233,6 +303,69 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn.unknown": "Unknown button",
         "screen.unknown": "Unknown screen",
         "err.not_your_group": "You are not an admin of that group",
+        "locks.all_on": "🔒 Lock all",
+        "locks.all_off": "🔓 Unlock all",
+        "locks.bulk": "{n} locks updated.",
+        "menu.lockdown": "🚨 Lockdown",
+        "lockdown.on": "<b>The group is locked down.</b>\nOnly admins can write.\nTo undo: /lockdown off",
+        "lockdown.off": "<b>Lockdown lifted.</b>\nThe group is open again.",
+        "lockdown.short_on": "Group locked down",
+        "lockdown.short_off": "Lockdown lifted",
+        "lockdown.state_on": "locked down",
+        "lockdown.state_off": "open",
+        "say.usage": "Write what to send: /say your message",
+        "del.done": "Deleted.",
+        "pin.done": "Message pinned.",
+        "pin.off": "Unpinned.",
+        "lock.usage": "Usage: /lock <type> [action]\n\nTypes: {types}",
+        "lock.done": "{name}: {action}",
+        "lock.unknown": "There is no lock called {name}.",
+        "locks.state": "<b>Active locks</b>\n{list}",
+        "locks.state_none": "No locks are active in this group.",
+        "cmd.lock": "Lock a content type",
+        "cmd.unlock": "Unlock a content type",
+        "cmd.locks": "Which locks are active",
+        "cmd.lockdown": "Lock down the whole group",
+        "cmd.say": "Send a message as the bot",
+        "cmd.del": "Delete the replied message",
+        "cmd.pin": "Pin a message",
+        "cmd.unpin": "Unpin",
+        "group.media": "Media",
+        "group.links": "Links",
+        "group.interaction": "Interaction",
+        "group.text": "Text",
+        "lock.photo": "Photos",
+        "lock.video": "Videos",
+        "lock.gif": "GIFs",
+        "lock.sticker": "Stickers",
+        "lock.premium_sticker": "Premium stickers",
+        "lock.audio": "Audio files",
+        "lock.voice": "Voice messages",
+        "lock.video_note": "Video messages",
+        "lock.document": "Files",
+        "lock.album": "Albums",
+        "lock.url": "Links",
+        "lock.invite": "Invite links",
+        "lock.mention": "Mentions",
+        "lock.forward": "Forwarded messages",
+        "lock.email": "Email addresses",
+        "lock.phone": "Phone numbers",
+        "lock.command": "Commands",
+        "lock.bot": "Bots",
+        "lock.button": "Buttons",
+        "lock.poll": "Polls",
+        "lock.game": "Games",
+        "lock.contact": "Contacts",
+        "lock.location": "Location",
+        "lock.anonchannel": "Channel messages",
+        "lock.hashtag": "Hashtags",
+        "lock.cashtag": "Cashtags",
+        "lock.cjk": "Chinese and Japanese",
+        "lock.cyrillic": "Cyrillic",
+        "lock.arabic": "Arabic",
+        "lock.emoji_only": "Emoji-only messages",
+        "lock.caps": "ALL-CAPS shouting",
+        "lock.long": "Very long messages",
         "cmd.start": "Open the control panel",
         "cmd.help": "All commands",
         "cmd.ban": "Ban [duration] [reason]",
@@ -285,8 +418,32 @@ STRINGS: dict[str, dict[str, str]] = {
     },
 }
 
-DEFAULT = "he"
+# שפה שאין לה מילון — נופלים לאנגלית ולא לעברית. ראה את ההסבר למעלה.
+DEFAULT = "en"
 FALLBACK = "en"
+
+# המפתחות שמשתמש רואה בפועל. שפה חייבת לכסות אותם כדי להיות מוצעת
+# בבורר — ממשק חצי מתורגם גרוע מממשק באנגלית.
+CORE: tuple[str, ...] = (
+    "home.groups", "home.hint",
+    "menu.locks", "menu.warns", "menu.audit", "menu.settings",
+    "menu.language", "menu.back", "menu.groups",
+    "stat.members", "stat.locks", "stat.warns", "stat.today",
+    "err.no_permission", "err.group_only", "err.need_reply", "err.failed",
+    "err.need_admin", "err.not_your_group",
+    "act.banned", "act.muted", "act.kicked", "act.unbanned", "act.unmuted",
+    "act.reason", "act.off", "act.delete", "act.warn", "act.mute",
+    "act.kick", "act.ban",
+    "warn.added", "warn.triggered", "warn.removed", "warn.count",
+    "purge.done", "lang.title", "lang.set", "help.title", "saved",
+    "locks.title", "locks.hint",
+    "settings.title", "settings.on", "settings.off",
+)
+
+# השפות שמעבר לשתי שפות הייחוס נטענות מקובץ נפרד, כדי שהוספת שפה
+# תהיה עריכה של קובץ אחד שאין בו לוגיקה.
+for _code, _table in EXTRA.items():
+    STRINGS.setdefault(_code, {}).update(_table)
 
 
 def normalize(code: str | None) -> str:
@@ -294,7 +451,7 @@ def normalize(code: str | None) -> str:
     if not code:
         return DEFAULT
     base = str(code).replace("_", "-").split("-")[0].lower()
-    return base if base in STRINGS else (base if base in LANG_NAMES else DEFAULT)
+    return base if base in STRINGS else DEFAULT
 
 
 def is_rtl(lang: str) -> bool:
@@ -319,29 +476,43 @@ def t(key: str, lang: str = DEFAULT, **kw: Any) -> str:
 
 
 class Lang:
-    """בוחר שפה לפי קבוצה ומשתמש, עם ברירות מחדל."""
+    """בוחר שפה לפי קבוצה ומשתמש, עם ברירות מחדל.
+
+    בצ'אט פרטי ‎chat_id‎ שווה ל-‎user_id‎, ולכן אותה טבלה משמשת גם
+    לשפת קבוצה וגם לשפה שמשתמש בחר לעצמו — בלי טבלה נוספת."""
 
     def __init__(self, db):
         self.db = db
 
+    def chosen(self, chat_id: int) -> str | None:
+        """מה שנקבע במפורש, או ‎None‎. ההבחנה חשובה: משתמש שטרם בחר
+        הוא משתמש שצריך לראות את בורר השפה."""
+        raw = self.db.get(chat_id, "lang", None)
+        return normalize(raw) if raw else None
+
     def for_chat(self, chat_id: int) -> str:
-        return normalize(self.db.get(chat_id, "lang", DEFAULT))
+        return self.chosen(chat_id) or DEFAULT
+
+    def resolve(self, chat_id: int, tg_code: str | None = None) -> str:
+        """הנבחרת אם יש, אחרת שפת הטלגרם, אחרת אנגלית."""
+        return self.chosen(chat_id) or normalize(tg_code)
 
     def for_user(self, chat_id: int, user_id: int,
                  tg_code: str | None = None) -> str:
-        """שפת הקבוצה מנצחת; אחרת שפת הטלגרם של המשתמש."""
-        explicit = self.db.get(chat_id, "lang", None)
-        if explicit:
-            return normalize(explicit)
-        return normalize(tg_code)
+        return self.resolve(chat_id, tg_code)
 
     def set_chat(self, chat_id: int, lang: str) -> None:
         self.db.set(chat_id, "lang", normalize(lang))
 
 
 def available() -> list[tuple[str, str]]:
-    """שפות שיש להן מילון, לתצוגה בבורר."""
-    return [(code, LANG_NAMES.get(code, code)) for code in STRINGS]
+    """שפות שמכסות את ‎CORE‎, לתצוגה בבורר. שפה חלקית לא מוצעת.
+
+    אנגלית ראשונה. במסך הפתיחה, לפני שידוע מי הפונה, השורה הראשונה
+    היא מה שרוב העולם יזהה."""
+    codes = [c for c, t in STRINGS.items() if all(k in t for k in CORE)]
+    codes.sort(key=lambda c: (c != FALLBACK, list(STRINGS).index(c)))
+    return [(c, LANG_NAMES.get(c, c)) for c in codes]
 
 
 def coverage() -> dict[str, float]:

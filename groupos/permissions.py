@@ -58,6 +58,12 @@ PERMISSIONS: dict[str, int] = {
     "user.ban":        RANK["admin"],
     "user.unban":      RANK["admin"],
     "chat.purge":      RANK["moderator"],
+    "chat.pin":        RANK["moderator"],
+    # השבתת קבוצה משתיקה את כולם בבת אחת, ולכן היא לא ביד של מנחה
+    "chat.lockdown":   RANK["admin"],
+    # דיבור בשם הבוט הוא דיבור בשם הקבוצה. ההודעה נראית רשמית, ולכן
+    # ההרשאה גבוהה ממחיקה — טעות כאן נראית כמו הודעה של ההנהלה.
+    "chat.say":        RANK["admin"],
     # תוכן
     "notes.read":      RANK["member"],
     "notes.write":     RANK["moderator"],
