@@ -1049,7 +1049,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     };
     video.addEventListener("error", onError);
 
-    let lastT = -1, stuckSince = 0, nudges = 0;
+    let lastT = -1, stuckSince = 0, nudges = 0, lastAhead = -1;
     let everAdvanced = false, escalated = false, deadMs = 0, askedInfo = false;
     const stallWatch = setInterval(() => {
       if (destroyed) return;
@@ -1133,7 +1133,31 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
       // נגיעה כזאת רק תזרוק באפר תקין, ולכן לא נוגעים. חל רק אחרי
       // שהניגון באמת התחיל — לפני כן "יש באפר" הוא הסימן לתקלה, לא
       // הוכחה שהכול בסדר.
-      if (everAdvanced && bufferAhead(video) > 0.5) return;
+      // ── באפר שגדל = נתונים זורמים, גם אם הזמן עוד לא זז ─────────────
+      // זו ההבחנה שחסרה כאן, וזה מה שהפך את המשמר לבעיה: קובץ שמתחיל
+      // לאט ממלא באפר בשקט, ‎currentTime‎ עומד על 0, והמשמר קרא לזה
+      // "תקוע". הטיפול למטה — קפיצה של 0.001 או טעינה מחדש — **זורק
+      // את הבאפר שנצבר**, ואז זה מתחיל מאפס. נפעל שנייה, נתקע, נזרק,
+      // מהתחלה. לופ שמונע מהקובץ להתחיל לנצח.
+      //
+      // דווח מהמכשיר: "נפעל ונתקע, נפעל ונתקע, נשאר תקוע על אפס."
+      // אותו קישור ב-VLC ובכרום עובד — שם אין משמר שיפריע.
+      const ahead = bufferAhead(video);
+      if (ahead > lastAhead + 0.05) {        // התקדם מאז הבדיקה הקודמת
+        lastAhead = ahead; stuckSince = 0; nudges = 0;
+        return;
+      }
+      lastAhead = ahead;
+
+      if (everAdvanced && ahead > 0.5) return;
+
+      // ── לפני שהניגון התחיל בכלל — לא נוגעים ─────────────────────────
+      // בשלב הזה כל נגיעה היא הרסנית ואין לה מה לתקן: אין מה "לשחרר",
+      // יש רק באפר שנבנה. ההסלמה היחידה שמותרת בשלב הזה היא המסלול
+      // של onUnsupported שכבר טופל למעלה, והוא מבוסס על תשובת השרת
+      // (/vodinfo) ולא על ניחוש לפי שעון.
+      if (!everAdvanced) return;
+
       if (!stuckSince) { stuckSince = Date.now(); return; }
       if (Date.now() - stuckSince < 8000) return;
 
