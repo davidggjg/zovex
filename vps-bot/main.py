@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pyrogram import Client, filters
@@ -2674,6 +2674,87 @@ async def _hls_audio_args(host: str, path: str, src: str) -> list:
     return ["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]
 
 
+# [fix_live_opengop]
+# זרם open-GOP: יש בו I-slices ונקודות התאוששות, אבל אף NAL מסוג 5 (IDR).
+# MSE — המנוע של Shaka ושל video.js — מחייב IDR כדי להתחיל להזרים, ולכן
+# הוא נתקע על 0:00 **בלי לזרוק שגיאה**, בעוד VLC ו-ffmpeg מנגנים.
+# נמדד בספורט 5 פלוס: חמישה סגמנטים רצופים, 224 slices ו-7 SPS בכל אחד,
+# IDR=0 בכולם. באותו ספק ובאותו פורט, 5gold מחזיר IDR=2 לסגמנט.
+_hls_idr_cache: dict = {}
+_HLS_IDR_TTL = 6 * 3600
+# ארבע שניות = אורך הסגמנט ב-_hls_fix_start, כדי שכל סגמנט יתחיל ב-IDR.
+_HLS_IDR_SEC = 4
+_OPENGOP_VARGS = [
+    "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+    "-profile:v", "main", "-pix_fmt", "yuv420p",
+    "-g", "96", "-keyint_min", "48", "-sc_threshold", "0",
+    # forced-idr הופך את נקודות המפתח ל-IDR אמיתיים ולא ל-I-slices בלבד.
+    # בלעדיו x264 יכול לייצר שוב בדיוק את הבעיה שאנחנו מתקנים.
+    "-forced-idr", "1",
+    "-force_key_frames", f"expr:gte(t,n_forced*{_HLS_IDR_SEC})",
+    "-b:v", "2500k", "-maxrate", "3000k", "-bufsize", "5000k",
+    "-vf", "scale=min(1280\,iw):-2",
+]
+
+
+def _h264_has_idr(data: bytes) -> bool:
+    """האם יש בזרם Annex B יחידת NAL מסוג 5.
+
+    נפרד מהבדיקה שמריצה ffmpeg כדי שאפשר יהיה לבדוק אותו לבדו.
+    מחזיר True גם כשלא נמצאו slices בכלל — "לא יודע" נחשב תקין, כדי
+    שספק לא יפעיל קידוד מחדש.
+    """
+    idr = slices = 0
+    i = 0
+    while True:
+        j = data.find(b"\x00\x00\x01", i)
+        if j < 0 or j + 3 >= len(data):
+            break
+        t = data[j + 3] & 0x1F
+        if t == 5:
+            idr += 1
+        if t in (1, 5):
+            slices += 1
+        i = j + 3
+    if not slices:
+        return True                 # לא הצלחנו לקרוא — לא משנים התנהגות
+    return idr > 0
+
+
+def _hls_probe_no_idr(src: str) -> bool:
+    """מושך שמונה שניות של וידאו וסורק את יחידות ה-NAL.
+
+    לא משתמשים ב-key_frame של ffprobe: הוא דולק גם על I-slice שאינו
+    IDR. בסגמנט שנבדק הוא החזיר 7 "מפתחות" בזמן שה-IDR האמיתי הוא אפס.
+    ריצה חוסמת, ולכן נקראת דרך run_in_executor כמו הבדיקות שלידה.
+    """
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-v", "error", "-t", "8",
+             "-i", src, "-map", "0:v:0", "-c", "copy", "-f", "h264", "-"],
+            capture_output=True, timeout=60)
+        return not _h264_has_idr(r.stdout or b"")
+    except Exception:
+        return False                # ספק — מתנהגים כמו קודם
+
+
+async def _hls_no_idr(host: str, path: str, src: str) -> bool:
+    """האם הערוץ הזה open-GOP. נשמר במטמון כמו בדיקת הקול שלידה."""
+    key = f"{host}/{path}"
+    now = time.time()
+    ent = _hls_idr_cache.get(key)
+    if ent is None or now - ent[0] > _HLS_IDR_TTL:
+        loop = asyncio.get_running_loop()
+        bad = await loop.run_in_executor(None, _hls_probe_no_idr, src)
+        _hls_idr_cache[key] = (now, bad)
+        ent = _hls_idr_cache[key]
+        log.info("hls_codec: %s → %s", key,
+                 "אין IDR (open-GOP), מקודד וידאו מחדש" if bad
+                 else "יש IDR, copy")
+    return ent[1]
+
+
 async def _hls_codec_args(host: str, path: str, src: str):
     """הארגומנטים שקובעים איך לטפל בזרמים. copy כברירת מחדל."""
     key = f"{host}/{path}"
@@ -2693,6 +2774,11 @@ async def _hls_codec_args(host: str, path: str, src: str):
     # את כל הניגון, בעוד VLC ו-ffmpeg פשוט מדלגים וממשיכים.
     aud = await _hls_audio_args(host, path, src)
     if not codec or codec == "h264":
+        # [fix_live_opengop]
+        # h264 תקין אינו מספיק: זרם בלי IDR הוא h264 לכל דבר, ו-copy
+        # משמר אותו כמו שהוא — כלומר משמר גם את התקיעה בדפדפן.
+        if await _hls_no_idr(host, path, src):
+            return list(_OPENGOP_VARGS) + aud
         return ["-c:v", "copy"] + aud
     # קודק שדפדפן לא יפענח: ממירים את הווידאו. הקול נקבע בנפרד
     # ב-_hls_audio_args — copy אם הוא תקין, קידוד מחדש אם לא.
@@ -2706,19 +2792,97 @@ async def _hls_codec_args(host: str, path: str, src: str):
     ] + aud
 
 
-async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
-    """מפעיל (או מחזיר קיים) תהליך ffmpeg שממיר את הערוץ ל-HLS/fMP4 מקומי."""
+# [fix_live_robust]
+# תקרה על מספר ההמרות המקבילות. עד כה לא הייתה שום תקרה, וכל ערוץ שנפתח
+# קיבל תהליך ffmpeg משלו — כלומר מספיק צופים במקביל כדי להפיל את השרת.
+HLS_FIX_MAX = int(os.environ.get("HLS_FIX_MAX", "8"))
+# כמה שורות שגיאה אחרונות שומרים לכל ערוץ. חסם, כדי שערוץ פטפטן
+# לא ינפח את הזיכרון.
+HLS_FIX_ERRLINES = 40
+
+# פרופיל 1 (גיבוי): קידוד מלא, בלי שום copy ובלי bitstream filter. מכסה
+# את כל משפחת הכשלים של העתקה — זרם בלי IDR, מסנן שאינו מתאים לקודק,
+# ומכולה שאינה מקבלת את הזרם כמו שהוא.
+HLS_FIX_SAFE_ARGS = [
+    "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+    "-profile:v", "main", "-pix_fmt", "yuv420p",
+    "-g", "96", "-keyint_min", "48", "-sc_threshold", "0",
+    "-forced-idr", "1", "-force_key_frames", "expr:gte(t,n_forced*4)",
+    "-b:v", "2500k", "-maxrate", "3000k", "-bufsize", "5000k",
+    "-vf", "scale=min(1280\\,iw):-2",
+    "-c:a", "aac", "-ac", "2", "-b:a", "128k", "-ar", "48000",
+]
+# הפרופיל שהצליח לערוץ, כדי שהצופה הבא לא ישלם שוב על הניסיון הראשון.
+_hls_fix_profile: dict = {}
+
+
+async def _hls_drain_err(ent):
+    """מרוקן את ה-stderr של ffmpeg לתוך חוצץ קצר.
+
+    זה לא קישוט. צינור שאיש אינו קורא ממנו מתמלא, ו-ffmpeg נחסם עליו
+    לנצח — כלומר הוספת PIPE בלי ריקון הייתה יוצרת בדיוק את התקיעה
+    שהפאץ' הזה בא למנוע.
+    """
+    import collections
+    ent["err"] = collections.deque(maxlen=HLS_FIX_ERRLINES)
+    proc = ent["proc"]
+    try:
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            ent["err"].append(line.decode("utf-8", "replace").rstrip())
+    except Exception:
+        pass
+
+
+def _hls_fix_err(ent) -> str:
+    return " | ".join(list(ent.get("err") or [])[-6:])
+
+
+async def _hls_fix_evict():
+    """מפנה מקום כשהגענו לתקרה — סוגר את הערוץ שאיש לא צפה בו הכי הרבה
+    זמן. **לא** מסרב לצופה החדש: מי שמפנה את מקומו הוא מי שכבר לא שם."""
+    import shutil as _sh
+    while len(_hls_fix) >= HLS_FIX_MAX:
+        key = min(_hls_fix, key=lambda k: _hls_fix[k]["last"])
+        ent = _hls_fix.pop(key, None)
+        if not ent:
+            break
+        try:
+            if ent["proc"].returncode is None:
+                ent["proc"].kill()
+        except Exception:
+            pass
+        _sh.rmtree(ent["dir"], ignore_errors=True)
+        log.info("hls_fix: תקרה (%d) — נסגר הערוץ הישן %s", HLS_FIX_MAX, key)
+
+
+async def _hls_fix_start(host: str, path: str, profile: int = 0) -> Optional[dict]:
+    """מפעיל (או מחזיר קיים) תהליך ffmpeg שממיר את הערוץ ל-HLS/fMP4 מקומי.
+
+    profile=0 — מה ש-_hls_codec_args מחליט (copy כשאפשר).
+    profile=1 — קידוד מלא, כגיבוי כשהראשון נפל.
+    """
     key = _hls_fix_key(host, path)
     async with _hls_fix_lock:
         ent = _hls_fix.get(key)
-        if ent and ent["proc"].returncode is None:
+        if ent and ent["proc"].returncode is None and ent.get("profile") == profile:
             ent["last"] = time.time()
             return ent
         if ent is not None:
             # אם זה מופיע ביומן — מצאנו את הרגע שהערוץ נתקע אצל הצופה: מכאן
             # והלאה המספור מתחיל מאפס והנגן מבקש סגמנטים שכבר לא קיימים.
             log.warning("hls_fix: ffmpeg של %s מת (קוד %s) - מפעיל מחדש, "
-                        "הנגן יראה קפיצה במספור", key, ent["proc"].returncode)
+                        "הנגן יראה קפיצה במספור. שגיאה: %s",
+                        key, ent["proc"].returncode, _hls_fix_err(ent) or "(שתק)")
+            try:
+                if ent["proc"].returncode is None:
+                    ent["proc"].kill()
+            except Exception:
+                pass
+            _hls_fix.pop(key, None)
+        await _hls_fix_evict()
         outdir = HLS_FIX_DIR / key
         try:
             import shutil
@@ -2728,7 +2892,10 @@ async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
             log.error("hls_fix: יצירת תיקייה נכשלה - %s", e)
             return None
         src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
-        _codec = await _hls_codec_args(host, path, src)
+        if profile:
+            _codec = list(HLS_FIX_SAFE_ARGS)
+        else:
+            _codec = await _hls_codec_args(host, path, src)
         args = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             # בלי הדגלים האלה כל שיהוק זמני של המקור הורג את ffmpeg,
@@ -2751,11 +2918,15 @@ async def _hls_fix_start(host: str, path: str) -> Optional[dict]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args, stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL)
+                # PIPE ולא DEVNULL: בלי זה שגיאת ffmpeg נזרקת לפח, וזו
+                # בדיוק הסיבה שלא היה מה לקרוא ביומן על 36 ערוצים.
+                stderr=asyncio.subprocess.PIPE)
         except FileNotFoundError:
             log.error("hls_fix: ffmpeg לא מותקן בשרת")
             return None
-        ent = {"proc": proc, "dir": outdir, "last": time.time()}
+        ent = {"proc": proc, "dir": outdir, "last": time.time(),
+               "profile": profile}
+        asyncio.ensure_future(_hls_drain_err(ent))
         _hls_fix[key] = ent
         return ent
 
@@ -2803,19 +2974,50 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
             headers={"Cache-Control": "public, max-age=60", **CORS_MEDIA},
         )
 
-    # בקשה ל-playlist: מוודאים שה-ffmpeg רץ, מחכים שייווצר, ומשכתבים נתיבים.
-    ent = await _hls_fix_start(host, path)
-    if ent is None:
-        raise HTTPException(502, "hls_fix: לא ניתן להפעיל את ההמרה")
-    idx = ent["dir"] / "index.m3u8"
-    for _ in range(120):                      # עד ~12 שניות לסגמנטים ראשונים
-        if idx.exists() and idx.read_text(encoding="utf-8", errors="ignore").count(".m4s") >= 1:
+    # [fix_live_robust] בקשה ל-playlist.
+    # עד כה: ניסיון אחד, ואם הוא נפל — 502 ומסך שחור. עכשיו שני פרופילים,
+    # ואם גם הם נפלו — הפניה למסלול הרגיל. הצופה אף פעם לא נשאר בלי כלום.
+    key = _hls_fix_key(host, path)
+    first = _hls_fix_profile.get(key, 0)
+    order = [first] + [p for p in (0, 1) if p != first]
+    why = ""
+    for profile in order:
+        ent = await _hls_fix_start(host, path, profile)
+        if ent is None:
+            why = why or "לא ניתן להפעיל את ההמרה"
+            continue
+        idx = ent["dir"] / "index.m3u8"
+        ok = False
+        for _ in range(120):                  # עד ~12 שניות לסגמנטים ראשונים
+            if idx.exists() and idx.read_text(encoding="utf-8", errors="ignore").count(".m4s") >= 1:
+                ok = True
+                break
+            if ent["proc"].returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        if ok:
+            if _hls_fix_profile.get(key) != profile:
+                _hls_fix_profile[key] = profile
+                log.info("hls_fix: %s עובד בפרופיל %s", key, profile)
             break
-        if ent["proc"].returncode is not None:
-            raise HTTPException(502, "hls_fix: ffmpeg נכשל")
-        await asyncio.sleep(0.1)
+        # הפרופיל הזה נכשל. כאן, ורק כאן, אפשר סוף-סוף לראות למה.
+        await asyncio.sleep(0.3)              # שהריקון יספיק לקלוט
+        why = _hls_fix_err(ent) or f"ffmpeg קוד {ent['proc'].returncode}"
+        log.warning("hls_fix: %s נכשל בפרופיל %s — %s", key, profile, why)
+        try:
+            if ent["proc"].returncode is None:
+                ent["proc"].kill()
+        except Exception:
+            pass
+        _hls_fix.pop(key, None)
     else:
-        raise HTTPException(504, "hls_fix: הזרם לא התחיל בזמן")
+        # שני הפרופילים נפלו. לא מחזירים 502: מפנים לאותו ערוץ במסלול
+        # הרגיל, שמחזיר 200 — נמדד על כל הערוצים שנכשלו כאן. גרוע
+        # מהמרה מוצלחת, אינסוף פעמים טוב ממסך שחור.
+        _hls_fix_profile.pop(key, None)
+        log.error("hls_fix: %s נכשל בכל הפרופילים (%s) — מפנה למסלול הרגיל",
+                  key, why)
+        return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=307)
 
     base = f"/hls-relay/_fix/{host}/{path.rstrip('/')}"
     base = base.rsplit("/", 1)[0] if "." in base.rsplit("/", 1)[-1] else base
@@ -3411,36 +3613,86 @@ def _stream_sig(chat: str, msg: str, exp: int) -> str:
     data = f"{chat}/{msg}/{exp}".encode()
     return hmac.new(SIGN_SECRET.encode(), data, hashlib.sha256).hexdigest()[:32]
 
+def _strip_stream_sig(url: str) -> str:
+    """[fix_stale_sig] מסיר exp ו-sig מכתובת, ומשאיר כל פרמטר אחר.
+
+    פירוק לפי ‎&‎ ולא ביטוי רגולרי: כתובת עם ‎?t=90&exp=...&sig=...‎ חייבת
+    לשמור על ‎t‎, וביטוי שמוחק "מ-exp עד הסוף" היה אוכל אותו."""
+    base, sep, query = url.partition("?")
+    if not sep:
+        return url
+    keep = [p for p in query.split("&")
+            if p and p.split("=", 1)[0] not in ("exp", "sig")]
+    return base + ("?" + "&".join(keep) if keep else "")
+
+
 def sign_stream_url(url):
-    """מוסיף ?exp=&sig= לקישור /stream. משאיר קישורים אחרים כמו שהם."""
+    """[fix_stale_sig] חותם קישור /stream מחדש. קישורים אחרים לא נוגעים.
+
+    קודם הייתה כאן יציאה מוקדמת כשהכתובת כבר נשאה חתימה, והיא הפילה את
+    כל הקטלוג.
+    חלק מנתיבי השמירה שומרים ב-video_url את הקישור כולל ‎?exp=&sig=‎, ולכן
+    החתימה נשארה קפואה מיום השמירה — ואחרי SIGN_TTL היא 403 לנצח. נמדד
+    על השרת החי: 14,876 קישורים חתומים, 14,876 פגי תוקף, אפס תקפים.
+
+    חותמים מחדש **תמיד**. זו גם הכוונה המקורית: הקטלוג נבנה כל
+    CONTENT_CACHE_TTL שניות, וה-ETag נושא חלון זמן כדי לאלץ לקוח לרענן
+    לפני שהחתימות פגות. החלון עבד; הפונקציה הזאת היא שדילגה.
+    """
     if not isinstance(url, str) or not SIGN_SECRET:
         return url
     m = _STREAM_PATH_RE.search(url)
-    if not m or "sig=" in url:
+    if not m:
         return url
+    clean = _strip_stream_sig(url)
     exp = int(time.time()) + SIGN_TTL
     sig = _stream_sig(m.group(1), m.group(2), exp)
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}exp={exp}&sig={sig}"
+    sep = "&" if "?" in clean else "?"
+    return f"{clean}{sep}exp={exp}&sig={sig}"
 
 def _expand_urls(items: list) -> list:
+    """[fix_stale_sig2] מרחיב את ה-placeholder וחותם כל קישור /stream.
+
+    קודם החתימה הייתה בתוך התנאי ‎if BASE_TOKEN in v‎, ולכן פריט ששמור
+    עם כתובת מוחלטת לא נחתם **בכלל** — הוא הוגש עם מה שכתוב במסד,
+    כולל חתימה שפגה. נמדד אחרי fix_stale_sig: 14,876 קישורים חתומים,
+    רק 1 קיבל חתימה טרייה, 14,875 נשארו פגי תוקף.
+
+    ‎sign_stream_url‎ מחזיר כל קישור שאינו /stream או /vh כמו שהוא,
+    ולכן קריאה על כל הקישורים בטוחה: /hls-relay וכתובות חיצוניות
+    עוברות בלי שינוי.
+    """
     for e in items:
         for k in ("video_url", "video_id"):
             v = e.get(k)
-            if isinstance(v, str) and BASE_TOKEN in v:
-                e[k] = sign_stream_url(v.replace(BASE_TOKEN, STREAM_PUBLIC_BASE))
+            if not isinstance(v, str):
+                continue
+            if BASE_TOKEN in v:
+                v = v.replace(BASE_TOKEN, STREAM_PUBLIC_BASE)
+            e[k] = sign_stream_url(v)
     return items
 
 def _collapse_urls(items: list) -> list:
+    """[fix_stale_sig2] מחליף את הבסיס ב-placeholder, ומסיר חתימה תמיד.
+
+    הסרת ה-exp/sig הייתה **בתוך** התנאי על הבסיס, ולכן כתובת ששמורה
+    עם בסיס אחר מזה שמוגדר כרגע — http מול https, IP מול דומיין, או
+    בסיס שהוחלף מאז — נשמרה למסד יחד עם החתימה. משם היא לא הוחלפה
+    אף פעם, וזה מה שהפיל את כל הקטלוג ל-403.
+
+    עכשיו: הסרת החתימה חלה על כל קישור /stream או /vh, בלי תלות בבסיס.
+    """
     for e in items:
         for k in ("video_url", "video_id"):
             v = e.get(k)
-            if isinstance(v, str) and STREAM_PUBLIC_BASE and STREAM_PUBLIC_BASE in v:
+            if not isinstance(v, str):
+                continue
+            if STREAM_PUBLIC_BASE and STREAM_PUBLIC_BASE in v:
                 v = v.replace(STREAM_PUBLIC_BASE, BASE_TOKEN)
-                # מסירים חתימה/תוקף אם דבקו בקישור (הם מתווספים מחדש בכל הגשה)
-                if "/stream/" in v:
-                    v = re.sub(r"[?&](exp|sig)=[^&]*", "", v)
-                e[k] = v
+            # חתימה לעולם לא נשמרת: היא מתווספת מחדש בכל הגשה
+            if _STREAM_PATH_RE.search(v):
+                v = _strip_stream_sig(v)
+            e[k] = v
     return items
 
 upload_bot: Optional[Client] = None
