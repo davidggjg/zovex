@@ -51,6 +51,14 @@ fix_channel_meta.py — לוגו ו-slug לערוצים החדשים, וחיפו
            יום של HOT הוא כ-9.5MB, ולכן התשובה נשמרת ב-data/hot-epg-raw.json
            לשש שעות. כמה סריקות בזו אחר זו אינן מורידות שוב.
 
+--hot-hbo  בונה את חתימת ה-HBO **מהנתונים של TMDB** ולא מהזיכרון: שולף את
+           רשימת הסדרות של HBO ושל Max לפי שיוך הרשת, בעברית ובאנגלית, ומחפש
+           אותן בכותרות *וגם בתקצירים* של HOT. הפלט מציג גם דוגמאות מהרשימה
+           שנשלפה, כדי שאם מזהה הרשת שגוי זה ייראה ולא ייחשב לתשובה.
+           דורש TMDB_API_KEY בסביבה או ב-/opt/zovex-bot/.env. המפתח אינו
+           מודפס בשום מצב.
+
+    python3 fix_channel_meta.py --hot-hbo
     python3 fix_channel_meta.py --hot-fingerprint --unmapped
     python3 fix_channel_meta.py --hot-hunt ufc
     python3 fix_channel_meta.py --hot-hunt hbo --days 2
@@ -217,6 +225,107 @@ def _our_hot_ids() -> dict:
             if src == "h":
                 out.setdefault(str(cid), []).append(slug)
     return {k: ", ".join(v) for k, v in out.items()}
+
+
+# ── חתימת HBO מתוך TMDB ולא מתוך הזיכרון שלי ─────────────────────────────
+# החתימה שכתבתי ביד החזירה 0 מתוך 41,326 תוכניות, וזה מלמד שניחשתי לא נכון
+# אילו סדרות משודרות שם. TMDB מחזיק את השיוך של סדרה לרשת, ולכן אפשר לשלוף
+# את רשימת הסדרות של HBO ושל Max *מהנתונים* — כולל השם העברי, שהוא מה שיופיע
+# בלוח של HOT. זו עדות ולא ניחוש.
+TMDB_API = "https://api.themoviedb.org/3"
+TMDB_NETWORKS = {49: "HBO", 3186: "Max"}
+ENV_PATHS = ["/opt/zovex-bot/.env", ".env"]
+
+def _tmdb_key() -> str:
+    """המפתח מהסביבה או מ-.env. **אינו מודפס בשום מצב.**"""
+    v = os.environ.get("TMDB_API_KEY", "").strip()
+    if v:
+        return v
+    for p in ENV_PATHS:
+        try:
+            for line in open(p, encoding="utf-8", errors="replace"):
+                if line.strip().startswith("TMDB_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+        except Exception:
+            continue
+    return ""
+
+
+def hbo_titles(pages: int = 5) -> list:
+    """שמות הסדרות של HBO ושל Max לפי TMDB, בעברית ובאנגלית."""
+    import urllib.request, urllib.parse
+    key = _tmdb_key()
+    if not key:
+        print("  אין TMDB_API_KEY בסביבה ולא ב-.env — אי אפשר לבנות חתימה מהנתונים.")
+        return []
+    out, sample = set(), {}
+    for net, label in TMDB_NETWORKS.items():
+        for lang in ("he-IL", "en-US"):
+            for page in range(1, pages + 1):
+                q = urllib.parse.urlencode({
+                    "api_key": key, "with_networks": net, "language": lang,
+                    "sort_by": "popularity.desc", "page": page})
+                try:
+                    req = urllib.request.Request(f"{TMDB_API}/discover/tv?{q}",
+                                                 headers={"User-Agent": UA_STR})
+                    with urllib.request.urlopen(req, timeout=40) as r:
+                        res = json.loads(r.read())
+                except Exception as e:
+                    print(f"  TMDB {label}/{lang} עמוד {page} נכשל — {type(e).__name__}")
+                    break
+                rows = res.get("results") or []
+                for s in rows:
+                    for k in ("name", "original_name"):
+                        t = (s.get(k) or "").strip()
+                        # שמות קצרים מדי הופכים לרעש: "Max" או "בית" יתפסו
+                        # חצי מהלוח של כל ערוץ.
+                        if len(t) >= 5:
+                            out.add(t)
+                            s6 = sample.setdefault(label, [])
+                            if page == 1 and len(s6) < 6 and t not in s6:
+                                s6.append(t)
+                if page >= (res.get("total_pages") or 1):
+                    break
+    print(f"  נבנתה חתימה מ-{len(out)} שמות סדרות לפי TMDB")
+    # מדפיסים דוגמאות כדי שאם מזהה הרשת שגוי זה ייראה כאן ולא ייחשב לתשובה.
+    for label, ex in sample.items():
+        print(f"    {label}: {' · '.join(ex[:6])}")
+    if not sample:
+        print("    ⚠ לא חזרו שמות בכלל — בדוק שמזהי הרשתות נכונים.")
+    return sorted(out)
+
+
+def hot_hbo(days: int = 1, pages: int = 5, top: int = 10) -> None:
+    """מחפש את HOT HBO בלוח של HOT לפי רשימת הסדרות של הרשת מ-TMDB."""
+    titles = hbo_titles(pages)
+    if not titles:
+        return
+    rx = re.compile("|".join(re.escape(t) for t in titles), re.I)
+    by_ch, hits = {}, {}
+    for p in hot_programs(days):
+        cid = str(p.get("channelID"))
+        t = (p.get("programTitle") or "").strip()
+        by_ch.setdefault(cid, []).append(t)
+        # גם התקציר, כי HOT כותב את השם הלועזי שם גם כשהכותרת מתורגמת
+        blob = f"{t} {(p.get('synopsis') or '')}"
+        m = rx.search(blob)
+        if m:
+            hits.setdefault(cid, []).append(f"{t} → {m.group(0)}")
+    if not by_ch:
+        print("  לא התקבלו נתונים מ-HOT.")
+        return
+    if not hits:
+        print(f"\n  אף אחד מ-{len(by_ch)} ערוצי HOT אינו משדר סדרה של HBO או Max.")
+        print("  הפעם זו תשובה על הערוץ ולא על החתימה: הרשימה באה מ-TMDB.")
+        print("  המשמעות: ל-HOT HBO אין לוח לינארי ב-HOT, וכנראה הוא VOD.")
+        return
+    rank = sorted(((len(v) / len(by_ch[c]), len(v), len(by_ch[c]), c)
+                   for c, v in hits.items()), reverse=True)
+    print(f"\n  {len(rank)} ערוצים עם סדרות של HBO/Max, לפי שיעור מתוך הלוח:\n")
+    for pct, n, tot, cid in rank[:top]:
+        print(f'    "hot-hbo": ("h", "{cid}"),'.ljust(36)
+              + f"# {n}/{tot} = {pct*100:.0f}% · {hits[cid][0][:52]}")
+    print("\n  שיעור גבוה = זה HOT HBO. שיעור נמוך = ערוץ שקנה סדרה אחת.")
 
 
 def hot_fingerprint(days: int = 1, only_unmapped: bool = False, top: int = 3) -> None:
@@ -570,6 +679,8 @@ def main() -> None:
                     help="טביעת אצבע לכל ערוצי HOT — הכותרות שחוזרות בכל אחד")
     ap.add_argument("--unmapped", action="store_true",
                     help="עם --hot-fingerprint: רק ערוצים שאינם ב-MAP שלנו")
+    ap.add_argument("--hot-hbo", action="store_true",
+                    help="מחפש את HOT HBO לפי רשימת הסדרות של הרשת מ-TMDB")
     ap.add_argument("--days", type=int, default=1,
                     help="כמה ימים למשוך מ-HOT (ברירת מחדל 1)")
     ap.add_argument("--pattern", default=r"ספורט\s*5|sport\s*5|5\s*(plus|max|\+)")
@@ -599,6 +710,13 @@ def main() -> None:
         print(f"\n{'─' * 62}\nHOT · הלוח של {a.hot_dump}\n{'─' * 62}")
         try:
             hot_dump(a.hot_dump, a.days)
+        except Exception as e:
+            print(f"  נפל — {type(e).__name__}: {e}")
+        ran = True
+    if a.hot_hbo:
+        print(f"\n{'─' * 62}\nHOT HBO · חתימה מתוך TMDB\n{'─' * 62}")
+        try:
+            hot_hbo(a.days)
         except Exception as e:
             print(f"  נפל — {type(e).__name__}: {e}")
         ran = True
