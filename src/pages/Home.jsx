@@ -276,7 +276,10 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
       seriesName={selectedSeries}
       seriesMap={seriesMap}
       onEpisodePlay={openWithKalturaRefresh}
-      onClose={() => { setSelectedSeries(null); window.history.replaceState(null, "", "/zovex/"); }}
+      // BASE_URL ולא "/zovex/" קשיח: הבסיס הוא /zovex/ ב-GitHub Pages
+      // ו-/ בשרת. הכתובת הקשיחה הפכה סגירת דף בשרת לכתובת שמחזירה 404
+      // ברענון.
+      onClose={() => { setSelectedSeries(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
     />
   );
 
@@ -292,7 +295,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     <LiveTV
       channel={liveChannel}
       onPlay={(ch) => setShowLivePlayer(ch)}
-      onClose={() => { setLiveChannel(null); window.history.replaceState(null, "", "/zovex/"); }}
+      onClose={() => { setLiveChannel(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
     />
   );
 
@@ -302,7 +305,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
       movie={selectedMovie}
       movies={movies}
       onPlay={() => openWithKalturaRefresh(selectedMovie)}
-      onClose={() => { setSelectedMovie(null); window.history.replaceState(null, "", "/zovex/"); }}
+      onClose={() => { setSelectedMovie(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
       onSelectMovie={setSelectedMovie}
       isFavorite={isFavorite(selectedMovie.id)}
       onToggleFavorite={user?.id ? toggleFavorite : null}
@@ -324,7 +327,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
           // (למשל מקישור ישיר) חוזרים הביתה.
           onClose={() => {
             setShowLivePlayer(null);
-            if (!liveChannel) window.history.replaceState(null, "", "/zovex/");
+            if (!liveChannel) window.history.replaceState(null, "", import.meta.env.BASE_URL);
           }}
         />
       )}
