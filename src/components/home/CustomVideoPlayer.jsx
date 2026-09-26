@@ -1,6 +1,11 @@
-import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, RotateCcw, RotateCw, Share2, PictureInPicture2, SkipForward, Settings} from "lucide-react";
+import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, Share2, PictureInPicture2, SkipForward, Settings} from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t } from "../../i18n";
+
+// אורך הדילוג, בשניות. היה מוטבע בארבעה מקומות — שני הנגנים, הכיתוב על
+// הכפתור והאנימציה — ולכן השאלה "אצלנו זה 10 או 30" לא הייתה ניתנת
+// לתשובה בלי לקרוא את כולם. עכשיו יש מקום אחד.
+export const SKIP_SECONDS = 10;
 
 // ──────────────────────────────────────────────────────────────
 // Native bridge helpers (used when running inside the Android app)
@@ -381,7 +386,7 @@ function SkipAnim({ side }) {
       }}>
         <span style={{ fontSize: 26, color: "#fff" }}>{side === "forward" ? "▶▶" : "◀◀"}</span>
         <span style={{ fontSize: 13, color: "#fff", fontWeight: 700, fontFamily: "Arial" }}>
-          {side === "forward" ? "+10" : "-10"} שניות
+          {side === "forward" ? `+${SKIP_SECONDS}` : `-${SKIP_SECONDS}`} שניות
         </span>
       </div>
     </div>
@@ -742,12 +747,49 @@ const iconBtn = {
 
 const centerBtn = {
   background: "none", border: "none", color: "#fff",
-  width: 48, height: 48, borderRadius: "50%", cursor: "pointer",
+  width: 60, height: 60, borderRadius: "50%", cursor: "pointer",
   display: "flex", alignItems: "center", justifyContent: "center",
   position: "relative", flexShrink: 0,
   WebkitTapHighlightColor: "transparent",
   outline: "none",
 };
+
+// ─── אייקון הדילוג ─────────────────────────────────────────────
+//
+// המספר יושב **בתוך אותו SVG** ולא כ-span ממוקם מעליו. הגרסה הקודמת
+// הייתה אייקון Lucide בעובי 1.8 עם <span> ב-top:54% ובגודל 10px, וזה
+// נראה רע משתי סיבות שאפשר למדוד: המספר לא היה במרכז (54% אינו מרכז
+// המעגל של האייקון, שמצויר סביב 12,12 ב-viewBox של 24), והוא היה קטן
+// מדי ביחס לקו הדק. כאן שניהם באותה מערכת קואורדינטות, ולכן המרכוז
+// מדויק בכל גודל.
+//
+// הגאומטריה: מעגל ברדיוס 16 סביב (24,24), עם פער של 60° בחלק העליון.
+// הקשת נמשכת 300° ומסתיימת בדיוק בראש המעגל (24,8), ושם — כי המשיק
+// שלה שם אופקי — מונח ראש החץ. כיוון "אחורה" הוא שיקוף אופקי של אותה
+// צורה, כך שאין שתי גאומטריות שיכולות להיפרד זו מזו.
+function SkipIcon({ dir = "forward", seconds = 10, size = 44 }) {
+  const arrow = (
+    <g>
+      <path d="M 37.86 16 A 16 16 0 1 1 24 8" stroke="currentColor"
+            strokeWidth="3" strokeLinecap="round" fill="none" />
+      <path d="M 24 3.5 L 30.5 8 L 24 12.5 Z" fill="currentColor" />
+    </g>
+  );
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none"
+         color="#fff" aria-hidden="true">
+      {dir === "back"
+        ? <g transform="scale(-1,1) translate(-48,0)">{arrow}</g>
+        : arrow}
+      {/* dominantBaseline אינו אחיד בין דפדפנים, ולכן המרכוז האנכי נעשה
+          ב-y מחושב ולא בתכונה — 27.5 ב-viewBox של 48 הוא מרכז אופטי
+          למשפחת הגופנים הזו. */}
+      <text x="24" y="27.5" textAnchor="middle" fill="currentColor"
+            fontFamily="Arial, Helvetica, sans-serif"
+            fontSize="13" fontWeight="700">{seconds}</text>
+    </svg>
+  );
+}
 
 // ─── כפתור "הפרק הבא" ──────────────────────────────────────────
 // מופיע כש-5 דקות או פחות נשארו לסוף הפרק, ונעלם אם חוזרים אחורה מעבר לזה.
@@ -865,25 +907,23 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
         pointerEvents: visible ? "auto" : "none",
         zIndex: 20,
       }}>
-        {/* skip -10 — אייקון Lucide תקין */}
+        {/* דילוג אחורה */}
         {!isLive && (
           <button onClick={(e) => { e.stopPropagation(); onSkip("back"); }} style={centerBtn}>
-            <RotateCcw size={36} color="white" strokeWidth={1.8} />
-            <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
+            <SkipIcon dir="back" seconds={SKIP_SECONDS} />
           </button>
         )}
-        {/* play/pause — ללא שינוי */}
-        <button onClick={togglePlay} style={{ ...centerBtn, width: 58, height: 58 }}>
+        {/* play/pause */}
+        <button onClick={togglePlay} style={{ ...centerBtn, width: 64, height: 64 }}>
           {playing
-            ? <svg width="28" height="28" viewBox="0 0 28 28" fill="white"><rect x="3" y="3" width="8" height="22" rx="2"/><rect x="17" y="3" width="8" height="22" rx="2"/></svg>
-            : <svg width="28" height="28" viewBox="0 0 28 28" fill="white"><polygon points="5,2 26,14 5,26"/></svg>
+            ? <svg width="34" height="34" viewBox="0 0 28 28" fill="white"><rect x="3" y="3" width="8" height="22" rx="2"/><rect x="17" y="3" width="8" height="22" rx="2"/></svg>
+            : <svg width="34" height="34" viewBox="0 0 28 28" fill="white"><polygon points="5,2 26,14 5,26"/></svg>
           }
         </button>
-        {/* skip +10 — אייקון Lucide תקין */}
+        {/* דילוג קדימה */}
         {!isLive && (
           <button onClick={(e) => { e.stopPropagation(); onSkip("forward"); }} style={centerBtn}>
-            <RotateCw size={36} color="white" strokeWidth={1.8} />
-            <span style={{ position: "absolute", top: "54%", left: "50%", transform: "translate(-50%,-50%)", fontSize: 10, fontWeight: 900, fontFamily: "Arial", color: "white" }}>10</span>
+            <SkipIcon dir="forward" seconds={SKIP_SECONDS} />
           </button>
         )}
       </div>
@@ -1220,7 +1260,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     const v = videoElRef.current;
     // seekTo ולא השמה ישירה: כשהנגן עוד לא יודע את אורך הסרט (moov בסוף
     // הקובץ, רשת איטית) השמה ישירה נבלעת בשקט והדילוג פשוט לא קורה.
-    if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? 10 : -10)));
+    if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? SKIP_SECONDS : -SKIP_SECONDS)));
     setSkipAnim(side);
     setTimeout(() => setSkipAnim(null), 700);
   }, []);
@@ -1398,7 +1438,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     const v = videoElRef.current;
     // seekTo ולא השמה ישירה: כשהנגן עוד לא יודע את אורך הסרט (moov בסוף
     // הקובץ, רשת איטית) השמה ישירה נבלעת בשקט והדילוג פשוט לא קורה.
-    if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? 10 : -10)));
+    if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? SKIP_SECONDS : -SKIP_SECONDS)));
     setSkipAnim(side);
     setTimeout(() => setSkipAnim(null), 700);
   }, []);
