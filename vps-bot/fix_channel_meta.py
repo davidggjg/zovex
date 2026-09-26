@@ -11,11 +11,23 @@ fix_channel_meta.py — לוגו ו-slug לערוצים החדשים, וחיפו
            הלוגואים נלקחים מאותו מאגר ציבורי שהקטלוג כבר משתמש בו
            (tv-logo/tv-logos) ומאומתים ב-HTTP לפני הכתיבה.
 
---epg-scan שואל את וואלה אילו ערוצים קיימים ומדפיס מזהה לכל שם שמתאים.
-           הפרמטר provider הוא מספר (3=yes, 2=hot). שליחת "yes"/"hot"
-           מחזירה 400 — זו הייתה הטעות שלי, לא חסימה גיאוגרפית.
-           הפלט נועד להשלמה ל-MAP ב-epg_build.py.
+--scan-all שואל את כל ארבעת המקורות של epg_build.py אילו ערוצים קיימים,
+           ומדפיס שורה מוכנה ל-MAP לכל שם שמתאים ל---pattern. אפשר גם כל
+           מקור לחוד: --epg-scan (וואלה), --free-scan, --yes-scan, --hot-scan.
 
+           מי נגיש מאיפה — זה לא אותו דבר לכל המקורות:
+             וואלה  · פתוח מכל מקום. הפרמטר provider הוא מספר (3=yes, 2=hot);
+                      שליחת "yes"/"hot" מחזירה 400 — זו הייתה טעות שלי ולא
+                      חסימה גיאוגרפית.
+             FreeTV · פתוח מכל מקום, בלי הרשמה.
+             HOT    · מחזיר 302 בלופ לכל מי שאינו דפדפן אמיתי. חייב לרוץ
+                      מהשרת.
+             yes    · אינו בקשת רשת בכלל אלא תצלום שנאסף מהדפדפן ויושב ב-
+                      data/yes-epg.json, כי Akamai חוסמת שם. חייב את השרת.
+
+           לכן כדי לכסות את כל הארבעה — להריץ מהשרת.
+
+    python3 fix_channel_meta.py --scan-all --pattern 'hbo|סלקום|ufc|לחימה'
     python3 fix_channel_meta.py --epg-scan
     python3 fix_channel_meta.py --thumbs --check
     python3 fix_channel_meta.py --thumbs
@@ -129,22 +141,97 @@ def hot_scan(pattern: str) -> None:
     except Exception as e:
         print(f"  HOT נכשל — {type(e).__name__}: {e}")
         return
-    progs = (res.get("data") or {}).get("programsDetails") or []
+    data = res.get("data") or {}
+    progs = data.get("programsDetails") or []
     names = {}
     for p in progs:
         cid = p.get("channelID")
-        nm = p.get("channelName") or p.get("channel_name") or ""
+        nm = (p.get("channelName") or p.get("channel_name")
+              or p.get("channelTitle") or "")
         if cid is not None and nm:
             names[str(cid)] = nm
+    # לא בטוח ששם הערוץ יושב על התוכנית. אם לא — מחפשים רשימת ערוצים נפרדת
+    # בתשובה, ואם גם היא אינה שם, מדפיסים את מבנה התשובה כדי שאפשר יהיה
+    # לכתוב את הקוד הנכון בלי לנחש.
+    if not names:
+        for k, v in data.items():
+            if not isinstance(v, list) or not v or not isinstance(v[0], dict):
+                continue
+            for row in v:
+                cid = (row.get("channelID") or row.get("channelId")
+                       or row.get("id"))
+                nm = (row.get("channelName") or row.get("name")
+                      or row.get("title") or "")
+                if cid is not None and nm:
+                    names[str(cid)] = nm
+            if names:
+                print(f"  (שמות הערוצים נלקחו מ-data['{k}'])")
+                break
     print(f"  HOT: {len(progs)} תוכניות · {len(names)} ערוצים")
+    if not names:
+        print(f"  ⚠ לא נמצאו שמות ערוצים. מפתחות data: {list(data)}")
+        if progs:
+            print(f"     שדות בתוכנית: {list(progs[0])}")
+        print("     שלח לי את שתי השורות האלה ואכתוב את הקוצר הנכון.")
+        return
     rx = re.compile(pattern, re.I)
     hits = [(nm, cid) for cid, nm in names.items() if rx.search(nm)]
     if not hits:
-        print("\nאין התאמה. הרחב עם --pattern")
+        print(f"  אין התאמה מבין {len(names)} ערוצי HOT. הרחב עם --pattern")
         return
-    print(f"\n{len(hits)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
+    print(f"\n  {len(hits)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
     for nm, cid in sorted(hits):
-        print(f'    "<slug>": ("h", "{cid}"),'.ljust(34) + f"# {nm}")
+        print(f'    "<slug>": ("h", "{cid}"),'.ljust(36) + f"# {nm}")
+
+
+def yes_scan(pattern: str) -> None:
+    """מחפש בתצלום של yes שיושב על השרת. אין כאן בקשת רשת — הקובץ נאסף
+    מהדפדפן ע"י yes_harvest.js, כי Akamai חוסמת שם כל גישה שאינה דפדפן."""
+    f = DATA / "yes-epg.json"
+    if not f.exists():
+        print(f"  yes: אין תצלום ב-{f} — הרץ את yes_harvest.js בדפדפן")
+        return
+    try:
+        raw = json.loads(f.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  yes: קריאת {f.name} נכשלה — {e}")
+        return
+    chans = raw.get("channels") or {}
+    print(f"  yes: {len(chans)} ערוצים בתצלום")
+    rx = re.compile(pattern, re.I)
+    hits = [(str(ch.get("name") or ""), cid, len(ch.get("programs") or []))
+            for cid, ch in chans.items() if rx.search(str(ch.get("name") or ""))]
+    if not hits:
+        print(f"  אין התאמה מבין {len(chans)} ערוצי yes. הרחב עם --pattern")
+        return
+    print(f"\n  {len(hits)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
+    for nm, cid, n in sorted(hits):
+        print(f'    "<slug>": ("y", "{cid}"),'.ljust(36) + f"# {nm}  [{n} תוכניות]")
+
+
+FTV_LIVES = "https://web.freetv.tv/api/products/lives?platform=BROWSER&maxResults=200"
+
+def free_scan(pattern: str) -> None:
+    """רשימת הערוצים של FreeTV. פתוחה, בלי הרשמה ובלי חסימה גיאוגרפית —
+    זה המקור היחיד מהארבעה שאפשר לשאול גם מחוץ לישראל."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(FTV_LIVES, headers={"User-Agent": UA_STR})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            items = json.loads(r.read()).get("items") or []
+    except Exception as e:
+        print(f"  FreeTV נכשל — {type(e).__name__}: {e}")
+        return
+    print(f"  FreeTV: {len(items)} ערוצים")
+    rx = re.compile(pattern, re.I)
+    hits = [((c.get("title") or "").strip(), c.get("id")) for c in items
+            if rx.search((c.get("title") or ""))]
+    if not hits:
+        print(f"  אין התאמה מבין {len(items)} ערוצי FreeTV. הרחב עם --pattern")
+        return
+    print(f"\n  {len(hits)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
+    for nm, cid in sorted(hits):
+        print(f'    "<slug>": ("f", {cid}),'.ljust(36) + f"# FreeTV {nm}")
 
 
 def do_thumbs(check: bool) -> None:
@@ -212,6 +299,12 @@ def main() -> None:
     ap.add_argument("--epg-scan", action="store_true")
     ap.add_argument("--hot-scan", action="store_true",
                     help="רשימת הערוצים של HOT. חוסם מחוץ לישראל — להריץ מהשרת")
+    ap.add_argument("--yes-scan", action="store_true",
+                    help="התצלום של yes שיושב על השרת")
+    ap.add_argument("--free-scan", action="store_true",
+                    help="רשימת הערוצים של FreeTV. פתוחה מכל מקום")
+    ap.add_argument("--scan-all", action="store_true",
+                    help="כל ארבעת המקורות בזה אחר זה")
     ap.add_argument("--pattern", default=r"ספורט\s*5|sport\s*5|5\s*(plus|max|\+)")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--revert", action="store_true")
@@ -223,16 +316,26 @@ def main() -> None:
         shutil.copy2(BACKUP, CONTENT)
         print(f"✓ שוחזר מ-{BACKUP}")
         return
-    if a.epg_scan:
-        print("שואל את וואלה\n")
-        epg_scan(a.pattern)
-        if a.thumbs:
-            print()
-    if a.hot_scan:
-        hot_scan(a.pattern)
+    scans = [(a.epg_scan or a.scan_all, "וואלה", epg_scan),
+             (a.free_scan or a.scan_all, "FreeTV", free_scan),
+             (a.yes_scan or a.scan_all, "yes", yes_scan),
+             (a.hot_scan or a.scan_all, "HOT", hot_scan)]
+    ran = False
+    for on, label, fn in scans:
+        if not on:
+            continue
+        ran = True
+        print(f"\n{'─' * 62}\n{label}  ·  תבנית: {a.pattern}\n{'─' * 62}")
+        try:
+            fn(a.pattern)
+        except Exception as e:
+            print(f"  {label} נפל — {type(e).__name__}: {e}")
     if a.thumbs:
+        if ran:
+            print()
         do_thumbs(a.check)
-    if not (a.thumbs or a.epg_scan or a.hot_scan):
+        ran = True
+    if not ran:
         ap.print_help()
 
 
