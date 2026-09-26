@@ -2508,6 +2508,64 @@ def _is_hls_manifest(path: str) -> bool:
     return path.endswith(".m3u8")
 
 
+# [fix_live_autofix]
+# כיבוי בסביבה, בלי פאץ' ובלי הפעלה מחדש של שום דבר אחר.
+HLS_AUTOFIX = os.environ.get("HLS_AUTOFIX", "1") not in ("0", "false", "no")
+_hls_idr_probing: set = set()
+
+
+def _hls_idr_probe_bg(host: str, path: str) -> None:
+    """שולח את בדיקת ה-IDR לרקע ומחזיר מיד.
+
+    זה מה שהופך את זה ל"לא מזיק": הבדיקה מריצה ffmpeg על שמונה שניות
+    של זרם, וקריאה לה מתוך הבקשה הייתה מוסיפה את ההמתנה הזאת לצופה
+    הראשון של כל ערוץ. כאן הבקשה נענית בדיוק כמו היום, והתשובה מגיעה
+    למטמון בינתיים — מהצופה הבא הערוץ מופנה לבד.
+    """
+    key = f"{host}/{path}"
+    if key in _hls_idr_probing:
+        return
+    _hls_idr_probing.add(key)
+    src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
+
+    async def _run():
+        try:
+            await _hls_no_idr(host, path, src)
+        except Exception as e:
+            log.warning("autofix: בדיקת IDR נכשלה על %s - %s", key, e)
+        finally:
+            _hls_idr_probing.discard(key)
+
+    try:
+        asyncio.ensure_future(_run())
+    except Exception:
+        _hls_idr_probing.discard(key)
+
+
+def _hls_autofix_wanted(host: str, path: str) -> bool:
+    """האם להפנות את הערוץ הזה אל _fix.
+
+    מחזיר True רק כשיש **תשובה במטמון** שאומרת שאין IDR. בלי תשובה
+    מחזיר False ושולח בדיקה לרקע, ולכן אף בקשה אינה מחכה בגלל זה.
+    """
+    if not HLS_AUTOFIX:
+        return False
+    # ערוץ ש-_fix כבר נכשל עליו בכל הפרופילים מסומן ב-None. בלי הבדיקה
+    # הזאת ההפניה הייתה חוזרת אל עצמה: _fix מפנה בחזרה למסלול הרגיל.
+    if _hls_fix_profile.get(key := _hls_fix_key(host, path), 0) is None:
+        return False
+    ent = _hls_idr_cache.get(f"{host}/{path}")
+    if ent is None:
+        _hls_idr_probe_bg(host, path)
+        return False
+    # תשובה שהתיישנה: ממשיכים לפי מה שידוע, ומרעננים ברקע. ספק יכול
+    # לתקן את הקידוד של ערוץ, ובלי הרענון היינו ממשיכים להמיר אותו
+    # לנצח — וההמרה היא הדבר היחיד כאן שעולה משאבים.
+    if time.time() - ent[0] > _HLS_IDR_TTL:
+        _hls_idr_probe_bg(host, path)
+    return bool(ent[1])
+
+
 # ספקים רבים מפזרים את המקטעים על שרתי-קצה בכתובות IP שמתחלפות: המניפסט
 # מגיע מדומיין אחד, אבל כל מקטע מצביע ל-IP אחר, והרשימה משתנה מיום ליום.
 # רשימה לבנה קבועה לא יכולה לעמוד בזה. לכן: מארח שהופיע בתוך מניפסט שאנחנו
@@ -2955,7 +3013,13 @@ async def _hls_fix_reaper():
 @api.get("/hls-relay/_fix/{host}/{path:path}")
 async def hls_relay_fixed(host: str, path: str, request: Request):
     check_hotlink(request)
-    if host not in HLS_RELAY_ALLOWED_HOSTS:
+    # [fix_live_autofix] host יכול לכלול פורט מפורש, בדיוק כמו במסלול
+    # הרגיל: ‎/hls-relay/<host>:7070/...‎. כאן נבדקה המחרוזת כולה מול
+    # HLS_RELAY_ALLOWED_HOSTS, שהוא מילון של שמות בלי פורטים — ולכן כל
+    # ערוץ עם פורט מפורש קיבל 403. נמדד על השרת החי: אותו ערוץ החזיר
+    # 200 במסלול הרגיל ו-403 כאן. ההרשאה עדיין נבדקת מול שם המארח בלבד,
+    # ולכן זה אינו פותח שום מארח חדש.
+    if host.partition(":")[0] not in HLS_RELAY_ALLOWED_HOSTS:
         raise HTTPException(403, "host not allowed")
 
     # קבצים שה-ffmpeg כבר מייצר (init.mp4 / s3.m4s) מוגשים ישירות מהדיסק.
@@ -2978,7 +3042,9 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
     # עד כה: ניסיון אחד, ואם הוא נפל — 502 ומסך שחור. עכשיו שני פרופילים,
     # ואם גם הם נפלו — הפניה למסלול הרגיל. הצופה אף פעם לא נשאר בלי כלום.
     key = _hls_fix_key(host, path)
-    first = _hls_fix_profile.get(key, 0)
+    # [fix_live_autofix] None (כשל מוחלט) נקרא כ-0, כדי שניסיון ישיר
+    # ב-_fix ימשיך לנסות להתאושש ולא יקבל פרופיל None.
+    first = _hls_fix_profile.get(key) or 0
     order = [first] + [p for p in (0, 1) if p != first]
     why = ""
     for profile in order:
@@ -3014,7 +3080,10 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
         # שני הפרופילים נפלו. לא מחזירים 502: מפנים לאותו ערוץ במסלול
         # הרגיל, שמחזיר 200 — נמדד על כל הערוצים שנכשלו כאן. גרוע
         # מהמרה מוצלחת, אינסוף פעמים טוב ממסך שחור.
-        _hls_fix_profile.pop(key, None)
+        # [fix_live_autofix] סימון ולא מחיקה.
+        # ההפניה האוטומטית מהמסלול הרגיל בודקת את הסימן הזה. pop היה
+        # מוחק אותו, וההפניה הייתה נשלחת שוב בבקשה הבאה — כלומר לולאה.
+        _hls_fix_profile[key] = None
         log.error("hls_fix: %s נכשל בכל הפרופילים (%s) — מפנה למסלול הרגיל",
                   key, why)
         return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=307)
@@ -3057,6 +3126,13 @@ async def hls_relay(host: str, path: str, request: Request):
         upstream_url += f"?{request.url.query}"
 
     if _is_hls_manifest(path):
+        # [fix_live_autofix] ערוץ בלי IDR מופנה אל _fix, והקישור שבקטלוג
+        # נשאר כפי שהוא — הנגן עוקב אחרי ההפניה בעצמו.
+        _fix_host = f"{base_host}:{explicit_port}" if explicit_port.isdigit() \
+            else base_host
+        if _hls_autofix_wanted(_fix_host, path):
+            return RedirectResponse(f"/hls-relay/_fix/{_fix_host}/{path}",
+                                    status_code=307)
         # manifest זעיר (KB בודדים) - קאש קצר (TTL=1.5s) חוסך בקשה כפולה
         # למקור כשכמה צופים מבקשים בערך באותה שנייה; חייבים גם ככה לקרוא
         # במלואו כדי לשכתב שורה-שורה, אז אין עלות נוספת לשמור את התוצאה.
