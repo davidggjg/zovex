@@ -111,8 +111,13 @@ N_MAN = '''    if _is_hls_manifest(path):
         _fix_host = f"{base_host}:{explicit_port}" if explicit_port.isdigit() \\
             else base_host
         if _hls_autofix_wanted(_fix_host, path):
+            # 302 ולא 307. הבקשה כאן היא GET של playlist ותמיד תהיה GET,
+            # ולכן שמירת השיטה שמבטיח 307 אינה נדרשת — ובתמורה 302 הוא
+            # ההפניה שכל לקוח HTTP עוקב אחריה בלי יוצא מן הכלל, כולל
+            # ExoPlayer שמאחורי הנגן באפליקציה. אין סיבה להישען על הנחה
+            # לגבי איך ספרייה מסוימת מטפלת ב-307.
             return RedirectResponse(f"/hls-relay/_fix/{_fix_host}/{path}",
-                                    status_code=307)
+                                    status_code=302)
 '''
 
 # ── 4 · הלוגיקה ──────────────────────────────────────────────────────────
@@ -181,7 +186,16 @@ def _hls_autofix_wanted(host: str, path: str) -> bool:
     return bool(ent[1])
 '''
 
-EDITS = [("הרשאת פורט ב-_fix", A_HOST, N_HOST),
+# ── 5 · גם ההפניה שכבר קיימת ב-_fix עוברת ל-302 ──────────────────────────
+# fix_live_robust הוסיף הפניה מ-_fix בחזרה למסלול הרגיל, ב-307. אותו
+# נימוק חל גם עליה: זו בקשת GET, ו-302 נעקב על ידי כל לקוח.
+A_307 = '''        return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=307)
+'''
+N_307 = '''        return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=302)
+'''
+
+EDITS = [("307 ל-302 ב-_fix", A_307, N_307),
+         ("הרשאת פורט ב-_fix", A_HOST, N_HOST),
          ("סימון כשל מוחלט", A_MARK, N_MARK),
          ("קריאת הסימון", A_FIRST, N_FIRST),
          ("ההפניה במסלול הרגיל", A_MAN, N_MAN),
@@ -230,6 +244,12 @@ def validate(s):
     assert "_hls_fix_profile[key] = None" in fx, "הכשל אינו מסומן"
     assert "_hls_fix_profile.pop(key, None)" not in fx, "הסימון עוד נמחק"
     assert "_hls_fix_profile.get(key) or 0" in fx, "None ייקרא כפרופיל"
+
+    # כל ההפניות 302, כדי שלא נישען על איך לקוח מסוים מטפל ב-307
+    assert "status_code=307" not in rel and "status_code=307" not in fx, \
+        "נשארה הפניה 307"
+    assert rel.count("status_code=302") == 1 and fx.count("status_code=302") == 1, \
+        "חסרה הפניה 302"
 
     # ── התנהגות ──────────────────────────────────────────────────────────
     import time as _t
