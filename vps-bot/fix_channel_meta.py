@@ -39,6 +39,19 @@ fix_channel_meta.py — לוגו ו-slug לערוצים החדשים, וחיפו
            פעם אחת סרט מאותו סוג לא ייראה כמו הערוץ עצמו.
            --hot-dump <channelID> מדפיס לוח מלא של מזהה אחד, לזיהוי בעין.
 
+--hot-fingerprint
+           חיפוש לפי חתימה עובד רק אם ניחשתי נכון מה הערוץ משדר. חתימת
+           ה-HBO שכתבתי החזירה 0 מתוך 41,326 תוכניות — וזו עדות על החתימה,
+           לא על הערוץ. טביעת אצבע אינה מניחה כלום: לכל אחד מ-208 הערוצים
+           מודפסות הכותרות שחוזרות בו, והזיהוי נעשה בעין.
+           הסדר הוא לפי ריכוזיות — איזה שיעור מהלוח תופסות שלוש הכותרות
+           החוזרות ביותר — כך שערוץ סדרות עולה למעלה וערוץ סרטים מתחלפים
+           יורד למטה. --unmapped מסתיר את מה שכבר ממופה אצלנו.
+
+           יום של HOT הוא כ-9.5MB, ולכן התשובה נשמרת ב-data/hot-epg-raw.json
+           לשש שעות. כמה סריקות בזו אחר זו אינן מורידות שוב.
+
+    python3 fix_channel_meta.py --hot-fingerprint --unmapped
     python3 fix_channel_meta.py --hot-hunt ufc
     python3 fix_channel_meta.py --hot-hunt hbo --days 2
     python3 fix_channel_meta.py --hot-dump 215
@@ -153,6 +166,101 @@ def _hot_day(day: str) -> dict:
         return json.loads(r.read())
 
 
+HOT_CACHE_HOURS = 6
+
+def hot_programs(days: int = 1) -> list:
+    """כל התוכניות של HOT ל-days ימים, עם מטמון על הדיסק.
+
+    יום אחד הוא כ-9.5MB, ולכן כל סריקה חוזרת הייתה מורידה הכל מחדש. המטמון
+    הוא בן 6 שעות, וכך אפשר להריץ כמה חיפושים בזה אחר זה בלי לחכות.
+    """
+    from datetime import datetime, timedelta
+    cache = DATA / "hot-epg-raw.json"
+    if cache.exists() and time.time() - cache.stat().st_mtime < HOT_CACHE_HOURS * 3600:
+        try:
+            got = json.loads(cache.read_text(encoding="utf-8"))
+            if got.get("days", 0) >= days and got.get("programs"):
+                age = (time.time() - cache.stat().st_mtime) / 3600
+                print(f"  (מטמון מלפני {age:.1f} שעות · {len(got['programs'])} תוכניות)")
+                return got["programs"]
+        except Exception:
+            pass
+    progs, today = [], datetime.now().date()
+    for i in range(days):
+        day = (today + timedelta(days=i)).strftime("%Y/%m/%d")
+        try:
+            res = _hot_day(day)
+        except Exception as e:
+            print(f"  HOT {day} נכשל — {type(e).__name__}: {e}")
+            continue
+        progs += (res.get("data") or {}).get("programsDetails") or []
+    if progs:
+        try:
+            DATA.mkdir(parents=True, exist_ok=True)
+            atomic_write(cache, json.dumps({"days": days, "programs": progs},
+                                           ensure_ascii=False))
+        except Exception as e:
+            print(f"  (לא הצלחתי לשמור מטמון: {e})")
+    return progs
+
+
+def _our_hot_ids() -> dict:
+    """{channelID של HOT: slug אצלנו} מתוך ה-MAP, אם epg_build נגיש."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import epg_build as E
+    except Exception:
+        return {}
+    out = {}
+    for slug, v in E.MAP.items():
+        for src, cid in (v if isinstance(v, list) else [v]):
+            if src == "h":
+                out.setdefault(str(cid), []).append(slug)
+    return {k: ", ".join(v) for k, v in out.items()}
+
+
+def hot_fingerprint(days: int = 1, only_unmapped: bool = False, top: int = 3) -> None:
+    """טביעת אצבע לכל אחד מ-208 ערוצי HOT: הכותרות שחוזרות בו הרבה.
+
+    למה זה הכלי הנכון ל-HOT HBO: חיפוש לפי חתימת תוכן עובד רק אם ניחשתי
+    נכון מה הערוץ משדר, וחתימת ה-HBO שכתבתי החזירה 0 מתוך 41,326 תוכניות —
+    זה אומר שהחתימה שלי הייתה שגויה, לא שהערוץ אינו קיים. טביעת אצבע אינה
+    מניחה כלום: היא מציגה את הלוח עצמו, והזיהוי נעשה בעין.
+
+    הסדר אינו לפי מזהה אלא לפי *ריכוזיות* — איזה שיעור מהלוח תופסות שלוש
+    הכותרות החוזרות ביותר. ערוץ סדרות יוצא גבוה, ערוץ סרטים מתחלפים נמוך.
+    """
+    from collections import Counter
+    progs = hot_programs(days)
+    if not progs:
+        print("  לא התקבלו נתונים מ-HOT.")
+        return
+    ours = _our_hot_ids()
+    by = {}
+    for p in progs:
+        by.setdefault(str(p.get("channelID")), []).append(
+            (p.get("programTitle") or "").strip())
+    rows = []
+    for cid, titles in by.items():
+        if only_unmapped and cid in ours:
+            continue
+        c = Counter(t for t in titles if t)
+        best = c.most_common(top)
+        conc = sum(n for _, n in best) / max(len(titles), 1)
+        rows.append((conc, cid, len(titles), best))
+    rows.sort(reverse=True)
+    print(f"  HOT: {len(by)} ערוצים · {len(progs)} תוכניות · "
+          f"{len(ours)} מזהים כבר ב-MAP שלנו")
+    print(f"  מוצגים {len(rows)} ערוצים"
+          + (" שאינם ממופים אצלנו" if only_unmapped else "") + ", לפי ריכוזיות:\n")
+    for conc, cid, n, best in rows:
+        tag = f"  ← {ours[cid]}" if cid in ours else ""
+        titles = " · ".join(f"{t[:26]}×{k}" for t, k in best)
+        print(f"    {cid:>5} [{n:>4}] {conc*100:>3.0f}%  {titles}{tag}")
+    print("\n  מזהה שהלוח שלו הוא סדרות HBO — זה HOT HBO. שלח לי את השורה.")
+    print("  לוח מלא של מזהה אחד:  --hot-dump <channelID> --days 1")
+
+
 def hot_scan(pattern: str) -> None:
     """מדפיס channelID לכל ערוץ של HOT ששמו מתאים — אם בכלל יש שמות.
 
@@ -236,23 +344,14 @@ def hot_hunt(sig: str, days: int = 1, top: int = 8) -> None:
 
     sig הוא שם מ-HOT_SIGNATURES או ביטוי רגולרי משלך.
     """
-    from datetime import datetime, timedelta
     rx = re.compile(HOT_SIGNATURES.get(sig.lower(), sig), re.I)
     by_ch, hits = {}, {}
-    today = datetime.now().date()
-    for i in range(days):
-        day = (today + timedelta(days=i)).strftime("%Y/%m/%d")
-        try:
-            res = _hot_day(day)
-        except Exception as e:
-            print(f"  HOT {day} נכשל — {type(e).__name__}: {e}")
-            continue
-        for p in ((res.get("data") or {}).get("programsDetails") or []):
-            cid = str(p.get("channelID"))
-            title = (p.get("programTitle") or "").strip()
-            by_ch.setdefault(cid, []).append(title)
-            if title and rx.search(title):
-                hits.setdefault(cid, []).append(title)
+    for p in hot_programs(days):
+        cid = str(p.get("channelID"))
+        title = (p.get("programTitle") or "").strip()
+        by_ch.setdefault(cid, []).append(title)
+        if title and rx.search(title):
+            hits.setdefault(cid, []).append(title)
     if not by_ch:
         print("  לא התקבלו נתונים מ-HOT.")
         return
@@ -276,21 +375,13 @@ def hot_hunt(sig: str, days: int = 1, top: int = 8) -> None:
 
 def hot_dump(cid: str, days: int = 1) -> None:
     """מדפיס את הלוח המלא של channelID אחד ב-HOT, כדי לזהות אותו בעין."""
-    from datetime import datetime, timedelta
     rows = []
-    today = datetime.now().date()
-    for i in range(days):
-        day = (today + timedelta(days=i)).strftime("%Y/%m/%d")
-        try:
-            res = _hot_day(day)
-        except Exception as e:
-            print(f"  HOT {day} נכשל — {type(e).__name__}: {e}")
-            continue
-        for p in ((res.get("data") or {}).get("programsDetails") or []):
-            if str(p.get("channelID")) == str(cid):
-                rows.append(((p.get("programStartTime") or "")[-8:-3],
-                             (p.get("programTitle") or "").strip(),
-                             (p.get("synopsis") or "").strip()[:60]))
+    for p in hot_programs(days):
+        if str(p.get("channelID")) == str(cid):
+            rows.append(((p.get("programStartTime") or "")[5:16],
+                         (p.get("programTitle") or "").strip(),
+                         (p.get("synopsis") or "").strip()[:60]))
+    rows.sort()
     if not rows:
         print(f"  אין תוכניות ל-channelID {cid}.")
         return
@@ -475,6 +566,10 @@ def main() -> None:
                     help="מזהה ערוץ ב-HOT לפי תוכן: ufc / hbo / kids, או רגקס")
     ap.add_argument("--hot-dump", metavar="CHANNELID",
                     help="הלוח המלא של channelID אחד ב-HOT")
+    ap.add_argument("--hot-fingerprint", action="store_true",
+                    help="טביעת אצבע לכל ערוצי HOT — הכותרות שחוזרות בכל אחד")
+    ap.add_argument("--unmapped", action="store_true",
+                    help="עם --hot-fingerprint: רק ערוצים שאינם ב-MAP שלנו")
     ap.add_argument("--days", type=int, default=1,
                     help="כמה ימים למשוך מ-HOT (ברירת מחדל 1)")
     ap.add_argument("--pattern", default=r"ספורט\s*5|sport\s*5|5\s*(plus|max|\+)")
@@ -504,6 +599,13 @@ def main() -> None:
         print(f"\n{'─' * 62}\nHOT · הלוח של {a.hot_dump}\n{'─' * 62}")
         try:
             hot_dump(a.hot_dump, a.days)
+        except Exception as e:
+            print(f"  נפל — {type(e).__name__}: {e}")
+        ran = True
+    if a.hot_fingerprint:
+        print(f"\n{'─' * 62}\nHOT · טביעת אצבע לכל הערוצים\n{'─' * 62}")
+        try:
+            hot_fingerprint(a.days, a.unmapped)
         except Exception as e:
             print(f"  נפל — {type(e).__name__}: {e}")
         ran = True
