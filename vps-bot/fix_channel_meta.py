@@ -27,6 +27,22 @@ fix_channel_meta.py — לוגו ו-slug לערוצים החדשים, וחיפו
 
            לכן כדי לכסות את כל הארבעה — להריץ מהשרת.
 
+--list     שמות כל הערוצים בכל מקור שיש לו שמות, בלי סינון. כשחיפוש לפי
+           תבנית לא מוצא כלום, זו התשובה לשאלה "אז מה כן יש שם".
+
+--hot-hunt HOT הוא המקור היחיד שאינו מחזיר שמות ערוצים בכלל — רק channelID
+           וכותרות. נמדד: 20,663 תוכניות, 0 שמות. לכן חיפוש לפי שם ערוץ
+           שם חסר טעם, וזיהוי נעשה לפי *תוכן*: ערוץ UFC משדר תוכניות
+           שבשמן UFC, וערוץ HBO משדר את הסדרות של HBO. זו אותה שיטה שבה
+           זוהו המזהים שכבר ב-MAP (קומיט 579943f).
+           הדירוג הוא שיעור מתוך הלוח ולא מספר התאמות, כדי שערוץ שהקרין
+           פעם אחת סרט מאותו סוג לא ייראה כמו הערוץ עצמו.
+           --hot-dump <channelID> מדפיס לוח מלא של מזהה אחד, לזיהוי בעין.
+
+    python3 fix_channel_meta.py --hot-hunt ufc
+    python3 fix_channel_meta.py --hot-hunt hbo --days 2
+    python3 fix_channel_meta.py --hot-dump 215
+    python3 fix_channel_meta.py --list
     python3 fix_channel_meta.py --scan-all --pattern 'hbo|סלקום|ufc|לחימה'
     python3 fix_channel_meta.py --epg-scan
     python3 fix_channel_meta.py --thumbs --check
@@ -120,24 +136,34 @@ def epg_scan(pattern: str) -> None:
     print("\nהחלף <slug> ב-custom_slug של הערוץ אצלנו (למשל 5plus, 5max).")
 
 
-def hot_scan(pattern: str) -> None:
-    """מדפיס channelID לכל ערוץ של HOT ששמו מתאים. HOT מפנה בלופ
-    מחוץ לישראל, ולכן זה חייב לרוץ מהשרת — בשונה מוואלה, שם ה-400
-    היה פרמטר שגוי שלי ולא חסימה."""
-    import urllib.request
-    from datetime import datetime
-    api = ("https://www.hot.net.il/HotCmsApiFront/api/"
+HOT_API = ("https://www.hot.net.il/HotCmsApiFront/api/"
            "ProgramsSchedual/GetProgramsSchedual")
-    day = datetime.now().strftime("%Y/%m/%d")
+
+def _hot_day(day: str) -> dict:
+    """יום אחד מלוח השידורים של HOT. HOT מפנה בלופ מחוץ לישראל, ולכן זה
+    חייב לרוץ מהשרת — בשונה מוואלה, שם ה-400 היה פרמטר שגוי שלי."""
+    import urllib.request
     body = json.dumps({"ProgramsStartDateTime": f"{day} 00:00:00",
                        "ProgramsEndDateTime": f"{day} 23:59:59"}).encode()
     req = urllib.request.Request(
-        api, data=body, method="POST",
+        HOT_API, data=body, method="POST",
         headers={"User-Agent": UA_STR, "Content-Type": "application/json",
                  "Referer": "https://www.hot.net.il/heb/tv/tvguide/"})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        return json.loads(r.read())
+
+
+def hot_scan(pattern: str) -> None:
+    """מדפיס channelID לכל ערוץ של HOT ששמו מתאים — אם בכלל יש שמות.
+
+    נמדד בפועל: התשובה מכילה 'programsDetails' בלבד, וכל תוכנית נושאת
+    channelID **בלי שם ערוץ**. לכן המסלול הזה בדרך כלל אינו מוצא כלום,
+    וזיהוי ערוץ ב-HOT נעשה לפי תוכן — ראה hot_hunt.
+    """
+    from datetime import datetime
+    day = datetime.now().strftime("%Y/%m/%d")
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            res = json.loads(r.read())
+        res = _hot_day(day)
     except Exception as e:
         print(f"  HOT נכשל — {type(e).__name__}: {e}")
         return
@@ -169,10 +195,11 @@ def hot_scan(pattern: str) -> None:
                 break
     print(f"  HOT: {len(progs)} תוכניות · {len(names)} ערוצים")
     if not names:
-        print(f"  ⚠ לא נמצאו שמות ערוצים. מפתחות data: {list(data)}")
+        print(f"  HOT אינו מחזיר שמות ערוצים — מפתחות data: {list(data)}")
         if progs:
             print(f"     שדות בתוכנית: {list(progs[0])}")
-        print("     שלח לי את שתי השורות האלה ואכתוב את הקוצר הנכון.")
+        print("     זה מצב תקין ולא תקלה: זיהוי ערוץ ב-HOT נעשה לפי תוכן.")
+        print("     השתמש ב---hot-hunt, שמחפש בכותרות התוכניות עצמן.")
         return
     rx = re.compile(pattern, re.I)
     hits = [(nm, cid) for cid, nm in names.items() if rx.search(nm)]
@@ -182,6 +209,143 @@ def hot_scan(pattern: str) -> None:
     print(f"\n  {len(hits)} התאמות — להוסיף ל-MAP ב-epg_build.py:\n")
     for nm, cid in sorted(hits):
         print(f'    "<slug>": ("h", "{cid}"),'.ljust(36) + f"# {nm}")
+
+
+# ── זיהוי ערוץ ב-HOT לפי תוכן ────────────────────────────────────────────
+# HOT אינו מחזיר שמות ערוצים בכלל, ולכן חיפוש לפי שם הערוץ אינו אפשרי שם.
+# כך זוהו גם המזהים שכבר ב-MAP (קומיט 579943f): לא לפי דמיון שמות אלא לפי
+# הצלבת כותרות תוכניות באותן שעות. hot_hunt עושה את אותו הדבר הפוך —
+# מחפש חתימת תוכן בכותרות ומדווח אילו channelID מכילים אותה.
+#
+# למה זה עובד לערוצים שאין להם מקור אחר: ערוץ UFC משדר תוכניות שבשמן UFC,
+# וערוץ HBO משדר את הסדרות של HBO. זו עדות ישירה לזהות הערוץ, ולא ניחוש.
+HOT_SIGNATURES = {
+    "ufc": r"\bUFC\b|אוקטגון|קרב ראווה|Dana White",
+    "hbo": (r"משחקי הכ[וח]|Game of Thrones|יורופוריה|Euphoria|"
+            r"ה?לוואיט לוטוס|White Lotus|The Last of Us|האחרונים מבין|"
+            r"וסטוורלד|Westworld|סוקסשן|Succession|בית הדרקון|House of the Dragon|"
+            r"צ'רנוביל|Chernobyl|בארי|Barry|האנטורא?ז'|Entourage|"
+            r"סקס והעיר הגדולה|Sex and the City|הסופרנוס|Sopranos|"
+            r"בוארדווק|Boardwalk|True Detective|הבלש האמיתי|HBO"),
+    "kids": (r"פ?פא פיג|Peppa|בלואי|Bluey|פו הדב|דורה|Dora|"
+             r"פו?קימון|Pokemon|סטיץ'|במבה|ילדותי|מיקי מאוס|Mickey"),
+}
+
+def hot_hunt(sig: str, days: int = 1, top: int = 8) -> None:
+    """מדפיס אילו channelID ב-HOT משדרים תוכניות שמתאימות לחתימת תוכן.
+
+    sig הוא שם מ-HOT_SIGNATURES או ביטוי רגולרי משלך.
+    """
+    from datetime import datetime, timedelta
+    rx = re.compile(HOT_SIGNATURES.get(sig.lower(), sig), re.I)
+    by_ch, hits = {}, {}
+    today = datetime.now().date()
+    for i in range(days):
+        day = (today + timedelta(days=i)).strftime("%Y/%m/%d")
+        try:
+            res = _hot_day(day)
+        except Exception as e:
+            print(f"  HOT {day} נכשל — {type(e).__name__}: {e}")
+            continue
+        for p in ((res.get("data") or {}).get("programsDetails") or []):
+            cid = str(p.get("channelID"))
+            title = (p.get("programTitle") or "").strip()
+            by_ch.setdefault(cid, []).append(title)
+            if title and rx.search(title):
+                hits.setdefault(cid, []).append(title)
+    if not by_ch:
+        print("  לא התקבלו נתונים מ-HOT.")
+        return
+    print(f"  HOT: {len(by_ch)} ערוצים · {sum(len(v) for v in by_ch.values())} תוכניות")
+    print(f"  חתימה: {rx.pattern[:70]}{'…' if len(rx.pattern) > 70 else ''}")
+    if not hits:
+        print("\n  אף ערוץ ב-HOT אינו משדר תוכניות שמתאימות לחתימה.")
+        print("  זו תשובה אמיתית: הערוץ אינו בלוח של HOT, ואין להמציא לו קוד.")
+        return
+    # הדירוג הוא *שיעור* ולא מספר: ערוץ עם 3 מתוך 5 תוכניות הוא הערוץ
+    # המבוקש, וערוץ עם 3 מתוך 200 רק שידר פעם אחת סרט מאותו סוג.
+    rank = sorted(((len(v) / len(by_ch[c]), len(v), len(by_ch[c]), c)
+                   for c, v in hits.items()), reverse=True)
+    print(f"\n  {len(rank)} ערוצים עם התאמה, לפי שיעור מתוך הלוח שלהם:\n")
+    for pct, n, tot, cid in rank[:top]:
+        print(f'    "<slug>": ("h", "{cid}"),'.ljust(36)
+              + f"# {n}/{tot} = {pct*100:.0f}% · לדוגמה: {hits[cid][0][:40]}")
+    print("\n  שיעור גבוה = זה הערוץ. שיעור נמוך = הוא רק שידר פעם תוכנית כזו.")
+    print("  הדפסת הלוח המלא של מזהה מסוים:  --hot-dump <channelID>")
+
+
+def hot_dump(cid: str, days: int = 1) -> None:
+    """מדפיס את הלוח המלא של channelID אחד ב-HOT, כדי לזהות אותו בעין."""
+    from datetime import datetime, timedelta
+    rows = []
+    today = datetime.now().date()
+    for i in range(days):
+        day = (today + timedelta(days=i)).strftime("%Y/%m/%d")
+        try:
+            res = _hot_day(day)
+        except Exception as e:
+            print(f"  HOT {day} נכשל — {type(e).__name__}: {e}")
+            continue
+        for p in ((res.get("data") or {}).get("programsDetails") or []):
+            if str(p.get("channelID")) == str(cid):
+                rows.append(((p.get("programStartTime") or "")[-8:-3],
+                             (p.get("programTitle") or "").strip(),
+                             (p.get("synopsis") or "").strip()[:60]))
+    if not rows:
+        print(f"  אין תוכניות ל-channelID {cid}.")
+        return
+    print(f"  channelID {cid} · {len(rows)} תוכניות\n")
+    for t, title, syn in rows:
+        print(f"    {t}  {title[:44]:<44} {syn}")
+
+
+def list_names() -> None:
+    """מדפיס את שמות הערוצים בכל מקור שיש לו שמות, בלי סינון.
+
+    כשחיפוש לפי תבנית לא מוצא כלום, השאלה הבאה היא תמיד 'אז מה כן יש שם' —
+    וזו התשובה. HOT אינו כאן כי אין לו שמות בכלל.
+    """
+    import urllib.request
+    print("\n  ── וואלה ──")
+    for code, label in PROVIDERS.items():
+        try:
+            req = urllib.request.Request(
+                WALLA.format(p=code),
+                headers={"User-Agent": UA_STR,
+                         "Referer": "https://tv-guide.walla.co.il/"})
+            with urllib.request.urlopen(req, timeout=40) as r:
+                data = json.loads(r.read()).get("data", [])
+        except Exception as e:
+            print(f"     provider={code} נכשל — {e}")
+            continue
+        print(f"     provider={code} ({label}) · {len(data)} ערוצים")
+        for ch in sorted(data, key=lambda c: str(c.get("channel_name") or "")):
+            print(f"       {str(ch.get('channel_code')):<7} "
+                  f"{(ch.get('channel_name') or '').strip()}")
+    print("\n  ── FreeTV ──")
+    try:
+        req = urllib.request.Request(FTV_LIVES, headers={"User-Agent": UA_STR})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            items = json.loads(r.read()).get("items") or []
+        print(f"     {len(items)} ערוצים")
+        for c in sorted(items, key=lambda x: str(x.get("title"))):
+            print(f"       {c.get('id'):<9} {(c.get('title') or '').strip()}")
+    except Exception as e:
+        print(f"     נכשל — {e}")
+    print("\n  ── yes (התצלום שעל השרת) ──")
+    f = DATA / "yes-epg.json"
+    if not f.exists():
+        print(f"     אין תצלום ב-{f}")
+        return
+    try:
+        chans = (json.loads(f.read_text(encoding="utf-8")).get("channels") or {})
+    except Exception as e:
+        print(f"     קריאה נכשלה — {e}")
+        return
+    print(f"     {len(chans)} ערוצים")
+    for cid, ch in sorted(chans.items(), key=lambda kv: str(kv[1].get("name"))):
+        print(f"       {cid:<7} {str(ch.get('name') or '').strip():<40} "
+              f"[{len(ch.get('programs') or [])} תוכניות]")
 
 
 def yes_scan(pattern: str) -> None:
@@ -305,6 +469,14 @@ def main() -> None:
                     help="רשימת הערוצים של FreeTV. פתוחה מכל מקום")
     ap.add_argument("--scan-all", action="store_true",
                     help="כל ארבעת המקורות בזה אחר זה")
+    ap.add_argument("--list", action="store_true",
+                    help="שמות כל הערוצים בכל מקור שיש לו שמות, בלי סינון")
+    ap.add_argument("--hot-hunt", metavar="SIG",
+                    help="מזהה ערוץ ב-HOT לפי תוכן: ufc / hbo / kids, או רגקס")
+    ap.add_argument("--hot-dump", metavar="CHANNELID",
+                    help="הלוח המלא של channelID אחד ב-HOT")
+    ap.add_argument("--days", type=int, default=1,
+                    help="כמה ימים למשוך מ-HOT (ברירת מחדל 1)")
     ap.add_argument("--pattern", default=r"ספורט\s*5|sport\s*5|5\s*(plus|max|\+)")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--revert", action="store_true")
@@ -316,11 +488,30 @@ def main() -> None:
         shutil.copy2(BACKUP, CONTENT)
         print(f"✓ שוחזר מ-{BACKUP}")
         return
+    ran = False
+    if a.list:
+        print(f"\n{'─' * 62}\nכל הערוצים בכל המקורות\n{'─' * 62}")
+        list_names()
+        ran = True
+    if a.hot_hunt:
+        print(f"\n{'─' * 62}\nHOT · זיהוי לפי תוכן: {a.hot_hunt}\n{'─' * 62}")
+        try:
+            hot_hunt(a.hot_hunt, a.days)
+        except Exception as e:
+            print(f"  נפל — {type(e).__name__}: {e}")
+        ran = True
+    if a.hot_dump:
+        print(f"\n{'─' * 62}\nHOT · הלוח של {a.hot_dump}\n{'─' * 62}")
+        try:
+            hot_dump(a.hot_dump, a.days)
+        except Exception as e:
+            print(f"  נפל — {type(e).__name__}: {e}")
+        ran = True
+
     scans = [(a.epg_scan or a.scan_all, "וואלה", epg_scan),
              (a.free_scan or a.scan_all, "FreeTV", free_scan),
              (a.yes_scan or a.scan_all, "yes", yes_scan),
              (a.hot_scan or a.scan_all, "HOT", hot_scan)]
-    ran = False
     for on, label, fn in scans:
         if not on:
             continue
