@@ -62,9 +62,22 @@ export function useSlugRouting(movies, slug, episode, setSelectedSeries, setSele
         return;
       }
       // שלב 4: בדוק אם זה סרט לפי shortId (כתובת ישנה)
+      //
+      // ‎shortId‎ הוא **תמיד** שש תווים: כך נבנית הכתובת בצד השני —
+      // ‎encodeURIComponent(title) + "-" + item.id.slice(0, 6)‎. בלי
+      // אכיפת האורך ‎startsWith‎ מתאים לכל קידומת, וזה מה שקרה בפועל:
+      //
+      //   /live/Sport6  →  slug="live"  →  shortId="live"
+      //   movies.find(m => m.id.startsWith("live"))
+      //
+      // לסרט "חי את הלילה" (Live by Night) יש ‎id = "live-by-night-…"‎,
+      // ולכן לחיצה על **כל** ערוץ חי פתחה אותו. אורך שש הוא מה שמפריד
+      // מזהה אמיתי ממילה שהזדמנה בסוף הכתובת.
       const parts = slug.split("-");
       const shortId = parts[parts.length - 1];
-      const found = movies.find(m => m.id.startsWith(shortId));
+      const found = shortId.length >= 6
+        ? movies.find(m => m.id.startsWith(shortId))
+        : null;
       if (found) {
         setSelectedMovie(found);
         if (episode) openWithKalturaRefresh(found);
