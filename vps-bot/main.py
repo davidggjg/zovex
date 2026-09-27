@@ -2485,6 +2485,11 @@ MANIFEST_CACHE_TTL = 1.5
 # נמדד: ערוץ של ספק מושבת לא החזיר שגיאה אלא נתקע 25–45 שניות, כי כל
 # שלב חיכה בתורו (12ש לסגמנט, 8ש לאימות, 12ש לפרופיל שני, 15ש להפניה).
 HLS_FIX_DEADLINE = float(os.environ.get("HLS_FIX_DEADLINE", "14"))
+# [fix_relay_dead_check] תקרה לבקשת playlist בלבד. הלקוח מוגדר ל-15
+# שניות, וזה נכון למקטע וידאו של 3.6MB — אבל playlist הוא מאות בתים
+# שמגיעים ברבע שנייה או שלא מגיעים. נמדד: מקור שאינו עונה גרר 15 שניות
+# המתנה בכל בקשה, ובראשונה 50.
+HLS_PLAYLIST_TIMEOUT = float(os.environ.get("HLS_PLAYLIST_TIMEOUT", "6"))
 HLS_UP_PROBE_TIMEOUT = float(os.environ.get("HLS_UP_PROBE_TIMEOUT", "4"))
 HLS_DEAD_TTL = float(os.environ.get("HLS_DEAD_TTL", "45"))
 _hls_dead: dict = {}                 # key -> (expires_at, reason)
@@ -3500,6 +3505,16 @@ async def hls_relay(host: str, path: str, request: Request):
         upstream_url += f"?{request.url.query}"
 
     if _is_hls_manifest(path):
+        # [fix_relay_dead_check] הסימון נקרא, ולא רק נכתב. הפאץ' הקודם
+        # הוסיף כאן ‎_hls_mark_dead‎ אבל את הבדיקה רק במסלול ההמרה, ולכן
+        # המסלול הזה סימן שהמקור אינו עונה והתעלם מכך בבקשה הבאה —
+        # ושילם שוב 15 שניות, בכל בקשה. נמדד: 502 אחרי 15.4 שניות.
+        #
+        # רק על playlist: מקטע בודד נופל גם בשידור בריא, וסימון על זה
+        # היה מפיל ערוץ שעובד.
+        _dead = _hls_dead_reason(_hls_fix_key(host, path))
+        if _dead:
+            raise HTTPException(502, f"hls_relay: {_dead}")
         # [fix_live_autofix] ערוץ בלי IDR מופנה אל _fix, והקישור שבקטלוג
         # נשאר כפי שהוא — הנגן עוקב אחרי ההפניה בעצמו.
         _fix_host = f"{base_host}:{explicit_port}" if explicit_port.isdigit() \
@@ -3527,7 +3542,8 @@ async def hls_relay(host: str, path: str, request: Request):
             for _try in range(2):
                 try:
                     resp = await _hls_relay_client.get(
-                        upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS)
+                        upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS,
+                        timeout=HLS_PLAYLIST_TIMEOUT)
                 except httpx.HTTPError as e:
                     # [fix_relay_deadline] פסק זמן מסומן לזמן קצר. בלי זה
                     # כל בקשה לאותו ערוץ משלמת שוב 15 שניות המתנה, גם
