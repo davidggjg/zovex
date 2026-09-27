@@ -32,3 +32,4 @@ templates.py
 test_bot.py
 test_core.py
 vision.py
+voice.py

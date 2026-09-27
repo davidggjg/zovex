@@ -65,6 +65,7 @@ import customcmd                                # noqa: E402
 import emergency as emerg                       # noqa: E402
 import templates as tpl                         # noqa: E402
 import vision                                   # noqa: E402
+import voice                                    # noqa: E402
 from allowlist import Allowlist                 # noqa: E402
 from antiflood import AntiFlood                 # noqa: E402
 from federation import Federations              # noqa: E402
@@ -538,6 +539,12 @@ async def on_group_message(msg: Message):
         if await _check_image(msg, lg):
             return
 
+    # 4ג. הקלטות. אותו מסלול בדיוק, מתג נפרד: מה שיוצא החוצה כאן הוא
+    #     הקול של אדם, וזה הדבר הרגיש ביותר שהבוט שולח לספק חיצוני.
+    if db.get(msg.chat.id, "aivoice", "0") == "1" and brain.can_hear:
+        if await _check_voice(msg, lg):
+            return
+
     # 5. אוטומציות של הקבוצה. אחרי הבדיקות, כי הן צורכות את ‎risk‎
     #    שנגזר מהן.
     if await run_automation(msg, "message",
@@ -613,6 +620,47 @@ async def _check_image(msg: Message, lg: str) -> bool:
     if not d:
         return False
     await _enforce(msg, d.action, d.duration, d.explain(), "vision.action",
+                   severity="medium", notice="ai.verdict")
+    return True
+
+
+def _voice_of(msg: Message) -> tuple[str, str, str, str, int, int]:
+    """‎(סוג, file_id, file_unique_id, mime, גודל, שניות)‎ — או סוג ריק.
+
+    המשך והנפח כתובים בהודעה עצמה, ולכן שתי התקרות נבדקות לפני
+    שמורידים ולא אחרי."""
+    for attr in ("voice", "audio"):
+        m = getattr(msg, attr, None)
+        if m is not None:
+            return (attr, m.file_id, m.file_unique_id,
+                    (getattr(m, "mime_type", "") or "").lower(),
+                    m.file_size or 0, voice.seconds_of(m))
+    return ("", "", "", "", 0, 0)
+
+
+async def _check_voice(msg: Message, lg: str) -> bool:
+    """בודק הודעה קולית. ‎True‎ = טופלה ואין להמשיך בנתיב."""
+    kind, fid, uid, mime, size, secs = _voice_of(msg)
+    sigs = collect_signals(msg, msg.caption or "")
+    if not voice.worth_listening(kind, seconds=secs, mime=mime, size=size,
+                                 existing=sigs):
+        return False
+    caption = msg.caption or ""
+    v = brain.seen_voice(uid, caption)
+    if v is None:
+        data = await _fetch_file(fid)
+        if not data or len(data) > voice.MAX_BYTES:
+            return False
+        v = await brain.analyze_voice(data, mime=voice.mime_of(kind, mime),
+                                     caption=caption, lang=lg, seconds=secs,
+                                     unique_id=uid, probed=bool(uid))
+    sig = v.signal()
+    if sig is None:
+        return False
+    d = policy.decide(sigs + [sig], policy.rules_for(db, msg.chat.id))
+    if not d:
+        return False
+    await _enforce(msg, d.action, d.duration, d.explain(), "voice.action",
                    severity="medium", notice="ai.verdict")
     return True
 
@@ -1588,6 +1636,36 @@ async def cmd_aivision(msg: Message):
         return
     await reply(msg, T(msg, "vision.state", state=T(msg, "on" if cur else "off"))
                 + "\n\n" + T(msg, "vision.privacy"))
+
+
+@dp.message(Command("aivoice"))
+@needs("settings.write")
+async def cmd_aivoice(msg: Message):
+    """בדיקת הקלטות. מתג שלישי, ולא נגרר משני האחרים.
+
+    הקלטה היא הקול של אדם. זה הדבר הרגיש ביותר שהבוט הזה שולח לספק
+    חיצוני, ולכן ההסכמה עליו נפרדת גם מזו של התמונות."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "aivoice", "0") == "1"
+    if arg == "on":
+        if not brain.can_hear:
+            await reply(msg, T(msg, "voice.no_keys"))
+            return
+        db.set(msg.chat.id, "aivoice", "1", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivoice=1", severity="high")
+        await reply(msg, T(msg, "voice.state", state=T(msg, "on"))
+                    + "\n\n" + T(msg, "voice.privacy"))
+        return
+    if arg == "off":
+        db.set(msg.chat.id, "aivoice", "0", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivoice=0", severity="low")
+        await reply(msg, T(msg, "voice.state", state=T(msg, "off")))
+        return
+    await reply(msg, T(msg, "voice.state", state=T(msg, "on" if cur else "off"))
+                + "\n\n" + T(msg, "voice.privacy"))
 
 
 @dp.message(Command("aikeys"))

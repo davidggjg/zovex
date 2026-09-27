@@ -41,6 +41,7 @@ from typing import Any, Optional
 import ai
 import aikeys
 import vision
+import voice
 
 log = logging.getLogger("groupos.ai")
 
@@ -58,21 +59,23 @@ MODELS = {
     "gemini": "gemini-2.0-flash",
 }
 
-# מי מהספקים יכול **לראות**. ‎llama-3.3-70b‎ הוא מודל טקסט, ותמונה
-# שתישלח אליו אינה "פחות מדויקת" אלא שגיאה. לכן זו רשימה מפורשת
-# ולא הנחה: ספק שאינו כאן פשוט לא נבחר למסלול התמונות.
-VISION_MODELS = {
+# מי מהספקים יכול לקבל **מדיה** — תמונה או אודיו. ‎llama-3.3-70b‎ הוא
+# מודל טקסט, ותמונה שתישלח אליו אינה "פחות מדויקת" אלא שגיאה. לכן זו
+# רשימה מפורשת ולא הנחה: ספק שאינו כאן פשוט לא נבחר למסלול המדיה.
+MEDIA_MODELS = {
     "gemini": "gemini-2.0-flash",
 }
 
-# פסק זמן ארוך יותר מהטקסט: התמונה נשלחת בגוף הבקשה, והעלאה של
-# מאות קילובייטים אינה נגמרת בשש שניות בקו איטי.
-VISION_TIMEOUT = 12.0
-VISION_MAX_TOKENS = 200
+# פסק זמן ארוך יותר מהטקסט: המדיה נשלחת בגוף הבקשה, והעלאה של מאות
+# קילובייטים אינה נגמרת בשש שניות בקו איטי.
+MEDIA_TIMEOUT = 12.0
+MEDIA_MAX_TOKENS = 200
 
 
 def sees(provider: str) -> bool:
-    return provider in VISION_MODELS
+    """האם הספק מקבל מדיה. אותה תשובה לתמונה ולאודיו — אצל Gemini זה
+    אותו מודל ואותו ‎inline_data‎, ורק ה-‎mime‎ שונה."""
+    return provider in MEDIA_MODELS
 
 
 # ── בניית הבקשה ───────────────────────────────────────────────────────────
@@ -105,27 +108,30 @@ def build_request(provider: str, key: str, system: str,
     raise ValueError(f"ספק לא מוכר: {provider}")
 
 
-def build_image_request(provider: str, key: str, system: str, prompt: str,
+def build_media_request(provider: str, key: str, system: str, prompt: str,
                         data_b64: str, mime: str) -> tuple[str, dict, dict]:
-    """בקשה עם תמונה. טהורה — נבדקת בלי רשת ובלי מפתח.
+    """בקשה עם מדיה — תמונה או אודיו. טהורה, נבדקת בלי רשת ובלי מפתח.
 
-    התמונה נשלחת ‎inline‎ ולא כקישור: קישור היה מחייב את הספק להוריד
+    המדיה נשלחת ‎inline‎ ולא כקישור: קישור היה מחייב את הספק להוריד
     מטלגרם, וקובצי טלגרם דורשים את הטוקן ב-URL. שליחת התוכן עצמו
     שומרת את הטוקן אצלנו.
+
+    אודיו ותמונה הם אותה בקשה בדיוק, ורק ה-‎mime‎ שונה. זו הסיבה
+    שתמלול קוליות לא דרש תעבורה חדשה ולא פורמט בקשה שלישי.
     """
     if provider == "gemini":
         return (
-            ENDPOINTS["gemini"].format(model=VISION_MODELS["gemini"]),
+            ENDPOINTS["gemini"].format(model=MEDIA_MODELS["gemini"]),
             {"x-goog-api-key": key, "Content-Type": "application/json"},
             {"systemInstruction": {"parts": [{"text": system}]},
              "contents": [{"role": "user", "parts": [
                  {"inline_data": {"mime_type": mime, "data": data_b64}},
                  {"text": prompt}]}],
              "generationConfig": {"temperature": 0,
-                                  "maxOutputTokens": VISION_MAX_TOKENS,
+                                  "maxOutputTokens": MEDIA_MAX_TOKENS,
                                   "responseMimeType": "application/json"}},
         )
-    raise ValueError(f"ספק בלי ראייה: {provider}")
+    raise ValueError(f"ספק שאינו מקבל מדיה: {provider}")
 
 
 def extract_text(provider: str, data: Any) -> str:
@@ -155,16 +161,16 @@ class AIClient:
     def __init__(self, providers: aikeys.Providers,
                  cache: Optional[ai.Cache] = None,
                  transport=None, timeout: float = TIMEOUT,
-                 vision_timeout: float = VISION_TIMEOUT):
+                 media_timeout: float = MEDIA_TIMEOUT):
         self.providers = providers
         self.cache = cache or ai.Cache()
         # ‎transport(url, headers, body, timeout)‎ → ‎(status, headers, json)‎.
         # הזרקה ולא יבוא קשיח, כדי שהבדיקות ירוצו בלי רשת ובלי מפתח.
         self.transport = transport or _aiohttp_transport
         self.timeout = timeout
-        self.vision_timeout = vision_timeout
+        self.media_timeout = media_timeout
         self.calls = 0
-        self.vision_calls = 0
+        self.media_calls = 0
         self.failures = 0
 
     async def analyze(self, text: str, *, lang: str = "",
@@ -225,19 +231,25 @@ class AIClient:
             log.warning("AI %s: תשובה שלא נפרסה", provider)
         return v
 
-    # ── תמונות ────────────────────────────────────────────────────────────
+    # ── מדיה: תמונות ואודיו ───────────────────────────────────────────────
     @property
     def can_see(self) -> bool:
-        """האם יש בכלל ספק שיודע לקרוא תמונה. בלי זה המתג לא נדלק."""
-        return any(n in self.providers.pools for n in VISION_MODELS)
+        """האם יש ספק שמקבל מדיה. בלי זה המתגים לא נדלקים.
+
+        אותה תשובה לתמונה ולאודיו: אצל Gemini זה אותו מודל ואותו
+        ‎inline_data‎, ורק ה-‎mime‎ שונה.
+        """
+        return any(n in self.providers.pools for n in MEDIA_MODELS)
+
+    can_hear = can_see
 
     def _pick_seeing(self, now: Optional[float] = None):
-        """מפתח מספק שרואה בלבד.
+        """מפתח מספק שמקבל מדיה בלבד.
 
         לא ‎providers.pick(prefer=...)‎: הוא נופל לספק אחר כשהמועדף
         תפוס, ותמונה שנשלחת למודל טקסט אינה תשובה פחות טובה אלא שגיאה.
         """
-        for name in VISION_MODELS:
+        for name in MEDIA_MODELS:
             pool = self.providers.pools.get(name)
             if pool is None:
                 continue
@@ -246,24 +258,53 @@ class AIClient:
                 return name, key
         return None
 
-    def seen_image(self, unique_id: str,
-                   caption: str = "") -> Optional[ai.Verdict]:
-        """תשובה שכבר יש לתמונה הזאת — **לפני** שמורידים אותה.
+    def seen(self, fp: str) -> Optional[ai.Verdict]:
+        """תשובה שכבר יש, לפי טביעת אצבע — **לפני** שמורידים את הקובץ.
 
         זה מה שהופך את המטמון לחיסכון אמיתי: ‎file_unique_id‎ ידוע מתוך
-        ההודעה עצמה, ולכן תמונה שכבר נבדקה אינה נמשכת שוב מטלגרם.
+        ההודעה עצמה, ולכן מדיה שכבר נבדקה אינה נמשכת שוב מטלגרם.
         """
+        return self.cache.get(fp) if fp else None
+
+    def seen_image(self, unique_id: str,
+                   caption: str = "") -> Optional[ai.Verdict]:
         if not unique_id:
             return None
-        return self.cache.get(vision.fingerprint(unique_id, None, caption))
+        return self.seen(vision.fingerprint(unique_id, None, caption))
+
+    def seen_voice(self, unique_id: str,
+                   caption: str = "") -> Optional[ai.Verdict]:
+        if not unique_id:
+            return None
+        return self.seen(voice.fingerprint(unique_id, None, caption))
 
     async def analyze_image(self, data: bytes, *, mime: str = "image/jpeg",
                             caption: str = "", lang: str = "",
                             unique_id: str = "",
                             probed: bool = False) -> ai.Verdict:
+        return await self._media(
+            data, mime=mime, system=vision.SYSTEM,
+            prompt=vision.build_prompt(caption, lang=lang),
+            fp=vision.fingerprint(unique_id, data, caption),
+            probed=probed, what="תמונה")
+
+    async def analyze_voice(self, data: bytes, *, mime: str = "audio/ogg",
+                            caption: str = "", lang: str = "",
+                            seconds: int = 0, unique_id: str = "",
+                            probed: bool = False) -> ai.Verdict:
+        return await self._media(
+            data, mime=mime, system=voice.SYSTEM,
+            prompt=voice.build_prompt(caption, lang=lang, seconds=seconds),
+            fp=voice.fingerprint(unique_id, data, caption),
+            probed=probed, what="קולית")
+
+    async def _media(self, data: bytes, *, mime: str, system: str,
+                     prompt: str, fp: str, probed: bool,
+                     what: str) -> ai.Verdict:
+        """המסלול המשותף. תמונה ואודיו נבדלים בהוראה, ב-‎mime‎ ובטקסט
+        שנרשם ביומן — ולא בשום דבר אחר, ולכן יש כאן מימוש אחד."""
         if not data:
             return ai.FAILED
-        fp = vision.fingerprint(unique_id, data, caption)
         # ‎probed‎: הקורא כבר בדק במטמון לפני ההורדה. בדיקה שנייה כאן
         # הייתה נספרת כהחטאה שנייה ומעוותת את אחוז הפגיעה.
         if not probed:
@@ -272,60 +313,61 @@ class AIClient:
                 return hit
 
         b64 = base64.b64encode(data).decode("ascii")
-        prompt = vision.build_prompt(caption, lang=lang)
-        for _ in range(len(VISION_MODELS)):
+        for _ in range(len(MEDIA_MODELS)):
             picked = self._pick_seeing()
             if picked is None:
                 return ai.FAILED
             provider, key = picked
-            v = await self._one_image(provider, key, prompt, b64, mime)
+            v = await self._one_media(provider, key, system, prompt, b64,
+                                      mime, what)
             if not v.failed:
                 self.cache.put(fp, v)
                 return v
         return ai.FAILED
 
-    async def _one_image(self, provider: str, key: str, prompt: str,
-                         b64: str, mime: str) -> ai.Verdict:
+    async def _one_media(self, provider: str, key: str, system: str,
+                         prompt: str, b64: str, mime: str,
+                         what: str) -> ai.Verdict:
         try:
-            url, headers, body = build_image_request(
-                provider, key, vision.SYSTEM, prompt, b64, mime)
+            url, headers, body = build_media_request(
+                provider, key, system, prompt, b64, mime)
         except ValueError:
             return ai.FAILED
         self.calls += 1
-        self.vision_calls += 1
+        self.media_calls += 1
         try:
             status, resp_headers, data = await asyncio.wait_for(
-                self.transport(url, headers, body, self.vision_timeout),
-                timeout=self.vision_timeout + 1)
+                self.transport(url, headers, body, self.media_timeout),
+                timeout=self.media_timeout + 1)
         except asyncio.TimeoutError:
             self.failures += 1
             self.providers.fail(provider, key, status=None)
-            log.warning("AI %s (תמונה): פסק זמן", provider)
+            log.warning("AI %s (%s): פסק זמן", provider, what)
             return ai.FAILED
         except Exception as e:                       # noqa: BLE001
             self.failures += 1
             self.providers.fail(provider, key, status=None)
-            log.warning("AI %s (תמונה) נכשל: %s", provider, e)
+            log.warning("AI %s (%s) נכשל: %s", provider, what, e)
             return ai.FAILED
 
         if status != 200:
             self.failures += 1
             wait = self.providers.fail(provider, key, status=status,
                                        retry_after=retry_after_of(resp_headers))
-            log.warning("AI %s (תמונה) החזיר %s · מפתח %s מצונן %.0fש",
-                        provider, status, aikeys.mask(key), wait)
+            log.warning("AI %s (%s) החזיר %s · מפתח %s מצונן %.0fש",
+                        provider, what, status, aikeys.mask(key), wait)
             return ai.FAILED
 
         self.providers.ok(provider, key)
         v = ai.parse_verdict(extract_text(provider, data), provider)
         if v.failed:
             self.failures += 1
-            log.warning("AI %s (תמונה): תשובה שלא נפרסה", provider)
+            log.warning("AI %s (%s): תשובה שלא נפרסה", provider, what)
         return v
 
     def stats(self) -> dict:
         return {"calls": self.calls, "failures": self.failures,
-                "vision": self.vision_calls, "cache": self.cache.stats()}
+                "media": self.media_calls, "cache": self.cache.stats()}
 
 
 async def _aiohttp_transport(url: str, headers: dict, body: dict,

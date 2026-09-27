@@ -46,7 +46,8 @@ sys.path.insert(0, HERE)
 import bot as B                                      # noqa: E402
 import aiclient                                      # noqa: E402
 import aikeys                                        # noqa: E402
-from aiogram.types import Chat, Message, PhotoSize, User  # noqa: E402
+from aiogram.types import (Chat, Message, PhotoSize, User,  # noqa: E402
+                           Voice)
 
 CHAT, ADM, USER, BAD = -1001234567890, 90, 11, 13
 
@@ -165,6 +166,19 @@ def spam_msg(mid: int = 500) -> Message:
                    chat=Chat(id=CHAT, type="supergroup"),
                    from_user=User(id=BAD, is_bot=False, first_name="ספאמר"),
                    text="קנו עכשיו")
+
+
+def voice_msg(uid_tag: str = "V1", secs: int = 8, caption=None,
+              mid: int = 300, size: int = 40_000) -> Message:
+    """הודעה קולית כמו שטלגרם שולחת."""
+    return Message(message_id=mid, date=dt.datetime.now(),
+                   chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                   from_user=User(id=USER, is_bot=False, first_name="חבר",
+                                  language_code="he"),
+                   voice=Voice(file_id="vfile", file_unique_id=uid_tag,
+                               duration=secs, mime_type="audio/ogg",
+                               file_size=size),
+                   caption=caption)
 
 
 def photo_msg(uid_tag: str = "U1", caption=None, mid: int = 100) -> Message:
@@ -362,12 +376,70 @@ async def test_vision():
         B.db.set(CHAT, "aivision", "0")
 
 
+# ── הקלטות ────────────────────────────────────────────────────────────────
+async def test_voice():
+    section("הקלטות")
+    B.perms.set_role(CHAT, USER, "member")
+    real_brain = B.brain
+    B.brain = aiclient.AIClient(
+        aikeys.Providers.from_env({"GROUPOS_GEMINI_KEYS": "g1"}),
+        transport=ai_transport)
+    dl0, calls0 = len(DOWNLOADS), AI_CALLS["n"]
+    try:
+        await B.on_group_message(voice_msg("VA", mid=300))
+        ok("כשהמתג כבוי לא מורידים הקלטה",
+           len(DOWNLOADS) == dl0 and AI_CALLS["n"] == calls0)
+
+        B.db.set(CHAT, "aivoice", "1")
+        VERDICT["json"] = ('{"category":"threat","confidence":0.9,'
+                           '"reason":"איום"}')
+        await B.on_group_message(voice_msg("VB", mid=301))
+        ok("ההקלטה הורדה פעם אחת", len(DOWNLOADS) == dl0 + 1, str(DOWNLOADS))
+        ok("ההודעה נמחקה", 301 in DELETED, str(DELETED))
+        ok("נרשם ביומן כמסלול הקול",
+           any(r["action"] == "voice.action" for r in B.audit.recent(CHAT)),
+           str([r["action"] for r in B.audit.recent(CHAT)][:5]))
+
+        dl, calls = len(DOWNLOADS), AI_CALLS["n"]
+        await B.on_group_message(voice_msg("VB", mid=302))
+        ok("אותה הקלטה — בלי הורדה ובלי בקשה",
+           len(DOWNLOADS) == dl and AI_CALLS["n"] == calls)
+        ok("ובכל זאת נאכף", 302 in DELETED, str(DELETED))
+
+        # המשך נבדק לפני ההורדה
+        dl = len(DOWNLOADS)
+        await B.on_group_message(voice_msg("VC", secs=600, mid=303))
+        ok("הקלטה ארוכה מדי לא מורידה כלום",
+           len(DOWNLOADS) == dl and 303 not in DELETED)
+
+        VERDICT["json"] = ('{"category":"safe","confidence":0.1,'
+                           '"reason":"שיחה"}')
+        await B.on_group_message(voice_msg("VD", mid=304))
+        ok("הקלטה רגילה לא נמחקת", 304 not in DELETED, str(DELETED))
+
+        B.db.set(CHAT, "aivoice", "0")
+        B.perms.set_role(CHAT, USER, "owner")
+        B.brain = aiclient.AIClient(
+            aikeys.Providers.from_env({"GROUPOS_GROQ_KEYS": "k"}),
+            transport=ai_transport)
+        await B.cmd_aivoice(msg("/aivoice on", uid=USER, mid=305))
+        ok("בלי מפתח שמאזין הפקודה מסבירה ולא מדליקה",
+           "מפתח" in last() and B.db.get(CHAT, "aivoice", "0") == "0",
+           last())
+    finally:
+        B.brain = real_brain
+        B.db.set(CHAT, "aivoice", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
     B.db.set(CHAT, "lang", "he")
     B.db.set(CHAT, "autoclean", "0")
     B.db.set(CHAT, "xp", "0")
+    # בלי זה הגנת ההצפה נכנסת לפני מסלולי המדיה ומוחקת את ההודעה —
+    # והבדיקה "ההודעה נמחקה" הייתה עוברת מהסיבה הלא נכונה.
+    B.db.set(CHAT, "flood", "0")
     B.perms.set_role(CHAT, ADM, "owner")
     B.perms.set_role(CHAT, USER, "member")
     B.perms.set_role(CHAT, BAD, "member")
@@ -375,6 +447,7 @@ async def main() -> int:
     await test_customcmd()
     await test_reports()
     await test_vision()
+    await test_voice()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

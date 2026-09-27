@@ -15,10 +15,20 @@
 #   bash install.sh                      התקנה או עדכון
 #   bash install.sh --token 123:AA...    הטוקן בשורת הפקודה, בלי שאלה
 #   bash install.sh --update             רק קוד, בלי לגעת בטוקן ובשירות
+#
+# **מה הוא לא דורס, בשום מצב:**
+#   · המסד — לא נמחק, לא נדרס, ומגובה לפני כל הפעלה מחדש
+#   · הטוקן ומפתחות ה-AI שב-.env — נקראים ומוחזרים לקובץ כמו שהם
+#   · פקודות, דיווחים, הגדרות וכל מה שנשמר בקבוצות — הם במסד
+#
+# ואם עדכון בכל זאת שובר משהו: נשמר עותק של הקוד הקודם, והסקריפט
+# מחזיר אותו לבד כשהבוט לא עולה. ‎--rollback‎ מחזיר ידנית.
 # ──────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-DIR=/opt/groupos
+# ‎GROUPOS_DIR‎ קיים כדי שאפשר יהיה להריץ את המתקין עצמו בבדיקה, על
+# תיקייה זמנית, בלי לגעת בהתקנה האמיתית. בשרת לא מגדירים אותו.
+DIR=${GROUPOS_DIR:-/opt/groupos}
 BRANCH="claude/hls-relay-schema-port-ll8xiz"
 RAW="https://raw.githubusercontent.com/davidggjg/zovex/$BRANCH/groupos"
 # רשימת הקבצים מגיעה מ-manifest.txt שבמאגר ולא מכאן. הרשימה הקשיחה
@@ -30,10 +40,80 @@ RAW="https://raw.githubusercontent.com/davidggjg/zovex/$BRANCH/groupos"
 # בלי זה ‎bash /opt/groupos/install.sh --update‎ — מה שכתוב ב-README
 # ובמסך הסיום — נכשל ב-"No such file or directory".
 EXTRA=(README.md requirements.txt manifest.txt install.sh)
-SVC=/etc/systemd/system/groupos.service
+SVC=${GROUPOS_SVC:-/etc/systemd/system/groupos.service}
+KEEP=5                       # כמה גיבויים וגלגולים לאחור שומרים
 MODE=${1:-}
 ARG_TOKEN=""
 if [ "$MODE" = "--token" ]; then ARG_TOKEN=${2:-}; MODE=""; fi
+
+# ── גיבוי, שחזור וניקוי ──────────────────────────────────────────────────
+# הכול יושב ב-$DIR/data, שהוא ממילא התיקייה שלא נדרסת.
+BACKUPS="$DIR/data/backups"
+
+code_snapshot() {
+  # עותק של הקוד **החי** לפני שמחליפים אותו. בלי זה עדכון שבור הוא
+  # מצב שאין ממנו חזרה חוץ מלהתקין מחדש מהמאגר — כלומר בדיוק ברגע
+  # שהמאגר הוא זה שנשבר.
+  [ -f "$DIR/bot.py" ] || return 0
+  mkdir -p "$BACKUPS"
+  local f="$BACKUPS/code-$(date +%Y%m%d-%H%M%S).tgz"
+  (cd "$DIR" && tar czf "$f" ./*.py ./*.md manifest.txt requirements.txt \
+       2>/dev/null) || return 0
+  echo "  ✓ הקוד הקודם נשמר: $(basename "$f")"
+  ls -1t "$BACKUPS"/code-*.tgz 2>/dev/null | tail -n +$((KEEP + 1)) \
+    | xargs -r rm -f
+}
+
+db_backup() {
+  # המסד מגובה לפני כל הפעלה מחדש, כי הפעלה מחדש היא מה שמריץ
+  # מיגרציות. מיגרציה היא השינוי היחיד כאן שנוגע בנתונים.
+  local db="$DIR/data/groupos.db"
+  [ -f "$db" ] || return 0
+  mkdir -p "$BACKUPS"
+  local f="$BACKUPS/db-$(date +%Y%m%d-%H%M%S).db"
+  # ‎.backup‎ של sqlite ולא cp: cp על מסד עם WAL פתוח יכול להעתיק
+  # מצב חלקי. אם sqlite3 אינו מותקן — cp של שלושת הקבצים יחד.
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" ".backup '$f'" 2>/dev/null || cp -f "$db" "$f"
+  else
+    cp -f "$db" "$f"; cp -f "$db-wal" "$f-wal" 2>/dev/null || true
+  fi
+  echo "  ✓ המסד גובה: $(basename "$f") ($(du -h "$f" | cut -f1))"
+  ls -1t "$BACKUPS"/db-*.db 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
+}
+
+restore_code() {
+  local f
+  f=$(ls -1t "$BACKUPS"/code-*.tgz 2>/dev/null | head -1)
+  [ -n "$f" ] || { echo "  ✗ אין עותק קוד לשחזור"; return 1; }
+  tar xzf "$f" -C "$DIR" || return 1
+  echo "  ✓ הוחזר הקוד מ-$(basename "$f")"
+  systemctl restart groupos 2>/dev/null || true
+  return 0
+}
+
+alive() {
+  # "active" אינו מספיק: שירות שעלה ונפל נראה active לרגע. מחכים
+  # לשורה שהבוט כותב רק אחרי ש-getMe הצליח מול טלגרם.
+  local i
+  for i in $(seq 1 "${1:-20}"); do
+    sleep 1
+    journalctl -u groupos --since "-2 min" 2>/dev/null \
+      | grep -q "GroupOS עלה כ-@" && return 0
+  done
+  return 1
+}
+
+if [ "$MODE" = "--rollback" ]; then
+  echo "════════ מחזיר את הקוד הקודם ════════"
+  db_backup
+  restore_code || exit 1
+  if alive 20; then echo "✅ הבוט חי על הקוד הקודם."; else
+    echo "  ⚠ הבוט לא דיווח שהוא עלה. היומן:"
+    journalctl -u groupos --since "-2 min" --no-pager | tail -12 | sed 's/^/      /'
+  fi
+  exit 0
+fi
 
 echo "════════ 1/5 · מוריד ════════"
 mkdir -p "$DIR/data"
@@ -94,14 +174,32 @@ echo "  ✓ aiogram $(python3 -c 'import aiogram;print(aiogram.__version__)')"
 OUT=$(cd "$TMP" && GROUPOS_DB="$TMP/test.db" python3 test_core.py 2>&1)
 echo "$OUT" | tail -1
 if echo "$OUT" | grep -q "נכשלו 0"; then
-  echo "  ✓ הבדיקות עברו — ממשיכים"
+  echo "  ✓ בדיקות הליבה עברו"
 else
   echo "  ✗ בדיקות נכשלו. לא מתקינים."
   echo "$OUT" | grep "✗" | head -10
   exit 1
 fi
 
-# רק עכשיו, אחרי שהכול נבדק, מחליפים את הקוד החי
+# בדיקות המטפלים: מריצות את הקוד של הבוט מול טלגרם מדומה. הן תופסות
+# מה שבדיקות הליבה לא יכולות — פקודה ששולחת את הטקסט הלא נכון, או
+# מסלול מדיה שמוחק הודעה שלא היה צריך למחוק.
+if [ -f "$TMP/test_bot.py" ]; then
+  OUT2=$(cd "$TMP" && GROUPOS_DB="$TMP/test2.db" python3 test_bot.py 2>&1)
+  echo "$OUT2" | tail -1
+  if echo "$OUT2" | grep -qE "נכשלו 0|מדלגים"; then
+    echo "  ✓ בדיקות המטפלים עברו — ממשיכים"
+  else
+    echo "  ✗ בדיקות המטפלים נכשלו. לא מתקינים."
+    echo "$OUT2" | grep "✗" | head -10
+    exit 1
+  fi
+fi
+
+# רק עכשיו, אחרי שהכול נבדק, מחליפים את הקוד החי — ולא לפני שיש
+# ממה לחזור. שני הגיבויים עולים שברירי שנייה ושוקלים פחות ממגה.
+code_snapshot
+db_backup
 cp "$TMP"/*.py "$TMP"/*.md "$TMP"/requirements.txt "$TMP"/manifest.txt "$DIR/"
 # עותק של המתקין עצמו, דרך שם זמני ו-mv: זה החלפת inode ולא כתיבה
 # לתוך הקובץ. bash קורא סקריפט תוך כדי ריצה, ולכן כתיבה ישירה לקובץ
@@ -112,8 +210,29 @@ cp "$TMP/install.sh" "$DIR/.install.sh.new" && \
 echo "  ✓ הקוד הוחלף ב-$DIR"
 
 if [ "$MODE" = "--update" ]; then
-  systemctl restart groupos 2>/dev/null && echo "  ✓ השירות הופעל מחדש"
-  exit 0
+  # עדכון שמסתיים ב-"השירות הופעל מחדש" בלי לבדוק שהוא **עלה** הוא
+  # עדכון שמדווח הצלחה על בוט מת. כאן מחכים לתשובה מטלגרם, ואם היא
+  # לא באה — מחזירים את הקוד הקודם לבד.
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "  ✓ הקוד עודכן (אין systemd כאן — אין מה להפעיל)"
+    exit 0
+  fi
+  systemctl restart groupos 2>/dev/null || true
+  if alive 25; then
+    journalctl -u groupos --since "-2 min" | grep "GroupOS עלה" | tail -1 \
+      | sed 's/^/  ✓ /'
+    echo "✅ עודכן והבוט חי."
+    exit 0
+  fi
+  echo "  ✗ הבוט לא עלה אחרי העדכון. מחזיר את הקוד הקודם…"
+  journalctl -u groupos --since "-2 min" --no-pager | tail -12 | sed 's/^/      /'
+  if restore_code && alive 25; then
+    echo "✅ הוחזר הקוד הקודם והבוט חי. הקבוצות עובדות."
+    echo "   מה שנכשל נשאר ביומן למעלה."
+    exit 1
+  fi
+  echo "  ✗ גם השחזור לא הצליח. הרץ:  bash $DIR/install.sh"
+  exit 1
 fi
 
 echo
@@ -162,20 +281,55 @@ echo "  ✓ טוקן $(mask "$TOK") ${SRC:-שהוזן עכשיו}"
 
 # 600: רק root קורא. הטוקן לעולם לא נכנס למאגר ולא ליומני מערכת.
 umask 077
-# הקובץ נכתב רק בהתקנה מלאה. ‎--update‎ אינו נוגע בו, ולכן מפתחות
-# שהוספת ידנית שורדים עדכון.
+
+# ── הקובץ הזה לא נדרס ────────────────────────────────────────────────────
+# ‎--update‎ ממילא לא מגיע לכאן. אבל גם התקנה מלאה שנייה — מה שקורה
+# כשמריצים את הפקודה הראשית פעם נוספת — **חייבת** לשמור את מה שהוספת:
+# מפתחות AI, שרת Bot API מקומי, וכל שורה שהוספת בעצמך. הגרסה הקודמת
+# כתבה את הקובץ מאפס, כלומר מפתחות שהודבקו ידנית פשוט נעלמו בשקט.
+env_get() {
+  [ -f "$ENV" ] || return 0
+  grep -m1 "^$1=" "$ENV" 2>/dev/null | cut -d= -f2- || true
+}
+count_keys() {
+  # רק מספר. הערך עצמו לעולם לא נדפס ולא נכנס ליומן.
+  printf '%s' "$1" | tr ',' '\n' | grep -c '[^[:space:]]' 2>/dev/null || echo 0
+}
+
+OLD_API=$(env_get GROUPOS_API_BASE)
+OLD_GEM=$(env_get GROUPOS_GEMINI_KEYS)
+OLD_GRQ=$(env_get GROUPOS_GROQ_KEYS)
+KNOWN="GROUPOS_TOKEN GROUPOS_DB GROUPOS_API_BASE GROUPOS_GEMINI_KEYS GROUPOS_GROQ_KEYS"
+EXTRA_LINES=""
+if [ -f "$ENV" ]; then
+  mkdir -p "$BACKUPS"
+  cp -f "$ENV" "$BACKUPS/env-$(date +%Y%m%d-%H%M%S)"
+  chmod 600 "$BACKUPS"/env-* 2>/dev/null || true
+  # שורות שאיננו מכירים — של מי שהוסיף משתנה בעצמו. הן שורדות.
+  EXTRA_LINES=$(grep -v '^[[:space:]]*#' "$ENV" 2>/dev/null \
+    | grep '=' \
+    | grep -vE "^($(echo "$KNOWN" | tr ' ' '|'))=" || true)
+fi
+
 cat > "$ENV" <<EOF
 GROUPOS_TOKEN=$TOK
 GROUPOS_DB=$DIR/data/groupos.db
 # שרת Bot API מקומי — מחזיר נתיב מקומי לקבצים במקום להוריד אותם.
 # ריק = השרת של טלגרם.
-GROUPOS_API_BASE=
+GROUPOS_API_BASE=$OLD_API
 # מפתחות AI, מופרדים בפסיקים. אפשר כמה — הבוט מסובב ביניהם ומצנן
 # מפתח שהחזיר 429. הם יושבים כאן ולא במסד, כי מסד עובר בגיבוי.
-GROUPOS_GEMINI_KEYS=
-GROUPOS_GROQ_KEYS=
+GROUPOS_GEMINI_KEYS=$OLD_GEM
+GROUPOS_GROQ_KEYS=$OLD_GRQ
 EOF
+if [ -n "$EXTRA_LINES" ]; then
+  {
+    echo "# שורות שהוספת בעצמך — נשמרו כמו שהן."
+    printf '%s\n' "$EXTRA_LINES"
+  } >> "$ENV"
+fi
 chmod 600 "$ENV"
+echo "  ✓ נשמר: Gemini $(count_keys "$OLD_GEM") מפתחות · Groq $(count_keys "$OLD_GRQ") מפתחות"
 echo "  ✓ נשמר ב-$ENV (הרשאות $(stat -c%a "$ENV"))"
 
 echo
@@ -248,7 +402,10 @@ if [ "$OKAY" -eq 1 ]; then
   echo "פקודות שירות:"
   echo "  journalctl -u groupos -f          יומן חי"
   echo "  systemctl restart groupos         הפעלה מחדש"
-  echo "  bash install.sh --update          עדכון קוד בלבד"
+  echo "  bash $DIR/install.sh --update     עדכון קוד בלבד"
+  echo "  bash $DIR/install.sh --rollback   חזרה לקוד הקודם"
+  echo
+  echo "גיבויים (${KEEP} אחרונים מכל סוג):  $DIR/data/backups"
 else
   echo "  ✗ הבוט לא דיווח שהוא עלה תוך 20 שניות."
   echo "    היומן:"
