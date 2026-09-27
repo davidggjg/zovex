@@ -3048,6 +3048,92 @@ async def _hls_fix_reaper():
 
 # חייב להירשם *לפני* המסלול הכללי /hls-relay/{host}/{path} — אחרת "_fix" ייחשב
 # ל-host. גם חייב לשבת תחת /hls-relay/ כי nginx מעביר רק קידומות מוכרות.
+# [fix_autofix_debug]
+# נקודת אבחון להפניה האוטומטית. מקומית בלבד — בקשה שעברה דרך nginx
+# נושאת X-Forwarded-For ולכן אינה מקומית, ומקבלת 404 כאילו אין נתיב.
+# אותה הגנה בדיוק ששומרת על /content/relink ועל /admin/migrate.
+@api.get("/debug/autofix")
+async def debug_autofix(request: Request, host: str, path: str,
+                        run: int = 0):
+    if not is_local_request(request):
+        raise HTTPException(404, "not found")
+    key = f"{host}/{path}"
+    fkey = _hls_fix_key(host, path)
+    src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
+
+    def _red(v):
+        """ממסך את שם המארח של הספק ואת האסימון שבנתיב.
+
+        התשובה נועדה להעתקה, ו-stderr של ffmpeg נושא את הכתובת המלאה.
+        המיסוך נעשה כאן ולא בהוראה למי שמעתיק, כדי שהפלט יהיה בטוח
+        מעצם בנייתו. הודעת השגיאה עצמה נשמרת — היא מה שמאבחן.
+        """
+        import re as _re
+        s = str(v)
+        # מחלקת תווים בלי גרשיים: גרש בתוך מחרוזת המקור שבר כאן את
+        # הרגקס, ונתפס בקומפילציה של התוצאה. רווח מפריד ממילא.
+        s = _re.sub(r"(/hls-relay/)(_fix/)?[^/\s]+", r"\1\2<ספק>", s)
+        s = _re.sub(r"\b[A-Z0-9]{8,}\b", "<אסימון>", s)
+        s = _re.sub(r"\b(?:[a-z0-9-]+\.){2,}[a-z]{2,}\b", "<ספק>", s)
+        return s
+
+    out = {
+        "autofix_on": bool(HLS_AUTOFIX),
+        "host": _red(host), "path": _red(path),
+        "fix_key": fkey,
+        # None כאן = "_fix נכשל בכל הפרופילים", וזה **חוסם** את ההפניה
+        # בכוונה, כדי שלא תיווצר לולאה. אם זה הערך — זו התשובה.
+        "profile_marker": _hls_fix_profile.get(fkey, "אין"),
+        "probe_in_flight": key in _hls_idr_probing,
+        "fix_active": fkey in _hls_fix,
+        "src": _red(src),
+    }
+    ent = _hls_idr_cache.get(key)
+    out["idr_cache"] = None if ent is None else {
+        "age_sec": round(time.time() - ent[0], 1),
+        "no_idr": bool(ent[1]),
+        "ttl_sec": _HLS_IDR_TTL,
+    }
+    if run:
+        # מריצים את אותה פקודה בדיוק שהבדיקה מריצה, ומחזירים את המספרים
+        # במקום בוליאני. run_in_executor כדי לא לחסום את הלולאה.
+        import subprocess
+
+        def _probe():
+            try:
+                r = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-v", "error", "-t", "8",
+                     "-i", src, "-map", "0:v:0", "-c", "copy",
+                     "-f", "h264", "-"],
+                    capture_output=True, timeout=90)
+                data = r.stdout or b""
+                idr, slices = _h264_count_nals(data)
+                err = (r.stderr or b"").decode("utf-8", "replace").strip()
+                return {"bytes": len(data), "slices": slices, "idr": idr,
+                        "rc": r.returncode,
+                        "stderr_tail": [_red(l) for l in err.splitlines()[-3:]],
+                        "verdict_no_idr": bool(slices) and idr == 0}
+            except Exception as e:
+                return {"error": _red(f"{type(e).__name__}: {e}")}
+
+        loop = asyncio.get_running_loop()
+        out["probe"] = await loop.run_in_executor(None, _probe)
+        # ומרעננים את המטמון דרך המסלול האמיתי, כדי שהתשובה תשקף את מה
+        # שההחלטה תראה — ולא רק את מה שהבדיקה הידנית ראתה.
+        try:
+            out["no_idr_via_real_path"] = await _hls_no_idr(host, path, src)
+        except Exception as e:
+            out["no_idr_via_real_path"] = _red(f"{type(e).__name__}: {e}")
+        ent = _hls_idr_cache.get(key)
+        out["idr_cache_after"] = None if ent is None else {
+            "age_sec": round(time.time() - ent[0], 1),
+            "no_idr": bool(ent[1]),
+        }
+    out["would_redirect"] = _hls_autofix_wanted(host, path)
+    out["redirect_to"] = _red(f"/hls-relay/_fix/{host}/{path}")
+    return JSONResponse(out)
+
+
 @api.get("/hls-relay/_fix/{host}/{path:path}")
 async def hls_relay_fixed(host: str, path: str, request: Request):
     check_hotlink(request)
@@ -3124,7 +3210,7 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
         _hls_fix_profile[key] = None
         log.error("hls_fix: %s נכשל בכל הפרופילים (%s) — מפנה למסלול הרגיל",
                   key, why)
-        return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=307)
+        return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=302)
 
     base = f"/hls-relay/_fix/{host}/{path.rstrip('/')}"
     base = base.rsplit("/", 1)[0] if "." in base.rsplit("/", 1)[-1] else base
@@ -3169,8 +3255,11 @@ async def hls_relay(host: str, path: str, request: Request):
         _fix_host = f"{base_host}:{explicit_port}" if explicit_port.isdigit() \
             else base_host
         if _hls_autofix_wanted(_fix_host, path):
+            # [fix_autofix_debug] 302 ולא 307: זו תמיד בקשת GET של
+            # playlist, ולכן שמירת השיטה שמבטיח 307 אינה נדרשת — ובתמורה
+            # 302 נעקב על ידי כל לקוח HTTP בלי יוצא מן הכלל.
             return RedirectResponse(f"/hls-relay/_fix/{_fix_host}/{path}",
-                                    status_code=307)
+                                    status_code=302)
         # manifest זעיר (KB בודדים) - קאש קצר (TTL=1.5s) חוסך בקשה כפולה
         # למקור כשכמה צופים מבקשים בערך באותה שנייה; חייבים גם ככה לקרוא
         # במלואו כדי לשכתב שורה-שורה, אז אין עלות נוספת לשמור את התוצאה.
