@@ -659,6 +659,21 @@ def test_manifest():
        (ins.split("EXTRA=(", 1)[1].split(")", 1)[0] if "EXTRA=(" in ins else ""))
     ok("install.sh מעתיק את עצמו ל-DIR", '"$DIR/install.sh"' in ins)
 
+    # ההתקנה **לא דורסת**. ארבע השורות האלה הן בדיוק מה שנשבר פעם:
+    # התקנה שנייה כתבה את .env מאפס, ומפתחות AI שהודבקו ידנית נעלמו
+    # בשקט. ערך ריק כאן הוא הבאג עצמו, ולכן זו בדיקה על המחרוזת.
+    ok("install.sh לא מאפס מפתחות AI",
+       "GROUPOS_GEMINI_KEYS=$OLD_GEM" in ins
+       and "GROUPOS_GROQ_KEYS=$OLD_GRQ" in ins)
+    ok("install.sh שומר שורות שלא הוא כתב", "EXTRA_LINES" in ins)
+    ok("install.sh מגבה את המסד לפני הפעלה מחדש",
+       "db_backup" in ins and ".backup" in ins)
+    ok("install.sh שומר את הקוד הקודם", "code_snapshot" in ins
+       and "restore_code" in ins)
+    ok("install.sh מריץ גם את בדיקות המטפלים", "test_bot.py" in ins)
+    ok("install.sh מאמת שהבוט עלה לפני שהוא מדווח הצלחה",
+       "alive " in ins or "alive(" in ins)
+
     # כל נתיב שהמתקין וה-README מבטיחים חייב להיות נתיב שהמתקין יוצר
     promised = set(_re.findall(r"/opt/groupos/([A-Za-z0-9_.]+)", ins + open(
         os.path.join(here, "README.md"), encoding="utf-8").read()))

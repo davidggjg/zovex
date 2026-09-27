@@ -85,11 +85,29 @@ db_backup() {
 restore_code() {
   local f
   f=$(ls -1t "$BACKUPS"/code-*.tgz 2>/dev/null | head -1)
-  [ -n "$f" ] || { echo "  ✗ אין עותק קוד לשחזור"; return 1; }
+  if [ -z "$f" ]; then
+    echo "  ✗ אין עותק קוד לשחזור — אין התקנה קודמת לחזור אליה."
+    echo "    להתקנה מלאה:  bash $DIR/install.sh"
+    return 1
+  fi
   tar xzf "$f" -C "$DIR" || return 1
   echo "  ✓ הוחזר הקוד מ-$(basename "$f")"
   systemctl restart groupos 2>/dev/null || true
   return 0
+}
+
+# ‎systemctl‎ קיים גם במכולות שאין בהן systemd כ-PID 1, ושם כל פקודה
+# שלו נכשלת על "Failed to connect to bus". ‎list-units‎ הוא הבדיקה
+# הנכונה: הוא נכשל בלי אפיק, ומצליח גם על מערכת ב-degraded — מצב
+# נפוץ לגמרי בשרת אמיתי, ולכן ‎is-system-running‎ לא מתאים כאן.
+have_systemd() {
+  command -v systemctl >/dev/null 2>&1 \
+    && systemctl list-units --no-pager >/dev/null 2>&1
+}
+
+journal_has_any() {
+  [ -n "$(journalctl -u groupos --since '-5 min' --no-pager 2>/dev/null \
+          | grep -v 'No entries' | head -3)" ]
 }
 
 alive() {
@@ -101,6 +119,13 @@ alive() {
     journalctl -u groupos --since "-2 min" 2>/dev/null \
       | grep -q "GroupOS עלה כ-@" && return 0
   done
+  # השורה לא נמצאה. אם **אין יומן בכלל** — זה אומר שלא הצלחנו לקרוא,
+  # ולא שהבוט מת. גלגול לאחור של עדכון תקין רק כי הלוג לא נקרא הוא
+  # נזק שנגרם מהזהירות עצמה, ולכן כאן יש נפילה לבדיקה חלשה יותר.
+  if ! journal_has_any && systemctl is-active --quiet groupos 2>/dev/null; then
+    echo "  ⚠ אין יומן לקרוא, אבל השירות פעיל — ממשיכים בלי אימות מלא."
+    return 0
+  fi
   return 1
 }
 
@@ -108,6 +133,9 @@ if [ "$MODE" = "--rollback" ]; then
   echo "════════ מחזיר את הקוד הקודם ════════"
   db_backup
   restore_code || exit 1
+  if ! have_systemd; then
+    echo "✅ הקוד הקודם הוחזר (אין כאן systemd שמיש)."; exit 0
+  fi
   if alive 20; then echo "✅ הבוט חי על הקוד הקודם."; else
     echo "  ⚠ הבוט לא דיווח שהוא עלה. היומן:"
     journalctl -u groupos --since "-2 min" --no-pager | tail -12 | sed 's/^/      /'
@@ -213,8 +241,8 @@ if [ "$MODE" = "--update" ]; then
   # עדכון שמסתיים ב-"השירות הופעל מחדש" בלי לבדוק שהוא **עלה** הוא
   # עדכון שמדווח הצלחה על בוט מת. כאן מחכים לתשובה מטלגרם, ואם היא
   # לא באה — מחזירים את הקוד הקודם לבד.
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo "  ✓ הקוד עודכן (אין systemd כאן — אין מה להפעיל)"
+  if ! have_systemd; then
+    echo "  ✓ הקוד עודכן (אין כאן systemd שמיש — אין שירות להפעיל)"
     exit 0
   fi
   systemctl restart groupos 2>/dev/null || true
@@ -389,6 +417,13 @@ for i in $(seq 1 20); do
   fi
 done
 
+# אותה נפילה לאחור כמו ב-alive: יומן שלא נקרא אינו בוט מת.
+if [ "$OKAY" -eq 0 ] && ! journal_has_any \
+     && systemctl is-active --quiet groupos 2>/dev/null; then
+  echo "  ⚠ אין יומן לקרוא, אבל השירות פעיל."
+  OKAY=1
+fi
+
 if [ "$OKAY" -eq 1 ]; then
   journalctl -u groupos --since "-2 min" | grep "GroupOS עלה" | tail -1 | sed 's/^/  ✓ /'
   echo
@@ -410,5 +445,8 @@ else
   echo "  ✗ הבוט לא דיווח שהוא עלה תוך 20 שניות."
   echo "    היומן:"
   journalctl -u groupos --since "-2 min" --no-pager | tail -15 | sed 's/^/      /'
+  echo
+  echo "    הקוד הקודם שמור. לחזור אליו:"
+  echo "      bash $DIR/install.sh --rollback"
   exit 1
 fi
