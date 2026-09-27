@@ -487,6 +487,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("security",  "settings.read"),
     ("delall",    "chat.purge"),
     ("id",     ""),
+    ("diag",   "settings.read"),
     ("health", ""),
 ]
 

@@ -349,6 +349,78 @@ async def test_reports():
 
 
 
+
+# ── בדיקה עצמית ───────────────────────────────────────────────────────────
+async def test_diag():
+    section("בדיקה עצמית")
+    real_bot = B.bot
+    B.bot = SmokeBot()
+    B.db.set(CHAT, "adminpriv", "0")
+    B.perms.set_role(CHAT, ADM, "owner")
+    try:
+        # שלושת מסלולי השקט של הברכה, כל אחד בתורו
+        B.db.set(CHAT, "welcome", "")
+        B.db.set(CHAT, "welcome_on", "1")
+        out = await _out(B.cmd_diag, msg("/diag", uid=ADM, mid=9700))
+        ok("אין נוסח לברכה — נאמר במפורש", "אין נוסח" in out, out[:160])
+
+        B.db.set(CHAT, "welcome", "ברוך הבא <שם>")
+        out = await _out(B.cmd_diag, msg("/diag", uid=ADM, mid=9701))
+        ok("נוסח ש-טלגרם תדחה — נאמר במפורש", "בודד" in out, out[:200])
+
+        B.db.set(CHAT, "welcome_on", "0")
+        B.db.set(CHAT, "welcome", "ברוך הבא {user}")
+        out = await _out(B.cmd_diag, msg("/diag", uid=ADM, mid=9702))
+        ok("מתג כבוי — נאמר במפורש", "כבוי" in out, out[:200])
+
+        B.db.set(CHAT, "welcome_on", "1")
+        out = await _out(B.cmd_diag, msg("/diag", uid=ADM, mid=9703))
+        ok("ברכה תקינה מסומנת כעובדת", "✅" in out and "ברוך הבא" in out,
+           out[:200])
+        ok("הדוח כולל מונים", "נעילות" in out and "פילטרים" in out,
+           out[:200])
+        ok("והתפקיד שלך", "התפקיד שלך" in out, out[-160:])
+    finally:
+        B.bot = real_bot
+        B.db.set(CHAT, "adminpriv", "1")
+        B.db.set(CHAT, "welcome", "")
+
+
+# ── טקסט ש-טלגרם דוחה לא נשמר ─────────────────────────────────────────────
+async def test_bad_html():
+    section("טקסט שטלגרם דוחה")
+    real_bot = B.bot
+    B.bot = SmokeBot()
+    B.db.set(CHAT, "adminpriv", "0")
+    B.perms.set_role(CHAT, ADM, "owner")
+    try:
+        out = await _out(B.cmd_welcome, msg("/welcome שלום <שם>", uid=ADM))
+        ok("ברכה עם ‎<‎ בודד נדחית", "לא נשמר" in out, out[:120])
+        ok("ולא נשמרה", not (B.db.get(CHAT, "welcome", "") or "").strip(),
+           repr(B.db.get(CHAT, "welcome", "")))
+
+        out = await _out(B.cmd_welcome,
+                         msg("/welcome שלום <b>{user}</b>", uid=ADM))
+        ok("ברכה עם HTML תקין נשמרת",
+           "<b>{user}</b>" in (B.db.get(CHAT, "welcome", "") or ""),
+           repr(B.db.get(CHAT, "welcome", "")))
+
+        out = await _out(B.cmd_setrules, msg("/setrules אסור <b>לפרסם", uid=ADM))
+        ok("חוקים עם תגית לא סגורה נדחים", "לא נשמר" in out, out[:120])
+
+        out = await _out(B.cmd_save, msg("/save x <blink>זה</blink>", uid=ADM))
+        ok("הערה עם תגית לא נתמכת נדחית", "לא נשמר" in out, out[:120])
+
+        out = await _out(B.cmd_schedule,
+                         msg("/schedule daily 09:00 בוקר <טוב>", uid=ADM))
+        ok("תזמון עם ‎<‎ בודד נדחה", "לא נשמר" in out, out[:120])
+        ok("ולא נשמר", not B.sched.all(CHAT), str(len(B.sched.all(CHAT))))
+    finally:
+        B.bot = real_bot
+        B.db.set(CHAT, "adminpriv", "1")
+        B.db.set(CHAT, "welcome", "")
+
+
 # ── מנהל אנונימי ──────────────────────────────────────────────────────────
 def anon_msg(text: str, mid: int = 9600) -> Message:
     """הודעה שנשלחה בשם הקבוצה — כך טלגרם שולחת ממנהל אנונימי."""
@@ -1033,6 +1105,8 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_diag()
+    await test_bad_html()
     await test_anon_admin()
     await test_join()
     await test_flows()

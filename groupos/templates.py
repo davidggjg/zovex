@@ -110,3 +110,52 @@ def render_pick(text: str, ctx: dict) -> str:
 def used(text: str) -> set[str]:
     """אילו משתנים מופיעים בטקסט. משמש לתצוגה מקדימה ולבדיקות."""
     return set(_RX.findall(text or ""))
+
+
+# ── בדיקת HTML לפני שמירה ─────────────────────────────────────────────────
+# טלגרם מקבלת תת-קבוצה קטנה של HTML, ודוחה את כל ההודעה כשיש בה תגית
+# שאינה מוכרת או ‎<‎ שאינו פותח תגית. הדחייה הזאת נתפסה אצלנו ב-
+# ‎except TelegramAPIError‎ ונרשמה ליומן — כלומר **ברכה עם ‎<‎ אחד
+# מיותר נשמרה בהצלחה ואז לא נשלחה לעולם, בשקט.**
+#
+# לכן הבדיקה כאן, בזמן השמירה: מנהל שכתב משהו שטלגרם תדחה צריך לדעת
+# את זה מיד, ולא לגלות שהברכה "לא עובדת" שבוע אחר כך.
+TG_TAGS = frozenset({
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "a", "code", "pre", "blockquote", "span", "tg-spoiler", "tg-emoji",
+})
+
+_RX_TAG = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^<>]*)?)>")
+
+
+def check_html(text: str) -> Optional[str]:
+    """‎None‎ = טלגרם תקבל את הטקסט. אחרת תיאור התקלה, בעברית.
+
+    נבדקים שלושה דברים, וכולם דברים שטלגרם דוחה עליהם את ההודעה כולה:
+    תגית שאינה ברשימה, תגית שלא נסגרה או נסגרה בסדר הפוך, ו-‎<‎ בודד
+    שאינו פותח תגית מוכרת.
+    """
+    raw = text or ""
+    stack: list[str] = []
+    pos = 0
+    for m in _RX_TAG.finditer(raw):
+        # ‎<‎ בין התגיות: טלגרם דוחה "unsupported start tag"
+        if "<" in raw[pos:m.start()]:
+            return "יש ‎<‎ בודד בטקסט. כתוב ‎&lt;‎ במקומו."
+        pos = m.end()
+        closing, name = bool(m.group(1)), m.group(2).lower()
+        if name not in TG_TAGS:
+            return f"התגית ‎<{name}>‎ אינה נתמכת בטלגרם."
+        if closing:
+            if not stack:
+                return f"‎</{name}>‎ נסגרת בלי שנפתחה."
+            if stack[-1] != name:
+                return f"‎</{name}>‎ סוגרת במקום ‎</{stack[-1]}>‎."
+            stack.pop()
+        else:
+            stack.append(name)
+    if "<" in raw[pos:]:
+        return "יש ‎<‎ בודד בטקסט. כתוב ‎&lt;‎ במקומו."
+    if stack:
+        return f"התגית ‎<{stack[-1]}>‎ לא נסגרה."
+    return None

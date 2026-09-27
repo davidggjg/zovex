@@ -762,6 +762,24 @@ def test_i18n():
 # ── משתנים בהודעות ────────────────────────────────────────────────────────
 def test_templates():
     section("משתנים בהודעות")
+    # HTML שטלגרם דוחה: נשמר בהצלחה ואז לא נשלח לעולם, בשקט.
+    ok("טקסט רגיל תקין", tpl.check_html("שלום {user}") is None)
+    ok("HTML נתמך תקין",
+       tpl.check_html("<b>שלום</b> <i>{user}</i>") is None)
+    ok("קישור תקין",
+       tpl.check_html('<a href="https://x.com">כאן</a>') is None)
+    ok("‎<‎ בודד נדחה", tpl.check_html("שלום <שם>") is not None)
+    ok("‎<‎ בסוף נדחה", tpl.check_html("5 < 6") is not None)
+    ok("‎&lt;‎ מותר", tpl.check_html("5 &lt; 6") is None)
+    ok("תגית לא נתמכת נדחית",
+       "blink" in (tpl.check_html("<blink>x</blink>") or ""))
+    ok("תגית שלא נסגרה נדחית", tpl.check_html("<b>לא נסגר") is not None)
+    ok("סדר סגירה הפוך נדחה", tpl.check_html("<i>x</b>") is not None)
+    ok("סגירה בלי פתיחה נדחית", tpl.check_html("</b>לבד") is not None)
+    ok("ההסבר בעברית ולא באנגלית",
+       any("\u05d0" <= c <= "\u05ea"
+           for c in (tpl.check_html("<b>x") or "")))
+
     ctx = tpl.context(user_id=7, first="דוד", username="david",
                       chat_title="הקבוצה", chat_id=-100, count=42)
     ok("שם מוחלף", tpl.render("שלום {user}", ctx) == "שלום דוד")

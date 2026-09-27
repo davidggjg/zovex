@@ -200,6 +200,21 @@ GROUP_OUTPUT = frozenset({
 })
 
 
+async def _bad_html(msg: Message, text: str) -> bool:
+    """‎True‎ אם טלגרם תדחה את הטקסט — ואז נאמר למנהל למה, עכשיו.
+
+    בלי זה הטקסט נשמר בהצלחה, ובפעם הראשונה שהוא אמור להישלח טלגרם
+    דוחה את ההודעה כולה, ‎send_content‎ תופס את החריגה, רושם שורה ביומן
+    ומחזיר ‎None‎. כלומר ברכה עם ‎<‎ אחד מיותר "עובדת" בעיני המנהל
+    ופשוט לא נשלחת לעולם. זה בדיוק תסמין של "הפעלתי ברכה ולא קרה
+    כלום"."""
+    err = tpl.check_html(text)
+    if not err:
+        return False
+    await reply(msg, T(msg, "err.bad_html", why=err))
+    return True
+
+
 def _cmd_of(msg: Message) -> str:
     t = msg.text or ""
     if not t.startswith("/"):
@@ -1261,6 +1276,8 @@ async def cmd_save(msg: Message):
         return
     name = parts[1]
     text, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if await _bad_html(msg, text):
+        return
     if not notes.save(msg.chat.id, name, text, media_id=mid, media_kind=kind,
                       by=msg.from_user.id):
         await reply(msg, T(msg, "note.usage"))
@@ -1339,6 +1356,8 @@ async def cmd_filter(msg: Message):
         return
     trigger = parts[1]
     content, _, _ = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if content.strip() and await _bad_html(msg, content):
+        return
     if not content.strip() or not filters.add(msg.chat.id, trigger, content):
         await reply(msg, T(msg, "filter.usage"))
         return
@@ -1433,6 +1452,8 @@ async def cmd_setrules(msg: Message):
     if not body.strip():
         await reply(msg, T(msg, "rules.usage"))
         return
+    if await _bad_html(msg, body):
+        return
     db.set(msg.chat.id, RULES_KEY, body, msg.from_user.id)
     audit.log(msg.chat.id, "rules.write", actor_id=msg.from_user.id,
               severity="medium")
@@ -1454,6 +1475,8 @@ async def _greet_cmd(msg: Message, key: str, cmd: str):
                         vars=", ".join("{" + v + "}" for v in tpl.VARIABLES)))
         return
     body, _, _ = _content_of(msg, arg)
+    if await _bad_html(msg, body):
+        return
     db.set(msg.chat.id, key, body, msg.from_user.id)
     await reply(msg, T(msg, "greet.set"))
 
@@ -1648,6 +1671,8 @@ async def cmd_addcmd(msg: Message):
         await reply(msg, T(msg, "cc.usage"))
         return
     body, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if await _bad_html(msg, body):
+        return
     c, err = cmds.set(msg.chat.id, parts[1], body, by=msg.from_user.id,
                       media_id=mid, media_kind=kind)
     if err:
@@ -2561,6 +2586,8 @@ async def cmd_schedule(msg: Message):
     if len(sched.all(msg.chat.id)) >= schedmod.MAX_PER_CHAT:
         await reply(msg, T(msg, "sched.full", n=schedmod.MAX_PER_CHAT))
         return
+    if await _bad_html(msg, body):
+        return
     sid = sched.add(msg.chat.id, spec, body, by=msg.from_user.id)
     if sid is None:
         await reply(msg, T(msg, "sched.usage"))
@@ -3355,6 +3382,8 @@ async def cmd_say(msg: Message):
     if len(text) < 2 or not text[1].strip():
         await reply(msg, T(msg, "say.usage"))
         return
+    if await _bad_html(msg, text[1]):
+        return
     _schedule_delete(msg.chat.id, msg.message_id, 1)
     audit.log(msg.chat.id, "chat.say", actor_id=msg.from_user.id,
               after=text[1][:200], severity="medium")
@@ -3428,6 +3457,116 @@ async def cmd_id(msg: Message):
     touch(msg)
     t = _target_of(msg) or (msg.from_user.id if msg.from_user else 0)
     await reply(msg, T(msg, "id.line", user=t, chat=msg.chat.id))
+
+
+@dp.message(Command("diag"))
+@needs("settings.read")
+async def cmd_diag(msg: Message):
+    """בדיקה עצמית: מה יעבוד בקבוצה הזאת, ומה לא — ולמה.
+
+    נבנה אחרי "הפעלתי הודעת כניסה ולא קרה כלום". לברכה יש **שלושה**
+    מסלולים שבהם היא נכשלת בשקט: המתג כבוי, אין נוסח, או שהנוסח כולל
+    HTML שטלגרם דוחה — ובכל השלושה הבוט פשוט לא מדבר. אותו דבר
+    בקאפצ'ה, בפילטרים, ובניתוח התוכן.
+
+    במקום שמנהל ינחש, הפקודה הזאת אומרת לכל מערכת: תעבוד, או לא
+    תעבוד ובגלל מה."""
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    chat_id = msg.chat.id
+    lg = lang_of(msg)
+    admins = await sync_admins(chat_id)
+    is_admin, missing = await bot_rights(chat_id)
+    rows: list[str] = []
+
+    def line(state: str, label: str, detail: str = "") -> None:
+        mark = {"ok": "✅", "warn": "⚠️", "bad": "❌"}[state]
+        rows.append(f"{mark} <b>{label}</b>" + (f" — {detail}" if detail else ""))
+
+    # 1. הבסיס: בלי הרשאות ובלי זיהוי מנהלים שום דבר אחר לא ירוץ
+    if not is_admin:
+        line("bad", i18n.t("diag.rights", lg), i18n.t("diag.not_admin", lg))
+    elif missing:
+        line("warn", i18n.t("diag.rights", lg),
+             ", ".join(i18n.t(k, lg) for k in missing))
+    else:
+        line("ok", i18n.t("diag.rights", lg))
+    line("ok" if admins else "bad", i18n.t("diag.admins", lg),
+         str(len(admins)) if admins else i18n.t("diag.no_admin_list", lg))
+
+    # 2. ברכות — שלושת מסלולי השקט
+    for key, on_key, label, cmd in (
+            (WELCOME_KEY, "welcome_on", "diag.welcome", "/welcome"),
+            (GOODBYE_KEY, "goodbye_on", "diag.goodbye", "/goodbye")):
+        raw = db.get(chat_id, key, "") or ""
+        if db.get(chat_id, on_key, "1") != "1":
+            line("warn", i18n.t(label, lg), i18n.t("diag.switch_off", lg))
+        elif not raw.strip():
+            # לא "שבור" אלא לא מוגדר — וזו בדיוק המלכודת: המתג דלוק,
+            # אין נוסח, ולכן שום דבר לא נשלח ואף אחד לא אומר למה.
+            line("warn", i18n.t(label, lg),
+                 i18n.t("diag.no_text", lg) + f" — <code>{cmd} …</code>")
+        else:
+            bad = tpl.check_html(raw)
+            if bad:
+                line("bad", i18n.t(label, lg), bad)
+            else:
+                line("ok", i18n.t(label, lg),
+                     tpl.esc(raw.splitlines()[0][:40]))
+
+    # 3. שאר המערכות, לפי מה שיש בהן בפועל
+    rules = (db.get(chat_id, RULES_KEY, "") or "").strip()
+    line("ok" if rules else "warn", i18n.t("diag.rules", lg),
+         "" if rules else i18n.t("diag.no_text", lg)
+         + " — <code>/setrules …</code>")
+    line("ok" if db.get(chat_id, "captcha", "0") == "1" else "warn",
+         i18n.t("sec.captcha", lg),
+         "" if db.get(chat_id, "captcha", "0") == "1"
+         else i18n.t("settings.off", lg))
+    line("ok" if db.get(chat_id, "flood", "1") == "1" else "warn",
+         i18n.t("sec.flood", lg),
+         "" if db.get(chat_id, "flood", "1") == "1"
+         else i18n.t("settings.off", lg))
+
+    counts = (
+        ("diag.locks", len(locks.get_all(chat_id))),
+        ("diag.blocks", len(blocks.all(chat_id))),
+        ("diag.filters", len(filters.all(chat_id))),
+        ("diag.notes", len(notes.names(chat_id, include_admin=True))),
+        ("diag.cmds", cmds.count(chat_id)),
+        ("diag.sched", len(sched.all(chat_id))),
+        ("diag.autos", len(auto.rules_for(db, chat_id))),
+        ("diag.reports", rpt.open_count(chat_id)),
+    )
+    rows.append("")
+    rows.append(" · ".join(f"{i18n.t(k, lg)} {n}" for k, n in counts))
+
+    # 4. AI — שלושה מתגים ושלוש סיבות אפשריות לשקט
+    if not ai.pools:
+        line("warn", i18n.t("sec.ai", lg), i18n.t("ai.no_keys", lg))
+    else:
+        for sw, label, need_see in (("ai", "sec.ai", False),
+                                    ("aivision", "sw.aivision", True),
+                                    ("aivoice", "sw.aivoice", True)):
+            on = db.get(chat_id, sw, "0") == "1"
+            if on and need_see and not brain.can_see:
+                line("bad", i18n.t(label, lg), i18n.t("vision.no_keys", lg))
+            else:
+                line("ok" if on else "warn", i18n.t(label, lg),
+                     "" if on else i18n.t("settings.off", lg))
+
+    # 5. אתה
+    role = perms.role_of(chat_id, msg.from_user.id)
+    seen = msg.from_user.id in admins or role in ("owner", "admin",
+                                                  "super_admin")
+    line("ok" if seen else "warn", i18n.t("diag.you", lg),
+         role if seen else f"{role} · {i18n.t('diag.not_seen', lg)}")
+
+    rows.append("")
+    rows.append("<i>" + i18n.t("diag.hint", lg) + "</i>")
+    await reply(msg, i18n.t("diag.title", lg) + "\n\n" + "\n".join(rows))
 
 
 @dp.message(Command("health"))
