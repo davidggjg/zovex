@@ -2012,21 +2012,59 @@ def _edge_region(start, end, file_size):
     return None
 
 def _edge_evict():
-    """שומר על תקרת הגודל — מוחק את הקבצים שלא נגענו בהם הכי מזמן."""
+    """שומר על תקרת הגודל — מוחק את הקבצים שלא נגענו בהם הכי מזמן.
+
+    [fix_edge_evict] ‎stat‎ לכל קובץ בנפרד, ולא רשימה אחת עם ‎except
+    OSError: return‎ עליה. נמדד: המטמון הגיע ל-22GB מול תקרה של 3GB,
+    כי ‎glob‎ מחזיר שמות ו-‎stat‎ נקרא אחר כך — ובין השניים ‎tmp.replace‎
+    של מילוי מקביל מוחק את הקובץ. ‎FileNotFoundError‎ הוא ‎OSError‎,
+    ולכן הפינוי כולו יצא בלי למחוק דבר. כמה שיותר צופים, כך זה קרה
+    יותר.
+    """
+    cap = int(os.environ.get("STREAM_EDGE_CACHE_MAX", EDGE_CACHE_MAX))
+    now = time.time()
+    files, total, stale = [], 0, []
     try:
-        files = [(p.stat().st_atime, p.stat().st_size, p)
-                 for p in EDGE_CACHE_DIR.glob("*.*")]
+        listing = list(EDGE_CACHE_DIR.iterdir())
     except OSError:
         return
-    total = sum(s for _, s, _ in files)
+    for p in listing:
+        try:
+            st = p.stat()
+        except OSError:
+            continue                      # נעלם בדיוק עכשיו — לא תופס מקום
+        if not p.is_file():
+            continue
+        # ‎.tmp‎ שנשאר מעבודה שנקטעה. מילוי אינו נמשך חמש דקות.
+        if p.name.endswith(".tmp") and now - st.st_mtime > 300:
+            stale.append(p)
+            continue
+        files.append((st.st_atime, st.st_size, p))
+        total += st.st_size
+
+    removed = 0
+    freed = 0
+    for p in stale:
+        try:
+            freed += p.stat().st_size
+            p.unlink()
+            removed += 1
+        except OSError:
+            pass
+
     for _atime, size, p in sorted(files):
-        if total <= EDGE_CACHE_MAX:
+        if total <= cap:
             break
         try:
             p.unlink()
-            total -= size
         except OSError:
-            pass
+            continue
+        total -= size
+        freed += size
+        removed += 1
+    if removed:
+        log.info("מטמון קצה: נמחקו %d קבצים (%.1fGB) — נשאר %.1fGB מתוך %.1fGB",
+                 removed, freed / (1 << 30), total / (1 << 30), cap / (1 << 30))
 
 def _edge_read(chat_id, message_id, which, region_len):
     """קורא אזור קצה מהדיסק. מחזיר None אם אינו שם או אינו שלם."""
