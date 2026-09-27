@@ -2442,6 +2442,52 @@ HLS_RELAY_UPSTREAM_HEADERS = {
 # מקבילה לאותו מקטע בדיוק "מצטרפת" לזרימה הקיימת במקום לפתוח בקשה חדשה משלה.
 _hls_manifest_cache: dict = {}
 MANIFEST_CACHE_TTL = 1.5
+
+# [fix_relay_deadline] מועד יעד לבקשת playlist, ותקרה לבדיקת המקור.
+# נמדד: ערוץ של ספק מושבת לא החזיר שגיאה אלא נתקע 25–45 שניות, כי כל
+# שלב חיכה בתורו (12ש לסגמנט, 8ש לאימות, 12ש לפרופיל שני, 15ש להפניה).
+HLS_FIX_DEADLINE = float(os.environ.get("HLS_FIX_DEADLINE", "14"))
+HLS_UP_PROBE_TIMEOUT = float(os.environ.get("HLS_UP_PROBE_TIMEOUT", "4"))
+HLS_DEAD_TTL = float(os.environ.get("HLS_DEAD_TTL", "45"))
+_hls_dead: dict = {}                 # key -> (expires_at, reason)
+
+
+def _hls_dead_reason(key: str):
+    """הסיבה שהערוץ סומן כלא-עונה, או None. פג מעצמו."""
+    hit = _hls_dead.get(key)
+    if not hit:
+        return None
+    if hit[0] <= time.time():
+        _hls_dead.pop(key, None)
+        return None
+    return hit[1]
+
+
+def _hls_mark_dead(key: str, reason: str) -> None:
+    """סימון קצר-מועד. ההתאוששות של הספק לא דורשת מאיתנו כלום."""
+    _hls_dead[key] = (time.time() + HLS_DEAD_TTL, reason)
+
+
+async def _hls_upstream_alive(host: str, path: str):
+    """‎(עונה?, סיבה)‎ — בקשה אחת מהירה לפני שמפעילים המרה.
+
+    דרך המסלול הרגיל שלנו ב-127.0.0.1, בדיוק כמו שההמרה עצמה מקבלת את
+    הקלט שלה. כך אין כאן שכתוב של לוגיקת הסכימה, ההרשאות או ה-User-Agent,
+    והבדיקה של playlist ריק שכבר קיימת שם חלה גם על הבדיקה הזאת.
+    """
+    if _hls_relay_client is None:
+        return True, ""              # לפני האתחול אין מה לבדוק
+    src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
+    try:
+        r = await _hls_relay_client.get(src, timeout=HLS_UP_PROBE_TIMEOUT)
+    except Exception as e:
+        return False, (f"המקור לא ענה תוך {HLS_UP_PROBE_TIMEOUT:.0f} שניות "
+                       f"({type(e).__name__})")
+    if r.status_code != 200:
+        return False, f"המקור החזיר {r.status_code}"
+    if _hls_manifest_entries(r.text) == 0:
+        return False, "playlist ריק מהמקור"
+    return True, ""
 _hls_segment_inflight: dict = {}
 
 # ── משיכה מקדימה של מקטעי שידור חי ───────────────────────────────────────────
@@ -3281,12 +3327,38 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
     # עד כה: ניסיון אחד, ואם הוא נפל — 502 ומסך שחור. עכשיו שני פרופילים,
     # ואם גם הם נפלו — הפניה למסלול הרגיל. הצופה אף פעם לא נשאר בלי כלום.
     key = _hls_fix_key(host, path)
+
+    # [fix_relay_deadline] מה שסומן כלא-עונה נכשל מיד, בלי לשלם שוב.
+    dead = _hls_dead_reason(key)
+    if dead:
+        raise HTTPException(502, f"hls_fix: {dead}")
+
+    # [fix_relay_deadline] המקור נבדק **לפני** שנולד ffmpeg. בלי זה
+    # ערוץ של ספק מושבת מחזיק את הבקשה עשרות שניות ותהליך המרה שלם,
+    # על אותו מעבד שמזרים את הערוצים שכן עובדים.
+    _alive, _why_dead = await _hls_upstream_alive(host, path)
+    if not _alive:
+        _hls_mark_dead(key, _why_dead)
+        log.warning("hls_fix: %s — %s · לא מפעילים המרה", key, _why_dead)
+        raise HTTPException(502, f"hls_fix: {_why_dead}")
+
+    _t_start = time.time()
     # [fix_live_autofix] None (כשל מוחלט) נקרא כ-0, כדי שניסיון ישיר
     # ב-_fix ימשיך לנסות להתאושש ולא יקבל פרופיל None.
     first = _hls_fix_profile.get(key) or 0
     order = [first] + [p for p in (0, 1) if p != first]
     why = ""
     for profile in order:
+        # [fix_relay_deadline] מועד היעד נבדק לפני כל פרופיל. חריגה
+        # מחזירה 502 מיד ו**לא** מפנה למסלול הרגיל, כי הפניה על מקור
+        # שהוכח כלא עונה היא עוד 15 שניות של תקיעה.
+        if time.time() - _t_start > HLS_FIX_DEADLINE:
+            why = why or f"חריגה מ-{HLS_FIX_DEADLINE:.0f} שניות"
+            _hls_fix_profile[key] = None
+            _hls_fix_failed_at[key] = time.time()
+            _hls_mark_dead(key, why)
+            log.error("hls_fix: %s — %s", key, why)
+            raise HTTPException(502, f"hls_fix: {why}")
         ent = await _hls_fix_start(host, path, profile)
         if ent is None:
             why = why or "לא ניתן להפעיל את ההמרה"
@@ -3298,6 +3370,11 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
                 ok = True
                 break
             if ent["proc"].returncode is not None:
+                break
+            # [fix_relay_deadline] גם כאן, ולא רק בין פרופילים: ההמתנה
+            # הזאת היא רוב ה-12 השניות, ואין טעם להשלים אותה כשהמועד
+            # כבר עבר.
+            if time.time() - _t_start > HLS_FIX_DEADLINE:
                 break
             await asyncio.sleep(0.1)
         # [fix_verify_output] "נוצר סגמנט" אינו הצלחה.
@@ -3414,6 +3491,13 @@ async def hls_relay(host: str, path: str, request: Request):
                     resp = await _hls_relay_client.get(
                         upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS)
                 except httpx.HTTPError as e:
+                    # [fix_relay_deadline] פסק זמן מסומן לזמן קצר. בלי זה
+                    # כל בקשה לאותו ערוץ משלמת שוב 15 שניות המתנה, גם
+                    # כשברור שהמקור אינו עונה.
+                    if isinstance(e, (httpx.TimeoutException,
+                                      httpx.ConnectError)):
+                        _hls_mark_dead(_hls_fix_key(host, path),
+                                       f"המקור לא ענה ({type(e).__name__})")
                     raise HTTPException(
                         502, f"hls_relay: upstream fetch failed - {e}")
                 # אם המקור לא החזיר manifest תקין (שגיאה, redirect שלא נופה,
