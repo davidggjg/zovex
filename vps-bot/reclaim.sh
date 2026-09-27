@@ -100,28 +100,92 @@ echo
 # mkvtool מנקה אחרי עצמו, ולכן מה שנשאר כאן הוא עבודה שנקטעה באמצע —
 # למשל בהפעלה מחדש של השרת. תיקייה שנגעו בה בשעות האחרונות לא נוגעים בה.
 echo "──── 2. תיקיות עבודה שנקטעו (mkvwork) ────"
-if pgrep -f mkvtool >/dev/null 2>&1; then
-  echo "  ⚠ יש עבודת mkvtool שרצה כרגע — מדלג על הכול כאן."
-elif [ -d "$MKV" ]; then
-  MKV_TOTAL=$(du -sb "$MKV" 2>/dev/null | cut -f1)
-  echo "  התיקייה כולה: $(human "${MKV_TOTAL:-0}")"
-  FOUND=0; SUM=0
-  while IFS= read -r dir; do
-    [ -z "$dir" ] && continue
-    SZ=$(du -sb "$dir" 2>/dev/null | cut -f1)
-    SUM=$((SUM + ${SZ:-0})); FOUND=$((FOUND + 1))
-    printf "    %-46s %s  (נגעו לפני %s שעות)\n" \
-      "$(basename "$dir")" "$(human "${SZ:-0}")" \
-      "$(( ( $(date +%s) - $(stat -c %Y "$dir") ) / 3600 ))"
-    [ "$DO_IT" -eq 1 ] && rm -rf -- "$dir"
-  done < <(find "$MKV" -mindepth 1 -maxdepth 1 -type d \
-             -mmin +$((MKV_AGE_HOURS * 60)) 2>/dev/null)
-  if [ "$FOUND" -eq 0 ]; then
-    echo "    אין תיקייה ישנה מ-${MKV_AGE_HOURS} שעות — אין מה לפנות"
-  else
-    echo "  יפונה: $(human "$SUM") ב-$FOUND תיקיות"
-    [ "$DO_IT" -eq 1 ] && echo "  ✓ נמחקו"
-  fi
+# mkvtool מנקה אחרי עצמו, ולכן מה שנשאר כאן הוא עבודה שנקטעה באמצע —
+# למשל בהפעלה מחדש של השרת.
+#
+# **לא** "האם mkvtool רץ": הוא שירות שיושב ב-idle ומחכה לקבצים, כלומר
+# הוא רץ *תמיד*, ובדיקה כזאת הייתה מדלגת על 11GB לנצח. במקום זה נבדק
+# לכל תיקייה בנפרד אם מישהו מחזיק בה קובץ פתוח או יושב בה — דרך /proc,
+# בלי תלות ב-lsof שאינו בטוח מותקן.
+if [ -d "$MKV" ]; then
+  python3 - "$MKV" "$MKV_AGE_HOURS" "$DO_IT" <<'PYMKV'
+import os, shutil, sys, time
+from pathlib import Path
+
+root, age_h, do_it = Path(sys.argv[1]), float(sys.argv[2]), sys.argv[3] == "1"
+
+
+def busy_paths():
+    """כל מה שתהליך כלשהו מחזיק פתוח, או יושב בו כ-cwd."""
+    out = set()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        for kind in ("cwd", "fd"):
+            base = "/proc/%s/%s" % (pid, kind)
+            try:
+                names = [base] if kind == "cwd" else \
+                    ["%s/%s" % (base, fd) for fd in os.listdir(base)]
+            except OSError:
+                continue
+            for n in names:
+                try:
+                    out.add(os.path.realpath(os.readlink(n)))
+                except OSError:
+                    continue
+    return out
+
+
+def h(n):
+    return "%.1fGB" % (n / (1 << 30)) if n >= (1 << 30) else "%.0fMB" % (n / (1 << 20))
+
+
+open_paths = busy_paths()
+now = time.time()
+cut = now - age_h * 3600
+total_all = 0
+cand, skipped = [], []
+for d in sorted(root.iterdir() if root.exists() else []):
+    if not d.is_dir():
+        continue
+    size = 0
+    for f in d.rglob("*"):
+        try:
+            if f.is_file():
+                size += f.stat().st_size
+        except OSError:
+            pass
+    total_all += size
+    try:
+        mtime = d.stat().st_mtime
+    except OSError:
+        continue
+    real = os.path.realpath(d)
+    in_use = any(x == real or x.startswith(real + os.sep) for x in open_paths)
+    if in_use:
+        skipped.append((d.name, size, "קובץ פתוח בתוכה"))
+    elif mtime > cut:
+        skipped.append((d.name, size, "נגעו בה לפני %.0f דקות" % ((now - mtime) / 60)))
+    else:
+        cand.append((d, size, (now - mtime) / 3600))
+
+print("  התיקייה כולה: " + h(total_all))
+for name, size, why in skipped:
+    print("    \u2298 %-12s %8s  \u2014 %s" % (name, h(size), why))
+if not cand:
+    print("    אין תיקייה שאפשר לפנות")
+else:
+    for d, size, hours in cand:
+        print("    %-12s %8s  (נקטעה לפני %.0f שעות)" % (d.name, h(size), hours))
+    print("  יפונה: %s ב-%d תיקיות" % (h(sum(s for _, s, _ in cand)), len(cand)))
+    if do_it:
+        gone = 0
+        for d, _s, _hrs in cand:
+            shutil.rmtree(d, ignore_errors=True)
+            if not d.exists():
+                gone += 1
+        print("  \u2713 נמחקו %d תיקיות" % gone)
+PYMKV
 else
   echo "  אין תיקייה כזאת — מדלג"
 fi
