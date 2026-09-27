@@ -45,13 +45,22 @@ SITE_DIR=$(nginx -T 2>/dev/null | grep -E "^[[:space:]]*root[[:space:]]" \
 DRY=0; [ "${1:-}" = "--check" ] && DRY=1
 
 # פאצ'ים שעורכים main.py (ואחד גם את admin.html), לפי הסדר שבו הם מוחלים
-PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py fix_panel_pass_header.py fix_saved_poster.py fix_custom_poster.py fix_poster_sharp.py fix_stale_sig.py fix_stale_sig2.py fix_live_opengop.py fix_live_robust.py fix_live_autofix.py fix_idr_probe_log.py fix_autofix_debug.py fix_verify_output.py fix_empty_manifest.py fix_profile_memory.py)
+PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py fix_panel_pass_header.py fix_saved_poster.py fix_custom_poster.py fix_poster_sharp.py fix_stale_sig.py fix_stale_sig2.py fix_live_opengop.py fix_live_robust.py fix_live_autofix.py fix_idr_probe_log.py fix_autofix_debug.py fix_verify_output.py fix_empty_manifest.py fix_profile_memory.py fix_relay_deadline.py)
 # כלי אבחון — יורדים אבל לא מורצים
-TOOLS=(who_is_watching.py vodinfo_probe.py fix_catalog_meta.py server_headroom.py ai_cost_calc.py free_tier_plan.py scan_video.py hls_fix_probe.py h264_analyze.py live_watch.py fix_opengop_route.py)
+TOOLS=(who_is_watching.py vodinfo_probe.py fix_catalog_meta.py server_headroom.py ai_cost_calc.py free_tier_plan.py scan_video.py hls_fix_probe.py h264_analyze.py live_watch.py fix_opengop_route.py inventory.sh)
 
 echo "════════ 1/6 · מוריד ════════"
+# האימות הוא לפי סוג הקובץ ולא תמיד כפייתון: סקריפט bash שנבדק ב-ast
+# נכשל תמיד, וזה היה מפיל את כל העדכון בגלל כלי עזר אחד.
+check_file() {
+  case "$1" in
+    *.py) python3 -c "import ast,sys;ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$1" ;;
+    *.sh) bash -n "$1" ;;
+    *)    [ -s "$1" ] ;;
+  esac
+}
 for f in "${PATCHES[@]}" "${TOOLS[@]}"; do
-  if curl -fsSL -o "$f.new" "$RAW/$f" && python3 -c "import ast;ast.parse(open('$f.new',encoding='utf-8').read())"; then
+  if curl -fsSL -o "$f.new" "$RAW/$f" && check_file "$f.new"; then
     mv "$f.new" "$f"; echo "  ✓ $f"
   else
     rm -f "$f.new"; echo "  ✗ $f לא ירד או ירד פגום"; exit 1
