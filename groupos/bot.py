@@ -2286,10 +2286,28 @@ async def _toggle(msg: Message, key: str, cmd: str, default: str = "1"):
     cur = db.get(msg.chat.id, key, default) == "1"
     if arg in ("on", "off"):
         await _set_switch(msg.chat.id, key, arg == "on", msg.from_user.id)
-        await reply(msg, T(msg, "set.done", key=key, value=arg))
+        gap = _switch_gap(msg.chat.id, key, lang_of(msg)) if arg == "on" else ""
+        await reply(msg, T(msg, "set.done", key=key, value=arg)
+                    + (("\n\n" + gap) if gap else ""))
         return
     sc = panel.switch_screen(msg.chat.id, key, cur, lang_of(msg))
     await reply(msg, sc.text, markup=kb(sc))
+
+
+def _switch_gap(chat_id: int, key: str, lg: str) -> str:
+    """מתג שדלוק אבל אין לו תוכן — ולכן לא יקרה כלום.
+
+    זה הפגם שגרם ל"הפעלתי הודעת כניסה ולא קרה כלום": המתג אומר "דלוק",
+    אין נוסח, והבוט שותק בצדק. מתג שאין לו מה להפעיל חייב לומר את זה
+    ברגע ההפעלה — לא ב-‎/diag‎ שבוע אחר כך."""
+    pairs = {"welcome_on": (WELCOME_KEY, "/welcome"),
+             "goodbye_on": (GOODBYE_KEY, "/goodbye")}
+    if key not in pairs:
+        return ""
+    content_key, cmd = pairs[key]
+    if (db.get(chat_id, content_key, "") or "").strip():
+        return ""
+    return i18n.t("sw.no_content", lg, cmd=cmd)
 
 
 async def _set_switch(chat_id: int, key: str, on: bool,
@@ -3920,7 +3938,11 @@ async def on_callback(q: CallbackQuery):
             await _edit(q, _screen_for(chat_id, "sws", ""))
         else:
             await _edit(q, panel.switch_screen(chat_id, arg, want, lg))
-        await q.answer(i18n.t("saved" if okay else "err.failed", lg))
+        gap = _switch_gap(chat_id, arg, lg) if want else ""
+        if gap:
+            await q.answer(gap, show_alert=True)
+        else:
+            await q.answer(i18n.t("saved" if okay else "err.failed", lg))
         return
 
     if name == "tgl":

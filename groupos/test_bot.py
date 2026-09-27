@@ -350,6 +350,39 @@ async def test_reports():
 
 
 
+
+# ── מתג שאין לו מה להפעיל ─────────────────────────────────────────────────
+async def test_switch_gap():
+    section("מתג בלי תוכן")
+    real_bot = B.bot
+    B.bot = SmokeBot()
+    B.db.set(CHAT, "adminpriv", "0")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "welcome", "")
+    try:
+        # זה הפגם שגרם ל"הפעלתי הודעת כניסה ולא קרה כלום": המתג אומר
+        # "דלוק", אין נוסח, והבוט שותק בצדק.
+        out = await _out(B.cmd_welcome_on_toggle
+                         if hasattr(B, "cmd_welcome_on_toggle")
+                         else B.cmd_silent, msg("/silent on", uid=ADM))
+        ok("מתג רגיל לא מתלונן", "אין נוסח" not in out, out[:80])
+
+        gap = B._switch_gap(CHAT, "welcome_on", "he")
+        ok("מתג הברכה בלי נוסח מדווח על החוסר", "אין נוסח" in gap, gap)
+        ok("והוא נוקב בפקודה שמסדרת", "/welcome" in gap, gap)
+
+        B.db.set(CHAT, "welcome", "ברוך הבא {user}")
+        ok("עם נוסח אין תלונה",
+           B._switch_gap(CHAT, "welcome_on", "he") == "",
+           B._switch_gap(CHAT, "welcome_on", "he"))
+        ok("מתג שאינו ברכה אינו נבדק",
+           B._switch_gap(CHAT, "flood", "he") == "")
+    finally:
+        B.bot = real_bot
+        B.db.set(CHAT, "adminpriv", "1")
+        B.db.set(CHAT, "welcome", "")
+
+
 # ── בדיקה עצמית ───────────────────────────────────────────────────────────
 async def test_diag():
     section("בדיקה עצמית")
@@ -1105,6 +1138,7 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_switch_gap()
     await test_diag()
     await test_bad_html()
     await test_anon_admin()
