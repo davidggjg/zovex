@@ -252,10 +252,14 @@ async def test_customcmd():
 async def test_reports():
     section("דיווחים")
     victim = spam_msg()
+    # רק ההתראות: מאז ‎adminpriv‎ גם תשובות ניהול יוצאות לפרטי של המנהל,
+    # ולכן נספרות כאן הודעות עם כפתורים בלבד — זה מה שמייחד התראה.
+    before = len([s for s in SENT if s[0] == ADM and s[2]])
     await B.cmd_report(msg("/report ספאם", uid=USER, reply_to=victim))
-    to_admin = [s for s in SENT if s[0] == ADM]
-    ok("ההתראה נשלחה למנהל בפרטי", len(to_admin) == 1, str(len(to_admin)))
-    ok("להתראה יש כפתורים", to_admin[-1][2])
+    alerts = [s for s in SENT if s[0] == ADM and s[2]]
+    ok("ההתראה נשלחה למנהל בפרטי", len(alerts) - before == 1,
+       str(len(alerts) - before))
+    ok("להתראה יש כפתורים", alerts[-1][2])
     ok("המדווח קיבל אישור", "נשלח" in last(), last())
 
     open_ = B.rpt.list(CHAT)
@@ -264,7 +268,7 @@ async def test_reports():
 
     await B.cmd_report(msg("/report גם קישור", uid=ADM, reply_to=victim))
     ok("דיווח שני מצטרף ולא מתריע שוב",
-       len([s for s in SENT if s[0] == ADM and s[2]]) == 1
+       len([s for s in SENT if s[0] == ADM and s[2]]) == len(alerts)
        and "צורפת" in last(), last())
 
     await B.cmd_reportlist(msg("/reportlist"))
@@ -337,6 +341,275 @@ async def test_reports():
     ok("כשהדיווחים כבויים לא נפתח דיווח",
        "כבויים" in last(), last())
     B.db.set(CHAT, "reports", "1")
+
+
+
+
+# ── זרימות אמיתיות, עם ארגומנטים ──────────────────────────────────────────
+async def _out(fn, *a) -> str:
+    """מריץ מטפל ומחזיר את מה שיצא — או את החריגה, כטקסט.
+
+    זה מה שהסריקה בלי ארגומנטים לא יכולה לעשות: פקודה בלי ארגומנטים
+    נעצרת בהודעת השימוש ולא מגיעה לשורה שקורסת. שתי תקלות אמיתיות
+    נמצאו כאן דווקא — התנגשות ‎key=‎ ב-‎T()‎, ומילה שנבלעה ב-‎/schedule‎."""
+    before = len(SENT)
+    try:
+        await asyncio.wait_for(fn(*a), timeout=5)
+    except Exception as e:                                   # noqa: BLE001
+        return f"!!{type(e).__name__}: {e}"
+    return " ".join(t for _c, t, _m in SENT[before:])
+
+
+async def test_flows():
+    section("זרימות עם ארגומנטים")
+    real_bot = B.bot
+    B.bot = SmokeBot()
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.perms.set_role(CHAT, BAD, "member")
+    B.db.set(CHAT, "adminpriv", "0")        # שהתשובות יישארו נראות כאן
+    B.db.set(CHAT, "flood", "0")
+    B.db.set(CHAT, "xp", "0")
+    try:
+        # ענישה עם יעד
+        for label, fn, text in (
+                ("/ban", B.cmd_ban, "/ban ספאם"),
+                ("/mute עם זמן", B.cmd_mute, "/mute 30m רועש"),
+                ("/unmute", B.cmd_unmute, "/unmute"),
+                ("/kick", B.cmd_kick, "/kick"),
+                ("/warn", B.cmd_warn, "/warn קישורים")):
+            out = await _out(fn, msg(text, uid=ADM, mid=8001,
+                                     reply_to=spam_msg(8100)))
+            ok(f"{label} על מי שהשבתי לו", "!!" not in out, out)
+
+        # תוכן: נשמר ונשלף
+        ok("/save", "faq" in await _out(
+            B.cmd_save, msg("/save faq התשובות כאן", uid=ADM)))
+        ok("/get מחזיר את התוכן", "התשובות כאן" in await _out(
+            B.cmd_get, msg("/get faq", uid=ADM)))
+        ok("#faq עובד לחבר רגיל", "התשובות כאן" in await _out(
+            B.on_group_message, msg("#faq", uid=BAD, mid=8200)))
+        ok("/setrules", "!!" not in await _out(
+            B.cmd_setrules, msg("/setrules אסור לפרסם", uid=ADM)))
+        ok("/rules מחזיר את מה שנכתב", "אסור לפרסם" in await _out(
+            B.cmd_rules, msg("/rules", uid=BAD)))
+
+        # פילטר נורה בפועל
+        await _out(B.cmd_filter,
+                   msg("/filter קופון reply אין קופונים", uid=ADM))
+        ok("הפילטר נורה על המילה", "אין קופונים" in await _out(
+            B.on_group_message, msg("יש לך קופון?", uid=BAD, mid=8201)))
+
+        # ביטוי חסום נמחק בפועל
+        await _out(B.cmd_addblock, msg("/addblock הימורים", uid=ADM))
+        n_del = len(DELETED)
+        await _out(B.on_group_message,
+                   msg("בוא נדבר על הימורים", uid=BAD, mid=8202))
+        ok("ביטוי חסום נמחק", len(DELETED) > n_del, str(DELETED[-2:]))
+
+        # נעילה אוכפת בפועל
+        await _out(B.cmd_lock, msg("/lock url", uid=ADM))
+        n_del = len(DELETED)
+        await _out(B.on_group_message,
+                   msg("היכנסו ל-https://spam.example.com", uid=BAD,
+                       mid=8203))
+        ok("נעילת קישורים אוכפת", len(DELETED) > n_del, str(DELETED[-2:]))
+        await _out(B.cmd_unlock, msg("/unlock url", uid=ADM))
+
+        # תפקידים
+        await _out(B.cmd_role,
+                   msg("/role moderator", uid=ADM, reply_to=spam_msg(8101)))
+        ok("/role משנה תפקיד באמת",
+           B.perms.role_of(CHAT, BAD) == "moderator",
+           B.perms.role_of(CHAT, BAD))
+        B.perms.set_role(CHAT, BAD, "member")
+
+        # הגדרות: **הערך נשמר**, ולא "לא נזרקה חריגה". זה מה שתפס את
+        # ההתנגשות שהפילה כל מתג עם on/off מפורש — הערך נשמר והתשובה
+        # קרסה, ולכן נראה שהפקודה לא עובדת.
+        for text, fn, key, want in (
+                ("/setflood 5 10", B.cmd_setflood, "flood_rate", "5"),
+                ("/setclean 45", B.cmd_setclean, "autoclean", "45"),
+                ("/floodaction mute", B.cmd_floodaction,
+                 "flood_action", "mute"),
+                ("/blockmode delete", B.cmd_blockmode,
+                 "block_action", "delete"),
+                ("/setwarnmode kick", B.cmd_setwarnmode, "warn_mode", "kick"),
+                ("/captchatime 90", B.cmd_captchatime, "captcha_time", "90"),
+                ("/captchafail kick", B.cmd_captchafail,
+                 "captcha_fail", "kick"),
+                ("/antiraid off", B.cmd_antiraid, "antiraid", "0"),
+                ("/silent on", B.cmd_silent, "silent", "1")):
+            out = await _out(fn, msg(text, uid=ADM))
+            got = B.db.get(CHAT, key, None)
+            ok(f"{text} → {key}={want}", got == want and "!!" not in out,
+               f"נשמר {got!r} · {out}")
+        B.db.set(CHAT, "autoclean", "0")
+
+        # מדיניות ואוטומציה
+        ok("/policy נשמרת", "!!" not in await _out(
+            B.cmd_policy, msg("/policy 0.8 ban | 0.5 mute 1h", uid=ADM)))
+        ok("/simulate עונה", "!!" not in await _out(
+            B.cmd_simulate, msg("/simulate קנו ביטקוין ברווח מובטח",
+                                uid=ADM)))
+        ok("/addauto", "!!" not in await _out(
+            B.cmd_addauto, msg("/addauto message | risk>0.7 | delete",
+                               uid=ADM)))
+
+        # תזמון — כאן נבלעה מילה מההודעה
+        out = await _out(B.cmd_schedule, msg("/schedule 10m תזכורת", uid=ADM))
+        ok("/schedule דוחה ניסוח לא חוקי ומסביר", "daily" in out, out)
+        await _out(B.cmd_schedule,
+                   msg("/schedule daily 20:00 תזכורת יומית", uid=ADM))
+        rows = B.sched.all(CHAT)
+        ok("התזמון נשמר", len(rows) == 1, str(len(rows)))
+        ok("וההודעה נשמרה שלמה",
+           rows and rows[0]["content"] == "תזכורת יומית",
+           rows[0]["content"] if rows else "—")
+        ok("/scheduled מציג אותו", "תזכורת" in await _out(
+            B.cmd_scheduled, msg("/scheduled", uid=ADM)))
+        if rows:
+            await _out(B.cmd_unschedule,
+                       msg(f"/unschedule {rows[0]['id']}", uid=ADM))
+            ok("/unschedule מוחק", not B.sched.all(CHAT))
+
+        # מידע
+        for label, fn, text in (("/info", B.cmd_info, "/info"),
+                                ("/stats", B.cmd_stats, "/stats"),
+                                ("/actions", B.cmd_actions, "/actions"),
+                                ("/analytics", B.cmd_analytics,
+                                 "/analytics week")):
+            out = await _out(fn, msg(text, uid=ADM, reply_to=spam_msg(8102)))
+            ok(f"{label} עונה", "!!" not in out and out.strip(), out)
+    finally:
+        B.bot = real_bot
+        B.db.set(CHAT, "adminpriv", "1")
+
+
+# ── רעש בקבוצה ────────────────────────────────────────────────────────────
+async def test_quiet_group():
+    section("הקבוצה נשארת נקייה")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.perms.set_role(CHAT, USER, "member")
+
+    # פקודת ניהול של מנהל: התשובה בפרטי, והפקודה נמחקת מהקבוצה
+    n_grp = len([s for s in SENT if s[0] == CHAT])
+    n_prv = len([s for s in SENT if s[0] == ADM])
+    await B.cmd_settings(msg("/settings", uid=ADM, mid=7001))
+    ok("תשובת ניהול יוצאת לפרטי",
+       len([s for s in SENT if s[0] == ADM]) > n_prv)
+    ok("ולא לקבוצה",
+       len([s for s in SENT if s[0] == CHAT]) == n_grp,
+       str([t for c, t, _ in SENT[-3:]]))
+    await asyncio.sleep(0.05)          # למשימת המחיקה יש טיק אחד לרוץ
+    ok("הפקודה עצמה נמחקת מהקבוצה", 7001 in DELETED, str(DELETED[-3:]))
+
+    # פקודה שכולם אמורים לראות נשארת בקבוצה, גם כשמנהל שאל
+    n_grp = len([s for s in SENT if s[0] == CHAT])
+    await B.cmd_adminlist(msg("/adminlist", uid=ADM, mid=7002))
+    ok("רשימת מנהלים נשארת בקבוצה",
+       len([s for s in SENT if s[0] == CHAT]) > n_grp)
+
+    # חבר רגיל מקבל תשובה בקבוצה — "ניהול בפרטי" אינו רלוונטי לו
+    n_grp = len([s for s in SENT if s[0] == CHAT])
+    await B.cmd_rules(msg("/rules", uid=USER, mid=7003))
+    ok("חבר רגיל מקבל תשובה בקבוצה",
+       len([s for s in SENT if s[0] == CHAT]) > n_grp)
+
+    # ומי שמכבה את המתג מקבל את התשובות בקבוצה
+    B.db.set(CHAT, "adminpriv", "0")
+    n_grp = len([s for s in SENT if s[0] == CHAT])
+    await B.cmd_settings(msg("/settings", uid=ADM, mid=7004))
+    ok("כיבוי המתג מחזיר את התשובות לקבוצה",
+       len([s for s in SENT if s[0] == CHAT]) > n_grp)
+    B.db.set(CHAT, "adminpriv", "1")
+
+    # נפילה אחורה: מנהל שלא פתח שיחה עם הבוט חייב בכל זאת לקבל תשובה
+    real_send = B.send
+
+    async def no_private(chat_id, text, *, is_group=True, markup=None,
+                         clean_after=None):
+        if not is_group:
+            return None                    # טלגרם דוחה — אין שיחה פרטית
+        return await real_send(chat_id, text, is_group=is_group,
+                               markup=markup, clean_after=clean_after)
+
+    B.send = no_private
+    try:
+        n_grp = len([s for s in SENT if s[0] == CHAT])
+        await B.cmd_settings(msg("/settings", uid=ADM, mid=7005))
+        ok("כשהפרטי נכשל התשובה חוזרת לקבוצה",
+           len([s for s in SENT if s[0] == CHAT]) > n_grp)
+    finally:
+        B.send = real_send
+
+
+# ── מי רואה אילו פקודות ───────────────────────────────────────────────────
+async def test_command_visibility():
+    section("מי רואה אילו פקודות")
+    import panel as P
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.perms.set_role(CHAT, USER, "member")
+
+    member = set(P.member_commands())
+    ok("רשימת החברים קטנה", 5 <= len(member) <= 25, str(len(member)))
+    for dangerous in ("ban", "lockdown", "broadcast", "aikeys", "addcmd"):
+        ok(f"/{dangerous} אינו ברשימת החברים", dangerous not in member)
+    for open_cmd in ("help", "rules", "report", "cmds"):
+        ok(f"/{open_cmd} כן ברשימת החברים", open_cmd in member)
+
+    m_allowed = B._allowed_cmds(CHAT, USER)
+    a_allowed = B._allowed_cmds(CHAT, ADM)
+    ok("חבר רגיל מקבל בדיוק את רשימת החברים", m_allowed == member,
+       str(sorted(m_allowed ^ member)[:5]))
+    ok("בעלים מקבל הכול", len(a_allowed) == len(P.COMMANDS),
+       f"{len(a_allowed)}/{len(P.COMMANDS)}")
+
+    pages_m = P.help_pages("he", allowed=m_allowed)
+    joined = "\n".join(pages_m)
+    ok("העזרה של חבר רגיל היא עמוד אחד", len(pages_m) == 1, str(len(pages_m)))
+    ok("ואין בה /ban", "/ban —" not in joined)
+    ok("ויש בה /rules", "/rules —" in joined)
+    ok("העזרה של בעלים מכילה את הכול",
+       all(f"/{n} —" in "\n".join(P.help_pages("he", allowed=a_allowed))
+           for n, _ in P.COMMANDS))
+
+    # התפריט של טלגרם: שלושה היקפים, וההיקף של הקבוצה הוא הקטן
+    seen = []
+    real_bot = B.bot
+
+    class MenuBot(FakeBot):
+        async def set_my_commands(self, commands, scope=None,
+                                  language_code=None):
+            seen.append((type(scope).__name__ if scope else "default",
+                         language_code, len(commands)))
+            return True
+
+    B.bot = MenuBot()
+    try:
+        await B.publish_commands()
+    finally:
+        B.bot = real_bot
+    scopes = {s for s, _lg, _n in seen}
+    ok("נרשמו שלושה היקפים",
+       scopes == {"default", "BotCommandScopeAllGroupChats",
+                  "BotCommandScopeAllChatAdministrators"}, str(scopes))
+    grp = [n for s, _lg, n in seen if s == "BotCommandScopeAllGroupChats"]
+    adm = [n for s, _lg, n in seen
+           if s == "BotCommandScopeAllChatAdministrators"]
+    dflt = [n for s, _lg, n in seen if s == "default"]
+    ok("בקבוצות נרשמת רשימת החברים", grp and set(grp) == {len(member)},
+       str(set(grp)))
+    ok("למנהלי הקבוצה נרשם הכול",
+       adm and set(adm) == {len(P.COMMANDS)}, str(set(adm)))
+    ok("ברירת המחדל היא רשימת החברים",
+       dflt and set(dflt) == {len(member)}, str(set(dflt)))
+    ok("נרשם לכל שפה",
+       len({lg for _s, lg, _n in seen}) == len(i18n_langs()), str(seen[:2]))
+
+
+def i18n_langs():
+    import i18n
+    return [None] + [c for c in i18n.STRINGS if c != i18n.DEFAULT]
 
 
 # ── תחזוקה שרצה בפועל ─────────────────────────────────────────────────────
@@ -615,6 +888,9 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_flows()
+    await test_quiet_group()
+    await test_command_visibility()
     await test_upkeep()
     await test_every_command()
 

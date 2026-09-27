@@ -686,6 +686,21 @@ def test_manifest():
 # ── שפות ──────────────────────────────────────────────────────────────────
 def test_i18n():
     section("שפות")
+    # ‎T(msg, "set.done", key=...)‎ נתן TypeError, כי המפתח נקשר גם
+    # כארגומנט וגם כמציין מקום. זה הפיל בשקט כל מתג עם on/off מפורש,
+    # את /setclean, /setflood, /blockmode ואת /aikeys — הערך נשמר
+    # והתשובה קרסה. הפרמטרים מיקומיים-בלבד, ולכן זה נבדק כאן.
+    import inspect
+    sig = inspect.signature(i18n.t)
+    pos_only = [p.name for p in sig.parameters.values()
+                if p.kind == inspect.Parameter.POSITIONAL_ONLY]
+    ok("key ו-lang מיקומיים בלבד ב-t", pos_only[:2] == ["key", "lang"],
+       str(pos_only))
+    ok("מציין מקום בשם key עובד",
+       i18n.t("set.done", "he", key="autoclean", value=45) != "set.done")
+    ok("ומציין מקום בשם lang לא מפיל",
+       isinstance(i18n.t("saved", "he", lang="x"), str))
+
     ok("נרמול קוד שפה", i18n.normalize("he-IL") == "he")
     ok("קו תחתון גם", i18n.normalize("pt_BR") == "pt")
     ok("שפה לא מוכרת נופלת לברירת מחדל",
@@ -1908,6 +1923,21 @@ def test_aiclient():
 # ── תזמון ─────────────────────────────────────────────────────────────────
 def test_scheduler():
     section("תזמון")
+    # זנב מילים נדחה. סובלנות כאן נראתה כמו נדיבות והייתה באג:
+    # cmd_schedule מנסה 3 מילים ואז 2 ואז 1, וכש-'daily 20:00 תזכורת'
+    # נחשב תקין — הניסוח בלע את המילה הראשונה של ההודעה.
+    for good, bad in (("daily 20:00", "daily 20:00 תזכורת"),
+                      ("every 2h", "every 2h שלום"),
+                      ("weekly sun 09:30", "weekly sun 09:30 היי"),
+                      ("monthly 5 12:00", "monthly 5 12:00 אזהרה"),
+                      ("once 08:00", "once 08:00 בוקר")):
+        ok(f"'{good}' תקין", sched.parse_spec(good) is not None)
+        ok(f"'{bad}' נדחה", sched.parse_spec(bad) is None,
+           str(sched.parse_spec(bad)))
+    ok("'20:00' לבד הוא יומי",
+       (sched.parse_spec("20:00") or sched.Spec("x")).kind == "daily")
+    ok("'20:00 בוקר טוב' נדחה", sched.parse_spec("20:00 בוקר טוב") is None)
+
     ok("יומי נפרס", sched.parse_spec("daily 20:00").hour == 20)
     ok("שעה בלבד = יומי", sched.parse_spec("09:30").kind == "daily")
     ok("שבועי נפרס",

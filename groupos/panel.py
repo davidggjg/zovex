@@ -262,6 +262,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("ai",           "0", "sec.ai"),
     ("aivision",     "0", "sw.aivision"),
     ("aivoice",      "0", "sw.aivoice"),
+    ("adminpriv",    "1", "sw.adminpriv"),
     ("silent",       "1", "settings.silent"),
     ("cleanservice", "0", "cmd.cleanservice"),
     ("xp",           "1", "sw.xp"),
@@ -420,6 +421,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("antiraid", "settings.write"),
     ("reports",  "settings.write"),
     ("silent",   "settings.write"),
+    ("adminpriv", "settings.write"),
     ("setclean", "settings.write"),
     ("cleanservice", "settings.write"),
     ("allow",    "settings.write"),
@@ -498,16 +500,40 @@ TG_LIMIT = 4096          # תקרת אורך הודעה בטלגרם
 HELP_CHUNK = 3500        # מתחת לתקרה, עם מרווח לתגיות ולתרגום ארוך
 
 
-def help_pages(lang: str = i18n.DEFAULT) -> list[str]:
+def member_commands() -> list[str]:
+    """הפקודות שכל חבר יכול להריץ.
+
+    לא רק "בלי דרישת הרשאה": ‎/notes‎ ו-‎/get‎ דורשות ‎notes.read‎,
+    שמותרת לחבר רגיל. הגדרה לפי מחרוזת ריקה בלבד הייתה מסתירה מהחברים
+    שתי פקודות שהן דווקא בשבילם — ולכן ההגדרה היא **לפי הדירוג הנדרש**,
+    כמו שהבדיקה בפועל עושה.
+
+    זו הרשימה שנרשמת בתפריט ✏️ של טלגרם בקבוצות. עד כה נרשמו שם כל
+    132 הפקודות לכל אחד, כלומר כל חבר ראה את ‎/ban‎ ואת ‎/lockdown‎
+    בהשלמה האוטומטית — רשימה שרובה תיענה לו ב"אין לך הרשאה", וגם
+    חשיפה מיותרת של מה שאפשר לעשות בקבוצה."""
+    from permissions import PERMISSIONS, RANK
+    return [n for n, perm in COMMANDS
+            if not perm or PERMISSIONS.get(perm, 10 ** 9) <= RANK["member"]]
+
+
+def help_pages(lang: str = i18n.DEFAULT,
+               allowed: Optional[set] = None) -> list[str]:
     """העזרה, מפוצלת להודעות שנכנסות בתקרת טלגרם.
 
     עם 76 פקודות טקסט אחד חורג מ-4096 תווים, וטלגרם דוחה אותו —
     כלומר ‎/help‎ פשוט לא היה עונה. הפיצול הוא לפי שורות שלמות, כי
-    חיתוך באמצע שורה קוטע פקודה."""
+    חיתוך באמצע שורה קוטע פקודה.
+
+    ‎allowed‎ מסנן לפי מה שהפונה **יכול** להריץ. חבר רגיל שקיבל רשימה
+    של 132 פקודות קיבל בעיקר רשימה של דברים שייענו לו ב"אין לך
+    הרשאה" — וגם ידע בדיוק מה אפשר לעשות בקבוצה הזאת. ‎None‎ = הכול,
+    וזה מה שמשמש את התיעוד ואת הבדיקות."""
     head_txt = head("help.title", lang)
     rows = [f"/{name} — {i18n.t(f'cmd.{name}', lang)}"
             + (f"  <i>{perm}</i>" if perm else "")
-            for name, perm in COMMANDS]
+            for name, perm in COMMANDS
+            if allowed is None or name in allowed]
     hint = i18n.t("help.hint", lang)
 
     pages, cur = [], [head_txt, ""]

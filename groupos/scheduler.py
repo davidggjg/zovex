@@ -59,7 +59,13 @@ def parse_spec(raw: str, *, now: Optional[float] = None,
     """‎'daily 20:00'‎ · ‎'weekly sun 09:30'‎ · ‎'every 2h'‎ · ‎'20:00'‎.
 
     ניסוח שאינו מובן מחזיר ‎None‎ ולא זורק: מנהל שהקליד לא נכון צריך
-    לקבל הסבר, לא שירות שנפל."""
+    לקבל הסבר, לא שירות שנפל.
+
+    **האורך נבדק בדיוק**, ולא "לפחות". סובלנות לזנב מילים נראתה כמו
+    נדיבות והייתה באג: ‎cmd_schedule‎ מנסה 3 מילים, ואז 2, ואז 1 —
+    וכשגם ‎'daily 20:00 תזכורת'‎ נחשב תקין, הניסוח בלע את המילה הראשונה
+    של ההודעה. ‎/schedule daily 20:00 תזכורת יומית‎ נשמר כ-‎'יומית'‎.
+    """
     parts = (raw or "").strip().lower().split()
     if not parts:
         return None
@@ -69,7 +75,7 @@ def parse_spec(raw: str, *, now: Optional[float] = None,
         parts = ["daily"] + parts
         head = "daily"
 
-    if head == "every" and len(parts) > 1:
+    if head == "every" and len(parts) == 2:
         m = _RX_EVERY.match(parts[1])
         if not m:
             return None
@@ -79,7 +85,7 @@ def parse_spec(raw: str, *, now: Optional[float] = None,
             return None
         return Spec("every", seconds=secs)
 
-    if head in ("daily", "once") and len(parts) > 1:
+    if head in ("daily", "once") and len(parts) == 2:
         m = _RX_TIME.match(parts[1])
         if not m:
             return None
@@ -88,7 +94,7 @@ def parse_spec(raw: str, *, now: Optional[float] = None,
             return None
         return Spec(head, h, mi)
 
-    if head == "weekly" and len(parts) > 2:
+    if head == "weekly" and len(parts) == 3:
         if parts[1][:3] not in DAYS:
             return None
         m = _RX_TIME.match(parts[2])
@@ -97,7 +103,7 @@ def parse_spec(raw: str, *, now: Optional[float] = None,
         return Spec("weekly", int(m.group(1)), int(m.group(2)),
                     weekday=DAYS.index(parts[1][:3]))
 
-    if head == "monthly" and len(parts) > 2:
+    if head == "monthly" and len(parts) == 3:
         if not parts[1].isdigit():
             return None
         d = int(parts[1])

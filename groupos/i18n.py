@@ -195,6 +195,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "vision.privacy": "<b>מה נשלח החוצה</b>\nכשזה דלוק, תמונה שנשלחת בקבוצה נשלחת לספק ה-AI לבדיקה — התמונה והכיתוב בלבד, בלי שם ובלי מזהה. זה יותר ממה שנשלח בבדיקת טקסט, ולכן זה מתג נפרד.\nמדבקות, גיפים וסרטונים אינם נבדקים.",
         "sw.aivision": "בדיקת תמונות",
         "cmd.aivision": "בדיקת תמונות שנשלחות",
+        "sw.adminpriv": "תשובות ניהול בפרטי",
+        "cmd.adminpriv": "תשובות ניהול בפרטי",
         "report.tally": "<i>פתוחים {open} · טופלו {handled} · נדחו {dismissed}</i>",
         "report.weak_reporter": "⚠️ <i>כל הדיווחים הקודמים של המדווחים האלה נדחו</i>",
         "report.reopened": "דיווח <code>#{id}</code> נפתח מחדש.",
@@ -722,6 +724,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "vision.privacy": "<b>What leaves the group</b>\nWhile this is on, an image posted here is sent to the AI provider for checking — the image and its caption only, with no name and no ID. That is more than the text check sends, which is why it is a separate switch.\nStickers, GIFs and videos are not checked.",
         "sw.aivision": "Image checking",
         "cmd.aivision": "Check images that are posted",
+        "sw.adminpriv": "Admin answers in private",
+        "cmd.adminpriv": "Admin answers in private",
         "report.tally": "<i>Open {open} · handled {handled} · dismissed {dismissed}</i>",
         "report.weak_reporter": "⚠️ <i>every earlier report by these reporters was dismissed</i>",
         "report.reopened": "Report <code>#{id}</code> reopened.",
@@ -1182,7 +1186,7 @@ def is_rtl(lang: str) -> bool:
     return normalize(lang) in RTL_LANGS
 
 
-def t(key: str, lang: str = DEFAULT, **kw: Any) -> str:
+def t(key: str, lang: str = DEFAULT, /, **kw: Any) -> str:
     """הטקסט בשפה המבוקשת. חסר → אנגלית → המפתח עצמו."""
     lang = normalize(lang)
     for candidate in (lang, FALLBACK, DEFAULT):

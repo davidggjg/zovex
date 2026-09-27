@@ -42,8 +42,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (BufferedInputFile, BotCommand, CallbackQuery,
-                           ChatMemberUpdated,
+from aiogram.types import (BufferedInputFile, BotCommand,
+                           BotCommandScopeAllChatAdministrators,
+                           BotCommandScopeAllGroupChats, BotCommandScopeChat,
+                           CallbackQuery, ChatMemberUpdated,
                            ChatPermissions, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message)
 
@@ -174,13 +176,79 @@ def lang_of(msg: Message) -> str:
     return lang.resolve(msg.chat.id, u.language_code if u else None)
 
 
-def T(msg: Message, key: str, **kw) -> str:
+def T(msg: Message, key: str, /, **kw) -> str:
+    """טקסט בשפת הצ'אט.
+
+    ‎/‎ אחרי ‎key‎ הוא תיקון של באג ולא קוסמטיקה: ‎T(msg, "set.done",
+    key=key)‎ נתן ‎TypeError: got multiple values for argument 'key'‎,
+    כי המפתח נקשר גם כארגומנט מקומי וגם כמציין מקום. זה הפיל בשקט את
+    כל המתגים עם ‎on‎/‎off‎ מפורש, את ‎/setclean‎, ‎/setflood‎,
+    ‎/floodaction‎, ‎/blockmode‎, ‎/captchatime‎ ואת ‎/aikeys‎ — הערך
+    נשמר, התשובה קרסה, והמנהל הסיק שהפקודה לא עובדת.
+
+    פרמטר שהוא **מיקומי בלבד** אינו יכול להתנגש עם שם של מציין מקום,
+    ולכן כל המשפחה הזאת נסגרת כאן ולא בשבעה מקומות בנפרד."""
     return i18n.t(key, lang_of(msg), **kw)
+
+
+# פקודות שהתשובה עליהן שייכת לקבוצה גם כשמנהל שאל. אלה פקודות שכל
+# החברים אמורים לראות את התשובה שלהן — חוקים, רשימת מנהלים, הודעה
+# נעוצה. כל השאר הוא ניהול, ולניהול אין מה לעשות בשיחה של הקבוצה.
+GROUP_OUTPUT = frozenset({
+    "rules", "report", "cmds", "adminlist", "pinned", "locktypes",
+    "vars", "id", "health", "rep", "top",
+})
+
+
+def _cmd_of(msg: Message) -> str:
+    t = msg.text or ""
+    if not t.startswith("/"):
+        return ""
+    return t[1:].split()[0].split("@")[0].lower() if len(t) > 1 else ""
+
+
+def _answer_in_private(msg: Message) -> bool:
+    """האם התשובה הזאת צריכה לצאת בפרטי ולא בקבוצה.
+
+    זה התיקון לתלונה "כמעט על הכל הוא מגיב זבל בתוך הקבוצה". פקודת
+    ניהול מייצרת שתי הודעות בקבוצה — הפקודה והתשובה — ובקבוצה פעילה
+    זה רוב הרעש. ניקוי אוטומטי מוחק אותן אחרי 30 שניות, אבל 30 שניות
+    של רעש כפול לכל פעולת ניהול הן עדיין רעש.
+
+    התשובה יוצאת לפרטי רק כשמתקיימים כל אלה:
+
+      * זו קבוצה, וזו פקודה
+      * הפקודה אינה מהרשימה שכולם אמורים לראות
+      * המתג ‎adminpriv‎ דלוק (ברירת מחדל)
+      * הפונה הוא לפחות עוזר — לחבר רגיל אין "ניהול בפרטי", ותשובה
+        שתיעלם לו לפרטי רק תבלבל
+
+    ואם השליחה לפרטי נכשלת — למשל מנהל שלא פתח שיחה עם הבוט — יש
+    נפילה אחורה לקבוצה. תשובה שנעלמת לגמרי גרועה מתשובה רועשת.
+    """
+    if msg.chat.type not in GROUP_TYPES or msg.from_user is None:
+        return False
+    name = _cmd_of(msg)
+    if not name or name in GROUP_OUTPUT:
+        return False
+    if db.get(msg.chat.id, "adminpriv", "1") != "1":
+        return False
+    return perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["helper"]
 
 
 async def reply(msg: Message, text: str, markup=None) -> Optional[Message]:
     """תשובה בקבוצה שמנקה אחריה — גם את הפקודה עצמה."""
     is_group = msg.chat.type in GROUP_TYPES
+    if _answer_in_private(msg):
+        # הפקודה עצמה נמחקת מיד ולא אחרי שנייה: אין סיבה שהקבוצה תראה
+        # אפילו לרגע פקודת ניהול שהתשובה עליה ממילא בפרטי.
+        _schedule_delete(msg.chat.id, msg.message_id, 0)
+        got = await send(msg.from_user.id, text, is_group=False,
+                         markup=markup)
+        if got is not None:
+            return got
+        log.info("adminpriv: לא הצלחתי לשלוח בפרטי ל-%s — עונה בקבוצה",
+                 msg.from_user.id)
     delay = clean_delay(msg.chat.id) if is_group else 0
     if delay:
         _schedule_delete(msg.chat.id, msg.message_id, delay)
@@ -983,15 +1051,50 @@ async def cmd_start(msg: Message):
         else:
             sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+        # התפריט ✏️ של השיחה הזאת, לפי מה שהאדם הזה יכול בקבוצות שלו.
+        # ברירת המחדל היא רשימת החברים, ובעל קבוצה שמנהל מכאן צריך
+        # לראות את מה שיש לו.
+        await publish_personal_commands(msg.from_user.id, lang_of(msg))
     else:
         await reply(msg, await group_status(msg.chat.id, lang_of(msg)))
 
 
+def _allowed_cmds(chat_id: int, user_id: int) -> set:
+    """שמות הפקודות שהאדם הזה יכול להריץ בקבוצה הזאת.
+
+    ‎list_for‎ ולא ‎check‎ פר-פקודה: ‎check‎ עושה שתי שאילתות לכל קריאה,
+    ו-132 פקודות היו 264 שאילתות על כל ‎/help‎. כאן זו שאילתה אחת
+    לתפקיד ואחת לדריסות, והתוצאה נגזרת ממנה."""
+    role = perms.role_of(chat_id, user_id)
+    granted = perms.list_for(chat_id, role)
+    return {n for n, perm in panel.COMMANDS if not perm or granted.get(perm)}
+
+
+def _help_for(msg: Message) -> set:
+    """מה להציג לפונה. בקבוצה — לפי ההרשאות שלו שם.
+
+    בפרטי אין קבוצה להסתמך עליה, ולכן נלקח האיחוד של מה שהוא יכול
+    בקבוצות שהוא מנהל. מי שאינו מנהל אף קבוצה מקבל את רשימת החברים,
+    ולא 132 פקודות שרובן ייענו לו ב"אין לך הרשאה"."""
+    uid = msg.from_user.id if msg.from_user else 0
+    if msg.chat.type in GROUP_TYPES:
+        return _allowed_cmds(msg.chat.id, uid)
+    out: set = set(panel.member_commands())
+    for chat_id, _title in my_groups(uid):
+        out |= _allowed_cmds(chat_id, uid)
+    return out
+
+
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
-    """כל הפקודות, בשפה של הצ'אט. בפרטי לא נמחק — שם זה אמור להישאר."""
+    """הפקודות שאתה יכול להריץ, בשפה של הצ'אט.
+
+    לא כל הפקודות: חבר רגיל שקיבל 132 שורות קיבל בעיקר רשימה של דברים
+    שייענו לו בסירוב, וגם מפרט מלא של מה שאפשר לעשות בקבוצה."""
     touch(msg)
-    pages = panel.help_pages(lang_of(msg))
+    if msg.chat.type in GROUP_TYPES:
+        await sync_admins(msg.chat.id)
+    pages = panel.help_pages(lang_of(msg), allowed=_help_for(msg))
     private = msg.chat.type == ChatType.PRIVATE
     if not private:
         # בקבוצה עמוד אחד בלבד; השאר בפרטי. שלוש הודעות עזרה בקבוצה
@@ -2131,6 +2234,17 @@ async def cmd_antiraid(msg: Message):
 @needs("settings.write")
 async def cmd_reports(msg: Message):
     touch(msg); await _toggle(msg, "reports", "/reports")
+
+
+@dp.message(Command("adminpriv"))
+@needs("settings.write")
+async def cmd_adminpriv(msg: Message):
+    """תשובות ניהול בפרטי או בקבוצה.
+
+    דלוק כברירת מחדל. מי שמעדיף לראות את התשובות בקבוצה — למשל כדי
+    שכל צוות הניהול יראה מה נעשה — מכבה, והתשובות חוזרות לקבוצה עם
+    הניקוי האוטומטי."""
+    touch(msg); await _toggle(msg, "adminpriv", "/adminpriv")
 
 
 @dp.message(Command("silent"))
@@ -3681,18 +3795,54 @@ async def _edit(q: CallbackQuery, sc: panel.Screen) -> None:
 
 # ── תפריט הפקודות של טלגרם ─────────────────────────────────────────────────
 async def publish_commands() -> None:
-    """רושם את הפקודות בתפריט ✏️, פעם אחת לכל שפה.
+    """רושם את הפקודות בתפריט ✏️, לכל שפה ולפי היקף.
 
     טלגרם בוחרת לכל משתמש את הרשימה לפי שפת הממשק שלו, ונופלת לברירת
     המחדל כשאין התאמה. לכן ברירת המחדל נרשמת **בלי** ‎language_code‎,
-    ואחריה כל שפה שיש לה מילון."""
+    ואחריה כל שפה שיש לה מילון.
+
+    **ההיקף הוא החלק החדש.** עד כה נרשמו כל 132 הפקודות לכולם, כלומר
+    כל חבר בקבוצה ראה בהשלמה האוטומטית את ‎/ban‎, את ‎/lockdown‎ ואת
+    ‎/broadcast‎ — רשימה שרובה תיענה לו ב"אין לך הרשאה", וגם מפרט מלא
+    של מה שאפשר לעשות בקבוצה. עכשיו:
+
+        בקבוצות          13 פקודות של חברים
+        למנהלי הקבוצה    הכול
+        ברירת מחדל       13 — גם מי שפותח שיחה פרטית עם הבוט מהרחוב
+
+    מי שמנהל קבוצה מקבל בפרטי את הרשימה המדויקת שלו ב-‎/start‎, לפי
+    ההיקף של אותה שיחה.
+    """
+    member = set(panel.member_commands())
     for code in [None] + [c for c in i18n.STRINGS if c != i18n.DEFAULT]:
-        items = [BotCommand(command=n, description=d[:256])
-                 for n, d in panel.command_list(code or i18n.DEFAULT)]
-        try:
-            await bot.set_my_commands(items, language_code=code)
-        except TelegramAPIError as e:
-            log.warning("רישום פקודות ל-%s נכשל: %s", code or "ברירת מחדל", e)
+        full = [BotCommand(command=n, description=d[:256])
+                for n, d in panel.command_list(code or i18n.DEFAULT)]
+        small = [c for c in full if c.command in member]
+        for scope, items in ((None, small),
+                             (BotCommandScopeAllGroupChats(), small),
+                             (BotCommandScopeAllChatAdministrators(), full)):
+            try:
+                await bot.set_my_commands(items, scope=scope,
+                                          language_code=code)
+            except TelegramAPIError as e:
+                log.warning("רישום פקודות (%s/%s) נכשל: %s",
+                            code or "ברירת מחדל",
+                            type(scope).__name__ if scope else "default", e)
+
+
+async def publish_personal_commands(user_id: int, lg: str) -> None:
+    """הרשימה המדויקת של אדם אחד, בשיחה הפרטית שלו.
+
+    נקרא מ-‎/start‎ בפרטי. בעל קבוצה שמנהל אותה מכאן צריך לראות בתפריט
+    את מה שהוא יכול, ולא את רשימת החברים שנרשמה כברירת מחדל."""
+    allowed = set(panel.member_commands())
+    for chat_id, _t in my_groups(user_id):
+        allowed |= _allowed_cmds(chat_id, user_id)
+    items = [BotCommand(command=n, description=d[:256])
+             for n, d in panel.command_list(lg) if n in allowed]
+    with contextlib.suppress(TelegramAPIError):
+        await bot.set_my_commands(
+            items, scope=BotCommandScopeChat(chat_id=user_id))
 
 
 # ── רקע ────────────────────────────────────────────────────────────────────
