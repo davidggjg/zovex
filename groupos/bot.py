@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import os
 import re
@@ -63,6 +64,7 @@ import captcha as cap                           # noqa: E402
 import customcmd                                # noqa: E402
 import emergency as emerg                       # noqa: E402
 import templates as tpl                         # noqa: E402
+import vision                                   # noqa: E402
 from allowlist import Allowlist                 # noqa: E402
 from antiflood import AntiFlood                 # noqa: E402
 from federation import Federations              # noqa: E402
@@ -529,6 +531,13 @@ async def on_group_message(msg: Message):
                                    notice="ai.verdict")
                     return
 
+    # 4ב. תמונות. היקר מכולם — הורדה ואז שליחה — ולכן אחרון מבין
+    #     בדיקות התוכן, ומאחורי מתג נפרד: כאן יוצאת החוצה תמונה של
+    #     מישהו, ולא רק טקסט.
+    if db.get(msg.chat.id, "aivision", "0") == "1" and brain.can_see:
+        if await _check_image(msg, lg):
+            return
+
     # 5. אוטומציות של הקבוצה. אחרי הבדיקות, כי הן צורכות את ‎risk‎
     #    שנגזר מהן.
     if await run_automation(msg, "message",
@@ -549,6 +558,63 @@ async def on_group_message(msg: Message):
     fh = filters.check(msg.chat.id, text) if text else None
     if fh:
         await _run_filter(msg, fh)
+
+
+def _image_of(msg: Message) -> tuple[str, str, str, str, int]:
+    """‎(סוג, file_id, file_unique_id, mime, גודל)‎ — או סוג ריק."""
+    if msg.photo:
+        s = vision.pick_size(msg.photo)
+        if s is not None:
+            return ("photo", s.file_id, s.file_unique_id, "image/jpeg",
+                    s.file_size or 0)
+    d = msg.document
+    if d is not None:
+        return ("document", d.file_id, d.file_unique_id,
+                (d.mime_type or "").lower(), d.file_size or 0)
+    return ("", "", "", "", 0)
+
+
+async def _fetch_file(file_id: str) -> bytes:
+    """הורדה מטלגרם. כישלון מחזיר ריק — לא מפיל את הטיפול בהודעה."""
+    buf = io.BytesIO()
+    try:
+        await bot.download(file_id, destination=buf)
+    except (TelegramAPIError, OSError, ValueError) as e:
+        log.warning("הורדת קובץ נכשלה: %s", e)
+        return b""
+    return buf.getvalue()
+
+
+async def _check_image(msg: Message, lg: str) -> bool:
+    """בודק תמונה בהודעה. ‎True‎ = טופלה ואין להמשיך בנתיב.
+
+    סדר הפעולות הוא העיקר: קודם **מסתכלים במטמון**, ורק אחר כך מורידים.
+    אותה תמונה שמופצת למאה קבוצות היא ‎file_unique_id‎ אחד, ובדיקה
+    שמורידה קודם הייתה משלמת מאה פעמים על תשובה שכבר יש."""
+    kind, fid, uid, mime, size = _image_of(msg)
+    sigs = collect_signals(msg, msg.caption or "")
+    if not vision.worth_looking(kind, mime=mime, size=size, existing=sigs):
+        return False
+    caption = msg.caption or ""
+    v = brain.seen_image(uid, caption)
+    if v is None:
+        data = await _fetch_file(fid)
+        if not data or len(data) > vision.MAX_BYTES:
+            return False
+        v = await brain.analyze_image(data, mime=vision.mime_of(kind, mime),
+                                      caption=caption, lang=lg,
+                                      unique_id=uid, probed=bool(uid))
+    sig = v.signal()
+    if sig is None:
+        return False
+    # ‎decide‎ מחזיר החלטה **תמיד**, ו-‎action="none"‎ היא "אין מה לעשות".
+    # ‎if d is None‎ היה נראה נכון ומוחק כל תמונה שקיבלה אות חלש.
+    d = policy.decide(sigs + [sig], policy.rules_for(db, msg.chat.id))
+    if not d:
+        return False
+    await _enforce(msg, d.action, d.duration, d.explain(), "vision.action",
+                   severity="medium", notice="ai.verdict")
+    return True
 
 
 def _bl_domains(text: str) -> set[str]:
@@ -583,7 +649,9 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
 
     לפני זה כל מנגנון אכיפה חזר על ארבעת השלבים בעצמו, וזה בדיוק איך
     שמנגנון שלישי נולד בלי רישום ביומן."""
-    if action == "off":
+    # ‎none‎ ולא רק ‎off‎: ‎Decision‎ מחזיר ‎none‎ כשאין מה לעשות, וקורא
+    # שיעביר אותו לכאן בטעות היה מוחק הודעה בלי שאף כלל נדרס.
+    if action in ("off", "none"):
         return
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
@@ -1489,6 +1557,37 @@ async def cmd_ai(msg: Message):
                            failures=st["failures"], size=st["cache"]["size"],
                            hit_rate=st["cache"]["hit_rate"])
                 + "\n\n" + T(msg, "ai.privacy"))
+
+
+@dp.message(Command("aivision"))
+@needs("settings.write")
+async def cmd_aivision(msg: Message):
+    """בדיקת תמונות. מתג נפרד מ-‎/ai‎ בכוונה: מה שיוצא החוצה שונה.
+
+    ניתוח טקסט שולח טקסט; בדיקת תמונות שולחת **תמונה שמישהו העלה**.
+    מתג אחד לשניהם היה גורר החוצה תמונות של אנשים בלי שמישהו הסכים
+    לזה במפורש."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "aivision", "0") == "1"
+    if arg == "on":
+        if not brain.can_see:
+            await reply(msg, T(msg, "vision.no_keys"))
+            return
+        db.set(msg.chat.id, "aivision", "1", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivision=1", severity="high")
+        await reply(msg, T(msg, "vision.state", state=T(msg, "on"))
+                    + "\n\n" + T(msg, "vision.privacy"))
+        return
+    if arg == "off":
+        db.set(msg.chat.id, "aivision", "0", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivision=0", severity="low")
+        await reply(msg, T(msg, "vision.state", state=T(msg, "off")))
+        return
+    await reply(msg, T(msg, "vision.state", state=T(msg, "on" if cur else "off"))
+                + "\n\n" + T(msg, "vision.privacy"))
 
 
 @dp.message(Command("aikeys"))

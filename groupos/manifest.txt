@@ -29,4 +29,6 @@ reports.py
 reputation.py
 scheduler.py
 templates.py
+test_bot.py
 test_core.py
+vision.py
