@@ -2564,8 +2564,16 @@ def _hls_autofix_wanted(host: str, path: str) -> bool:
         return False
     # ערוץ ש-_fix כבר נכשל עליו בכל הפרופילים מסומן ב-None. בלי הבדיקה
     # הזאת ההפניה הייתה חוזרת אל עצמה: _fix מפנה בחזרה למסלול הרגיל.
-    if _hls_fix_profile.get(key := _hls_fix_key(host, path), 0) is None:
-        return False
+    key = _hls_fix_key(host, path)
+    # [fix_profile_memory] הסימון פג אחרי HLS_FIX_FAIL_TTL.
+    # קודם הוא היה נצחי: ערוץ שנכשל פעם אחת בגלל הזמן — ולא בגלל תקלה —
+    # נשאר חסום להפניה האוטומטית עד להפעלה מחדש של השירות.
+    if _hls_fix_profile.get(key, 0) is None:
+        if time.time() - _hls_fix_failed_at.get(key, 0) < HLS_FIX_FAIL_TTL:
+            return False
+        _hls_fix_profile.pop(key, None)
+        _hls_fix_failed_at.pop(key, None)
+        log.info("hls_fix: סימון הכשל של %s פג — מנסים שוב", key)
     ent = _hls_idr_cache.get(f"{host}/{path}")
     if ent is None:
         _hls_idr_probe_bg(host, path)
@@ -2921,7 +2929,45 @@ HLS_FIX_SAFE_ARGS = [
     "-c:a", "aac", "-ac", "2", "-b:a", "128k", "-ar", "48000",
 ]
 # הפרופיל שהצליח לערוץ, כדי שהצופה הבא לא ישלם שוב על הניסיון הראשון.
+# [fix_profile_memory]
+# הפרופיל שעובד לכל ערוץ, על הדיסק. קודם הוא ישב בזיכרון התהליך בלבד,
+# ולכן כל הפעלה מחדש איבדה אותו וכל ערוץ שילם מחדש על סבב ההעתקה
+# הכושל — עד דקה בבקשה הראשונה, שבה הנגן מתייבש ומקבל הפניה.
+HLS_PROFILE_FILE = DATA_DIR / "hls_fix_profile.json"
+# לסימון כשל יש תוקף. בלעדיו ערוץ שנכשל פעם אחת בגלל הזמן נשאר חסום
+# להפניה האוטומטית עד restart.
+HLS_FIX_FAIL_TTL = int(os.environ.get("HLS_FIX_FAIL_TTL", "600"))
+
+
+def _load_fix_profiles() -> dict:
+    """{key: profile} מהדיסק. קובץ חסר או פגום נקרא כ'אין זיכרון'."""
+    try:
+        raw = json.loads(HLS_PROFILE_FILE.read_text(encoding="utf-8"))
+        out = {}
+        for k, v in (raw or {}).items():
+            if v is None or (isinstance(v, int) and v in (0, 1)):
+                out[k] = v
+        if out:
+            log.info("hls_fix: נטענו %d פרופילים מהדיסק", len(out))
+        return out
+    except Exception:
+        return {}
+
+
+def _save_fix_profiles() -> None:
+    """כתיבה אטומית. נקראת רק כשהערך באמת השתנה."""
+    try:
+        keep = {k: v for k, v in _hls_fix_profile.items() if v is not None}
+        HLS_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = HLS_PROFILE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(keep, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(HLS_PROFILE_FILE)
+    except Exception as e:
+        log.warning("hls_fix: שמירת הפרופילים נכשלה — %s", e)
+
+
 _hls_fix_profile: dict = {}
+_hls_fix_failed_at: dict = {}      # key -> מתי סומן ככשל
 
 
 async def _hls_drain_err(ent):
@@ -2998,7 +3044,10 @@ def _hls_out_has_idr(outdir) -> bool:
                 ["ffmpeg", "-hide_banner", "-v", "error", "-i", joined,
                  "-map", "0:v:0", "-c", "copy",
                  "-bsf:v", "h264_mp4toannexb", "-f", "h264", "-"],
-                capture_output=True, timeout=25)
+                # [fix_profile_memory] 8 ולא 25: זה רץ על שני קבצים
+                # מקומיים שאנחנו כתבנו, ולוקח פחות משנייה. 25 שניות היו
+                # רק דרך לשרוף את חלון הבקשה כשמשהו נתקע.
+                capture_output=True, timeout=8)
         finally:
             try:
                 os.unlink(joined)
@@ -3087,6 +3136,10 @@ async def _hls_fix_start(host: str, path: str, profile: int = 0) -> Optional[dic
         asyncio.ensure_future(_hls_drain_err(ent))
         _hls_fix[key] = ent
         return ent
+
+
+# [fix_profile_memory] נטען פעם אחת בעלייה, לפני הבקשה הראשונה.
+_hls_fix_profile.update(_load_fix_profiles())
 
 
 async def _hls_fix_reaper():
@@ -3264,6 +3317,10 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
         if ok:
             if _hls_fix_profile.get(key) != profile:
                 _hls_fix_profile[key] = profile
+                _hls_fix_failed_at.pop(key, None)
+                # [fix_profile_memory] לדיסק, כדי שהפעלה מחדש לא תאבד
+                # את זה והצופה הבא לא ישלם שוב על סבב ההעתקה.
+                _save_fix_profiles()
                 log.info("hls_fix: %s עובד בפרופיל %s", key, profile)
             break
         # הפרופיל הזה נכשל. כאן, ורק כאן, אפשר סוף-סוף לראות למה.
@@ -3283,7 +3340,9 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
         # [fix_live_autofix] סימון ולא מחיקה.
         # ההפניה האוטומטית מהמסלול הרגיל בודקת את הסימן הזה. pop היה
         # מוחק אותו, וההפניה הייתה נשלחת שוב בבקשה הבאה — כלומר לולאה.
+        # [fix_profile_memory] סימון עם חותמת זמן, כדי שיפוג.
         _hls_fix_profile[key] = None
+        _hls_fix_failed_at[key] = time.time()
         log.error("hls_fix: %s נכשל בכל הפרופילים (%s) — מפנה למסלול הרגיל",
                   key, why)
         return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=302)
