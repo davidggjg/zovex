@@ -48,9 +48,11 @@ sys.path.insert(0, HERE)
 import bot as B                                      # noqa: E402
 import aiclient                                      # noqa: E402
 import aikeys                                        # noqa: E402
+from aiogram.enums import ChatMemberStatus                # noqa: E402
 from aiogram.filters import Command, CommandStart          # noqa: E402
-from aiogram.types import (Chat, Message, PhotoSize, User,  # noqa: E402
-                           Voice)
+from aiogram.types import (Chat, ChatMemberLeft,           # noqa: E402
+                           ChatMemberMember, ChatMemberUpdated,
+                           Message, PhotoSize, User, Voice)
 import panel                                               # noqa: E402
 import permissions                                         # noqa: E402
 
@@ -343,6 +345,149 @@ async def test_reports():
     B.db.set(CHAT, "reports", "1")
 
 
+
+
+
+
+# ── מנהל אנונימי ──────────────────────────────────────────────────────────
+def anon_msg(text: str, mid: int = 9600) -> Message:
+    """הודעה שנשלחה בשם הקבוצה — כך טלגרם שולחת ממנהל אנונימי."""
+    grp = Chat(id=CHAT, type="supergroup", title="ק")
+    return Message(message_id=mid, date=dt.datetime.now(), chat=grp,
+                   sender_chat=grp,
+                   from_user=User(id=B.ANON_BOT_ID, is_bot=True,
+                                  first_name="GroupAnonymousBot"),
+                   text=text)
+
+
+async def test_anon_admin():
+    section("מנהל אנונימי")
+    B.db.set(CHAT, "adminpriv", "0")
+    B.db.run("DELETE FROM members WHERE chat_id=? AND user_id=?",
+             (CHAT, B.ANON_BOT_ID))
+    ok("לפני הזיהוי הוא חבר רגיל",
+       B.perms.rank_of(CHAT, B.ANON_BOT_ID) == 0)
+
+    out = await _out(B.cmd_settings, anon_msg("/settings"))
+    ok("פקודת ניהול ממנהל אנונימי עובדת",
+       "!!" not in out and "הרשאה" not in out, out[:90])
+    ok("והוא נרשם כ-admin",
+       B.perms.role_of(CHAT, B.ANON_BOT_ID) == "admin",
+       B.perms.role_of(CHAT, B.ANON_BOT_ID))
+
+    # ערוץ מקושר שמפרסם בקבוצה **אינו** מנהל אנונימי
+    other = Message(message_id=9601, date=dt.datetime.now(),
+                    chat=Chat(id=CHAT, type="supergroup"),
+                    sender_chat=Chat(id=-1009999999999, type="channel"),
+                    from_user=User(id=B.ANON_BOT_ID, is_bot=True,
+                                   first_name="x"),
+                    text="/settings")
+    ok("ערוץ מקושר אינו מזוהה כמנהל", not B._anon_admin(other))
+
+    # ומה שמיועד לבעלים בלבד עדיין נדחה
+    out = await _out(B.cmd_broadcast, anon_msg("/broadcast שלום", mid=9602))
+    ok("פעולת בעלים נדחית ממנהל אנונימי", "הרשאה" in out or "נדרש" in out,
+       out[:90])
+    B.db.set(CHAT, "adminpriv", "1")
+
+
+# ── הצטרפות משני המקורות ──────────────────────────────────────────────────
+NEWBIE = 555
+
+
+def _joiner(uid=NEWBIE):
+    return User(id=uid, is_bot=False, first_name="נכנס")
+
+
+def service_join(uid=NEWBIE, mid=9500) -> Message:
+    """הודעת השירות — מה שטלגרם שולחת בקבוצה קטנה."""
+    return Message(message_id=mid, date=dt.datetime.now(),
+                   chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                   from_user=_joiner(uid), new_chat_members=[_joiner(uid)])
+
+
+def member_update(uid=NEWBIE, old="left", new="member") -> ChatMemberUpdated:
+    """עדכון ‎chat_member‎ — המקור היחיד בקבוצה שדורשת אישור הצטרפות."""
+    cls = {"left": ChatMemberLeft, "member": ChatMemberMember}
+    return ChatMemberUpdated(
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=_joiner(uid), date=dt.datetime.now(),
+        old_chat_member=cls[old](user=_joiner(uid)),
+        new_chat_member=cls[new](user=_joiner(uid)))
+
+
+async def test_join():
+    section("הצטרפות וברכה")
+    B.db.set(CHAT, "welcome", "ברוך הבא {user}!")
+    B.db.set(CHAT, "welcome_on", "1")
+    B.db.set(CHAT, "captcha", "0")
+    B.db.set(CHAT, "goodbye", "להתראות {user}")
+    B.db.set(CHAT, "goodbye_on", "1")
+    B._join_seen.clear()
+
+    n = len(SENT)
+    await B.on_join(service_join())
+    ok("ברכה נשלחת על הודעת שירות",
+       any("ברוך הבא" in t for _c, t, _m in SENT[n:]),
+       str([t for _c, t, _m in SENT[n:]][-2:]))
+
+    # ומכאן החלק שלא עבד: קבוצה שדורשת אישור הצטרפות אינה מקבלת
+    # הודעת שירות בכלל, ולכן לא קרה שום דבר לנכנס
+    B._join_seen.clear()
+    n = len(SENT)
+    await B.on_member_change(member_update(uid=556))
+    ok("ברכה נשלחת גם על עדכון chat_member",
+       any("ברוך הבא" in t for _c, t, _m in SENT[n:]),
+       str([t for _c, t, _m in SENT[n:]][-2:]))
+    ok("והנכנס נרשם בטבלת החברים",
+       B.db.one("SELECT 1 FROM members WHERE chat_id=? AND user_id=?",
+                (CHAT, 556)) is not None)
+
+    # שני המקורות יחד — ברכה אחת
+    B._join_seen.clear()
+    n = len(SENT)
+    await B.on_join(service_join(uid=557, mid=9501))
+    await B.on_member_change(member_update(uid=557))
+    greets = [t for _c, t, _m in SENT[n:] if "ברוך הבא" in t]
+    ok("שני המקורות יחד מברכים פעם אחת", len(greets) == 1, str(len(greets)))
+
+    # השתקה אינה הצטרפות
+    B._join_seen.clear()
+    n = len(SENT)
+    await B.on_member_change(member_update(uid=558, old="member",
+                                           new="member"))
+    ok("מעבר בין שני מצבי 'בפנים' אינו מברך",
+       not [t for _c, t, _m in SENT[n:] if "ברוך הבא" in t])
+
+    # יציאה
+    B._join_seen.clear()
+    n = len(SENT)
+    await B.on_member_change(member_update(uid=559, old="member",
+                                           new="left"))
+    ok("פרידה נשלחת על עדכון chat_member",
+       any("להתראות" in t for _c, t, _m in SENT[n:]),
+       str([t for _c, t, _m in SENT[n:]][-2:]))
+
+    # ברכה כבויה = שקט
+    B.db.set(CHAT, "welcome_on", "0")
+    B._join_seen.clear()
+    n = len(SENT)
+    await B.on_join(service_join(uid=560, mid=9502))
+    ok("מתג כבוי משתיק את הברכה",
+       not [t for _c, t, _m in SENT[n:] if "ברוך הבא" in t])
+    B.db.set(CHAT, "welcome_on", "1")
+
+    # קאפצ'ה במקום ברכה — וגם היא תלתה בהודעת השירות
+    B.db.set(CHAT, "captcha", "1")
+    B._join_seen.clear()
+    n = len(SENT)
+    await B.on_member_change(member_update(uid=561))
+    out = " ".join(t for _c, t, _m in SENT[n:])
+    ok("קאפצ'ה מופעלת גם מעדכון chat_member",
+       "ברוך הבא" not in out and len(SENT) > n, out[:80])
+    B.db.set(CHAT, "captcha", "0")
+    B.db.set(CHAT, "welcome", "")
+    B.db.set(CHAT, "goodbye", "")
 
 
 # ── זרימות אמיתיות, עם ארגומנטים ──────────────────────────────────────────
@@ -888,6 +1033,8 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_anon_admin()
+    await test_join()
     await test_flows()
     await test_quiet_group()
     await test_command_visibility()

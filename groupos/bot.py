@@ -366,16 +366,44 @@ def touch(msg: Message) -> None:
                (msg.chat.id, u.id, now))
 
 
+# מנהל אנונימי: טלגרם שולחת את ההודעה **בשם הקבוצה**, ולכן
+# ‎from_user‎ הוא ‎GroupAnonymousBot‎ ולא האדם. בלי טיפול מיוחד
+# ‎role_of‎ מחזיר "member" — וכל פקודת ניהול נענית ב"אין לך הרשאה",
+# למנהל שהוא לפעמים בעל הקבוצה עצמו. זה נראה כמו "בקושי הפקודות
+# עובדות", והסיבה היא סימון אחד בהגדרות הקבוצה.
+#
+# ‎sender_chat.id == chat.id‎ הוא ההוכחה: רק מנהל אנונימי **של הקבוצה
+# הזאת** יכול לשלוח כך. ערוץ מקושר שמפרסם בקבוצה שולח עם מזהה של
+# הערוץ, שאינו שווה למזהה הקבוצה, ולכן אינו נכנס לכאן.
+#
+# מה שאי אפשר לדעת הוא **איזה** מנהל זה, ולכן הדירוג הוא ‎admin‎ ולא
+# ‎owner‎: פעולות שמיועדות לבעלים בלבד — ייבוא, פדרציה, הפצה — עדיין
+# ידרשו מנהל מזוהה.
+ANON_BOT_ID = 1087968824
+
+
+def _anon_admin(msg: Message) -> bool:
+    sc = getattr(msg, "sender_chat", None)
+    if not (sc and msg.chat and sc.id == msg.chat.id):
+        return False
+    uid = msg.from_user.id if msg.from_user else ANON_BOT_ID
+    if perms.rank_of(msg.chat.id, uid) < RANK["admin"]:
+        perms.set_role(msg.chat.id, uid, "admin")
+        log.info("מנהל אנונימי ב-%s (%s) — דירוג admin", msg.chat.id, uid)
+    return True
+
+
 def needs(permission: str):
     def deco(fn: Callable):
         @wraps(fn)
         async def inner(msg: Message, *a, **kw):
             if msg.from_user is None:
                 return
+            _anon_admin(msg)
             if msg.chat.type == ChatType.PRIVATE:
                 await reply(msg, T(msg, "err.group_only"))
                 return
-            await sync_admins(msg.chat.id)
+            admins = await sync_admins(msg.chat.id)
             # פקודה מכובה בקבוצה — למעט למנהלים. פקודה שמנהל אינו
             # יכול להריץ אינה "מכובה", היא שבורה.
             name = (msg.text or "")[1:].split()[0].split("@")[0].lower() \
@@ -390,7 +418,13 @@ def needs(permission: str):
             d = perms.check(msg.chat.id, msg.from_user.id, permission,
                             _target_of(msg))
             if not d:
-                await reply(msg, T(msg, "err.no_permission", reason=d.reason))
+                # אבחון ולא רק סירוב. "נדרש admin ומעלה" אינו מסביר
+                # למנהל אמיתי **למה** הבוט לא מזהה אותו, וזה בדיוק
+                # המצב שנראה כמו "בקושי הפקודות עובדות": אם שליפת
+                # המנהלים נכשלה, לבוט חסרות הרשאות ניהול בקבוצה.
+                hint = "" if admins else "\n\n" + T(msg, "err.no_admins")
+                await reply(msg, T(msg, "err.no_permission",
+                                   reason=d.reason) + hint)
                 audit.log(msg.chat.id, "permission.denied",
                           actor_id=msg.from_user.id, reason=d.reason,
                           after=permission, severity="low")
@@ -527,6 +561,7 @@ async def on_group_message(msg: Message):
     if msg.from_user is None:
         return
     await sync_admins(msg.chat.id)
+    _anon_admin(msg)
     # מנהלים ומנחים פטורים מהכול — כלל שכל בוט ניהול מקיים
     if perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["moderator"]:
         return
@@ -874,47 +909,86 @@ async def _greet(chat_id: int, user, key: str, joined: bool) -> None:
                        clean_after=secs or None)
 
 
+# הצטרפות מגיעה משני מקומות, ולא מאחד. עד כה טופל רק הראשון:
+#
+#   1. הודעת שירות ‎new_chat_members‎ — מה שרואים בקבוצה קטנה
+#   2. עדכון ‎chat_member‎ — המקור **היחיד** כשהקבוצה דורשת אישור
+#      הצטרפות, וכשחברים מוסתרים
+#
+# בקבוצה מהסוג השני לא קרה שום דבר לנכנס: לא ברכה, לא קאפצ'ה, לא
+# הגנת פשיטה, ולא אכיפת חסימת פדרציה — כי כל אלה תלו בהודעת השירות
+# שטלגרם פשוט אינה שולחת שם. זה מה שנראה כמו "הפעלתי הודעת כניסה
+# ולא קורה כלום".
+JOIN_DEDUP = 45.0
+_join_seen: dict = {}
+
+
+def _join_once(chat_id: int, user_id: int) -> bool:
+    """‎True‎ אם ההצטרפות הזאת כבר טופלה עכשיו.
+
+    שני המקורות יכולים להגיע שניהם, ואז בלי זה הנכנס היה מקבל שתי
+    ברכות ושתי קאפצ'ות."""
+    now = time.time()
+    for k, t in list(_join_seen.items()):
+        if now - t > JOIN_DEDUP:
+            _join_seen.pop(k, None)
+    key = (chat_id, user_id)
+    if key in _join_seen:
+        return True
+    _join_seen[key] = now
+    return False
+
+
+async def _handle_join(chat, user) -> None:
+    """כל מה שקורה לנכנס. נקרא משני המקורות, פעם אחת בלבד."""
+    if user is None or user.is_bot or _join_once(chat.id, user.id):
+        return
+    db.run("""INSERT INTO members (chat_id,user_id,joined_at,last_msg)
+              VALUES (?,?,?,0)
+              ON CONFLICT (chat_id,user_id) DO UPDATE SET
+                joined_at=COALESCE(members.joined_at,excluded.joined_at)""",
+           (chat.id, user.id, time.time()))
+    # חסימת פדרציה נאכפת לפני הכול: מי שנחסם ברשת לא אמור לראות
+    # ברכה ואז להיזרק
+    fb = feds.banned_here(chat.id, user.id)
+    if fb:
+        if await apply_action(chat.id, user.id, "ban", None,
+                              f"fed:{fb['fed_id']}", None, "automation"):
+            if db.get(chat.id, "silent", "1") != "1":
+                await send(chat.id,
+                           i18n.t("fed.hit", lang.for_chat(chat.id),
+                                  name=tpl.esc(user.first_name or user.id),
+                                  reason=tpl.esc(fb["reason"] or "—")),
+                           clean_after=clean_delay(chat.id) or None)
+            return
+    raid = flood.join(chat.id)
+    if raid and db.get(chat.id, "antiraid", "1") == "1":
+        await _on_raid(chat.id, raid)
+    if db.get(chat.id, "captcha", "0") == "1":
+        # האימות קודם לברכה: אין טעם לברך מי שעוד לא הוכח כאדם
+        if await _start_captcha(chat.id, user):
+            return
+    await _greet(chat.id, user, WELCOME_KEY, True)
+
+
+async def _handle_leave(chat, user) -> None:
+    if user is None or user.is_bot:
+        return
+    await _greet(chat.id, user, GOODBYE_KEY, False)
+
+
 @dp.message(F.new_chat_members)
 async def on_join(msg: Message):
     """כניסה לקבוצה. גם מונה פשיטה — הצטרפות המונית מתחילה כאן."""
     register_chat(msg.chat)
     for u in msg.new_chat_members or []:
-        if u.is_bot:
-            continue
-        db.run("""INSERT INTO members (chat_id,user_id,joined_at,last_msg)
-                  VALUES (?,?,?,0)
-                  ON CONFLICT (chat_id,user_id) DO UPDATE SET
-                    joined_at=COALESCE(members.joined_at,excluded.joined_at)""",
-               (msg.chat.id, u.id, time.time()))
-        # חסימת פדרציה נאכפת לפני הכול: מי שנחסם ברשת לא אמור
-        # לראות ברכה ואז להיזרק
-        fb = feds.banned_here(msg.chat.id, u.id)
-        if fb:
-            if await apply_action(msg.chat.id, u.id, "ban", None,
-                                  f"fed:{fb['fed_id']}", None, "automation"):
-                if db.get(msg.chat.id, "silent", "1") != "1":
-                    await send(msg.chat.id,
-                               i18n.t("fed.hit", lang.for_chat(msg.chat.id),
-                                      name=tpl.esc(u.first_name or u.id),
-                                      reason=tpl.esc(fb["reason"] or "—")),
-                               clean_after=clean_delay(msg.chat.id) or None)
-                continue
-        raid = flood.join(msg.chat.id)
-        if raid and db.get(msg.chat.id, "antiraid", "1") == "1":
-            await _on_raid(msg.chat.id, raid)
-        if db.get(msg.chat.id, "captcha", "0") == "1":
-            # האימות קודם לברכה: אין טעם לברך מי שעוד לא הוכח כאדם
-            if await _start_captcha(msg.chat.id, u):
-                continue
-        await _greet(msg.chat.id, u, WELCOME_KEY, True)
+        await _handle_join(msg.chat, u)
     _clean_service(msg)
 
 
 @dp.message(F.left_chat_member)
 async def on_leave(msg: Message):
-    u = msg.left_chat_member
-    if u and not u.is_bot:
-        await _greet(msg.chat.id, u, GOODBYE_KEY, False)
+    await _handle_leave(msg.chat, msg.left_chat_member)
     _clean_service(msg)
 
 
@@ -1025,14 +1099,29 @@ async def _on_raid(chat_id: int, raid) -> None:
 
 @dp.chat_member()
 async def on_member_change(ev: ChatMemberUpdated):
-    """קידום או הורדה של משתמש. מרענן את המטמון מיד במקום לחכות לפקיעה.
+    """הצטרפות, עזיבה, קידום והורדה — כפי שטלגרם מדווחת עליהם.
 
-    רק שינוי שנוגע לניהול מפעיל שליפה מחדש. בקבוצה פעילה כל הצטרפות
-    ועזיבה מגיעות לכאן, ו-getChatAdministrators על כל אחת מהן היא בזבוז
-    מכסה על מידע שלא השתנה."""
+    זה **המקור היחיד** להצטרפות בקבוצה שדורשת אישור או שחבריה מוסתרים:
+    שם אין הודעת שירות ‎new_chat_members‎ בכלל. עד כה הפונקציה הזאת רק
+    רעננה את מטמון המנהלים, ולכן בקבוצות כאלה לא קרה לנכנס שום דבר."""
     if ev.chat.type not in GROUP_TYPES:
         return
-    touched = {ev.old_chat_member.status, ev.new_chat_member.status}
+    old = ev.old_chat_member.status
+    new = ev.new_chat_member.status
+    user = ev.new_chat_member.user
+
+    # ‎restricted‎ הוא חבר מוגבל, כלומר בפנים. ולכן מעבר בין שני מצבים
+    # שנחשבים "בפנים" אינו הצטרפות — השתקה אינה כניסה.
+    inside = {ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED,
+              ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+    outside = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
+    if old in outside and new in inside:
+        register_chat(ev.chat)
+        await _handle_join(ev.chat, user)
+    elif old in inside and new in outside:
+        await _handle_leave(ev.chat, user)
+
+    touched = {old, new}
     if not touched & set(ADMIN_STATUSES):
         return
     _admin_cache.pop(ev.chat.id, None)
