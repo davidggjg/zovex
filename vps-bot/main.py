@@ -2779,6 +2779,28 @@ def _h264_has_idr(data: bytes) -> bool:
     return idr > 0
 
 
+def _h264_count_nals(data: bytes):
+    """[fix_idr_probe_log] (IDR, slices) — אותה סריקה, אבל עם המספרים.
+
+    _h264_has_idr מחזיר בוליאני, ולכן אי אפשר לרשום ביומן כמה נמצא.
+    שתי הפונקציות סורקות אותו דבר בדיוק; הבדיקה למטה מאמתת שהן
+    מסכימות, כדי שלא תיווצר כאן סריקה שנייה שמתפצלת מהראשונה.
+    """
+    idr = slices = 0
+    i = 0
+    while True:
+        j = data.find(b"\x00\x00\x01", i)
+        if j < 0 or j + 3 >= len(data):
+            break
+        t = data[j + 3] & 0x1F
+        if t == 5:
+            idr += 1
+        if t in (1, 5):
+            slices += 1
+        i = j + 3
+    return idr, slices
+
+
 def _hls_probe_no_idr(src: str) -> bool:
     """מושך שמונה שניות של וידאו וסורק את יחידות ה-NAL.
 
@@ -2786,14 +2808,30 @@ def _hls_probe_no_idr(src: str) -> bool:
     IDR. בסגמנט שנבדק הוא החזיר 7 "מפתחות" בזמן שה-IDR האמיתי הוא אפס.
     ריצה חוסמת, ולכן נקראת דרך run_in_executor כמו הבדיקות שלידה.
     """
+    # [fix_idr_probe_log] המסקנה זהה, אבל מה שראינו נרשם.
+    # קודם כל אלה נבלעו — קוד היציאה, ה-stderr ומספר הבתים — ולכן
+    # "יש IDR" ו-"לא הצלחתי לקרוא את הזרם" נראו ביומן אותו דבר, בזמן
+    # שהן שתי מסקנות שונות לגמרי.
     try:
         import subprocess
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-v", "error", "-t", "8",
              "-i", src, "-map", "0:v:0", "-c", "copy", "-f", "h264", "-"],
             capture_output=True, timeout=60)
-        return not _h264_has_idr(r.stdout or b"")
-    except Exception:
+        data = r.stdout or b""
+        idr, slices = _h264_count_nals(data)
+        err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        log.info("idr_probe: %d בתים · slices=%d · IDR=%d · rc=%s%s",
+                 len(data), slices, idr, r.returncode,
+                 (" · " + " | ".join(err[-2:])) if err else "")
+        if not slices:
+            # אין slices זה "לא הצלחתי לקרוא", לא "יש IDR". ההחלטה נשארת
+            # זהה — לא משנים התנהגות בספק — אבל היא נאמרת במפורש.
+            log.warning("idr_probe: לא נקראו slices בכלל — לא משנים התנהגות")
+            return False
+        return idr == 0
+    except Exception as e:
+        log.warning("idr_probe: נכשל — %s: %s", type(e).__name__, e)
         return False                # ספק — מתנהגים כמו קודם
 
 
