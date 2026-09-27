@@ -11,6 +11,7 @@ blocklist.py
 bot.py
 captcha.py
 content.py
+customcmd.py
 db.py
 disabling.py
 emergency.py
@@ -24,6 +25,7 @@ panel.py
 permissions.py
 policy.py
 ratelimit.py
+reports.py
 reputation.py
 scheduler.py
 templates.py

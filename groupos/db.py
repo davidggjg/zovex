@@ -252,6 +252,64 @@ MIGRATIONS: list[tuple[int, str]] = [
     );
     CREATE INDEX idx_rep_xp ON reputation (chat_id, xp DESC);
     """),
+
+    (4, """
+    -- דיווחים עם סטטוס. עד כה /report רק שלח למנהלים בפרטי ונרשם ביומן,
+    -- ולכן לא היה אפשר לדעת מה כבר טופל, מי טיפל, ומה תלוי ועומד.
+    --
+    -- msg_id הוא ההודעה שעליה דווח, והוא חלק מהמפתח הלוגי: כמה חברים
+    -- שמדווחים על אותה הודעה אינם שלושה דיווחים אלא אחד עם שלושה
+    -- מדווחים. בלי זה הצפת דיווחים על הודעה אחת מציפה גם את המנהלים.
+    CREATE TABLE reports (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id      INTEGER NOT NULL,
+        msg_id       INTEGER,
+        target_id    INTEGER NOT NULL,
+        reason       TEXT    NOT NULL DEFAULT '',
+        status       TEXT    NOT NULL DEFAULT 'open',
+        count        INTEGER NOT NULL DEFAULT 1,
+        handled_by   INTEGER,
+        handled_at   REAL,
+        note         TEXT,
+        created_at   REAL    NOT NULL
+    );
+    -- הרשימה הנפוצה היא "מה פתוח בקבוצה הזאת, החדש קודם".
+    CREATE INDEX idx_reports_open ON reports (chat_id, status, created_at DESC);
+    -- ומכאן מגיע האיחוד: חיפוש דיווח פתוח קיים על אותה הודעה.
+    CREATE INDEX idx_reports_msg ON reports (chat_id, msg_id, status);
+
+    -- מי דיווח על מה. טבלה נפרדת ולא מונה בלבד, כדי שאפשר יהיה לדעת
+    -- אם אותו אדם מדווח שוב (ולא לספור אותו פעמיים) ומי המדווחים.
+    CREATE TABLE report_voters (
+        report_id    INTEGER NOT NULL,
+        user_id      INTEGER NOT NULL,
+        at           REAL    NOT NULL,
+        PRIMARY KEY (report_id, user_id)
+    );
+
+    -- פקודות מותאמות: /<שם> שהמנהל מגדיר, עם תשובה משלו.
+    --
+    -- זה **לא** filters. filter מגיב למילה בתוך הודעה; פקודה היא קריאה
+    -- מפורשת. הפרדה ולא שדה נוסף, כי לשתיהן התנגשויות שונות: פקודה
+    -- מתנגשת עם פקודות המערכת, ופילטר מתנגש עם טקסט חופשי.
+    --
+    -- ‎media_id‎ ולא רק טקסט: מנהל שמשיב לתמונה עם ‎/addcmd banner‎ מתכוון
+    -- לתמונה. בלי העמודות האלה התמונה נזרקת בשקט, והפקודה עונה טקסט
+    -- ריק — שגיאה שנראית כמו הצלחה.
+    CREATE TABLE custom_cmds (
+        chat_id      INTEGER NOT NULL,
+        name         TEXT    NOT NULL,
+        content      TEXT    NOT NULL DEFAULT '',
+        media_id     TEXT,
+        media_kind   TEXT,
+        buttons      TEXT,
+        admin_only   INTEGER NOT NULL DEFAULT 0,
+        uses         INTEGER NOT NULL DEFAULT 0,
+        created_by   INTEGER,
+        created_at   REAL    NOT NULL,
+        PRIMARY KEY (chat_id, name)
+    );
+    """),
 ]
 
 

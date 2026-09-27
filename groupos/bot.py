@@ -60,6 +60,7 @@ import linksec                                  # noqa: E402
 import policy                                   # noqa: E402
 import scheduler as schedmod                    # noqa: E402
 import captcha as cap                           # noqa: E402
+import customcmd                                # noqa: E402
 import emergency as emerg                       # noqa: E402
 import templates as tpl                         # noqa: E402
 from allowlist import Allowlist                 # noqa: E402
@@ -75,6 +76,7 @@ from locks import ACTIONS, LOCK_TYPES, Locks    # noqa: E402
 from moderation import Moderation, parse_policy  # noqa: E402
 from permissions import Permissions, RANK       # noqa: E402
 from ratelimit import RateGuard                 # noqa: E402
+from reports import Reports                     # noqa: E402
 
 log = logging.getLogger("groupos")
 
@@ -103,6 +105,8 @@ brain = aiclient.AIClient(ai)
 sched = schedmod.Scheduler(db)
 feds = Federations(db)
 rep = Reputation(db)
+rpt = Reports(db)
+cmds = customcmd.CustomCmds(db)
 lang = i18n.Lang(db)
 guard = RateGuard()
 dp = Dispatcher()
@@ -1175,15 +1179,178 @@ async def cmd_report(msg: Message):
     reason = " ".join((msg.text or "").split()[1:])
     audit.log(msg.chat.id, "user.report", actor_id=msg.from_user.id,
               target_id=src.from_user.id, reason=reason, severity="medium")
+    r, is_new = rpt.add(msg.chat.id, msg.from_user.id, src.from_user.id,
+                        msg_id=src.message_id, reason=reason)
+    if not is_new:
+        # דיווח שמצטרף לדיווח פתוח אינו התראה נוספת. חמש התראות זהות
+        # בפרטי מסתירות את כל השאר, והמונה ממילא נראה ב-/reportlist.
+        await reply(msg, T(msg, "report.merged", n=r.count))
+        return
     admins = await sync_admins(msg.chat.id)
     alert = T(msg, "report.alert",
               reporter=tpl.mention(msg.from_user.id, _name(msg)),
               target=tpl.mention(src.from_user.id,
                                  src.from_user.first_name or "?"),
               reason=tpl.esc(reason))
+    markup = _report_buttons(msg.chat.id, r.id, lang_of(msg))
     for uid in list(admins)[:10]:
-        await send(uid, alert, is_group=False)
+        await send(uid, alert, is_group=False, markup=markup)
     await reply(msg, T(msg, "report.sent"))
+
+
+def _report_buttons(chat_id: int, rid: int, lg: str) -> InlineKeyboardMarkup:
+    """שני כפתורים על ההתראה בפרטי — טיפול בלחיצה אחת.
+
+    מנהל שקיבל התראה בשלוש בלילה לא יחזור לקבוצה כדי להקליד ‎/resolve‎.
+    ‎callback_data‎ נושא את מזהה הקבוצה, כי ההתראה נשלחת בפרטי ואין דרך
+    אחרת לדעת על איזו קבוצה מדובר."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=i18n.t("report.btn_close", lg),
+                             callback_data=f"r:{chat_id}:{rid}:ok"),
+        InlineKeyboardButton(text=i18n.t("report.btn_drop", lg),
+                             callback_data=f"r:{chat_id}:{rid}:no"),
+    ]])
+
+
+@dp.message(Command("reportlist"))
+@needs("reports.handle")
+async def cmd_reportlist(msg: Message):
+    touch(msg)
+    open_ = rpt.list(msg.chat.id, limit=20)
+    if not open_:
+        await reply(msg, T(msg, "report.none"))
+        return
+    rows = [T(msg, "report.row", id=r.id, target=_named(msg, r.target_id),
+              n=r.count, reason=tpl.esc(r.reason) or T(msg, "report.nothing"))
+            for r in open_]
+    await reply(msg, T(msg, "report.list", n=rpt.open_count(msg.chat.id),
+                       list="\n\n".join(rows)))
+
+
+async def _close_report(msg: Message, cmd: str, drop: bool):
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
+        await reply(msg, T(msg, "report.usage", cmd=cmd))
+        return
+    rid = int(parts[1].lstrip("#"))
+    note = parts[2] if len(parts) > 2 else ""
+    fn = rpt.dismiss if drop else rpt.resolve
+    r = fn(msg.chat.id, rid, msg.from_user.id, note)
+    if r is None:
+        # או שאין דיווח כזה, או שמנהל אחר הספיק לסגור אותו. בשני
+        # המקרים אין מה לעשות, ובשניהם חשוב לא לדרוס את מי שטיפל.
+        await reply(msg, T(msg, "report.notfound"))
+        return
+    audit.log(msg.chat.id, "report.dismissed" if drop else "report.resolved",
+              actor_id=msg.from_user.id, target_id=r.target_id,
+              reason=note or None, after=str(rid), severity="low")
+    await reply(msg, T(msg, "report.dropped" if drop else "report.closed",
+                       id=rid))
+
+
+@dp.message(Command("resolve"))
+@needs("reports.handle")
+async def cmd_resolve(msg: Message):
+    touch(msg); await _close_report(msg, "/resolve", drop=False)
+
+
+@dp.message(Command("dismiss"))
+@needs("reports.handle")
+async def cmd_dismiss(msg: Message):
+    touch(msg); await _close_report(msg, "/dismiss", drop=True)
+
+
+@dp.callback_query(F.data.startswith("r:"))
+async def on_report_button(q: CallbackQuery):
+    parts = (q.data or "").split(":")
+    if len(parts) != 4:
+        return
+    _, cid, rid, what = parts
+    try:
+        chat_id, rid = int(cid), int(rid)
+    except ValueError:
+        return
+    lg = lang.for_chat(chat_id)
+    # ההרשאה נבדקת בלחיצה ולא בשליחה: מי שהודח מהניהול לא יטפל
+    # בדיווחים דרך התראה שנשארה פתוחה אצלו בפרטי.
+    if not perms.check(chat_id, q.from_user.id, "reports.handle"):
+        await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+        return
+    drop = what == "no"
+    fn = rpt.dismiss if drop else rpt.resolve
+    r = fn(chat_id, rid, q.from_user.id)
+    if r is None:
+        await q.answer(i18n.t("report.notfound", lg), show_alert=True)
+        return
+    audit.log(chat_id, "report.dismissed" if drop else "report.resolved",
+              actor_id=q.from_user.id, target_id=r.target_id,
+              after=str(rid), source="button", severity="low")
+    done = i18n.t("report.dropped" if drop else "report.closed", lg, id=rid)
+    body = getattr(q.message, "html_text", None) or (q.message.text or "")
+    with contextlib.suppress(TelegramAPIError):
+        await q.message.edit_text(body + "\n\n" + done)
+    await q.answer(i18n.t("saved", lg))
+
+
+# ── פקודות שהקבוצה מגדירה ──────────────────────────────────────────────────
+@dp.message(Command("addcmd"))
+@needs("customcmd.write")
+async def cmd_addcmd(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "cc.usage"))
+        return
+    body, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    c, err = cmds.set(msg.chat.id, parts[1], body, by=msg.from_user.id,
+                      media_id=mid, media_kind=kind)
+    if err:
+        await reply(msg, T(msg, err,
+                           name=tpl.esc(customcmd.normalize(parts[1])),
+                           max=(customcmd.CONTENT_MAX if err == "cc.too_long"
+                                else customcmd.MAX_PER_CHAT)))
+        return
+    audit.log(msg.chat.id, "customcmd.set", actor_id=msg.from_user.id,
+              after=c.name, severity="low")
+    await reply(msg, T(msg, "cc.saved", name=c.name))
+
+
+@dp.message(Command("delcmd"))
+@needs("customcmd.write")
+async def cmd_delcmd(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "cc.usage"))
+        return
+    name = customcmd.normalize(parts[1])
+    if not cmds.delete(msg.chat.id, name):
+        await reply(msg, T(msg, "cc.missing", name=tpl.esc(name)))
+        return
+    audit.log(msg.chat.id, "customcmd.delete", actor_id=msg.from_user.id,
+              before=name, severity="low")
+    await reply(msg, T(msg, "cc.deleted", name=tpl.esc(name)))
+
+
+@dp.message(Command("cmds"))
+async def cmd_cmds(msg: Message):
+    """רשימת הפקודות של הקבוצה. פתוחה לכולם — פקודה שאף אחד לא יודע
+    שקיימת אינה פקודה."""
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    await sync_admins(msg.chat.id)
+    admin = bool(perms.check(msg.chat.id, msg.from_user.id, "settings.read"))
+    rows = [c for c in cmds.list(msg.chat.id) if admin or not c.admin_only]
+    if not rows:
+        await reply(msg, T(msg, "cc.none"))
+        return
+    mark = T(msg, "cc.admin_only")
+    await reply(msg, T(msg, "cc.list", list="\n".join(
+        f"• <code>/{c.name}</code>"
+        + (f" <i>{mark}</i>" if c.admin_only else "")
+        for c in rows)))
 
 
 @dp.message(Command("info"))
@@ -3011,6 +3178,36 @@ async def cmd_role(msg: Message):
     audit.log(msg.chat.id, "role.change", actor_id=msg.from_user.id,
               target_id=target, before=old, after=parts[1], severity="medium")
     await reply(msg, T(msg, "role.changed", before=old, after=parts[1]))
+
+
+# ── פקודה מותאמת: המטפל האחרון ─────────────────────────────────────────────
+# נרשם **אחרי** כל ‎Command(...)‎ בקובץ, כי aiogram מריצה את המטפלים
+# בסדר הרישום והראשון שמתאים מנצח. מטפל כזה למעלה היה קולט את ‎/ban‎
+# לפני הפקודה עצמה — כלומר משתיק את האכיפה בשקט.
+@dp.message(F.chat.type.in_(GROUP_TYPES), F.text.startswith("/"))
+async def on_custom_command(msg: Message):
+    touch(msg)
+    if msg.from_user is None:
+        return
+    c = cmds.resolve(msg.chat.id, msg.text or "")
+    if c is None:
+        return
+    name = c.name
+    await sync_admins(msg.chat.id)
+    if disabling.is_disabled(db, msg.chat.id, name) \
+            and perms.rank_of(msg.chat.id,
+                              msg.from_user.id) < RANK["moderator"]:
+        return
+    if c.admin_only and not perms.check(msg.chat.id, msg.from_user.id,
+                                        "settings.read"):
+        return
+    cmds.bump(msg.chat.id, name)
+    delay = clean_delay(msg.chat.id)
+    if delay:
+        _schedule_delete(msg.chat.id, msg.message_id, delay)
+    await send_content(msg.chat.id, tpl.render_pick(c.content, _ctx(msg)),
+                       c.media_id, c.media_kind, c.buttons or "",
+                       clean_after=delay or None)
 
 
 # ── הפאנל הפרטי ────────────────────────────────────────────────────────────

@@ -46,6 +46,8 @@ import reputation as rep  # noqa: E402
 from allowlist import Allowlist  # noqa: E402
 import emergency as emerg  # noqa: E402
 from antiflood import AntiFlood  # noqa: E402
+import reports  # noqa: E402
+import customcmd  # noqa: E402
 
 PASS = FAIL = 0
 FAILURES: list[str] = []
@@ -938,6 +940,175 @@ def test_captcha():
     ok("שלא פג נשאר", P2.waiting(CHAT, 2))
     ok("שנאסף הוסר", not P2.waiting(CHAT, 1))
     ok("ספירה לפי קבוצה", P2.count(CHAT) == 1)
+
+
+# ── דיווחים ───────────────────────────────────────────────────────────────
+def test_reports():
+    section("דיווחים")
+    db = fresh()
+    R = reports.Reports(db)
+    CHAT, MSG = -100555, 4242
+    A, B, C, ADM, ADM2 = 11, 12, 13, 90, 91
+
+    r, is_new = R.add(CHAT, A, C, msg_id=MSG, reason="ספאם", now=1000.0)
+    ok("דיווח נוצר", is_new and r.is_open and r.count == 1, str(r))
+    ok("המדווח נרשם", R.voters(r.id) == [A])
+
+    # חמישה שמדווחים על אותה הודעה הם דיווח אחד עם חמישה מדווחים
+    r2, is_new2 = R.add(CHAT, B, C, msg_id=MSG, reason="קישור", now=1001.0)
+    ok("דיווח שני מצטרף", not is_new2 and r2.id == r.id)
+    ok("המונה עלה", r2.count == 2, str(r2.count))
+    ok("שתי הסיבות נשמרו",
+       "ספאם" in r2.reason and "קישור" in r2.reason, r2.reason)
+
+    # אותו אדם שמדווח שוב אינו מדווח נוסף
+    r3, _ = R.add(CHAT, A, C, msg_id=MSG, reason="ספאם", now=1002.0)
+    ok("אותו מדווח לא נספר פעמיים", r3.count == 2, str(r3.count))
+    ok("רשימת המדווחים מלאה", sorted(R.voters(r.id)) == [A, B])
+
+    # בלי msg_id אין על מה לאחד: שני דברים שונים שאותו אדם עשה
+    x1, n1 = R.add(CHAT, A, C, reason="הטרדה בפרטי", now=1003.0)
+    x2, n2 = R.add(CHAT, B, C, reason="שם משתמש פוגע", now=1004.0)
+    ok("בלי הודעה אין איחוד", n1 and n2 and x1.id != x2.id)
+
+    ok("סיבה נחתכת בתקרה",
+       len(R.add(CHAT, A, C, msg_id=7, reason="א" * 900)[0].reason)
+       <= reports.REASON_MAX)
+
+    ok("רק פתוחים ברשימה",
+       all(r.is_open for r in R.list(CHAT))
+       and len(R.list(CHAT)) == R.open_count(CHAT), str(R.counts(CHAT)))
+
+    done = R.resolve(CHAT, r.id, ADM, "הוחסם")
+    ok("טופל", done is not None and done.status == reports.HANDLED
+       and done.handled_by == ADM, str(done))
+    # שני מנהלים שלוחצים בו-זמנית: הראשון קובע, השני מקבל None ויֵדע
+    # לומר "כבר טופל" במקום לדרוס את מי שטיפל
+    ok("מנהל שני לא דורס", R.resolve(CHAT, r.id, ADM2) is None)
+    ok("דיווח שלא קיים מחזיר None", R.resolve(CHAT, 99999, ADM) is None)
+
+    dropped = R.dismiss(CHAT, x1.id, ADM)
+    ok("נדחה", dropped is not None and dropped.status == reports.DISMISSED)
+    ok("נדחה אינו טופל", dropped.status != reports.HANDLED)
+
+    back = R.reopen(CHAT, x1.id)
+    ok("אפשר לפתוח מחדש", back is not None and back.is_open
+       and back.handled_by is None, str(back))
+    ok("פתוח לא נפתח שוב", R.reopen(CHAT, back.id) is None)
+
+    # קבוצה אחרת לא רואה את הדיווחים של הקבוצה הזאת
+    R.add(-100556, A, C, msg_id=MSG, reason="אחר", now=1005.0)
+    ok("הפרדה בין קבוצות",
+       R.get(-100556, r.id) is None and R.open_count(-100556) == 1)
+
+    # דיווח פתוח שנעלם מעצמו הוא בדיוק מה שהמערכת באה למנוע
+    old = R.add(CHAT, A, C, msg_id=555, now=0.0)[0]
+    R.dismiss(CHAT, old.id, ADM, now=0.0)
+    open_before = R.open_count(CHAT)
+    n = R.prune(CHAT, now=100 * 86400)
+    ok("סגור וישן נמחק", n >= 1, str(n))
+    ok("פתוח לא נמחק", R.open_count(CHAT) == open_before)
+    orphans = db.one("""SELECT COUNT(*) c FROM report_voters v
+                        WHERE v.report_id NOT IN (SELECT id FROM reports)""")
+    ok("שורות הצבעה של דיווח שנמחק נוקו", orphans["c"] == 0)
+
+    db2 = fresh()
+    R2 = reports.Reports(db2)
+    ok("מדווח חדש אינו לא-אמין ואינו אמין",
+       R2.reporter_credibility(CHAT, A) == 0.5)
+    for i in range(3):
+        rr = R2.add(CHAT, A, C, msg_id=1000 + i)[0]
+        R2.dismiss(CHAT, rr.id, ADM)
+    ok("מי שכל דיווחיו נדחו מאבד אמינות",
+       R2.reporter_credibility(CHAT, A) == 0.0,
+       str(R2.reporter_credibility(CHAT, A)))
+
+
+# ── פקודות שהקבוצה מגדירה ─────────────────────────────────────────────────
+def test_customcmd():
+    section("פקודות מותאמות")
+    db = fresh()
+    C = customcmd.CustomCmds(db)
+    CHAT, OTHER, ADM = -100666, -100667, 90
+
+    ok("שם תקין עובר", customcmd.check_name("discord") is None)
+    ok("שם קצר מדי נדחה", customcmd.check_name("a") == "cc.bad_name")
+    ok("רווח בשם נדחה", customcmd.check_name("two words") == "cc.bad_name")
+    ok("אמוג'י בשם נדחה", customcmd.check_name("ש🙂") == "cc.bad_name")
+    ok("נרמול פקודה של טלגרם",
+       customcmd.normalize("/Discord@MyBot") == "discord")
+
+    # ההגנה שאי אפשר לדלג עליה: פקודה מותאמת שדורסת /ban היא השתלטות
+    # על האכיפה. הרשימה נגזרת מ-panel.COMMANDS ולא נכתבת ביד — ולכן
+    # הבדיקה עוברת על **כולן**, כדי שפקודה שתיווסף מחר תהיה מוגנת גם.
+    taken = [n for n, _ in panel.COMMANDS
+             if customcmd.check_name(n) != "cc.reserved"]
+    ok("אי אפשר לדרוס שום פקודת מערכת", not taken, str(taken[:5]))
+    ok("הגזירה אכן קרתה", len(customcmd._reserved()) >= len(panel.COMMANDS))
+
+    cmd, err = C.set(CHAT, "discord", "הקישור: example.com", by=ADM)
+    ok("נשמרה", err is None and cmd.name == "discord", str(err))
+    ok("נשלפת", C.get(CHAT, "discord").content.startswith("הקישור"))
+    ok("נשלפת גם עם לוכסן", C.get(CHAT, "/Discord") is not None)
+
+    ok("שם שמור נדחה", C.set(CHAT, "ban", "כלום")[1] == "cc.reserved")
+    ok("ולא נוצרה", C.get(CHAT, "ban") is None)
+    ok("תוכן ריק נדחה", C.set(CHAT, "empty", "   ")[1] == "cc.empty")
+    ok("תוכן ארוך מדי נדחה",
+       C.set(CHAT, "long", "x" * (customcmd.CONTENT_MAX + 1))[1]
+       == "cc.too_long")
+    # תמונה בלי כיתוב היא פקודה שלמה
+    pic, perr = C.set(CHAT, "banner", "", media_id="AgACAg", media_kind="photo")
+    ok("מדיה בלי טקסט מותרת", perr is None and pic.media_kind == "photo",
+       str(perr))
+
+    C.bump(CHAT, "discord")
+    C.bump(CHAT, "discord")
+    C.set(CHAT, "discord", "ניסוח מתוקן", by=ADM)
+    ok("עדכון ניסוח לא מאפס את המונה", C.get(CHAT, "discord").uses == 2,
+       str(C.get(CHAT, "discord").uses))
+    ok("העדכון נכנס", C.get(CHAT, "discord").content == "ניסוח מתוקן")
+
+    C.set(CHAT, "vip", "רק למנהלים", admin_only=True)
+    ok("admin_only נשמר", C.get(CHAT, "vip").admin_only is True)
+
+    ok("רשימה ממוינת", C.names(CHAT) == sorted(C.names(CHAT)))
+    ok("ספירה", C.count(CHAT) == 3, str(C.count(CHAT)))
+    ok("קבוצה אחרת לא רואה", C.count(OTHER) == 0
+       and C.get(OTHER, "discord") is None)
+
+    # פתרון מטקסט הודעה
+    ok("טקסט חופשי אינו פקודה", C.resolve(CHAT, "discord") is None)
+    ok("פקודה נמצאת", (C.resolve(CHAT, "/discord now") or None) is not None)
+    ok("עם שם הבוט נמצאת", C.resolve(CHAT, "/discord@MyBot") is not None)
+    ok("פקודת מערכת לא נחטפת", C.resolve(CHAT, "/ban @x") is None)
+    ok("פקודה שלא קיימת", C.resolve(CHAT, "/nope") is None)
+    ok("הודעה ריקה", C.resolve(CHAT, "") is None)
+
+    ok("מחיקה", C.delete(CHAT, "vip") and C.get(CHAT, "vip") is None)
+    ok("מחיקה של מה שאין", not C.delete(CHAT, "vip"))
+
+    # תקרה לקבוצה, בגבול נמוך כדי שהבדיקה תהיה מהירה
+    cap_was = customcmd.MAX_PER_CHAT
+    try:
+        customcmd.MAX_PER_CHAT = 2
+        while C.count(CHAT) > 2:
+            C.delete(CHAT, C.names(CHAT)[0])
+        full = C.set(CHAT, "onemore", "תוכן")
+        ok("תקרה לקבוצה", full[1] == "cc.too_many", str(full[1]))
+        ok("מעבר לתקרה אפשר לעדכן קיימת",
+           C.set(CHAT, C.names(CHAT)[0], "עדכון")[1] is None)
+    finally:
+        customcmd.MAX_PER_CHAT = cap_was
+
+    # הסדר בקובץ הוא ההגנה: מטפל שתופס כל ‎/‎ ונרשם לפני הפקודות היה
+    # קולט את /ban לפני האכיפה — ומשתיק אותה בשקט.
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "bot.py"), encoding="utf-8").read()
+    catch = src.find("async def on_custom_command")
+    last_cmd = src.rfind('@dp.message(Command("')
+    ok("המטפל של הפקודות המותאמות נרשם אחרון",
+       catch > last_cmd > 0, f"{catch} · {last_cmd}")
 
 
 # ── מצב חירום ─────────────────────────────────────────────────────────────
@@ -1853,6 +2024,8 @@ def main() -> int:
     test_backup()
     test_captcha()
     test_emergency()
+    test_reports()
+    test_customcmd()
     test_manifest()
     test_i18n()
     test_flow()

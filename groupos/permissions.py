@@ -72,8 +72,14 @@ PERMISSIONS: dict[str, int] = {
     "blocklist.write": RANK["admin"],
     "rules.write":     RANK["admin"],
     "welcome.write":   RANK["admin"],
+    # פקודה מותאמת מדברת בקול הבוט מול כל הקבוצה, ולכן היא באותה
+    # דרגה כמו ‎chat.say‎ ולא כמו הערה שמישהו מבקש במפורש
+    "customcmd.write": RANK["admin"],
     # מערכת
     "settings.read":   RANK["moderator"],
+    # טיפול בדיווח אינו שינוי הגדרות: מנחה שמטפל בהצפה הוא בדיוק מי
+    # שאמור לסגור את הדיווח עליה
+    "reports.handle":  RANK["moderator"],
     "settings.write":  RANK["admin"],
     "roles.assign":    RANK["super_admin"],
     "audit.read":      RANK["admin"],
