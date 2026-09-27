@@ -1336,11 +1336,24 @@ async def cmd_reportlist(msg: Message):
     if not open_:
         await reply(msg, T(msg, "report.none"))
         return
-    rows = [T(msg, "report.row", id=r.id, target=_named(msg, r.target_id),
-              n=r.count, reason=tpl.esc(r.reason) or T(msg, "report.nothing"))
-            for r in open_]
-    await reply(msg, T(msg, "report.list", n=rpt.open_count(msg.chat.id),
-                       list="\n\n".join(rows)))
+    rows = []
+    for r in open_:
+        row = T(msg, "report.row", id=r.id, target=_named(msg, r.target_id),
+                n=r.count,
+                reason=tpl.esc(r.reason) or T(msg, "report.nothing"))
+        # מדווח שכל דיווחיו הסגורים נדחו הוא עצמו בעיה, ומנהל שרואה
+        # דיווח חדש ממנו צריך לדעת את זה לפני שהוא פועל. ‎0.5‎ פירושו
+        # "אין די נתונים" ולכן אינו מסומן.
+        vs = rpt.voters(r.id)
+        if vs and all(rpt.reporter_credibility(msg.chat.id, v) == 0.0
+                      for v in vs):
+            row += "\n" + T(msg, "report.weak_reporter")
+        rows.append(row)
+    c = rpt.counts(msg.chat.id)
+    await reply(msg, T(msg, "report.list", n=c["open"],
+                       list="\n\n".join(rows))
+                + "\n\n" + T(msg, "report.tally", open=c["open"],
+                             handled=c["handled"], dismissed=c["dismissed"]))
 
 
 async def _close_report(msg: Message, cmd: str, drop: bool):
@@ -1374,6 +1387,31 @@ async def cmd_resolve(msg: Message):
 @needs("reports.handle")
 async def cmd_dismiss(msg: Message):
     touch(msg); await _close_report(msg, "/dismiss", drop=True)
+
+
+@dp.message(Command("reopen"))
+@needs("reports.handle")
+async def cmd_reopen(msg: Message):
+    """פתיחה מחדש של דיווח שנסגר.
+
+    בלי זה סגירה היא בלתי הפיכה: מנהל שלחץ "דיווח שווא" בטעות — או
+    שגילה אחר כך שהדיווח היה נכון — נשאר בלי שום דרך להחזיר אותו,
+    והדיווח נעלם מהרשימה לתמיד."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].lstrip("#").split()[0].isdigit():
+        await reply(msg, T(msg, "report.usage", cmd="/reopen"))
+        return
+    rid = int(parts[1].lstrip("#").split()[0])
+    r = rpt.reopen(msg.chat.id, rid)
+    if r is None:
+        # או שאין דיווח כזה, או שהוא **כבר** פתוח. בשני המקרים אין מה
+        # לעשות, ושתיהן אותה תשובה מבחינת המנהל.
+        await reply(msg, T(msg, "report.notfound"))
+        return
+    audit.log(msg.chat.id, "report.reopened", actor_id=msg.from_user.id,
+              target_id=r.target_id, after=str(rid), severity="low")
+    await reply(msg, T(msg, "report.reopened", id=rid))
 
 
 @dp.callback_query(F.data.startswith("r:"))
@@ -3679,6 +3717,28 @@ async def expire_loop():
             log.warning("סגירת אתגרים שפגו נכשלה: %s", e)
 
 
+async def upkeep_loop():
+    """תחזוקה יומית. כרגע: מחיקת דיווחים סגורים וישנים.
+
+    ‎Reports.prune‎ נכתב, תועד — ולא נקרא מאף מקום. פונקציית תחזוקה
+    שאין לה קורא אינה "מוכנה להמשך", היא קוד מת שנראה כמו מנגנון:
+    הטבלה הייתה גדלה לנצח ואף אחד לא היה יודע.
+
+    ריצה ראשונה אחרי חמש דקות ולא מיד: העלייה של הבוט היא הרגע העמוס
+    ביותר שלו, וסריקת טבלה אינה דחופה אפילו ביום אחד.
+    """
+    await asyncio.sleep(300)
+    while True:
+        try:
+            n = rpt.prune()
+            if n:
+                log.info("תחזוקה: נמחקו %d דיווחים סגורים מעל %d יום",
+                         n, rpt.KEEP_CLOSED_DAYS)
+        except Exception as e:
+            log.warning("ניקוי דיווחים נכשל: %s", e)
+        await asyncio.sleep(86400)
+
+
 async def schedule_loop():
     """שולח מה שהגיע זמנו. סריקה כל 30 שניות.
 
@@ -3741,7 +3801,7 @@ async def main() -> int:
     if not ai.pools:
         log.info("AI: לא הוגדרו מפתחות (GROUPOS_GEMINI_KEYS / GROUPOS_GROQ_KEYS)")
     await publish_commands()
-    for loop_fn in (expire_loop, schedule_loop):
+    for loop_fn in (expire_loop, schedule_loop, upkeep_loop):
         _bg.add(asyncio.create_task(loop_fn()))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

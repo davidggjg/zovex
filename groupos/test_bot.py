@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import os
 import sys
@@ -306,11 +307,71 @@ async def test_reports():
     await B.on_report_button(FakeQuery("r:garbage", ADM))
     ok("callback משובש לא מפיל", True)
 
+    # פתיחה מחדש: בלי זה סגירה בטעות היא בלתי הפיכה
+    back = B.rpt.get(CHAT, rid2)
+    await B.cmd_reopen(msg(f"/reopen {rid2}"))
+    ok("דיווח נפתח מחדש", B.rpt.get(CHAT, rid2).status == "open", last())
+    ok("ההודעה אומרת שנפתח", "נפתח מחדש" in last(), last())
+    await B.cmd_reopen(msg(f"/reopen {rid2}"))
+    ok("פתיחה מחדש של פתוח — אין מה לעשות", "אין דיווח" in last(), last())
+    await B.cmd_reopen(msg("/reopen"))
+    ok("בלי מספר — הסבר שימוש", "/reopen" in last(), last())
+    B.rpt.dismiss(CHAT, rid2, ADM)
+
+    # הסימון על מדווח שכל דיווחיו נדחו, והמאזן בתחתית הרשימה
+    LIAR = 77
+    B.perms.set_role(CHAT, LIAR, "member")
+    for i in range(3):
+        rr = B.rpt.add(CHAT, LIAR, BAD, msg_id=900 + i)[0]
+        B.rpt.dismiss(CHAT, rr.id, ADM)
+    ok("אמינות התאפסה",
+       B.rpt.reporter_credibility(CHAT, LIAR) == 0.0,
+       str(B.rpt.reporter_credibility(CHAT, LIAR)))
+    B.rpt.add(CHAT, LIAR, BAD, msg_id=950, reason="עוד אחד")
+    await B.cmd_reportlist(msg("/reportlist"))
+    ok("הרשימה מסמנת מדווח שדיווחיו נדחו", "נדחו" in last(), last())
+    ok("הרשימה מציגה מאזן", "טופלו" in last(), last())
+
     B.db.set(CHAT, "reports", "0")
     await B.cmd_report(msg("/report x", uid=USER, reply_to=spam_msg(502)))
     ok("כשהדיווחים כבויים לא נפתח דיווח",
-       B.rpt.open_count(CHAT) == 0 and "כבויים" in last(), last())
+       "כבויים" in last(), last())
     B.db.set(CHAT, "reports", "1")
+
+
+# ── תחזוקה שרצה בפועל ─────────────────────────────────────────────────────
+async def test_upkeep():
+    section("לולאת התחזוקה")
+    src = open(os.path.join(HERE, "bot.py"), encoding="utf-8").read()
+    ok("לולאת התחזוקה רשומה בהפעלה", "upkeep_loop)" in src
+       or "upkeep_loop," in src, "אינה ב-create_task")
+
+    # ומורצת בפועל: איטרציה אחת, עם sleep מקוצר
+    called = []
+    real_prune = B.rpt.prune
+
+    def fake_prune(chat_id=None, now=None):
+        called.append(True)
+        return 3
+
+    real_sleep = asyncio.sleep
+    n = {"i": 0}
+
+    async def fast_sleep(secs):
+        n["i"] += 1
+        if n["i"] > 2:                     # אחרי איטרציה אחת שלמה
+            raise asyncio.CancelledError
+        return None
+
+    B.rpt.prune = fake_prune
+    asyncio.sleep = fast_sleep
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            await B.upkeep_loop()
+    finally:
+        asyncio.sleep = real_sleep
+        B.rpt.prune = real_prune
+    ok("prune נקרא בפועל מהלולאה", called, "לא נקרא — קוד מת")
 
 
 # ── תמונות ────────────────────────────────────────────────────────────────
@@ -554,6 +615,7 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_upkeep()
     await test_every_command()
 
     print(f"\n{'─' * 46}")

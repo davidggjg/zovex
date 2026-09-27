@@ -393,6 +393,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("reportlist", "reports.handle"),
     ("resolve",  "reports.handle"),
     ("dismiss",  "reports.handle"),
+    ("reopen",   "reports.handle"),
     ("addcmd",   "customcmd.write"),
     ("delcmd",   "customcmd.write"),
     ("cmds",     ""),
