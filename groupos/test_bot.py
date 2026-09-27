@@ -30,6 +30,7 @@ import datetime as dt
 import os
 import sys
 import tempfile
+from unittest.mock import MagicMock
 
 try:
     import aiogram                                   # noqa: F401
@@ -46,8 +47,11 @@ sys.path.insert(0, HERE)
 import bot as B                                      # noqa: E402
 import aiclient                                      # noqa: E402
 import aikeys                                        # noqa: E402
+from aiogram.filters import Command, CommandStart          # noqa: E402
 from aiogram.types import (Chat, Message, PhotoSize, User,  # noqa: E402
                            Voice)
+import panel                                               # noqa: E402
+import permissions                                         # noqa: E402
 
 CHAT, ADM, USER, BAD = -1001234567890, 90, 11, 13
 
@@ -431,6 +435,108 @@ async def test_voice():
         B.db.set(CHAT, "aivoice", "0")
 
 
+# ── כל הפקודות, אחת-אחת ───────────────────────────────────────────────────
+class SmokeBot(FakeBot):
+    """מתירני בכוונה: כל קריאה ל-API מחזירה אובייקט דמה.
+
+    בסריקה על 131 פקודות המטרה אינה לאמת את ה-API אלא שהמטפל **ירוץ
+    מקצה לקצה** — יפרש ארגומנטים, יבדוק הרשאה, ויענה משהו. בוט קפדני
+    היה נופל על ‎AttributeError‎ של שיטה שלא מימשנו, וזה רעש ולא מידע.
+    """
+
+    def __getattr__(self, name):
+        async def any_call(*a, **kw):
+            if name.startswith("send_"):
+                SENT.append((a[0] if a else 0, f"[{name}]", False))
+                return Message(message_id=9999, date=dt.datetime.now(),
+                               chat=Chat(id=CHAT, type="private"), text="")
+            if name == "get_chat_administrators":
+                return []
+            if name == "delete_message":
+                DELETED.append(a[1] if len(a) > 1 else 0)
+                return True
+            return MagicMock()
+        return any_call
+
+
+def _handler_map() -> dict:
+    """שם פקודה → המטפל שנרשם עליה, מתוך המרשם של aiogram עצמו.
+
+    לא לפי מוסכמת שמות: ‎_variant‎ רושם וריאציות בלולאה, ומיפוי לפי
+    ‎cmd_<שם>‎ היה מפספס אותן — כלומר מדווח "יש מטפל" על סמך ניחוש."""
+    out = {}
+    for h in B.dp.message.handlers:
+        for f in (h.filters or []):
+            cb = getattr(f, "callback", None)
+            if isinstance(cb, Command):
+                for c in cb.commands:
+                    out[str(c)] = h.callback
+            elif isinstance(cb, CommandStart):
+                out["start"] = h.callback
+    return out
+
+
+# ‎/pinned‎ מעביר את ההודעה הנעוצה ב-‎forward_message‎ ואינו שולח טקסט.
+# בבוט המדומה ‎pinned_message‎ הוא אובייקט דמה ולכן תמיד "יש נעיצה".
+SILENT_OK = {"pinned"}
+
+
+async def test_every_command():
+    section("כל הפקודות שבתפריט")
+    hmap = _handler_map()
+    names = [n for n, _ in panel.COMMANDS]
+
+    ok("אין פקודה בתפריט בלי מטפל",
+       not [n for n in names if n not in hmap],
+       str([n for n in names if n not in hmap]))
+    ok("אין מטפל שאינו בתפריט",
+       not (set(hmap) - set(names)), str(sorted(set(hmap) - set(names))))
+
+    # פקודה שמצהירה על הרשאה שאינה קיימת ב-PERMISSIONS תיענה **תמיד**
+    # ב"אין לך הרשאה", גם לבעלים. כלומר פקודה מתה שנראית קיימת.
+    unknown = [(n, p) for n, p in panel.COMMANDS
+               if p and p not in permissions.PERMISSIONS]
+    ok("כל הרשאה שפקודה דורשת קיימת", not unknown, str(unknown))
+
+    real_bot, real_guard = B.bot, B.guard.acquire
+    B.bot = SmokeBot()
+
+    async def no_wait(chat_id, is_group=True):
+        return None
+    B.guard.acquire = no_wait          # שומר המכסות נבדק בנפרד
+    B.perms.set_role(CHAT, ADM, "owner")
+    try:
+        crashed, silent = [], []
+        for i, n in enumerate(names):
+            fn = hmap[n]
+            before = len(SENT)
+            try:
+                await asyncio.wait_for(
+                    fn(msg("/" + n, uid=ADM, mid=5000 + i)), timeout=5)
+                out = " ".join(t for _, t, _ in SENT[before:])
+                if not out.strip():
+                    # ייתכן שהיא לפרטי בלבד
+                    pm = Message(message_id=6000 + i, date=dt.datetime.now(),
+                                 chat=Chat(id=ADM, type="private"),
+                                 from_user=User(id=ADM, is_bot=False,
+                                                first_name="דוד",
+                                                language_code="he"),
+                                 text="/" + n)
+                    await asyncio.wait_for(fn(pm), timeout=5)
+                    out = " ".join(t for _, t, _ in SENT[before:])
+                if not out.strip() and n not in SILENT_OK:
+                    silent.append(n)
+            except asyncio.TimeoutError:
+                crashed.append(f"{n}: נתקע")
+            except Exception as e:                       # noqa: BLE001
+                crashed.append(f"{n}: {type(e).__name__}: {e}")
+        ok(f"כל {len(names)} הפקודות רצות בלי לקרוס", not crashed,
+           " · ".join(crashed[:6]))
+        ok("כל פקודה עונה משהו", not silent, str(silent))
+    finally:
+        B.bot, B.guard.acquire = real_bot, real_guard
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -448,6 +554,7 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_every_command()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
