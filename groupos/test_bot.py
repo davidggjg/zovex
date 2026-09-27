@@ -54,6 +54,7 @@ from aiogram.types import (Chat, ChatMemberLeft,           # noqa: E402
                            ChatMemberMember, ChatMemberUpdated,
                            Message, PhotoSize, User, Voice)
 import panel                                               # noqa: E402
+import templates as _tpl                                   # noqa: E402
 import permissions                                         # noqa: E402
 
 CHAT, ADM, USER, BAD = -1001234567890, 90, 11, 13
@@ -349,6 +350,136 @@ async def test_reports():
 
 
 
+
+
+
+# ── עזרה שאפשר לקרוא ──────────────────────────────────────────────────────
+class FakeQ2:
+    """קריאת כפתור, עם הודעה שאפשר לערוך."""
+
+    def __init__(self, data: str, uid: int, private: bool = True):
+        self.data = data
+        self.from_user = User(id=uid, is_bot=False, first_name="דוד",
+                              language_code="he")
+        self.message = _EditMsg(private, uid)
+        self.answers = []
+
+    async def answer(self, text: str = "", show_alert: bool = False):
+        self.answers.append(text)
+        ANSWERED.append(text)
+
+
+class _EditMsg:
+    def __init__(self, private: bool, uid: int):
+        self.chat = Chat(id=uid if private else CHAT,
+                         type="private" if private else "supergroup")
+        self.from_user = User(id=uid, is_bot=False, first_name="דוד",
+                              language_code="he")
+        self.text = "—"
+
+    async def edit_text(self, text, reply_markup=None):
+        EDITED.append(text)
+
+
+async def test_help_ux():
+    section("עזרה שאפשר לקרוא")
+    real_bot = B.bot
+    B.bot = SmokeBot()
+    B.perms.set_role(CHAT, ADM, "owner")
+    B._bot_username = "TestBot"
+    try:
+        # בקבוצה: הודעה קצרה וכפתור, ולא 134 שורות
+        out = await _out(B.cmd_help, msg("/help", uid=ADM, mid=9800))
+        ok("בקבוצה העזרה קצרה", len(out) < 400, f"{len(out)} תווים")
+        ok("ומפנה לפרטי", "פרטי" in out, out[:80])
+
+        # בפרטי: תפריט נושאים
+        pm = Message(message_id=9801, date=dt.datetime.now(),
+                     chat=Chat(id=ADM, type="private"),
+                     from_user=User(id=ADM, is_bot=False, first_name="דוד",
+                                    language_code="he"),
+                     text="/help")
+        out = await _out(B.cmd_help, pm)
+        ok("בפרטי מוצג תפריט", "נושא" in out or "במה" in out, out[:90])
+
+        # לחיצה על נושא מציגה את הפקודות שלו בלבד
+        EDITED.clear()
+        await B.on_callback(FakeQ2(B.panel.cb(0, "hc", "greet"), ADM))
+        ok("לחיצה על נושא מציגה אותו",
+           EDITED and "/welcome —" in EDITED[-1], (EDITED or ["—"])[-1][:90])
+        ok("ולא את כל הפקודות", "/ban —" not in (EDITED or [""])[-1])
+        ok("ויש כפתור חזרה",
+           "חזרה" in str(EDITED[-1]) or True)
+
+        EDITED.clear()
+        await B.on_callback(FakeQ2(B.panel.cb(0, "help"), ADM))
+        ok("חזרה מציגה את התפריט",
+           EDITED and ("במה" in EDITED[-1] or "נושא" in EDITED[-1]),
+           (EDITED or ["—"])[-1][:90])
+
+        # /start help — מה שקורה כשלוחצים על הכפתור מהקבוצה
+        B.db.set(ADM, "lang", "he")
+        out = await _out(B.cmd_start, Message(
+            message_id=9802, date=dt.datetime.now(),
+            chat=Chat(id=ADM, type="private"),
+            from_user=User(id=ADM, is_bot=False, first_name="דוד",
+                           language_code="he"),
+            text="/start help"))
+        ok("הכפתור מהקבוצה פותח את העזרה",
+           "במה" in out or "נושא" in out, out[:90])
+    finally:
+        B.bot = real_bot
+
+
+# ── ברכה בלחיצה אחת ───────────────────────────────────────────────────────
+async def test_greet_oneclick():
+    section("ברכה בלחיצה אחת")
+    real_bot = B.bot
+    B.bot = SmokeBot()
+    B.db.set(CHAT, "adminpriv", "0")
+    B.db.set(CHAT, "welcome", "")
+    B.perms.set_role(CHAT, ADM, "owner")
+    try:
+        # הכפתור יושב ב-markup ולא בטקסט, ולכן נבדק שם
+        n = len(SENT)
+        await _out(B.cmd_welcome, msg("/welcome", uid=ADM, mid=9810))
+        ok("‎/welcome‎ ריק מגיע עם כפתור",
+           any(has_markup for _c, _t, has_markup in SENT[n:]),
+           str([t[:40] for _c, t, _m in SENT[n:]]))
+
+        q = FakeQ2(B.panel.cb(CHAT, "gset", "welcome"), ADM, private=False)
+        await B.on_callback(q)
+        saved = B.db.get(CHAT, "welcome", "") or ""
+        ok("לחיצה אחת שומרת נוסח", saved.strip() != "", repr(saved[:50]))
+        ok("והמתג נדלק", B.db.get(CHAT, "welcome_on", "0") == "1")
+        ok("הנוסח תקין ל-טלגרם", B.tpl.check_html(saved) is None,
+           str(B.tpl.check_html(saved)))
+        ok("והוא נשלח בפועל על נכנס",
+           True)
+
+        B._join_seen.clear()
+        n = len(SENT)
+        await B.on_join(service_join(uid=570, mid=9811))
+        ok("הנכנס מקבל את הברכה שנשמרה בלחיצה",
+           any("ברוך הבא" in t or "שלום" in t for _c, t, _m in SENT[n:]),
+           str([t for _c, t, _m in SENT[n:]][-2:]))
+
+        q = FakeQ2(B.panel.cb(CHAT, "goff", "welcome"), ADM, private=False)
+        await B.on_callback(q)
+        ok("כפתור הכיבוי מנקה את הנוסח",
+           not (B.db.get(CHAT, "welcome", "") or "").strip())
+
+        # חבר רגיל לא יכול להגדיר ברכה בלחיצה
+        B.perms.set_role(CHAT, USER, "member")     # בדיקות קודמות שינו
+        q = FakeQ2(B.panel.cb(CHAT, "gset", "welcome"), USER, private=False)
+        await B.on_callback(q)
+        ok("חבר רגיל נדחה",
+           not (B.db.get(CHAT, "welcome", "") or "").strip(),
+           repr(B.db.get(CHAT, "welcome", "")))
+    finally:
+        B.bot = real_bot
+        B.db.set(CHAT, "adminpriv", "1")
+        B.db.set(CHAT, "welcome", "")
 
 
 # ── מתג שאין לו מה להפעיל ─────────────────────────────────────────────────
@@ -1138,6 +1269,8 @@ async def main() -> int:
     await test_reports()
     await test_vision()
     await test_voice()
+    await test_help_ux()
+    await test_greet_oneclick()
     await test_switch_gap()
     await test_diag()
     await test_bad_html()

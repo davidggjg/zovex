@@ -545,6 +545,47 @@ def test_panel():
     ok("כל פקודה במתאם מופיעה בתפריט", not (declared - set(names)),
        str(declared - set(names)))
 
+    # ── עזרה בקטגוריות ────────────────────────────────────────────────────
+    # 134 שורות ברשימה אחת הן מפרט ולא עזרה. הקטגוריות הן מה שהופך
+    # אותה לקריאה, ולכן פקודה שאינה באף קטגוריה היא פקודה שנעלמה
+    # מהעזרה בלי שאף אחד שם לב.
+    in_cats = [n for _k, _i, ns in panel.HELP_CATS for n in ns]
+    ok("כל פקודה בקטגוריה", not (set(names) - set(in_cats)),
+       str(sorted(set(names) - set(in_cats))))
+    ok("אין בקטגוריה פקודה שלא קיימת", not (set(in_cats) - set(names)),
+       str(sorted(set(in_cats) - set(names))))
+    ok("אין פקודה בשתי קטגוריות",
+       len(in_cats) == len(set(in_cats)),
+       str([n for n in set(in_cats) if in_cats.count(n) > 1]))
+    for lg in ("he", "en"):
+        holes = [k for k, _i, _n in panel.HELP_CATS
+                 if i18n.t(f"hcat.{k}", lg) == f"hcat.{k}"]
+        ok(f"לכל קטגוריה יש שם ב-{lg}", not holes, str(holes))
+    menu = panel.help_menu("he")
+    ok("תפריט העזרה הוא כפתורים", menu.rows and len(menu.rows) >= 5,
+       str(len(menu.rows)))
+    ok("שתי עמודות לכל היותר",
+       all(len(r) <= 2 for r in menu.rows))
+    ok("כל כפתור בתפריט נכנס בתקרת טלגרם",
+       all(len(c.encode()) <= panel.CB_MAX for c in menu.all_callbacks()))
+    # חבר רגיל רואה תפריט קצר יותר, ולא קטגוריות ריקות
+    member = set(panel.member_commands())
+    m_menu = panel.help_menu("he", member)
+    ok("לחבר רגיל פחות נושאים",
+       len(m_menu.all_callbacks()) < len(menu.all_callbacks()),
+       f"{len(m_menu.all_callbacks())} מול {len(menu.all_callbacks())}")
+    for key, _icon, _ns in panel.HELP_CATS:
+        sc = panel.help_category(key, "he")
+        ok(f"נושא {key} נבנה", sc is not None and sc.text.strip())
+        ok(f"נושא {key} נכנס בתקרה", len(sc.text) <= panel.TG_LIMIT)
+        ok(f"נושא {key} מחזיר לתפריט",
+           any("hc" not in c and "help" in c for c in sc.all_callbacks()),
+           str(sc.all_callbacks()))
+    ok("נושא שאינו קיים מחזיר None",
+       panel.help_category("לא-קיים", "he") is None)
+    ok("נושא שכולו מחוץ להרשאה מחזיר None",
+       panel.help_category("fed", "he", allowed=set()) is None)
+
     for lg in ("he", "en"):
         holes = [n for n in names if i18n.t(f"cmd.{n}", lg) == f"cmd.{n}"]
         ok(f"לכל פקודה יש תיאור ב-{lg}", not holes, str(holes))
@@ -726,6 +767,23 @@ def test_i18n():
 
     # כל מפתח שמופיע באנגלית חייב להופיע בעברית ולהפך — אחרת יש טקסט
     # שאף פעם לא יוצג בשפה שהיא ברירת המחדל
+    # מפתח כפול באותו מילון נדרס בשקט — בדיקת ההצטלבות he/en לא רואה
+    # את זה, כי שני העותקים באותה שפה. קרה לי בפועל: הוספתי "sw.now"
+    # שכבר היה קיים, וההגדרה שלי נעלמה בלי שום סימן.
+    import ast as _ast
+    src_i18n = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "i18n.py"), encoding="utf-8").read()
+    dups = {}
+    for node in _ast.walk(_ast.parse(src_i18n)):
+        if not isinstance(node, _ast.Dict):
+            continue
+        keys = [k.value for k in node.keys
+                if isinstance(k, _ast.Constant) and isinstance(k.value, str)]
+        for k in keys:
+            if keys.count(k) > 1:
+                dups[k] = keys.count(k)
+    ok("אין מפתח כפול במילוני השפה", not dups, str(dups))
+
     he, en = set(i18n.STRINGS["he"]), set(i18n.STRINGS["en"])
     ok("עברית ואנגלית מכסות את אותם מפתחות", he == en,
        f"רק בעברית: {he-en} · רק באנגלית: {en-he}")

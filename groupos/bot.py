@@ -313,6 +313,10 @@ NEEDED_RIGHTS = (
     ("can_restrict_members", "right.restrict"),
 )
 _me_id: Optional[int] = None
+# שם המשתמש של הבוט, לקישור העומק מהקבוצה אל השיחה הפרטית. בלי זה
+# צריך להסביר לאדם "לך לבוט בפרטי ותשלח /start", וזה בדיוק הטרחה
+# שגורמת לאנשים לוותר.
+_bot_username: str = ""
 
 
 async def bot_rights(chat_id: int) -> tuple[bool, list[str]]:
@@ -1154,6 +1158,11 @@ async def cmd_start(msg: Message):
             sc = panel.welcome_screen()
         else:
             sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
+        # ‎/start help‎ — כך מגיע מי שלחץ על הכפתור בקבוצה. הוא ביקש
+        # עזרה, ולכן הוא יקבל עזרה ולא את מסך הבית.
+        payload = ((msg.text or "").split(maxsplit=1) + [""])[1].strip()
+        if payload == "help" and lang.chosen(msg.chat.id) is not None:
+            sc = panel.help_menu(lang_of(msg), _help_for(msg))
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         # התפריט ✏️ של השיחה הזאת, לפי מה שהאדם הזה יכול בקבוצות שלו.
         # ברירת המחדל היא רשימת החברים, ובעל קבוצה שמנהל מכאן צריך
@@ -1191,22 +1200,27 @@ def _help_for(msg: Message) -> set:
 
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
-    """הפקודות שאתה יכול להריץ, בשפה של הצ'אט.
+    """עזרה שאפשר לקרוא, ולא מפרט של 134 שורות.
 
-    לא כל הפקודות: חבר רגיל שקיבל 132 שורות קיבל בעיקר רשימה של דברים
-    שייענו לו בסירוב, וגם מפרט מלא של מה שאפשר לעשות בקבוצה."""
+    בקבוצה: הודעה קצרה וכפתור שפותח את העזרה בשיחה הפרטית — כך
+    הקבוצה לא מתמלאת, ואף אחד לא צריך לחפש איפה הבוט גר. בפרטי:
+    תפריט נושאים, ובכל נושא רק הפקודות שלו ורק אלה שאתה יכול להריץ.
+    """
     touch(msg)
+    lg = lang_of(msg)
+    allowed = _help_for(msg)
     if msg.chat.type in GROUP_TYPES:
         await sync_admins(msg.chat.id)
-    pages = panel.help_pages(lang_of(msg), allowed=_help_for(msg))
-    private = msg.chat.type == ChatType.PRIVATE
-    if not private:
-        # בקבוצה עמוד אחד בלבד; השאר בפרטי. שלוש הודעות עזרה בקבוצה
-        # הן בדיוק הרעש שהבוט הזה נועד למנוע.
-        await reply(msg, pages[0])
+        markup = None
+        if _bot_username:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text=i18n.t("help.open", lg),
+                    url=f"https://t.me/{_bot_username}?start=help")]])
+        await reply(msg, T(msg, "help.in_private"), markup=markup)
         return
-    for page in pages:
-        await send(msg.chat.id, page, is_group=False)
+    sc = panel.help_menu(lg, allowed)
+    await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
 
 
 # ── תוכן: הערות, פילטרים, חוקים, ברכות ─────────────────────────────────────
@@ -1469,10 +1483,20 @@ async def _greet_cmd(msg: Message, key: str, cmd: str):
         return
     if not arg and not msg.reply_to_message:
         cur = db.get(msg.chat.id, key, "") or ""
+        # כפתור אחד שמגדיר נוסח מוכן. אדם שרוצה ברכה לא צריך ללמוד
+        # תחביר של מציינֵי מקום כדי לקבל אחת — הוא צריך ברכה.
+        which = "welcome" if key == WELCOME_KEY else "goodbye"
+        rows = [[(T(msg, "greet.use_default"), panel.cb(msg.chat.id, "gset",
+                                                        which))]]
+        if cur:
+            rows[0].append((T(msg, "greet.turn_off"),
+                            panel.cb(msg.chat.id, "goff", which)))
+        sc = panel.Screen("", rows)
         await reply(msg, (tpl.render(cur, _ctx(msg)) if cur else "")
                     + ("\n\n" if cur else "")
                     + T(msg, "greet.usage", cmd=cmd,
-                        vars=", ".join("{" + v + "}" for v in tpl.VARIABLES)))
+                        vars=", ".join("{" + v + "}" for v in tpl.VARIABLES)),
+                    markup=kb(sc))
         return
     body, _, _ = _content_of(msg, arg)
     if await _bad_html(msg, body):
@@ -2285,13 +2309,28 @@ async def _toggle(msg: Message, key: str, cmd: str, default: str = "1"):
     arg = ((msg.text or "").split() + [""])[1].lower()
     cur = db.get(msg.chat.id, key, default) == "1"
     if arg in ("on", "off"):
+        lg = lang_of(msg)
         await _set_switch(msg.chat.id, key, arg == "on", msg.from_user.id)
-        gap = _switch_gap(msg.chat.id, key, lang_of(msg)) if arg == "on" else ""
-        await reply(msg, T(msg, "set.done", key=key, value=arg)
+        gap = _switch_gap(msg.chat.id, key, lg) if arg == "on" else ""
+        state = i18n.t("settings.on" if arg == "on" else "settings.off", lg)
+        await reply(msg, T(msg, "sw.set", what=_switch_label(key, lg),
+                           state=state)
                     + (("\n\n" + gap) if gap else ""))
         return
     sc = panel.switch_screen(msg.chat.id, key, cur, lang_of(msg))
     await reply(msg, sc.text, markup=kb(sc))
+
+
+def _switch_label(key: str, lg: str) -> str:
+    """השם שהאדם רואה למתג, ולא המפתח שבמסד.
+
+    ‎"autoclean = 45"‎ אינו משפט שמישהו אומר. הפאנל ממילא מחזיק תווית
+    לכל מתג, ולכן אין סיבה שהאישור ידבר בשפת הטבלה."""
+    for k, _d, label in panel.SWITCHES:
+        if k == key:
+            return i18n.t(label, lg)
+    return i18n.t(f"cmd.{key}", lg) if i18n.t(f"cmd.{key}", lg) \
+        != f"cmd.{key}" else key
 
 
 def _switch_gap(chat_id: int, key: str, lg: str) -> str:
@@ -2339,7 +2378,8 @@ async def _number(msg: Message, key: str, cmd: str, default: str,
         return
     val = max(lo, min(hi, int(parts[1])))
     db.set(msg.chat.id, key, str(val), msg.from_user.id)
-    await reply(msg, T(msg, "set.done", key=key, value=val))
+    await reply(msg, T(msg, "sw.set", what=_switch_label(key, lang_of(msg)),
+                       state=val))
 
 
 @dp.message(Command("settings"))
@@ -3887,6 +3927,22 @@ async def on_callback(q: CallbackQuery):
         await _edit(q, panel.home(my_groups(q.from_user.id), lg))
         return
 
+    # העזרה יושבת לפני בדיקת ההרשאה לקבוצה: היא נפתחת בשיחה פרטית,
+    # שבה ‎chat_id‎ הוא 0 ואין קבוצה להיבדק מולה.
+    if name in ("help", "hc"):
+        allowed = _help_for(q.message) if q.message else None
+        if name == "help":
+            await _edit(q, panel.help_menu(lg, allowed))
+            await q.answer()
+            return
+        sc = panel.help_category(arg, lg, allowed)
+        if sc is None:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        await _edit(q, sc)
+        await q.answer()
+        return
+
     # כל לחיצה נבדקת מחדש. מי שהודח מהניהול לא ימשיך לנהל דרך מסך פתוח.
     if not perms.check(chat_id, q.from_user.id, "settings.read"):
         await q.answer(i18n.t("err.not_your_group", lg), show_alert=True)
@@ -3943,6 +3999,24 @@ async def on_callback(q: CallbackQuery):
             await q.answer(gap, show_alert=True)
         else:
             await q.answer(i18n.t("saved" if okay else "err.failed", lg))
+        return
+
+    if name in ("gset", "goff"):
+        if not perms.check(chat_id, q.from_user.id, "welcome.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in ("welcome", "goodbye"):
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        key = WELCOME_KEY if arg == "welcome" else GOODBYE_KEY
+        if name == "goff":
+            db.set(chat_id, key, "", q.from_user.id)
+            await q.answer(i18n.t("greet.off", lg), show_alert=True)
+            return
+        db.set(chat_id, key, i18n.t(f"greet.default_{arg}", lg),
+               q.from_user.id)
+        db.set(chat_id, f"{arg}_on", "1", q.from_user.id)
+        await q.answer(i18n.t("greet.set", lg), show_alert=True)
         return
 
     if name == "tgl":
@@ -4170,7 +4244,7 @@ async def schedule_loop():
 
 
 async def main() -> int:
-    global bot, _me_id
+    global bot, _me_id, _bot_username
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -4194,6 +4268,7 @@ async def main() -> int:
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML), **kw)
     me = await bot.get_me()
     _me_id = me.id
+    _bot_username = me.username or ""
     log.info("GroupOS עלה כ-@%s · סכימה v%s", me.username, db.version)
     for p in ai.stats():
         log.info("AI %s: %d מפתחות · תקציב %s", p["provider"], p["keys"],

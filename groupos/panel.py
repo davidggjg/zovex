@@ -550,6 +550,87 @@ def help_pages(lang: str = i18n.DEFAULT,
     return [p for p in pages if p.strip()]
 
 
+# ── עזרה בקטגוריות ────────────────────────────────────────────────────────
+# 134 פקודות ברשימה אחת הן לא עזרה, הן מפרט. מי שרק רוצה להגדיר ברכה
+# צריך לקרוא 134 שורות כדי למצוא שורה אחת, וזה מה שגורם לאנשים לוותר.
+#
+# לכן: תפריט של קטגוריות עם כפתורים, ובכל קטגוריה רק הפקודות שלה ורק
+# אלה שהפונה יכול להריץ. הרשימה המלאה נשארת — היא מה שמזין את התפריט
+# של טלגרם ואת התיעוד — אבל היא אינה מה שמוצג לאדם.
+#
+# יש בדיקה שמאמתת שכל פקודה נמצאת בקטגוריה **אחת בדיוק**. בלי זה
+# פקודה חדשה נעלמת מהעזרה בלי שאף אחד ישים לב.
+HELP_CATS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("start", "🚀", ("start", "help", "settings", "diag", "id", "health",
+                     "lang", "info", "stats", "adminlist", "roles")),
+    ("greet", "👋", ("welcome", "goodbye", "setwelcome", "setgoodbye",
+                     "rules", "setrules", "vars", "cleanservice")),
+    ("mod", "🛡️", ("ban", "unban", "mute", "unmute", "kick", "sban", "dban",
+                   "smute", "dmute", "skick", "dkick", "del", "purge",
+                   "spurge", "purgefrom", "purgeto", "delall")),
+    ("warns", "⚠️", ("warn", "unwarn", "warns", "dwarn", "swarn",
+                     "warnings", "warnlimit", "resetwarns", "setwarnmode")),
+    ("locks", "🔒", ("lock", "unlock", "locks", "locktypes", "lockdown",
+                     "silent")),
+    ("filters", "🧹", ("filter", "stop", "stopall", "filters", "addblock",
+                       "rmblock", "blocklist", "rmblockall", "blockmode",
+                       "linkcheck")),
+    ("notes", "📝", ("save", "get", "notes", "clear", "addcmd", "delcmd",
+                     "cmds", "say", "echo", "pin", "unpin", "pinned")),
+    ("members", "👥", ("promote", "demote", "role", "approve", "unapprove",
+                       "approved", "allow", "unallow", "allowlist",
+                       "rmallowall", "admincache", "link", "settitle",
+                       "setdesc", "rep", "top")),
+    ("safety", "🚨", ("captcha", "captchatime", "captchatries",
+                      "captchafail", "setflood", "floodaction", "antiraid",
+                      "emergency", "security", "policy", "simulate")),
+    ("reports", "📣", ("report", "reports", "reportlist", "resolve",
+                       "dismiss", "reopen", "actions", "analytics")),
+    ("ai", "🤖", ("ai", "aivision", "aivoice", "aikeys")),
+    ("auto", "⏰", ("schedule", "scheduled", "unschedule", "automation",
+                   "addauto", "rmauto", "broadcast", "setclean",
+                   "adminpriv", "disable", "enable", "disabled")),
+    ("fed", "🌐", ("newfed", "joinfed", "leavefed", "fedinfo", "fban",
+                   "unfban", "fedadmin", "fedbans", "export", "import")),
+)
+
+CAT_OF = {name: key for key, _icon, names in HELP_CATS for name in names}
+
+
+def help_menu(lang: str = i18n.DEFAULT, allowed: Optional[set] = None,
+              deep: str = "") -> Screen:
+    """תפריט הקטגוריות. שתי עמודות, כי בטלפון שלוש נחתכות."""
+    rows, line = [], []
+    for key, icon, names in HELP_CATS:
+        shown = [n for n in names if allowed is None or n in allowed]
+        if not shown:
+            continue
+        line.append((f"{icon} {i18n.t('hcat.' + key, lang)}",
+                     cb(0, "hc", key)))
+        if len(line) == 2:
+            rows.append(line)
+            line = []
+    if line:
+        rows.append(line)
+    return Screen(i18n.t("help.menu", lang), rows)
+
+
+def help_category(key: str, lang: str = i18n.DEFAULT,
+                  allowed: Optional[set] = None) -> Optional[Screen]:
+    for k, icon, names in HELP_CATS:
+        if k != key:
+            continue
+        rows = [f"/{n} — {i18n.t('cmd.' + n, lang)}"
+                for n in names if allowed is None or n in allowed]
+        if not rows:
+            return None
+        txt = (f"{icon} <b>{i18n.t('hcat.' + key, lang)}</b>\n\n"
+               + "\n".join(rows))
+        return Screen(txt[:TG_LIMIT - 200],
+                      [[(i18n.t("menu.back", lang), cb(0, "help"))]])
+    return None
+
+
 def help_screen(lang: str = i18n.DEFAULT) -> Screen:
     """העמוד הראשון בלבד. מי ששולח ‎/help‎ מקבל את כל העמודים."""
     return Screen(help_pages(lang)[0])
