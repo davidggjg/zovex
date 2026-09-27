@@ -2508,6 +2508,18 @@ def _is_hls_manifest(path: str) -> bool:
     return path.endswith(".m3u8")
 
 
+# [fix_empty_manifest]
+def _hls_manifest_entries(text: str) -> int:
+    """כמה שורות שאינן הערה יש ב-playlist, כלומר כמה סגמנטים או גרסאות.
+
+    זו הבדיקה שהייתה חסרה. ‎startswith("#EXTM3U")‎ עובר גם על playlist
+    של 73 בתים בלי אף סגמנט, ואז הנגן מקבל רשימה בלי מה לבקש ונתקע
+    על 0:00 בלי שגיאה. נמדד על 46 מ-105 ערוצי השידור החי.
+    """
+    return sum(1 for ln in text.splitlines()
+               if ln.strip() and not ln.strip().startswith("#"))
+
+
 # [fix_live_autofix]
 # כיבוי בסביבה, בלי פאץ' ובלי הפעלה מחדש של שום דבר אחר.
 HLS_AUTOFIX = os.environ.get("HLS_AUTOFIX", "1") not in ("0", "false", "no")
@@ -2954,6 +2966,56 @@ async def _hls_fix_evict():
         log.info("hls_fix: תקרה (%d) — נסגר הערוץ הישן %s", HLS_FIX_MAX, key)
 
 
+# [fix_verify_output]
+# כיבוי בסביבה, בלי לבטל את הפאץ'.
+HLS_VERIFY_OUT = os.environ.get("HLS_VERIFY_OUT", "1") not in ("0", "false", "no")
+
+
+def _hls_out_has_idr(outdir) -> bool:
+    """האם הפלט ש-ffmpeg ייצר מכיל IDR.
+
+    סורק את init.mp4 יחד עם הסגמנט הראשון. **חייב** לעבור דרך
+    h264_mp4toannexb: ב-fMP4 יחידות ה-NAL נשמרות באורך-קידומת ולא
+    בקודי פתיחה, וסריקת 00 00 01 ישירות על .m4s לא הייתה מוצאת כלום
+    והייתה מדווחת על כל ערוץ כשבור.
+
+    מחזיר True בכל מקרה של ספק — קובץ חסר, ffmpeg שנכשל, פלט ריק —
+    כדי שתקלה בבדיקה לא תפעיל קידוד מחדש בלי סיבה.
+    """
+    try:
+        import subprocess, tempfile
+        init = outdir / "init.mp4"
+        segs = sorted(outdir.glob("*.m4s"),
+                      key=lambda p: p.stat().st_mtime)
+        if not init.exists() or not segs:
+            return True
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as fh:
+            fh.write(init.read_bytes())
+            fh.write(segs[0].read_bytes())
+            joined = fh.name
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-v", "error", "-i", joined,
+                 "-map", "0:v:0", "-c", "copy",
+                 "-bsf:v", "h264_mp4toannexb", "-f", "h264", "-"],
+                capture_output=True, timeout=25)
+        finally:
+            try:
+                os.unlink(joined)
+            except OSError:
+                pass
+        idr, slices = _h264_count_nals(r.stdout or b"")
+        if not slices:
+            log.warning("verify_out: לא נקראו slices מהפלט — לא משנים החלטה")
+            return True
+        log.info("verify_out: פלט %s · slices=%d · IDR=%d",
+                 outdir.name, slices, idr)
+        return idr > 0
+    except Exception as e:
+        log.warning("verify_out: נכשל — %s: %s", type(e).__name__, e)
+        return True
+
+
 async def _hls_fix_start(host: str, path: str, profile: int = 0) -> Optional[dict]:
     """מפעיל (או מחזיר קיים) תהליך ffmpeg שממיר את הערוץ ל-HLS/fMP4 מקומי.
 
@@ -3185,6 +3247,20 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
             if ent["proc"].returncode is not None:
                 break
             await asyncio.sleep(0.1)
+        # [fix_verify_output] "נוצר סגמנט" אינו הצלחה.
+        # profile 0 הוא -c:v copy, והעתקה של זרם open-GOP מייצרת פלט
+        # שנראה תקין ואינו נגיש: ffmpeg מצליח, הקובץ קיים, ואין בו אף
+        # IDR — ולכן MSE לא יכול להתחיל והנגן נתקע על 0:00 בלי שגיאה.
+        # נמדד: חמישה ערוצים שעוברים דרך _fix יצאו open-GOP בפלט.
+        # כאן זה נתפס, והערוץ נופל לפרופיל הקידוד המלא שאומת כמייצר IDR.
+        if ok and profile == 0 and HLS_VERIFY_OUT:
+            loop = asyncio.get_running_loop()
+            if not await loop.run_in_executor(
+                    None, _hls_out_has_idr, ent["dir"]):
+                log.warning("hls_fix: %s — הפלט של profile 0 בלי IDR, "
+                            "עובר לקידוד מלא", key)
+                ok = False
+                why = "פלט בלי IDR"
         if ok:
             if _hls_fix_profile.get(key) != profile:
                 _hls_fix_profile[key] = profile
@@ -3268,17 +3344,39 @@ async def hls_relay(host: str, path: str, request: Request):
         if cached and cached[0] > now:
             rewritten = cached[1]
         else:
-            try:
-                resp = await _hls_relay_client.get(upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS)
-            except httpx.HTTPError as e:
-                raise HTTPException(502, f"hls_relay: upstream fetch failed - {e}")
-            # אם המקור לא החזיר manifest תקין (שגיאה, redirect שלא נופה, דף
-            # HTML כלשהו) - חשוב לעצור כאן. אחרת שכתוב-שורה-שורה "יצליח" גם
-            # על HTML ומחזיר ללקוח playlist שבור בלי שום שגיאה ברורה.
-            if resp.status_code != 200 or not resp.text.lstrip().startswith("#EXTM3U"):
+            # [fix_empty_manifest] ניסיון חוזר אחד על playlist ריק.
+            # בקצה של שידור חי ריק חולף הוא דבר שקורה, ובמקרה כזה הצופה
+            # לא צריך לדעת שהיה משהו. ריק **אינו** נכנס למטמון, אחרת
+            # הניסיון החוזר היה חסר טעם והתאוששות של הספק הייתה מתעכבת.
+            resp = None
+            n_entries = 0
+            for _try in range(2):
+                try:
+                    resp = await _hls_relay_client.get(
+                        upstream_url, headers=HLS_RELAY_UPSTREAM_HEADERS)
+                except httpx.HTTPError as e:
+                    raise HTTPException(
+                        502, f"hls_relay: upstream fetch failed - {e}")
+                # אם המקור לא החזיר manifest תקין (שגיאה, redirect שלא נופה,
+                # דף HTML כלשהו) - חשוב לעצור כאן. אחרת שכתוב-שורה-שורה
+                # "יצליח" גם על HTML ומחזיר ללקוח playlist שבור בלי שגיאה.
+                if resp.status_code != 200 or not resp.text.lstrip().startswith("#EXTM3U"):
+                    raise HTTPException(
+                        502, f"hls_relay: upstream did not return a valid m3u8 "
+                             f"(status {resp.status_code})")
+                n_entries = _hls_manifest_entries(resp.text)
+                if n_entries:
+                    break
+                if _try == 0:
+                    await asyncio.sleep(0.4)
+            if not n_entries:
+                # 200 עם #EXTM3U ואפס סגמנטים. עד כה זה עבר כתקין, נכנס
+                # למטמון, והנגן נתקע עליו לנצח בלי שגיאה.
+                log.warning("hls_relay: playlist ריק מהמקור — %s בתים, "
+                            "אפס סגמנטים · %s", len(resp.text), path)
                 raise HTTPException(
-                    502, f"hls_relay: upstream did not return a valid m3u8 "
-                         f"(status {resp.status_code})")
+                    502, "hls_relay: upstream returned an empty playlist "
+                         "(no segments)")
             rewritten = _rewrite_hls_manifest(resp.text, upstream_url)
             _hls_manifest_cache[upstream_url] = (now + MANIFEST_CACHE_TTL, rewritten)
             # מדליקים משיכה מקדימה של המקטעים החדשים בעוד הנגן מעכל את ה-manifest
