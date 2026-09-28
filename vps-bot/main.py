@@ -3222,6 +3222,14 @@ async def _hls_fix_start(host: str, path: str, profile: int = 0) -> Optional[dic
             "-reconnect_on_network_error", "1",
             "-reconnect_on_http_error", "5xx",
             "-reconnect_delay_max", "10",
+            # [fix_relay_ffmpeg_probe] הקלט של ffmpeg הוא המסלול הרגיל
+            # שלנו, ולכן גם הוא נחסם מסימון "לא עונה" — ומכיוון שהוא
+            # מוגדר להתחבר מחדש על 5xx, הוא עשה את זה **בשקט מוחלט**:
+            # בלי שורת stderr, בלי לצאת, עד שהמועד עבר. ביומן זה נראה
+            # כ"ffmpeg קוד None", וזה הדבר הכי פחות מסביר שאפשר.
+            #
+            # הכותרת חייבת להופיע לפני ‎-i‎, כי היא חלה על הקלט.
+            "-headers", f"x-zovex-probe: {HLS_PROBE_TOKEN}\r\n",
             "-fflags", "+genpts", "-i", src,
             *_codec,
             "-f", "hls", "-hls_time", "4", "-hls_list_size", "6",
@@ -3394,7 +3402,17 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
     # [fix_relay_deadline] מה שסומן כלא-עונה נכשל מיד, בלי לשלם שוב.
     dead = _hls_dead_reason(key)
     if dead:
-        raise HTTPException(502, f"hls_fix: {dead}")
+        # [fix_relay_fallback] מפנים למסלול הרגיל במקום 502. הענף
+        # "נכשלו כל הפרופילים" עושה בדיוק את זה מאז ומתמיד; fix_relay_deadline
+        # הוסיף כאן יציאה שעוקפת אותו, ולכן דווקא במקרה שקורה בפועל
+        # הצופה קיבל שגיאה במקום ערוץ.
+        #
+        # הסימון לפני ההפניה, כי _hls_autofix_wanted קורא אותו — בלעדיו
+        # המסלול הרגיל היה מפנה בחזרה לכאן ונוצרת לולאת הפניות.
+        _hls_fix_profile[key] = None
+        _hls_fix_failed_at[key] = time.time()
+        log.warning("hls_fix: %s — %s · מפנה למסלול הרגיל", key, dead)
+        return RedirectResponse(f"/hls-relay/{host}/{path}", status_code=302)
 
     # [fix_relay_deadline] המקור נבדק **לפני** שנולד ffmpeg. בלי זה
     # ערוץ של ספק מושבת מחזיק את הבקשה עשרות שניות ותהליך המרה שלם,
@@ -3420,8 +3438,11 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
             _hls_fix_profile[key] = None
             _hls_fix_failed_at[key] = time.time()
             _hls_mark_dead(key, why)
-            log.error("hls_fix: %s — %s", key, why)
-            raise HTTPException(502, f"hls_fix: {why}")
+            # [fix_relay_fallback] גם כאן: ערוץ ולא שגיאה. הסימון כבר
+            # נכתב בשתי השורות שמעל, ולכן ההפניה אינה יוצרת לולאה.
+            log.error("hls_fix: %s — %s · מפנה למסלול הרגיל", key, why)
+            return RedirectResponse(f"/hls-relay/{host}/{path}",
+                                    status_code=302)
         ent = await _hls_fix_start(host, path, profile)
         if ent is None:
             why = why or "לא ניתן להפעיל את ההמרה"
@@ -3465,7 +3486,14 @@ async def hls_relay_fixed(host: str, path: str, request: Request):
             break
         # הפרופיל הזה נכשל. כאן, ורק כאן, אפשר סוף-סוף לראות למה.
         await asyncio.sleep(0.3)              # שהריקון יספיק לקלוט
-        why = _hls_fix_err(ent) or f"ffmpeg קוד {ent['proc'].returncode}"
+        # [fix_relay_ffmpeg_probe] stderr ריק ותהליך חי אינם "קוד None".
+        # הם אומרים דבר מדויק: ffmpeg לא התלונן ולא יצא, הוא פשוט לא
+        # הוציא סגמנט בזמן — כמעט תמיד כי הקלט לא זורם.
+        _rc = ent["proc"].returncode
+        why = _hls_fix_err(ent) or (
+            f"ffmpeg חי ולא הוציא סגמנט תוך {HLS_FIX_DEADLINE:.0f} שניות "
+            f"(הקלט כנראה אינו זורם)" if _rc is None
+            else f"ffmpeg יצא בקוד {_rc} בלי הודעה")
         log.warning("hls_fix: %s נכשל בפרופיל %s — %s", key, profile, why)
         try:
             if ent["proc"].returncode is None:
