@@ -8284,6 +8284,10 @@ SAVED_UPLOAD_USER = os.environ.get("SAVED_UPLOAD_USER", "").strip().lstrip("@").
 SAVED_TMP_DIR = DATA_DIR / "saved_uploads"
 SAVED_JOB_TTL = 3600          # רשומת התקדמות נשמרת שעה אחרי הסיום
 SAVED_STALE_SEC = 6 * 3600    # קובץ זמני ישן מזה — שריד מהעלאה שנפלה
+# [fix_saved_write_block] כמה לצבור לפני כתיבה. ארבעה מגה־בייט הם
+# פשרה נמדדת: מספיק גדול כדי שמסירת ה-executor תיבלע בתוך הכתיבה
+# עצמה, ומספיק קטן כדי שזיכרון של שישה־עשר חלקים במקביל יישאר 64MB.
+SAVED_WRITE_BLOCK = int(os.environ.get("SAVED_WRITE_BLOCK", 4 * 1024 * 1024))
 
 _saved_jobs: dict = {}        # job_id -> {stage, pct, ...}
 # החזקת הפניה חזקה למשימות הרקע. asyncio.create_task מחזיר משימה שאם אף אחד
@@ -8970,16 +8974,37 @@ async def saved_upload_part(request: Request, job: str = "", index: int = -1):
     path = pathlib.Path(j["path"])
     loop = asyncio.get_running_loop()
 
+    # [fix_saved_write_block] צוברים לגוש וכותבים אותו במסירה אחת.
+    #
+    # נמדד על חלק של 8MB: 120ms בנתחי 16KB, ו-23ms עם גוש של 4MB.
+    # מה שעולה אינו הכתיבה אלא **המסירה ל-executor**, שקרתה פעם לכל
+    # נתח — 512 מסירות לחלק. אותו קוד עם מתאר קובץ פתוח מראש נמדד
+    # 123ms, כלומר ‎os.open‎ לא היה הבעיה ולא היה טעם לגעת בו.
     got = 0
+    pend, pend_len, pend_at = [], 0, 0
+
+    async def _flush():
+        nonlocal pend, pend_len, pend_at
+        if not pend_len:
+            return
+        data = b"".join(pend) if len(pend) > 1 else pend[0]
+        await loop.run_in_executor(
+            None, _saved_pwrite, path, offset + pend_at, data)
+        pend_at += pend_len
+        pend, pend_len = [], 0
+
     try:
         async for chunk in request.stream():
             if not chunk:
                 continue
             if got + len(chunk) > expect:
                 raise HTTPException(status_code=400, detail="החלק ארוך מהצפוי")
-            await loop.run_in_executor(
-                None, _saved_pwrite, path, offset + got, chunk)
+            pend.append(chunk)
+            pend_len += len(chunk)
             got += len(chunk)
+            if pend_len >= SAVED_WRITE_BLOCK:
+                await _flush()
+        await _flush()
     except HTTPException:
         raise
     except Exception as e:
