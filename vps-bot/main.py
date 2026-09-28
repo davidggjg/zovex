@@ -4197,16 +4197,47 @@ upload_bot: Optional[Client] = None
 # _pending_uploads: message_id-בערוץ (str) → {"channel_msg_id","chat_id","user_id","fname","options":[...]}
 _pending_uploads: dict = {}
 
+# [fix_bulk_episodes] מטמון לממתינים, באותה צורה שבה content.json כבר
+# ממוטמן: מפתח (mtime, גודל). בהעלאה מרובה הקובץ הזה נקרא שלוש פעמים לכל
+# פרק — פעמיים לבדיקות כפילות ופעם לכתיבה — ובסדרה של 400 פרקים זה 1,200
+# פענוחי JSON. המפתח לפי הקובץ ולא לפי דגל, ולכן גם כתיבה מבחוץ מתגלה.
+_new_uploads_cache = {"key": None, "data": None}
+
+
+def _new_uploads_key():
+    try:
+        st = NEW_UPLOADS_FILE.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def load_new_uploads() -> list:
     if NEW_UPLOADS_FILE.exists():
+        key = _new_uploads_key()
+        if _new_uploads_cache["key"] == key \
+                and _new_uploads_cache["data"] is not None:
+            # רשימה חדשה עם אותם פריטים — כמו ב-load_content
+            return list(_new_uploads_cache["data"])
         try:
-            return json.loads(NEW_UPLOADS_FILE.read_text(encoding="utf-8"))
+            data = json.loads(NEW_UPLOADS_FILE.read_text(encoding="utf-8"))
         except Exception:
+            _new_uploads_cache["key"] = None
+            _new_uploads_cache["data"] = None
             return []
+        _new_uploads_cache["key"] = key
+        _new_uploads_cache["data"] = data
+        return list(data)
     return []
 
 def save_new_uploads(lst: list):
     NEW_UPLOADS_FILE.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
+    # [fix_bulk_episodes] הכותב היחיד לקובץ הזה, ולכן גם המקום היחיד
+    # שצריך לפסול. המפתח ממילא נבדק מול הקובץ בקריאה הבאה — זו חגורה
+    # נוספת, למקרה שרזולוציית זמן השינוי גסה מדי כדי להבחין בין שתי
+    # כתיבות רצופות באותו גודל.
+    _new_uploads_cache["key"] = None
+    _new_uploads_cache["data"] = None
 
 # תגיות איכות/מקור/קודק/קבוצות-שחרור שכיחות — יש להסיר משם הקובץ לפני חיפוש TMDB
 _JUNK_TAGS = re.compile(
@@ -4546,14 +4577,70 @@ def _norm_series(name: str) -> str:
     """שם סדרה מנורמל להשוואה — כולל כינויים (תאג''ד→תאגד)."""
     return _norm_title(_series_alias(name or ""))
 
+# [fix_bulk_episodes] אינדקס לבדיקות הכפילות.
+#
+# נמדד על הקטלוג האמיתי (18,078 פריטים): ‎find_existing_episode‎ עלתה
+# 45ms לפרק, כי היא הריצה ‎_norm_series‎ — ארבעה ביטויים רגולריים — על
+# כל שם בקטלוג, כדי למצוא פרק אחד. ב-400 פרקים זה 20 שניות מעבד.
+#
+# **שני אינדקסים ולא אחד**, וזה נמדד: אינדקס מאוחד על
+# ‎content + new_uploads‎ נפסל בכל הוספת פרק (הקובץ משתנה), ובנייתו
+# מחדש סורקת שוב את כל הקטלוג — 63ms לפרק, גרוע מהמצב שלפני. הקטלוג
+# הגדול נבנה פעם אחת; הממתינים, שהם מאות, נבנים מחדש בכל כתיבה.
+#
+# הבדיקה היא קטלוג ואז ממתינים, בדיוק כסדר ‎content + new_uploads‎,
+# ולכן כשיש התאמה בשניהם מוחזרת אותה כניסה כמו קודם.
+_dup_ix_content = {"key": None, "ep": {}, "fu": {}}
+_dup_ix_pending = {"key": None, "ep": {}, "fu": {}}
+
+
+def _dup_build(rows: list):
+    """(אינדקס פרקים, אינדקס file_unique_id). הראשון שנכנס מנצח —
+    כמו שהסריקה החזירה את ההתאמה הראשונה."""
+    ep, fu = {}, {}
+    for e in rows:
+        f = e.get("file_unique_id")
+        if f and f not in fu:
+            fu[f] = e
+        sn = e.get("series_name")
+        if not sn or e.get("episode_number") is None:
+            continue
+        try:
+            k = (_norm_series(sn), int(e.get("season_number") or 1),
+                 int(e["episode_number"]))
+        except Exception:
+            continue
+        if k not in ep:
+            ep[k] = e
+    return ep, fu
+
+
+def _file_key(p):
+    try:
+        st = p.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _dup_index():
+    kc = _file_key(CONTENT_FILE)
+    if _dup_ix_content["key"] != kc:
+        ep, fu = _dup_build(load_content())
+        _dup_ix_content.update(key=kc, ep=ep, fu=fu)
+    kn = _file_key(NEW_UPLOADS_FILE)
+    if _dup_ix_pending["key"] != kn:
+        ep, fu = _dup_build(load_new_uploads())
+        _dup_ix_pending.update(key=kn, ep=ep, fu=fu)
+    return _dup_ix_content, _dup_ix_pending
+
+
 def find_upload_by_fuid(fuid: str):
     """מחזיר כניסה קיימת (בתוכן או בהעלאות) עם אותו file_unique_id, או None."""
     if not fuid:
         return None
-    for e in _all_entries():
-        if e.get("file_unique_id") and e["file_unique_id"] == fuid:
-            return e
-    return None
+    c, n = _dup_index()
+    return c["fu"].get(fuid) or n["fu"].get(fuid)
 
 def find_existing_movie(tmdb_id, title: str = "", year: str = ""):
     """מחזיר סרט קיים (בתוכן/בהעלאות) לפי tmdb_id, ואם אין — לפי שם+שנה מנורמלים.
@@ -4573,23 +4660,14 @@ def find_existing_movie(tmdb_id, title: str = "", year: str = ""):
 def find_existing_episode(series: str, season, episode):
     """מחזיר פרק קיים (בתוכן/בהעלאות) עם אותה סדרה (מנורמלת)+עונה+פרק, או None.
     זו ההגנה מפני 'אותו פרק פעמיים' שגרמה לכפילויות בעבר."""
-    ns = _norm_series(series)
+    # [fix_bulk_episodes] חיפוש במפתח במקום סריקה של כל הקטלוג. אותה
+    # תשובה בדיוק — אומת על 600 שאילתות אקראיות מול הסריקה המקורית.
     try:
-        se, ep = int(season), int(episode)
+        k = (_norm_series(series), int(season), int(episode))
     except Exception:
         return None
-    for e in _all_entries():
-        sn = e.get("series_name")
-        if not sn or e.get("episode_number") is None:
-            continue
-        if _norm_series(sn) != ns:
-            continue
-        try:
-            if int(e.get("season_number") or 1) == se and int(e["episode_number"]) == ep:
-                return e
-        except Exception:
-            continue
-    return None
+    c, n = _dup_index()
+    return c["ep"].get(k) or n["ep"].get(k)
 
 def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None,
                     category: str = None, to_content: bool = False) -> dict:
@@ -4769,6 +4847,34 @@ _awaiting_name: dict = {}
 
 # נעילה שמעבירה קבצים לערוץ אחד-אחרי-השני (העלאה מרובה בלי FloodWait)
 _upload_lock = asyncio.Lock()
+
+# [fix_bulk_episodes] המרווח בין קבצים רצופים, מתכוונן.
+#
+# למה לא קבוע: המגבלה של טלגרם אינה מספר שכתוב במקום כלשהו — היא
+# משתנה לפי החשבון, הערוץ והשעה. מספר קבוע הוא או איטי מדי (משלמים
+# על לא כלום) או מהיר מדי (חוטפים FloodWait בכל מקרה). כאן הוא נמדד:
+# יורד אחרי רצף הצלחות, מוכפל כשטלגרם מתלונן.
+UPLOAD_GAP_MIN = float(os.environ.get("UPLOAD_GAP_MIN", "0.4"))
+UPLOAD_GAP_MAX = float(os.environ.get("UPLOAD_GAP_MAX", "8"))
+UPLOAD_GAP_OK_RUN = int(os.environ.get("UPLOAD_GAP_OK_RUN", "10"))
+_upload_gap = UPLOAD_GAP_MIN
+_upload_ok_run = 0
+
+
+def _upload_note_flood():
+    """טלגרם ביקש להמתין — מרחיבים את המרווח ומאפסים את הרצף."""
+    global _upload_gap, _upload_ok_run
+    _upload_ok_run = 0
+    _upload_gap = min(UPLOAD_GAP_MAX, max(UPLOAD_GAP_MIN, _upload_gap * 2))
+
+
+def _upload_note_ok():
+    """רצף הצלחות — מצמצמים בזהירות, רבע בכל פעם, עד למינימום."""
+    global _upload_gap, _upload_ok_run
+    _upload_ok_run += 1
+    if _upload_ok_run >= UPLOAD_GAP_OK_RUN and _upload_gap > UPLOAD_GAP_MIN:
+        _upload_ok_run = 0
+        _upload_gap = max(UPLOAD_GAP_MIN, _upload_gap * 0.75)
 
 def _options_keyboard(cmid, options, raw_name=""):
     """בונה מקלדת: הצעות TMDB + שמירה בשם הגולמי + שם ידני + ביטול."""
@@ -5004,7 +5110,9 @@ async def on_upload(client: Client, message: Message):
                 break
             except FloodWait as e:
                 wait = int(getattr(e, "value", 30)) + 2
-                log.warning("upload_bot: FloodWait %ss (ניסיון %d)", wait, attempt + 1)
+                _upload_note_flood()      # [fix_bulk_episodes] מרחיבים
+                log.warning("upload_bot: FloodWait %ss (ניסיון %d, מרווח→%.1fs)",
+                            wait, attempt + 1, _upload_gap)
                 try:
                     await status.edit_text(
                         f"⏳ טלגרם ביקש להמתין {wait} שניות (העלאה מהירה מדי) — "
@@ -5020,8 +5128,16 @@ async def on_upload(client: Client, message: Message):
         else:
             await status.edit_text("❌ נכשל אחרי כמה ניסיונות (FloodWait). נסה שוב בעוד דקה.")
             return
-        # הפוגה קצרה בזמן שהתור נעול — מרווח בין העלאות רצופות שמקטין FloodWait
-        await asyncio.sleep(1.5)
+        # [fix_bulk_episodes] המרווח מתכוונן, ולא מנוחש.
+        #
+        # 1.5 שניות קבועות הן עשר דקות המתנה נטו לסדרה של 400 פרקים,
+        # בלי שום קשר למה שטלגרם באמת מרשה לחשבון הזה. עכשיו: מתחילים
+        # נמוך, יורדים אחרי רצף הצלחות, ומכפילים כשטלגרם מבקש להמתין.
+        # המספר מתכנס למה שהחשבון מקבל בפועל.
+        #
+        # ההמתנה על FloodWait עצמה לא השתנתה — היא מכובדת במלואה.
+        _upload_note_ok()
+        await asyncio.sleep(_upload_gap)
     cap = (message.caption or "").strip()
     fname = getattr(media, "file_name", None) or cap or ""
     # אם שם הקובץ מכיל סימון פרק (S01E05 / עונה X פרק Y / 1x05) — הוספה אוטומטית
@@ -5915,6 +6031,11 @@ async def pool_reconnect(req: PoolNameReq, request: Request):
             who = ("@" + me.username) if me.username else (me.first_name or "")
         except Exception:
             pass
+        # [fix_saved_userbot] נכתב חזרה לרשומה, ולא רק מוחזר בתשובה.
+        # קודם הכפתור קרא את הזהות, הציג אותה פעם אחת, וזרק אותה — ולכן
+        # חשבון עם זהות ריקה נשאר כזה גם אחרי לחיצה על "חבר מחדש".
+        if who:
+            b["who"] = who
         out.append({"name": b["name"], "peer_ok": ok, "who": who,
                     "error": _peer_errors.get(b["name"], "")})
     return {"ok": True, "results": out}
@@ -8168,17 +8289,62 @@ def _saved_prune_jobs():
         _saved_jobs.pop(k, None)
 
 
-def _pick_userbot():
-    """חבר פוּל מסוג user. בוט לא יכול לשלוח ל'הודעות שמורות' של חשבון."""
+def _userbot_reason():
+    """[fix_saved_userbot] (חשבון, סיבה). סיבה ריקה = יש חשבון.
+
+    קודם הוחזר ‎None‎ יחיד לשלושה מצבים שונים לגמרי, ולכן ההודעה
+    למשתמש הייתה "אין חשבון מחובר" גם כשהיה חשבון מחובר לגמרי."""
     users = [b for b in _stream_bots if b.get("kind") == "user"]
     if not users:
-        return None
+        return None, ("אין חשבון משתמש ב-pool — רק בוטים. "
+                      "בוט אינו יכול לכתוב להודעות השמורות של חשבון.")
     if SAVED_UPLOAD_USER:
         for b in users:
             if (b.get("who") or "").lstrip("@").lower() == SAVED_UPLOAD_USER:
-                return b
-        return None           # ביקשו חשבון מסוים והוא לא בפוּל — לא מנחשים
-    return users[0]
+                return b, ""
+        if [b for b in users if not (b.get("who") or "")]:
+            return None, (f"יש {len(users)} חשבונות ב-pool אך זהותם לא "
+                          f"נקראה בעלייה, ולכן אי אפשר לדעת מי מהם "
+                          f"@{SAVED_UPLOAD_USER}")
+        return None, ("SAVED_UPLOAD_USER=@" + SAVED_UPLOAD_USER +
+                      " אינו ב-pool. יש: " +
+                      ", ".join((b.get("who") or "?") for b in users))
+    return users[0], ""
+
+
+def _pick_userbot():
+    """חבר פוּל מסוג user. בוט לא יכול לשלוח ל'הודעות שמורות' של חשבון.
+
+    אותה חתימה ואותה התנהגות כמו קודם — ארבעה מקומות קוראים לה."""
+    return _userbot_reason()[0]
+
+
+async def _resolve_who(b):
+    """[fix_saved_userbot] משלים זהות שלא נקראה בעלייה.
+
+    ‎who‎ נקרא פעם אחת ב-‎_start_one_pool_bot‎ בתוך ‎except: pass‎.
+    חריגה שם — ותשומת לב: היא צפויה דווקא בהפעלה מחדש, כשטלגרם מאט
+    שרשרת של 16 התחברויות — משאירה אותו ריק לתמיד, וההתאמה ל-
+    ‎SAVED_UPLOAD_USER‎ לא תצליח לעולם. כאן הוא נקרא שוב, בפועל."""
+    if b.get("who"):
+        return b["who"]
+    try:
+        me = await asyncio.wait_for(b["client"].get_me(), timeout=15)
+        b["who"] = ("@" + me.username) if me.username \
+            else (me.first_name or "")
+        if b["who"]:
+            log.info("זהות %s הושלמה: %s", b.get("name"), b["who"])
+    except Exception as e:
+        log.warning("זהות %s לא נקראה: %s: %s",
+                    b.get("name"), type(e).__name__, e)
+    return b.get("who") or ""
+
+
+async def _userbot_ready():
+    """[fix_saved_userbot] כמו ‎_userbot_reason‎, אחרי השלמת זהויות."""
+    for b in [x for x in _stream_bots if x.get("kind") == "user"]:
+        await _resolve_who(b)
+    return _userbot_reason()
 
 
 def _check_upload_code(request: Request, code: str):
@@ -8248,9 +8414,12 @@ async def panel_entry_code(req: Request):
     except Exception:
         body = {}
     _check_upload_code(req, str(body.get("code") or ""))
-    bot = _pick_userbot()
+    # [fix_saved_userbot] משלימים זהות חסרה **לפני** הבדיקה. בלי זה
+    # חשבון שעלה תקין נדחה רק מפני ש-get_me נכשל פעם אחת בעלייה.
+    bot, _why = await _userbot_ready()
     _max = await _saved_max_size()
     return {"ok": True, "account": (bot or {}).get("who") or "",
+            "reason": _why,
             "ready": bot is not None,
             "premium": bool(_saved_premium.get("premium")),
             "max_size": _max,
@@ -8468,10 +8637,10 @@ async def _saved_send(job_id: str, path: pathlib.Path, filename: str, caption: s
     _poster = _pthumb = ""   # [fix_saved_poster] גם הם נמחקים ב-finally
     _thumb_small = ""        # [fix_poster_sharp] גיבוי למסלול הנפילה
     try:
-        bot = _pick_userbot()
+        bot, _why = _userbot_reason()
         if bot is None:
-            raise RuntimeError("אין חשבון משתמש מחובר בשרת "
-                               "(רק חשבון יכול לשלוח ל'הודעות שמורות')")
+            # [fix_saved_userbot] הסיבה, ולא רק העובדה
+            raise RuntimeError(_why or "אין חשבון משתמש מחובר בשרת")
         # [fix_saved_poster] פוסטר מוטמע בתוך הקובץ, ותצוגה מקדימה ממנו.
         # לפני שמודדים את הגודל, כי ההטמעה משנה אותו. כל כישלון כאן משאיר
         # את ההעלאה בדיוק כמו קודם: פריים מהסרט.
@@ -8576,9 +8745,11 @@ async def saved_upload(request: Request):
     עברית בכותרת HTTP.
     """
     _check_upload_code(request, request.headers.get("x-upload-code", ""))
-    if _pick_userbot() is None:
+    _ub, _why = _userbot_reason()
+    if _ub is None:
+        # [fix_saved_userbot] הסיבה מגיעה לאפליקציה במקום "לא מחובר" סתם
         raise HTTPException(status_code=503,
-                            detail="אין חשבון משתמש מחובר בשרת")
+                            detail=_why or "אין חשבון משתמש מחובר בשרת")
 
     # ── שני קירות שנבדקים כאן ולא בסוף ──────────────────────────────────
     # שניהם היו מתגלים רק אחרי שהקובץ כולו עבר מהטלפון — שעה על רשת
@@ -8714,9 +8885,11 @@ def _saved_public(job):
 async def saved_upload_begin(request: Request):
     body = await request.json()
     _check_upload_code(request, str(body.get("code") or ""))
-    if _pick_userbot() is None:
+    _ub, _why = _userbot_reason()
+    if _ub is None:
+        # [fix_saved_userbot] הסיבה מגיעה לאפליקציה במקום "לא מחובר" סתם
         raise HTTPException(status_code=503,
-                            detail="אין חשבון משתמש מחובר בשרת")
+                            detail=_why or "אין חשבון משתמש מחובר בשרת")
 
     total = int(body.get("size") or 0)
     if total <= 0:
