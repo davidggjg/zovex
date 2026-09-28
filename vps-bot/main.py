@@ -2495,6 +2495,13 @@ HLS_FIX_DEADLINE = float(os.environ.get("HLS_FIX_DEADLINE", "14"))
 HLS_PLAYLIST_TIMEOUT = float(os.environ.get("HLS_PLAYLIST_TIMEOUT", "6"))
 HLS_UP_PROBE_TIMEOUT = float(os.environ.get("HLS_UP_PROBE_TIMEOUT", "4"))
 HLS_DEAD_TTL = float(os.environ.get("HLS_DEAD_TTL", "45"))
+# [fix_relay_probe_loop] אסימון פנימי לבדיקת החיות. מי שנושא אותו מדלג
+# על סימון "לא עונה" — כי הוא זה שנשלח לבדוק אם הסימון עדיין נכון.
+#
+# אסימון ולא כותרת קבועה: דילוג פירושו לשלם שוב שש שניות המתנה למקור
+# מת, ולקוח חיצוני לא אמור להיות מסוגל לבקש את זה. נוצר בעלייה ומת
+# איתה, ולכן אינו צריך להישמר בשום מקום.
+HLS_PROBE_TOKEN = __import__("secrets").token_hex(16)
 _hls_dead: dict = {}                 # key -> (expires_at, reason)
 
 
@@ -2525,7 +2532,13 @@ async def _hls_upstream_alive(host: str, path: str):
         return True, ""              # לפני האתחול אין מה לבדוק
     src = f"http://127.0.0.1:{PORT}/hls-relay/{host}/{path}"
     try:
-        r = await _hls_relay_client.get(src, timeout=HLS_UP_PROBE_TIMEOUT)
+        # [fix_relay_probe_loop] הבדיקה נושאת אסימון שמדלג על הסימון.
+        # בלעדיו היא פנתה למסלול הרגיל, קיבלה ממנו את ה-502 שנובע
+        # מהסימון שלנו עצמו, והסיקה "המקור לא עונה" — כלומר איששה את
+        # מה שהיא נשלחה לבדוק, והאריכה אותו בעוד 45 שניות בכל ניסיון.
+        r = await _hls_relay_client.get(
+            src, timeout=HLS_UP_PROBE_TIMEOUT,
+            headers={"x-zovex-probe": HLS_PROBE_TOKEN})
     except Exception as e:
         return False, (f"המקור לא ענה תוך {HLS_UP_PROBE_TIMEOUT:.0f} שניות "
                        f"({type(e).__name__})")
@@ -2533,6 +2546,10 @@ async def _hls_upstream_alive(host: str, path: str):
         return False, f"המקור החזיר {r.status_code}"
     if _hls_manifest_entries(r.text) == 0:
         return False, "playlist ריק מהמקור"
+    # [fix_relay_probe_loop] המקור עונה — הסימון יורד עכשיו ולא בעוד
+    # 45 שניות. עד כה לא היה שום מסלול שמסיר סימון מלבד פקיעתו, כלומר
+    # "הספק חזר" לא היה משהו שהמערכת יכולה לגלות, רק להמתין לו.
+    _hls_dead.pop(_hls_fix_key(host, path), None)
     return True, ""
 _hls_segment_inflight: dict = {}
 
@@ -3515,9 +3532,14 @@ async def hls_relay(host: str, path: str, request: Request):
         #
         # רק על playlist: מקטע בודד נופל גם בשידור בריא, וסימון על זה
         # היה מפיל ערוץ שעובד.
-        _dead = _hls_dead_reason(_hls_fix_key(host, path))
-        if _dead:
-            raise HTTPException(502, f"hls_relay: {_dead}")
+        # [fix_relay_probe_loop] בדיקת החיות עוברת דרך המסלול הזה, ולכן
+        # היא חייבת לראות את המקור ולא את הדעה שלנו עליו. בלי הדילוג
+        # הזה הסימון אישש את עצמו בלולאה, וערוץ שנפל פעם אחת לא קם כל
+        # עוד מישהו ניסה לצפות בו.
+        if request.headers.get("x-zovex-probe") != HLS_PROBE_TOKEN:
+            _dead = _hls_dead_reason(_hls_fix_key(host, path))
+            if _dead:
+                raise HTTPException(502, f"hls_relay: {_dead}")
         # [fix_live_autofix] ערוץ בלי IDR מופנה אל _fix, והקישור שבקטלוג
         # נשאר כפי שהוא — הנגן עוקב אחרי ההפניה בעצמו.
         _fix_host = f"{base_host}:{explicit_port}" if explicit_port.isdigit() \
