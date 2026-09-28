@@ -36,8 +36,13 @@ from collections import Counter
 DATA = pathlib.Path(os.environ.get("ZOVEX_DATA", "/opt/zovex-bot/data"))
 CONTENT = DATA / "content.json"
 
-# ‎/hls-relay/<host>/<path>‎ או ‎/hls-relay/_fix/<host>/<path>‎
-RELAY = re.compile(r"^/hls-relay/(?:_fix/)?([^/]+)/(.+)$")
+# ‎/hls-relay/<host>/<path>‎ או ‎/hls-relay/_fix/<host>/<path>‎.
+#
+# ‎search‎ ולא ‎match‎, ובלי עיגון להתחלה: הקטלוג שומר קישורים עם מציין
+# המקום ‎%BASE%‎ בראש (הוא מוחלף בכתובת האמיתית רק בהגשה), ויש גם
+# פריטים עם כתובת מוחלטת. עיגון ל-‎^/hls-relay‎ מצא **אפס** תבניות על
+# קטלוג מלא של ערוצים חיים — ניחשתי את הצורה במקום לקרוא אותה.
+RELAY = re.compile(r"/hls-relay/(?:_fix/)?([^/?]+)/([^?]+)")
 # מקטע נתיב שהוא מספר בלבד — מזהה הערוץ. ‎/live/330/chunks.m3u8‎ ⇒ 330
 NUMSEG = re.compile(r"/(\d{1,6})(?=/)")
 
@@ -50,6 +55,13 @@ def mask(s: str) -> str:
     """
     s = re.sub(r"^[a-z]+://[^/]+", "<ספק>", s)
     return re.sub(r"\b[A-Za-z0-9]{10,}\b", "<אסימון>", s)
+
+
+def mask_any(s: str) -> str:
+    """מיסוך לכל קישור, גם כזה שאינו תבנית — לדוגמאות האבחון."""
+    s = re.sub(r"(/hls-relay/(?:_fix/)?)[^/]+", r"\1<ספק>", s)
+    s = re.sub(r"^[a-z]+://[^/]+", "<מארח>", s)
+    return re.sub(r"\b[A-Za-z0-9]{16,}\b", "<אסימון>", s)
 
 
 def main() -> int:
@@ -68,7 +80,7 @@ def main() -> int:
     seen = Counter()
     for m in items:
         url = (m.get("video_url") or "").strip()
-        g = RELAY.match(url)
+        g = RELAY.search(url)
         if not g:
             continue
         host, path = g.group(1), g.group(2)
@@ -85,7 +97,20 @@ def main() -> int:
 
     picked = [(t, c) for t, c in seen.most_common() if c >= a.min]
     if not picked:
-        sys.exit("לא נמצאה אף תבנית בקטלוג. יש בו ערוצים חיים?")
+        # "לא נמצא" בלי לומר מה כן יש שולח לחפש במקום הלא נכון. כאן
+        # מודפסות דוגמאות ממוסכות, כדי שאפשר יהיה לראות את הצורה
+        # האמיתית במקום לנחש אותה — וזו בדיוק הטעות שהביאה לכאן.
+        print("לא נמצאה אף תבנית. כך נראים הקישורים בקטלוג:\n")
+        shown = 0
+        for m in items:
+            v = (m.get("video_url") or "").strip()
+            if not v or shown >= 8:
+                continue
+            print("  " + mask_any(v))
+            shown += 1
+        print(f"\n  (מתוך {len(items)} פריטים)")
+        print("\nאם אין ביניהם /hls-relay — הערוצים החיים אינם בקטלוג הזה.")
+        sys.exit(1)
 
     out = pathlib.Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
