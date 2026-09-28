@@ -119,8 +119,11 @@ def main():
             for b in data.get("bots", []):
                 if b.get("kind") == "user":
                     live_users.append(b)
+                    # המזהה מודפס לצד השם: שם משתמש אפשר להחליף — וזה
+                    # מה שניתק את ההעלאה פעם אחת — והמזהה לא משתנה.
                     print(f"  · {b['name']}  זהות: "
-                          f"{b.get('who') or '(ריקה — get_me לא הצליח)'}  "
+                          f"{b.get('who') or '(ריקה — get_me לא הצליח)'}"
+                          f"  מזהה: {b.get('uid') or '(לא נשמר)'}  "
                           f"· {b.get('status')} · ערוץ: "
                           f"{'כן' if b.get('peer_ok') else 'לא'}")
             if not live_users:
@@ -133,8 +136,23 @@ def main():
     want = (env.get("SAVED_UPLOAD_USER") or "").strip().lstrip("@").lower()
     if not want:
         print("  לא מוגדר — נבחר החשבון הראשון שעלה. זה המצב הסלחני.")
+    elif want.isdigit():
+        print(f"  מוגדר לפי מזהה: {want}  ← זו הדרך היציבה")
+        if live_users:
+            ids = [str(b.get("uid") or "") for b in live_users]
+            if want in ids:
+                print("  ✓ תואם לחשבון שעלה.")
+            elif any(not i for i in ids):
+                print("  ✗ יש חשבון שעלה אבל מזההו לא נשמר — הרץ")
+                print("    fix_userbot_by_id.py והפעל מחדש.")
+            else:
+                print(f"  ✗ לא תואם. ב-pool יש: {', '.join(i or '?' for i in ids)}")
     else:
-        print(f"  מוגדר: @{want}")
+        print(f"  מוגדר לפי שם: @{want}")
+        # שם משתמש הוא תווית שאפשר להחליף, וזה בדיוק מה שניתק את
+        # ההעלאה פעם אחת בלי שאיש נגע בקוד. המספר אינו משתנה לעולם.
+        print("     שם משתמש אפשר להחליף בטלגרם בשתי לחיצות, ואז זה נשבר")
+        print("     בלי שנגעת בכלום. עדיף לשים כאן את המזהה מסעיף 2.")
         if live_users:
             got = [(b.get("who") or "").lstrip("@").lower() for b in live_users]
             if want in got:
@@ -145,6 +163,10 @@ def main():
                 print("    הקובץ. לא חשבון חסר: חשבון שלא שאלנו מי הוא.")
             else:
                 print(f"  ✗ לא תואם. ב-pool יש: {', '.join(g or '?' for g in got)}")
+                for b in live_users:
+                    if b.get("uid"):
+                        print(f"     {b.get('who') or '?'} → "
+                              f"SAVED_UPLOAD_USER={b['uid']}")
     print("  UPLOAD_PANEL_CODE: "
           + ("מוגדר" if (env.get("UPLOAD_PANEL_CODE") or "").strip()
              else "✗ חסר — הפאנל יחזיר 503 לכל קוד"))
@@ -170,8 +192,10 @@ def main():
         print("  אין חשבון מוגדר. צריך להוסיף אחד — זו אינה תקלה שנשברה.")
     elif not live_users:
         print("  יש חשבון מוגדר שלא עלה. הסיבה בסעיף 4.")
-    elif want and not any((b.get("who") or "").lstrip("@").lower() == want
-                          for b in live_users):
+    elif want and not any(
+            (str(b.get("uid") or "") == want) if want.isdigit()
+            else ((b.get("who") or "").lstrip("@").lower() == want)
+            for b in live_users):
         print("  החשבון עלה, אבל SAVED_UPLOAD_USER אינו מתאים לו.")
         print("  fix_saved_userbot.py מתקן את המקרה שבו הסיבה היא זהות ריקה.")
     else:
