@@ -47,20 +47,52 @@ RELAY = re.compile(r"/hls-relay/(?:_fix/)?([^/?]+)/([^?]+)")
 NUMSEG = re.compile(r"/(\d{1,6})(?=/)")
 
 
+# מילים שמופיעות בשמות מארחים ואינן מזהות ספק
+_GENERIC = {"com", "net", "org", "www", "live", "stream", "iptv",
+            "http", "https", "index", "playlist", "chunks", "m3u8"}
+
+
+def _labels(host: str) -> set:
+    """המילים שמזהות את הספק בשם המארח שלו.
+
+    הן מופיעות לא רק במארח אלא גם **בתוך הנתיב** — שער בשם
+    ‎/p/<שם-הספק>/s/{n}/‎ הוא צורה נפוצה. מיסוך שהסתיר רק את המארח
+    השאיר אותן על המסך, וזה נתפס רק אחרי שהפלט כבר הודפס.
+    """
+    out = set()
+    for w in re.split(r"[.\-_:]+", host.lower()):
+        if len(w) >= 3 and not w.isdigit() and w not in _GENERIC:
+            out.add(w)
+    return out
+
+
 def mask(s: str) -> str:
     """להדפסה בלבד: מסתיר מארח ואסימון.
 
     הגרסה הראשונה חתכה ‎^[^/]+‎, וזה תפס רק את ‎https:‎ — המארח נשאר
     על המסך במלואו. נתפס בבדיקה, לפני שהודפס משהו אמיתי.
     """
-    s = re.sub(r"^[a-z]+://[^/]+", "<ספק>", s)
+    return mask_at(s, "ספק")
+
+
+def mask_at(s: str, tag: str) -> str:
+    """כמו mask, עם תגית מארח משלה."""
+    g = re.match(r"^[a-z]+://([^/:]+)", s)
+    host = g.group(1) if g else ""
+    s = re.sub(r"^[a-z]+://[^/]+", f"<{tag}>", s)
+    for w in sorted(_labels(host), key=len, reverse=True):
+        s = re.sub(re.escape(w), "<שם>", s, flags=re.I)
     return re.sub(r"\b[A-Za-z0-9]{10,}\b", "<אסימון>", s)
 
 
 def mask_any(s: str) -> str:
     """מיסוך לכל קישור, גם כזה שאינו תבנית — לדוגמאות האבחון."""
-    s = re.sub(r"(/hls-relay/(?:_fix/)?)[^/]+", r"\1<ספק>", s)
+    g = re.search(r"/hls-relay/(?:_fix/)?([^/?]+)", s)
+    host = g.group(1).split(":")[0] if g else ""
+    s = re.sub(r"(/hls-relay/(?:_fix/)?)[^/?]+", r"\1<ספק>", s)
     s = re.sub(r"^[a-z]+://[^/]+", "<מארח>", s)
+    for w in sorted(_labels(host), key=len, reverse=True):
+        s = re.sub(re.escape(w), "<שם>", s, flags=re.I)
     return re.sub(r"\b[A-Za-z0-9]{16,}\b", "<אסימון>", s)
 
 
@@ -137,10 +169,19 @@ def main() -> int:
 
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    # תגית קבועה לכל מארח. בלעדיה שתי תבניות באותה **צורה** על שני
+    # ספקים שונים מודפסות כשתי שורות זהות לחלוטין, ואי אפשר לדעת
+    # לאיזו מהן להתכוון — וזה בדיוק מה שקרה בפלט הראשון.
+    tags = {}
+    for t, _c in picked:
+        h = t.split("/", 1)[0].split(":")[0]
+        tags.setdefault(h, f"ספק{len(tags) + 1}")
+
     print(f"נמצאו {len(picked)} תבניות ב-{len(items)} פריטי קטלוג:\n")
-    for (t, c), full in zip(picked, lines):
-        known = "✓" if t.split("/", 1)[0].split(":")[0] in origins else "⚠"
-        print(f"  {known} {c:>4} ערוצים   {mask(full)}")
+    for i, ((t, c), full) in enumerate(zip(picked, lines), 1):
+        h = t.split("/", 1)[0].split(":")[0]
+        known = "✓" if h in origins else "⚠"
+        print(f"  {i}. {known} {c:>4} ערוצים   {mask_at(full, tags[h])}")
     if any(t.split("/", 1)[0].split(":")[0] not in origins for t, _ in picked):
         print("\n  ⚠ = המארח אינו ב-relay_hosts.json, ולכן הסכימה והפורט")
         print("      הם ניחוש (http:80). ייתכן שהסריקה עליו תחזיר אפס.")
