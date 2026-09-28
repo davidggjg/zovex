@@ -9024,6 +9024,32 @@ async def saved_upload_part(request: Request, job: str = "", index: int = -1):
             "parts_done": len(j["parts"]), "n_parts": j["n_parts"]}
 
 
+# [add_upload_bench] מדידת המסלול עצמו: קורא את הגוף וזורק אותו.
+#
+# בלי דיסק, בלי טלגרם, בלי עיבוד — ולכן מה שנמדד כאן הוא הרשת, ה-TLS,
+# nginx ו-uvicorn בלבד. השוואה מול scp של אותו קובץ באותה דקה אומרת
+# אם המסלול HTTP הוא הצוואר או שהקו פשוט מלא.
+#
+# הזמן נמדד מהבייט הראשון שהגיע, ולא מקבלת הבקשה: זמן ההתחברות וה-TLS
+# אינו חלק ממהירות ההעברה, וכלילתו הייתה מציגה קו מהיר כאיטי בקבצים
+# קטנים.
+@api.post("/panel/upload-bench")
+async def upload_bench(request: Request):
+    _check_upload_code(request, request.headers.get("x-upload-code", ""))
+    n = 0
+    t0 = None
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if t0 is None:
+            t0 = time.monotonic()
+        n += len(chunk)
+    dt = max(1e-6, time.monotonic() - t0) if t0 else 0.0
+    return {"ok": True, "bytes": n, "seconds": round(dt, 2),
+            "mb_per_sec": round(n / 1048576 / dt, 2) if dt else 0,
+            "mbit_per_sec": round(n * 8 / 1e6 / dt, 1) if dt else 0}
+
+
 @api.get("/panel/saved-upload/parts")
 async def saved_upload_parts(job: str = ""):
     """אילו חלקים כבר הגיעו — כדי לשלוח מחדש רק את החסרים."""
