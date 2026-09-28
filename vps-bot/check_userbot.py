@@ -59,17 +59,75 @@ def head(t):
     print(f"\n──── {t} ────")
 
 
+ENV_SOURCE = ""
+
+
+def _parse_env_file(path, env):
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln or ln.startswith("#") or "=" not in ln:
+                continue
+            k, v = ln.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return True
+
+
 def read_env():
-    """משתני הסביבה של השירות. הערכים נשמרים, אך לעולם לא מודפסים."""
+    """משתני הסביבה של השירות **כפי שהתהליך החי רואה אותם**.
+
+    הגרסה הראשונה קראה רק את ‎/opt/zovex-bot/.env‎, והיא דיווחה
+    "UPLOAD_PANEL_CODE חסר" על שרת שבו הפאנל נפתח מצוין ו-
+    "SAVED_UPLOAD_USER לא מוגדר" על שרת שבו הוא בהחלט מוגדר. כלומר
+    הכלי הסיק "לא מוגדר" ממה שהוא **לא הצליח לקרוא** — וזו מסקנה
+    גרועה יותר מ"לא יודע", כי היא נשמעת כמו תשובה.
+
+    מקור האמת הוא סביבת התהליך עצמו: לא משנה אם ההגדרה הגיעה מ-.env,
+    מ-Environment= ביחידת systemd, או מ-EnvironmentFile אחר.
+
+    הערכים נשמרים בזיכרון ולעולם אינם מודפסים — רק "מוגדר"/"חסר".
+    """
+    global ENV_SOURCE
     env = {}
-    if os.path.exists(ENV_FILE):
-        with open(ENV_FILE, encoding="utf-8", errors="replace") as fh:
-            for ln in fh:
-                ln = ln.strip()
-                if not ln or ln.startswith("#") or "=" not in ln:
-                    continue
-                k, v = ln.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
+
+    # 1. סביבת התהליך החי — התשובה היחידה שאינה ניחוש
+    try:
+        pid = subprocess.run(
+            ["systemctl", "show", SERVICE, "-p", "MainPID", "--value"],
+            capture_output=True, text=True, timeout=15).stdout.strip()
+        if pid.isdigit() and int(pid) > 0:
+            with open(f"/proc/{pid}/environ", "rb") as fh:
+                for part in fh.read().split(b"\0"):
+                    s = part.decode("utf-8", "replace")
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        env[k] = v
+            if env:
+                ENV_SOURCE = f"סביבת התהליך החי (pid {pid})"
+                return env
+    except Exception:
+        pass
+
+    # 2. ה-EnvironmentFile שהיחידה מצהירה עליו
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", SERVICE, "-p", "EnvironmentFiles", "--value"],
+            capture_output=True, text=True, timeout=15).stdout
+        files = re.findall(r"(/\S+?)(?:\s|$)", out)
+        used = [f for f in files if _parse_env_file(f.lstrip("-"), env)]
+        if used:
+            ENV_SOURCE = "EnvironmentFile: " + ", ".join(used)
+            return env
+    except Exception:
+        pass
+
+    # 3. ברירת המחדל הישנה
+    if _parse_env_file(ENV_FILE, env):
+        ENV_SOURCE = ENV_FILE
+    else:
+        ENV_SOURCE = ""
     return env
 
 
@@ -96,6 +154,7 @@ def main():
         # רק אורך. session string הוא סוד גמור ואינו מודפס.
         for i, t in enumerate(users):
             print(f"  · חשבון #{i}: מחרוזת באורך {len(t)} תווים")
+        print(f"  ← {len(users)} מוגדרים. כמה מהם עלו — בסעיף 2.")
 
     # ── 2. מה עלה בפועל ──────────────────────────────────────────────────
     head("2. מי עלה בפועל ב-pool")
@@ -103,8 +162,8 @@ def main():
     pw = env.get("PANEL_PASSWORD") or env.get("ADMIN_PASSWORD") or ""
     live_users = []
     if not pw:
-        print("  ⚠️ לא נמצאה סיסמת פאנל בקובץ הסביבה — מדלג על השאילתה.")
-        print(f"     (חיפשתי ב-{ENV_FILE} את PANEL_PASSWORD/ADMIN_PASSWORD)")
+        print("  ⚠️ לא נמצאה סיסמת פאנל — מדלג על השאילתה.")
+        print(f"     (מקור הסביבה: {ENV_SOURCE or 'לא נקראה כלל'})")
     else:
         try:
             req = urllib.request.Request(
@@ -133,10 +192,26 @@ def main():
 
     # ── 3. ההגדרה שמצמצמת לחשבון מסוים ──────────────────────────────────
     head("3. SAVED_UPLOAD_USER")
+    if ENV_SOURCE:
+        print(f"  (נקרא מ: {ENV_SOURCE})")
     want = (env.get("SAVED_UPLOAD_USER") or "").strip().lstrip("@").lower()
-    if not want:
+    if not ENV_SOURCE:
+        # "לא הצלחתי לקרוא" אינו "לא מוגדר". הגרסה הראשונה בלבלה בין
+        # השניים ודיווחה "חסר" על שרת שבו הכל מוגדר — תשובה שנשמעת
+        # כמו עובדה ואינה.
+        print("  ⚠️ לא הצלחתי לקרוא את סביבת השירות בכלל, ולכן אינני")
+        print("     יודע מה מוגדר. זה **אינו** 'לא מוגדר'. לבדוק ידנית:")
+        print(f"     tr '\\0' '\\n' < /proc/$(systemctl show {SERVICE}"
+              " -p MainPID --value)/environ | grep '^SAVED_UPLOAD_USER='")
+        want = None
+    elif not want:
         print("  לא מוגדר — נבחר החשבון הראשון שעלה. זה המצב הסלחני.")
-    elif want.isdigit():
+        if len(live_users) > 1:
+            first = live_users[0]
+            print(f"     כלומר הקבצים ילכו ל{first.get('who') or first['name']}"
+                  f" — החשבון הראשון ברשימה, ולא בהכרח שלך.")
+            print(f"     כדי לקבוע: SAVED_UPLOAD_USER=<מזהה מסעיף 2>")
+    elif want and want.isdigit():
         print(f"  מוגדר לפי מזהה: {want}  ← זו הדרך היציבה")
         if live_users:
             ids = [str(b.get("uid") or "") for b in live_users]
@@ -147,7 +222,7 @@ def main():
                 print("    fix_userbot_by_id.py והפעל מחדש.")
             else:
                 print(f"  ✗ לא תואם. ב-pool יש: {', '.join(i or '?' for i in ids)}")
-    else:
+    elif want:
         print(f"  מוגדר לפי שם: @{want}")
         # שם משתמש הוא תווית שאפשר להחליף, וזה בדיוק מה שניתק את
         # ההעלאה פעם אחת בלי שאיש נגע בקוד. המספר אינו משתנה לעולם.
@@ -167,9 +242,12 @@ def main():
                     if b.get("uid"):
                         print(f"     {b.get('who') or '?'} → "
                               f"SAVED_UPLOAD_USER={b['uid']}")
-    print("  UPLOAD_PANEL_CODE: "
-          + ("מוגדר" if (env.get("UPLOAD_PANEL_CODE") or "").strip()
-             else "✗ חסר — הפאנל יחזיר 503 לכל קוד"))
+    if not ENV_SOURCE:
+        print("  UPLOAD_PANEL_CODE: לא ידוע (הסביבה לא נקראה)")
+    elif (env.get("UPLOAD_PANEL_CODE") or "").strip():
+        print("  UPLOAD_PANEL_CODE: מוגדר")
+    else:
+        print("  UPLOAD_PANEL_CODE: ✗ חסר — הפאנל יחזיר 503 לכל קוד")
 
     # ── 4. מה היומן אומר על העלייה ───────────────────────────────────────
     head("4. מה היומן אומר")
@@ -188,6 +266,13 @@ def main():
         print(f"  ⚠️ {type(e).__name__}: {e}")
 
     head("שורה תחתונה")
+    # "לא ידוע" קודם לכל מסקנה. הגרסה הראשונה הכריזה "החשבון עלה ותואם
+    # — התקלה אינה כאן" על שרת שבו היא פשוט לא הצליחה לקרוא את
+    # ההגדרה, והמשפט הזה שולח לחפש במקום הלא נכון.
+    if not ENV_SOURCE:
+        print("  לא הצלחתי לקרוא את סביבת השירות, ולכן אין לי מסקנה.")
+        print("  סעיף 3 אומר איך לבדוק ידנית.")
+        return 2
     if not users:
         print("  אין חשבון מוגדר. צריך להוסיף אחד — זו אינה תקלה שנשברה.")
     elif not live_users:
@@ -199,7 +284,18 @@ def main():
         print("  החשבון עלה, אבל SAVED_UPLOAD_USER אינו מתאים לו.")
         print("  fix_saved_userbot.py מתקן את המקרה שבו הסיבה היא זהות ריקה.")
     else:
-        print("  החשבון עלה ותואם — התקלה אינה כאן.")
+        print("  ההעלאה תעבוד.", end=" ")
+        if want:
+            print("החשבון עלה ותואם.")
+        else:
+            print("אין הגבלה, ולכן נבחר הראשון שעלה.")
+    # חשבון שמוגדר בקובץ ולא עלה הוא ממצא בפני עצמו, גם כשההעלאה
+    # עובדת דרך חשבון אחר: זה בדיוק מה שקרה כאן — session שנשלל.
+    if users and len(live_users) < len(users):
+        print(f"  ⚠️ בקובץ {len(users)} חשבונות ורק {len(live_users)} עלו.")
+        print("     חפש SESSION_REVOKED בסעיף 4: session שנשלל אינו חוזר")
+        print("     מעצמו וצריך ליצור חדש —")
+        print("     /opt/zovex-bot/venv/bin/python gen_session.py")
     return 0
 
 
