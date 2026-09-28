@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# update_all — כל מה שממתין, בפקודה אחת: הבוט, הפאנל והאתר.
+# update_all — כל מה שממתין, בפקודה אחת: הבוט, הפאנל, האתר ובוט הקבוצות.
 #
 # האפליקציה **אינה** כאן. ה-APK נבנה ב-GitHub Actions ולא על השרת, וזה
 # מסלול נפרד — ראה בסוף.
 #
 # הסדר אינו שרירותי:
-#   1. מוריד הכל ובודק שירד שלם
+#   1. מוריד הכל ובודק שירד שלם — כולל install.sh של GroupOS, כדי
+#      ש--check יגלה קישור שבור לפני שנגענו במשהו
 #   2. מריץ את הפאצ'ים על **עותקים**, בזה אחר זה — כי שניהם עורכים את
 #      אותו main.py, ופאץ' שני חייב לראות את התוצאה של הראשון
 #   3. רק אם כל הרצף עבר — מחיל באמת
 #   4. מפעיל מחדש ובודק שהנקודות עונות. לא "השירות רץ" אלא "הוא עונה":
-#      שירות שעלה ונפל בייבוא נראה active לרגע, וכך הופל האתר בעבר
-#   5. נכשל? מחזיר את הגיבויים ומפעיל מחדש, ואומר את זה במפורש
+#      שירות שעלה ונפל בייבוא נראה active לרגע, וכך הופל האתר בעבר.
+#      נכשל? מחזיר את הגיבויים ומפעיל מחדש, ואומר את זה במפורש
+#   5. GroupOS — בוט הקבוצות. מערכת נפרדת לגמרי עם install.sh משלה,
+#      שבודק שהבוט **ענה לטלגרם** ומחזיר את עצמו אחורה אם לא. כישלון
+#      שלו אינו מפיל את הבוט הראשי ואת האתר — הם לא נוגעים זה בזה
 #   6. האתר: מוחלף רק אחרי שהבוט בריא, ויש גיבוי לחזור אליו
 #   7. מגבה את הקבצים החיים למאגר
 #
@@ -49,7 +53,7 @@ PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py f
 # כלי אבחון — יורדים אבל לא מורצים
 TOOLS=(who_is_watching.py vodinfo_probe.py fix_catalog_meta.py server_headroom.py ai_cost_calc.py free_tier_plan.py scan_video.py hls_fix_probe.py h264_analyze.py live_watch.py fix_opengop_route.py inventory.sh reclaim.sh check_userbot.py)
 
-echo "════════ 1/6 · מוריד ════════"
+echo "════════ 1/7 · מוריד ════════"
 # האימות הוא לפי סוג הקובץ ולא תמיד כפייתון: סקריפט bash שנבדק ב-ast
 # נכשל תמיד, וזה היה מפיל את כל העדכון בגלל כלי עזר אחד.
 check_file() {
@@ -81,9 +85,24 @@ if tar xzOf /tmp/zovex-site.tgz ./index.html | grep -q 'src="/zovex/assets/'; th
   echo "    היא הייתה נותנת מסך לבן. לא נוגעים באתר."
   exit 1
 fi
+# GroupOS — מערכת נפרדת עם install.sh משלה. יורד כאן ולא בשלב שלו, כדי
+# ש-‎--check‎ יגלה קישור שבור לפני שנגענו במשהו. מריצים את מה שירד ולא
+# את מה שעל הדיסק: העותק שעל השרת הוא מלפני העדכון, ולכן שלב חדש בתוכו
+# לא היה רץ עד הפעם הבאה — אותה מלכודת שבגללה הסקריפט הזה מעדכן את עצמו.
+GOS_DIR=${GROUPOS_DIR:-/opt/groupos}
+GOS_SH=""
+if [ ! -d "$GOS_DIR" ]; then
+  echo "  ⊘ GroupOS אינו מותקן ב-$GOS_DIR — ידולג"
+elif curl -fsSL -o /tmp/groupos_install.sh \
+       "https://raw.githubusercontent.com/davidggjg/zovex/$BRANCH/groupos/install.sh" \
+     && bash -n /tmp/groupos_install.sh 2>/dev/null; then
+  GOS_SH=/tmp/groupos_install.sh; echo "  ✓ groupos/install.sh"
+else
+  echo "  ✗ groupos/install.sh לא ירד או ירד פגום"; exit 1
+fi
 
 echo
-echo "════════ 2/6 · בדיקה יבשה על עותקים ════════"
+echo "════════ 2/7 · בדיקה יבשה על עותקים ════════"
 SIM=$(mktemp -d); trap 'rm -rf "$SIM"' EXIT
 cp main.py "$SIM/main.py"; cp admin.html "$SIM/admin.html"
 APPLY=(); FAILED=0
@@ -102,12 +121,12 @@ python3 -c "import ast;ast.parse(open('$SIM/main.py',encoding='utf-8').read())" 
 
 if [ "$DRY" -eq 1 ]; then
   echo; echo "✓ הכל עבר על עותקים. לא שונה כלום (--check)."
-  echo "  להחלה: ${#APPLY[@]} פאצ'ים + האתר"
+  echo "  להחלה: ${#APPLY[@]} פאצ'ים + האתר${GOS_SH:+ + GroupOS}"
   exit 0
 fi
 
 echo
-echo "════════ 3/6 · מחיל על הבוט ════════"
+echo "════════ 3/7 · מחיל על הבוט ════════"
 cp main.py main.py.before_update_all
 cp admin.html admin.html.before_update_all
 if [ ${#APPLY[@]} -eq 0 ]; then
@@ -120,7 +139,7 @@ else
 fi
 
 echo
-echo "════════ 4/6 · מפעיל מחדש ובודק ════════"
+echo "════════ 4/7 · מפעיל מחדש ובודק ════════"
 systemctl restart zovex-bot
 UP=0
 for i in $(seq 1 30); do
@@ -163,7 +182,29 @@ if [ "$OK" -ne 1 ]; then
 fi
 
 echo
-echo "════════ 5/6 · מחליף את האתר ════════"
+echo "════════ 5/7 · בוט הקבוצות (GroupOS) ════════"
+# מערכת נפרדת לגמרי: קוד אחר, שירות אחר, מסד אחר. היא נכנסת לכאן כי
+# "פקודה אחת שמעדכנת הכל" שמשאירה בוט שלם בחוץ אינה פקודה אחת.
+#
+# מריצים את install.sh **שירד עכשיו** ולא את זה שעל הדיסק: העותק שעל
+# השרת הוא מלפני העדכון, ולכן שלב חדש בתוכו לא היה רץ עד הפעם הבאה —
+# אותה מלכודת שבגללה update_all.sh מעדכן את עצמו קודם.
+#
+# --update נוגע בקוד בלבד: לא בטוקן, לא ב-.env ולא במסד. הוא מוודא
+# שהבוט **ענה לטלגרם** אחרי ההפעלה, ומחזיר את הקוד הקודם לבד אם לא.
+if [ -z "$GOS_SH" ]; then
+  echo "  ⊘ אינו מותקן כאן — מדולג."
+elif GROUPOS_DIR="$GOS_DIR" bash "$GOS_SH" --update; then
+  echo "  ✓ GroupOS מעודכן וחי"
+else
+  # install.sh מחזיר את עצמו אחורה, ולכן כישלון כאן אינו סיבה להחזיר את
+  # הבוט הראשי או את האתר — שתי המערכות אינן נוגעות זו בזו.
+  echo "  ✗ עדכון GroupOS נכשל (הוא החזיר את עצמו). הבוט הראשי לא נפגע."
+  GOS_FAILED=1
+fi
+
+echo
+echo "════════ 6/7 · מחליף את האתר ════════"
 if [ -d "$SITE_DIR" ]; then
   rm -rf /opt/zovex-site.prev && cp -a "$SITE_DIR" /opt/zovex-site.prev
   echo "  גיבוי: /opt/zovex-site.prev"
@@ -199,7 +240,7 @@ if [ "$SC" != "200" ] && [ -d /opt/zovex-site.prev ]; then
 fi
 
 echo
-echo "════════ 6/6 · מגבה למאגר ════════"
+echo "════════ 7/7 · מגבה למאגר ════════"
 # הסקריפט יושב ב-/root ולא ליד main.py, ולכן מחפשים אותו ולא מניחים.
 # בלי הגיבוי הזה main.py ו-admin.html החיים לא מגיעים למאגר, והפאץ' הבא
 # נכתב מול קובץ ישן — זה בדיוק מה ששבר פעם את כל מסלול /vh.
@@ -232,7 +273,14 @@ else
 fi
 
 echo
-echo "✅ הבוט, הפאנל והאתר מעודכנים."
+if [ "${GOS_FAILED:-0}" = "1" ]; then
+  echo "⚠️ הבוט, הפאנל והאתר מעודכנים — אבל GroupOS נכשל וחזר אחורה."
+  echo "   הפלט שלו למעלה. לנסות שוב:  bash $GOS_DIR/install.sh --update"
+elif [ -z "$GOS_SH" ]; then
+  echo "✅ הבוט, הפאנל והאתר מעודכנים.  (GroupOS אינו מותקן כאן — לא נגעתי)"
+else
+  echo "✅ הבוט, הפאנל, האתר ובוט הקבוצות מעודכנים."
+fi
 echo
 echo "מה שנשאר בחוץ — האפליקציה:"
 echo "  ה-APK נבנה ב-GitHub Actions, לא כאן. תגיד לי ואני אריץ את הבנייה,"
