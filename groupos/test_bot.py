@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import os
+import re
 import sys
 import tempfile
 from unittest.mock import MagicMock
@@ -1196,6 +1197,81 @@ def _handler_map() -> dict:
 SILENT_OK = {"pinned"}
 
 
+# פקודות שכל תפקידן להפנות למקום אחר, ולכן הן מדברות על פקודות אחרות
+# ולא על עצמן — וזה נכון:
+#   notes / filters / ...  — רשימה ריקה מסבירה איך יוצרים את הפריט הראשון
+#   diag · security        — דוח שמונה מה חסר ובאיזו פקודה מסדרים
+#   help · start           — תפריט
+POINTERS = {"notes", "filters", "blocklist", "cmds", "scheduled",
+            "allowlist", "approved", "diag", "security", "help", "start",
+            "disabled", "automation", "locks", "reportlist", "purgeto",
+            "settings", "aikeys", "import", "simulate"}
+_TAG = re.compile(r"<[^>]+>")
+_SLASH = re.compile(r"/([a-z][a-z0-9_]{1,31})")
+
+
+async def test_usage_names_the_typed_command():
+    """פקודה שמסבירה על פקודה **אחרת** מזו שהוקלדה.
+
+    מי שהקליד ‎/unlock‎ קיבל "שימוש: /lock", ומי שהקליד ‎/spurge‎ קיבל
+    "שימוש: /purge <מספר>" — תחביר שאינו עובד שם בכלל, כי ‎/spurge‎
+    דורש תשובה להודעה. זה לא סגנון: זו הפניה לפקודה שלא ביקשו.
+
+    הכלל שנבדק אינו "אסור להזכיר פקודה אחרת" — ‎"שימוש: /get <שם>‎ ·
+    ‎הרשימה: /notes"‎ הוא בדיוק מה שרצוי. הכלל הוא **שהפקודה שהוקלדה
+    תופיע בתשובה שמזכירה פקודות**. תשובה שמדברת רק על פקודות אחרות
+    היא הפניה למקום שלא ביקשו.
+
+    הסיבה היא מטפל משותף עם מחרוזת שימוש אחת קבועה, ולכן הבדיקה סורקת
+    את **כל** הפקודות ולא את אלה שתוקנו — פקודה חדשה שתחלוק מטפל
+    תיתפס כאן ולא אצל המשתמש."""
+    section("הודעת השימוש מדברת על הפקודה שהוקלדה")
+    hmap = _handler_map()
+    names = {n for n, _ in panel.COMMANDS}
+    real_bot, real_guard = B.bot, B.guard.acquire
+    B.bot = SmokeBot()
+
+    async def no_wait(chat_id, is_group=True):
+        return None
+    B.guard.acquire = no_wait
+    B.perms.set_role(CHAT, ADM, "owner")
+    bad = []
+    try:
+        for i, n in enumerate(sorted(names)):
+            before = len(SENT)
+            try:
+                await asyncio.wait_for(
+                    hmap[n](msg("/" + n, uid=ADM, mid=8000 + i)), timeout=5)
+            except Exception:                            # noqa: BLE001
+                continue           # קריסות נבדקות בסריקה הכללית
+            if n in POINTERS:
+                continue
+            out = _TAG.sub(" ", " ".join(t for _, t, _ in SENT[before:]))
+            said = {c for c in _SLASH.findall(out) if c in names}
+            if said and n not in said:
+                bad.append(f"/{n} → /" + ", /".join(sorted(said)))
+    finally:
+        B.bot, B.guard.acquire = real_bot, real_guard
+    ok("אין פקודה שמפנה לפקודה שלא הוקלדה", not bad, " · ".join(bad[:8]))
+
+
+async def test_switch_titles():
+    """כותרת של מתג היא שם בשפת אדם, ולא מפתח מהמסד.
+
+    ‎/lockdown‎ ו-‎/emergency‎ אינם ב-‎SWITCHES‎, ולכן הכותרת שלהם נפלה
+    חזרה למפתח והוצג ‎<b>lockdown</b>‎ — מילה באנגלית בתוך הודעה
+    בעברית. התווית קיימת תחת ‎cmd.<שם>‎ ופשוט לא נקראה."""
+    section("כותרות המתגים")
+    keys = sorted({k for k, _, _ in panel.SWITCHES}
+                  | {"lockdown", "emergency"})
+    raw = [k for k in keys if panel.switch_label(k, "he") == k]
+    ok("אין מתג שמוצג בשם המפתח", not raw, str(raw))
+    # ובפועל, ולא רק דרך המילון: המסך עצמו
+    shown = [k for k in keys
+             if f"<b>{k}</b>" in panel.switch_screen(CHAT, k, True, "he").text]
+    ok("אין מסך מתג עם מפתח ככותרת", not shown, str(shown))
+
+
 async def test_every_command():
     section("כל הפקודות שבתפריט")
     hmap = _handler_map()
@@ -1280,7 +1356,9 @@ async def main() -> int:
     await test_quiet_group()
     await test_command_visibility()
     await test_upkeep()
+    await test_switch_titles()
     await test_every_command()
+    await test_usage_names_the_typed_command()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

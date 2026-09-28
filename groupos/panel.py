@@ -294,11 +294,27 @@ def switches_screen(chat_id: int, values: dict,
                   rows)
 
 
+def switch_label(key: str, lang: str = i18n.DEFAULT) -> str:
+    """השם שהאדם רואה למתג — ולעולם לא המפתח שבמסד.
+
+    ‎/lockdown‎ ו-‎/emergency‎ אינם ב-‎SWITCHES‎ (הם לא מופיעים במסך
+    המתגים), ולכן החיפוש כאן נפל עליהם חזרה למפתח והכותרת שהוצגה
+    הייתה ‎<b>lockdown</b>‎ — שם משתנה באנגלית בתוך הודעה בעברית. יש
+    להם תווית מלאה תחת ‎cmd.<שם>‎, ולכן זה נופל לשם לפני שהוא מוותר.
+
+    שתי נפילות ולא אחת, כי ‎t()‎ מחזירה את המפתח עצמו כשאין תרגום —
+    כלומר "יש תשובה" אינו "יש תווית"."""
+    for k, _d, label in SWITCHES:
+        if k == key:
+            return i18n.t(label, lang)
+    alt = f"cmd.{key}"
+    return i18n.t(alt, lang) if i18n.t(alt, lang) != alt else key
+
+
 def switch_screen(chat_id: int, key: str, on: bool,
                   lang: str = i18n.DEFAULT) -> Screen:
     """מתג בודד, לתשובה על פקודה. שני כפתורים מפורשים ולא החלפה."""
-    label = next((l for k, _, l in SWITCHES if k == key), key)
-    txt = (f"<b>{i18n.t(label, lang)}</b>\n"
+    txt = (f"<b>{switch_label(key, lang)}</b>\n"
            + i18n.t("sw.now", lang,
                     state=i18n.t("on" if on else "off", lang)))
     rows = [[("✅ " + i18n.t("sw.enable", lang), cb(chat_id, "sw1", key)),

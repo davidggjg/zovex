@@ -363,6 +363,22 @@ def register_chat(chat) -> None:
            (chat.id, chat.title or "", chat.username, chat.type, time.time()))
 
 
+def typed(msg: Message) -> str:
+    """הפקודה שהאדם באמת הקליד — בלי הסלאש ובלי ‎@שם_הבוט‎.
+
+    פקודות רבות חולקות מטפל: ‎/unlock‎ עם ‎/lock‎, ‎/echo‎ עם ‎/say‎,
+    ‎/approve‎ עם ‎/allow‎, ‎/spurge‎ ו-‎/purgefrom‎ עם ‎/purge‎. הודעת
+    השימוש נכתבה פעם אחת עם שם קבוע, ולכן מי שהקליד ‎/unlock‎ קיבל
+    "שימוש: /lock" — הופנה לפקודה שלא ביקש, ובמקרה של ‎/spurge‎ גם
+    לתחביר שאינו עובד שם (‎/spurge 10‎ אינו עושה דבר; הוא דורש תשובה
+    להודעה).
+
+    ‎/lock@GroupOSbot‎ הוא מה שטלגרם שולחת בקבוצה שיש בה יותר מבוט
+    אחד, ולכן החיתוך ב-‎@‎ אינו קישוט."""
+    head = (msg.text or msg.caption or "").strip().split(maxsplit=1)
+    return head[0].lstrip("/").split("@")[0] if head else ""
+
+
 def touch(msg: Message) -> None:
     now = time.time()
     u = msg.from_user
@@ -1307,7 +1323,7 @@ async def cmd_get(msg: Message):
     touch(msg)
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await reply(msg, T(msg, "note.usage"))
+        await reply(msg, T(msg, "note.name_usage", cmd=typed(msg)))
         return
     await _send_note(msg, parts[1])
 
@@ -1353,7 +1369,7 @@ async def cmd_clear_note(msg: Message):
     touch(msg)
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await reply(msg, T(msg, "note.usage"))
+        await reply(msg, T(msg, "note.name_usage", cmd=typed(msg)))
         return
     n = notes.delete(msg.chat.id, parts[1])
     await reply(msg, T(msg, "note.deleted") if n
@@ -1386,7 +1402,7 @@ async def cmd_stop(msg: Message):
     touch(msg)
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await reply(msg, T(msg, "filter.usage"))
+        await reply(msg, T(msg, "filter.stop_usage", cmd=typed(msg)))
         return
     n = filters.remove(msg.chat.id, parts[1])
     await reply(msg, T(msg, "filter.removed") if n else T(msg, "filter.none"))
@@ -1431,7 +1447,7 @@ async def cmd_rmblock(msg: Message):
     touch(msg)
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await reply(msg, T(msg, "block.usage"))
+        await reply(msg, T(msg, "block.rm_usage", cmd=typed(msg)))
         return
     n = blocks.remove(msg.chat.id, parts[1])
     await reply(msg, T(msg, "block.removed") if n else T(msg, "block.none"))
@@ -1716,7 +1732,7 @@ async def cmd_delcmd(msg: Message):
     touch(msg)
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await reply(msg, T(msg, "cc.usage"))
+        await reply(msg, T(msg, "cc.del_usage", cmd=typed(msg)))
         return
     name = customcmd.normalize(parts[1])
     if not cmds.delete(msg.chat.id, name):
@@ -2326,11 +2342,7 @@ def _switch_label(key: str, lg: str) -> str:
 
     ‎"autoclean = 45"‎ אינו משפט שמישהו אומר. הפאנל ממילא מחזיק תווית
     לכל מתג, ולכן אין סיבה שהאישור ידבר בשפת הטבלה."""
-    for k, _d, label in panel.SWITCHES:
-        if k == key:
-            return i18n.t(label, lg)
-    return i18n.t(f"cmd.{key}", lg) if i18n.t(f"cmd.{key}", lg) \
-        != f"cmd.{key}" else key
+    return panel.switch_label(key, lg)
 
 
 def _switch_gap(chat_id: int, key: str, lg: str) -> str:
@@ -2483,7 +2495,7 @@ async def cmd_allow(msg: Message):
     touch(msg)
     scope, value = _allow_arg(msg)
     if scope is None or not allow.add(msg.chat.id, scope, value):
-        await reply(msg, T(msg, "allow.usage"))
+        await reply(msg, T(msg, "allow.usage", cmd=typed(msg)))
         return
     audit.log(msg.chat.id, "allowlist.add", actor_id=msg.from_user.id,
               after=f"{scope}:{value}", severity="medium")
@@ -2677,7 +2689,7 @@ async def cmd_unschedule(msg: Message):
     touch(msg)
     parts = (msg.text or "").split()
     if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
-        await reply(msg, T(msg, "sched.usage"))
+        await reply(msg, T(msg, "sched.un_usage", cmd=typed(msg)))
         return
     n = sched.remove(msg.chat.id, int(parts[1].lstrip("#")))
     await reply(msg, T(msg, "sched.removed") if n else T(msg, "sched.missing"))
@@ -2959,7 +2971,7 @@ async def cmd_spurge(msg: Message):
     """כמו purge, בלי הודעת סיכום. בקבוצה גדולה גם הסיכום הוא רעש."""
     touch(msg)
     if not msg.reply_to_message:
-        await reply(msg, T(msg, "purge.usage"))
+        await reply(msg, T(msg, "purge.reply_usage", cmd=typed(msg)))
         return
     first = msg.reply_to_message.message_id
     if msg.message_id - first > PURGE_MAX:
@@ -2983,7 +2995,7 @@ async def cmd_purgefrom(msg: Message):
     """מסמן התחלה. הסימון לכל מנהל בנפרד, כדי ששניים לא ידרסו זה את זה."""
     touch(msg)
     if not msg.reply_to_message:
-        await reply(msg, T(msg, "purge.usage"))
+        await reply(msg, T(msg, "purge.from_usage"))
         return
     _purge_marks[(msg.chat.id, msg.from_user.id)] = \
         msg.reply_to_message.message_id
@@ -3392,7 +3404,7 @@ async def _lock_cmd(msg: Message, default_action: str):
             await reply(msg, T(msg, "lock.unknown", name=raw[1]))
             return
         # רשימת הסוגים במקום "שימוש שגוי": מי ששכח את השם צריך אותו כאן
-        await reply(msg, T(msg, "lock.usage",
+        await reply(msg, T(msg, "lock.usage", cmd=typed(msg),
                            types=", ".join(sorted(LOCK_TYPES))))
         return
     if action not in ACTIONS:
@@ -3438,7 +3450,7 @@ async def cmd_say(msg: Message):
     touch(msg)
     text = (msg.text or "").split(maxsplit=1)
     if len(text) < 2 or not text[1].strip():
-        await reply(msg, T(msg, "say.usage"))
+        await reply(msg, T(msg, "say.usage", cmd=typed(msg)))
         return
     if await _bad_html(msg, text[1]):
         return
