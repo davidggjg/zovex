@@ -790,13 +790,16 @@ async def _start_one_pool_bot(i, tok: str, timeout: float = None):
         # שומרים את המזהה פעם אחת בעלייה: בלעדיו הפאנל מציג bot_5/user_8 בלבד
         # ואי אפשר לדעת איזה בוט זה בפועל (למשל את מי להוסיף לערוץ).
         who = ""
+        uid = 0          # [fix_userbot_by_id] המזהה אינו משתנה לעולם
         try:
             me = await asyncio.wait_for(c.get_me(), timeout=15)
             who = ("@" + me.username) if me.username else (me.first_name or "")
+            uid = int(getattr(me, "id", 0) or 0)
         except Exception:
             pass
         entry = {"client": c, "name": name, "cooldown_until": 0.0,
-                 "token": tok, "kind": kind, "peer_ok": True, "who": who}
+                 "token": tok, "kind": kind, "peer_ok": True, "who": who,
+                 "uid": uid}
         if STREAM_CHANNEL_ID:
             entry["peer_ok"] = await _resolve_peer(c, name)
         _stream_bots.append(entry)
@@ -5990,6 +5993,9 @@ async def pool_list(req: PoolPwReq, request: Request):
         bots.append({
             "name": b["name"],
             "who": b.get("who", ""),           # @username — לזיהוי איזה בוט זה
+            # [fix_userbot_by_id] המזהה, כדי שאפשר יהיה להעתיק אותו
+            # ל-SAVED_UPLOAD_USER במקום שם משתמש שעלול להתחלף
+            "uid": b.get("uid", 0),
             "status": "פעיל" if cd == 0 else "מתקרר",
             "cooldown_left": cd,               # כמה שניות נשארו לעונשין
             # peer_ok: האם הבוט מזהה את ערוץ התוכן. בלעדיו כל משיכת מדיה שלו
@@ -6026,9 +6032,11 @@ async def pool_reconnect(req: PoolNameReq, request: Request):
         # מזהה הבוט: בלי זה אי אפשר לדעת *את מי* להוסיף לערוץ. בוט חייב להיות
         # חבר בערוץ כדי לגשת אליו — אין דרך לעקוף את זה בקוד.
         who = ""
+        uid = 0
         try:
             me = await asyncio.wait_for(b["client"].get_me(), timeout=10)
             who = ("@" + me.username) if me.username else (me.first_name or "")
+            uid = int(getattr(me, "id", 0) or 0)
         except Exception:
             pass
         # [fix_saved_userbot] נכתב חזרה לרשומה, ולא רק מוחזר בתשובה.
@@ -6036,6 +6044,8 @@ async def pool_reconnect(req: PoolNameReq, request: Request):
         # חשבון עם זהות ריקה נשאר כזה גם אחרי לחיצה על "חבר מחדש".
         if who:
             b["who"] = who
+        if uid:
+            b["uid"] = uid          # [fix_userbot_by_id]
         out.append({"name": b["name"], "peer_ok": ok, "who": who,
                     "error": _peer_errors.get(b["name"], "")})
     return {"ok": True, "results": out}
@@ -8299,16 +8309,28 @@ def _userbot_reason():
         return None, ("אין חשבון משתמש ב-pool — רק בוטים. "
                       "בוט אינו יכול לכתוב להודעות השמורות של חשבון.")
     if SAVED_UPLOAD_USER:
+        # [fix_userbot_by_id] מספר = מזהה משתמש, וזה מה שלא משתנה לעולם.
+        # שם משתמש הוא תווית: הבעלים החליף אותה פעם אחת וההעלאה נותקה
+        # בלי שאיש נגע בקוד. שם ממשיך לעבוד, כדי לא לשבור הגדרה קיימת.
+        want_id = int(SAVED_UPLOAD_USER) if SAVED_UPLOAD_USER.isdigit() else 0
         for b in users:
-            if (b.get("who") or "").lstrip("@").lower() == SAVED_UPLOAD_USER:
+            if want_id:
+                if int(b.get("uid") or 0) == want_id:
+                    return b, ""
+            elif (b.get("who") or "").lstrip("@").lower() == SAVED_UPLOAD_USER:
                 return b, ""
-        if [b for b in users if not (b.get("who") or "")]:
+        blind = [b for b in users
+                 if not (b.get("uid") if want_id else b.get("who"))]
+        if blind:
             return None, (f"יש {len(users)} חשבונות ב-pool אך זהותם לא "
                           f"נקראה בעלייה, ולכן אי אפשר לדעת מי מהם "
-                          f"@{SAVED_UPLOAD_USER}")
-        return None, ("SAVED_UPLOAD_USER=@" + SAVED_UPLOAD_USER +
+                          f"{SAVED_UPLOAD_USER}")
+        return None, ("SAVED_UPLOAD_USER=" + SAVED_UPLOAD_USER +
                       " אינו ב-pool. יש: " +
-                      ", ".join((b.get("who") or "?") for b in users))
+                      ", ".join(f"{b.get('who') or '?'} ({b.get('uid') or '?'})"
+                                for b in users) +
+                      ". אם החלפת שם משתמש — שים את המספר במקום השם, "
+                      "הוא לא משתנה.")
     return users[0], ""
 
 
@@ -8326,14 +8348,18 @@ async def _resolve_who(b):
     חריגה שם — ותשומת לב: היא צפויה דווקא בהפעלה מחדש, כשטלגרם מאט
     שרשרת של 16 התחברויות — משאירה אותו ריק לתמיד, וההתאמה ל-
     ‎SAVED_UPLOAD_USER‎ לא תצליח לעולם. כאן הוא נקרא שוב, בפועל."""
-    if b.get("who"):
+    # [fix_userbot_by_id] גם מי שיש לו שם עשוי להיות בלי מזהה: את המזהה
+    # התחלנו לשמור רק עכשיו, ורשומה שנוצרה לפני כן מחזיקה שם בלבד.
+    if b.get("who") and b.get("uid"):
         return b["who"]
     try:
         me = await asyncio.wait_for(b["client"].get_me(), timeout=15)
         b["who"] = ("@" + me.username) if me.username \
             else (me.first_name or "")
+        b["uid"] = int(getattr(me, "id", 0) or 0)
         if b["who"]:
-            log.info("זהות %s הושלמה: %s", b.get("name"), b["who"])
+            log.info("זהות %s הושלמה: %s (%s)",
+                     b.get("name"), b["who"], b["uid"])
     except Exception as e:
         log.warning("זהות %s לא נקראה: %s: %s",
                     b.get("name"), type(e).__name__, e)
