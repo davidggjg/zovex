@@ -86,14 +86,44 @@ fi
 if [ "$N" -eq 1 ]; then
   F="$M"
   cp "$F" "$F.bak_saveduser"
-  # שתי צורות: Environment="KEY=VALUE" ביחידת systemd (שם שומרים על
-  # הגרשיים), ו-KEY=VALUE בקובץ סביבה (שם מחליפים את כל שארית השורה,
-  # כך שגם ערך בגרשיים או עם הערה בסוף מוחלף נכון).
-  sed -i -E -e "s#(Environment=\"SAVED_UPLOAD_USER=)[^\"]*#\1$ID#" \
-            -e "s#^([[:space:]]*SAVED_UPLOAD_USER=).*#\1$ID#" "$F"
-  echo
-  echo "✓ עודכן: $F"
-  echo "  גיבוי: $F.bak_saveduser"
+  # ההחלפה אינה תלויה בצורה שבה השורה נכתבה, כי systemd מקבל את כולן:
+  #
+  #     Environment="SAVED_UPLOAD_USER=x"     גרשיים מסביב לזוג כולו
+  #     Environment=SAVED_UPLOAD_USER=x       בלי גרשיים  ← זו שנכשלה
+  #     SAVED_UPLOAD_USER=x                   קובץ סביבה
+  #     SAVED_UPLOAD_USER="x"                 קובץ סביבה, ערך בגרשיים
+  #
+  # הגרסה הקודמת דרשה גרשיים מיד אחרי ‎Environment=‎, או שורה שמתחילה
+  # במפתח. הצורה השנייה אינה אף אחת מהן, sed לא התאים כלום ויצא 0 —
+  # והסקריפט הדפיס "✓ עודכן" על קובץ שלא נגע בו.
+  #
+  # שני כללים לפי הסדר: ערך שעטוף בגרשיים משלו, ואז ערך חשוף שנעצר
+  # בגרש, ברווח או בסוף שורה.
+  sed -i -E -e "s#(SAVED_UPLOAD_USER=)([\"'])[^\"']*\2#\1$ID#g" \
+            -e "s#(SAVED_UPLOAD_USER=)[^\"'[:space:]]*#\1$ID#g" "$F"
+  # sed יוצא 0 גם כשלא התאים כלום, ולכן "עודכן" נאמר רק אם הקובץ
+  # באמת השתנה. דיווח הצלחה על שינוי שלא קרה גרוע מכישלון.
+  if cmp -s "$F" "$F.bak_saveduser"; then
+    # "לא השתנה" הוא גם מה שקורה כשהערך כבר נכון — וזו הצלחה, לא
+    # כישלון. מבדילים לפי מה שכתוב בקובץ בפועל.
+    if grep -qE "SAVED_UPLOAD_USER=[\"']?$ID([\"']|\$|[[:space:]])" "$F"; then
+      echo
+      echo "✓ כבר מוגדר נכון ב-$F"
+      rm -f "$F.bak_saveduser"
+    else
+      echo
+      echo "✗ הקובץ לא השתנה — לא זיהיתי את צורת השורה:"
+      grep -n "SAVED_UPLOAD_USER" "$F" | sed 's/^/    /'
+      echo "  לא נגעתי בכלום. שלח לי את השורה הזאת."
+      rm -f "$F.bak_saveduser"
+      exit 1
+    fi
+  else
+    echo
+    echo "✓ עודכן: $F"
+    grep -n "SAVED_UPLOAD_USER" "$F" | sed 's/^/    /'
+    echo "  גיבוי: $F.bak_saveduser"
+  fi
   case "$F" in *.service|*.conf) systemctl daemon-reload ;; esac
 else
   F="$ENVDEF"
