@@ -109,19 +109,33 @@ async def try_index(client):
     return bool(hits)
 
 
-async def probe(client, sem, pat, n, found, sigs):
+async def probe(client, sem, pat, n, found, sigs, errs=None):
+    """errs סופר **מה** הספק ענה על כל מזהה שלא נמצא.
+
+    בלי זה "0 ערוצים" הוא אותה שורה בדיוק כשהספק חסם אותנו, כשהמספור
+    הוחלף, וכשהוא לא עונה — ושלושת המצבים דורשים שלוש פעולות שונות.
+    זה בדיוק מה שפספסנו בסריקה קודמת: אפס ממצאים, ואפס מידע על למה.
+    """
     url = PATTERNS[pat].format(n=n)
+
+    def note(k):
+        if errs is not None:
+            errs[k] = errs.get(k, 0) + 1
+
     async with sem:
         for _ in range(2):
             try:
                 r = await client.get(url, headers=HDR, timeout=10)
-            except Exception:
+            except Exception as e:
                 await asyncio.sleep(0.3)
+                note(type(e).__name__)
                 continue
             if r.status_code != 200:
+                note(str(r.status_code))
                 return
             body = r.text
             if not body.lstrip().startswith("#EXTM3U"):
+                note("200 לא-playlist")
                 return
             sig = hash(body[:400])
             found.append({"pattern": pat, "id": n, "url": url, "sig": sig})
@@ -157,7 +171,7 @@ async def main():
         print(f"מ-{a.lo}, בלוקים של {a.block}, {a.conns} במקביל, "
               f"{'בלי תקרה' if not a.hi else 'עד ' + str(a.hi)}\n")
 
-        found, sigs = [], {}
+        found, sigs, errs = [], {}, {}
         sem = asyncio.Semaphore(a.conns)
         t0, lo, empty = time.time(), a.lo, 0
         while True:
@@ -165,7 +179,7 @@ async def main():
             if a.hi and hi > a.hi:
                 hi = a.hi
             before = len(found)
-            await asyncio.gather(*[probe(client, sem, p, n, found, sigs)
+            await asyncio.gather(*[probe(client, sem, p, n, found, sigs, errs)
                                    for p in pats for n in range(lo, hi + 1)])
             got = len(found) - before
             print(f"  {lo}–{hi}:  +{got}   (סה\"כ {len(found)})", flush=True)
@@ -189,6 +203,20 @@ async def main():
     print(f"\n{'='*54}")
     print(f"זמן: {time.time()-t0:.0f} שניות   נסרקו עד {lo + a.block - 1}")
     print(f"ערוצים תקינים: {len(real)}")
+    # מה הספק ענה על מה שלא נמצא. זו השורה שמפרידה בין "נחסמנו" לבין
+    # "המספור הוחלף": חסימה נותנת 403 על **הכל**, ומספור שהוחלף משאיר
+    # 200 על מזהים אחרים בטווח.
+    if errs:
+        top = sorted(errs.items(), key=lambda kv: -kv[1])[:6]
+        print("תשובות שלא נספרו: " + " · ".join(f"{k}×{v}" for k, v in top))
+        codes = {k for k in errs if k.isdigit()}
+        if codes == {"403"} and not real:
+            print("\n  כל התשובות 403, ואף מזהה לא החזיר playlist.")
+            print("  זו חסימה ולא שינוי מספור — מספור שהוחלף היה משאיר")
+            print("  200 על מזהים אחרים בטווח שנסרק.")
+        elif real:
+            print("\n  נמצאו ערוצים — כלומר הגישה פתוחה, והשאלה היא רק")
+            print("  אילו מזהים השתנו.")
     if noise:
         print(f"(סוננו {len(found)-len(real)} תשובות ברירת-מחדל זהות)")
     print(f"חדשים שאין לך: {len(new)}")
