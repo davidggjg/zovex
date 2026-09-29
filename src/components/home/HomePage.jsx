@@ -289,6 +289,47 @@ export default function HomePage({
           </a>
         ))}
         <span style={{ color: "#4a4f54", fontSize: 12 }}>© ZOVEX</span>
+
+        {/* יש מי שלוקח את האתר והאפליקציה וגובה עליהם כסף. מי ששילם לא
+            יחשוד בכך מעצמו — הוא הרי "קנה מזובקס" — ולכן זה חייב להיות
+            כתוב במקום שהוא יעבור בו, ולא רק בדף משפטי שאיש אינו פותח.
+            בכותרת התחתונה: נראה תמיד, לא חוסם כלום. */}
+        <div style={{
+          flexBasis: "100%", textAlign: "center", marginTop: 14,
+          color: "#6b7178", fontSize: 12, lineHeight: 1.7,
+        }}>
+          {getLanguage() === "he" ? (
+            <>
+              <strong style={{ color: "#8a9096" }}>ZOVEX חינמי לגמרי</strong>
+              {" — אין מנוי, אין תשלום ואין גרסה בתשלום."}
+              <br />
+              {"מישהו גבה ממך כסף על האתר או על האפליקציה? זה לא אנחנו — "}
+              <button
+                onClick={() => setSupportOpen(true)}
+                style={{ background: "none", border: "none", padding: 0,
+                         color: "#e50914", font: "inherit", cursor: "pointer",
+                         textDecoration: "underline" }}>
+                כתוב לנו בתמיכה
+              </button>
+              {"."}
+            </>
+          ) : (
+            <>
+              <strong style={{ color: "#8a9096" }}>ZOVEX is completely free</strong>
+              {" — no subscription, no payment, no paid tier."}
+              <br />
+              {"Someone charged you for the site or the app? That was not us — "}
+              <button
+                onClick={() => setSupportOpen(true)}
+                style={{ background: "none", border: "none", padding: 0,
+                         color: "#e50914", font: "inherit", cursor: "pointer",
+                         textDecoration: "underline" }}>
+                message support
+              </button>
+              {"."}
+            </>
+          )}
+        </div>
       </footer>
     </div>
   );

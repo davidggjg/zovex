@@ -28,6 +28,15 @@ const LEGAL_DOCS_HE = [
         'אם מישהו פונה אליכם בשם השירות ומבקש תשלום, סיסמה או קוד אימות — ' +
         'זו הונאה. דווחו לנו.',
       ]],
+      ['אם שילמתם על ZOVEX', [
+        'יש מי שלוקח את האפליקציה ואת האתר שלנו, אורז אותם מחדש ומוכר ' +
+        'אותם. אין לנו שום קשר לזה ואנחנו לא מקבלים מזה אגורה.',
+        'ZOVEX חינמי לגמרי — אין מנוי, אין תשלום ואין גרסה בתשלום. ' +
+        'הדרך היחידה להשיג אותו היא מהאתר או מקישור ההורדה הרשמי שלנו.',
+        'אם שילמתם למישהו על ZOVEX — פנו אלינו בתמיכה. אנחנו לא יכולים ' +
+        'להחזיר לכם כסף שלא קיבלנו, אבל נוכל לעזור לכם לדעת מול מי ' +
+        'אתם עומדים ולהזהיר אחרים.',
+      ]],
       ['איך פונים אלינו', [
         'בכפתור התמיכה שבאפליקציה, בשרת הדיסקורד, או בערוץ הטלגרם.',
       ]],
@@ -161,6 +170,15 @@ const LEGAL_DOCS_EN = [
         'payment — and nobody is ever asked for credit card details.',
         'If someone contacts you in the name of this service and asks for payment, ' +
         'a password or a verification code, it is a scam. Please report it to us.',
+      ]],
+      ['If you paid for ZOVEX', [
+        'Some people take our app and our site, repackage them and sell them. ' +
+        'We have nothing to do with that and we receive nothing from it.',
+        'ZOVEX is completely free — no subscription, no payment and no paid tier. ' +
+        'The only way to get it is from our site or our official download link.',
+        'If you paid someone for ZOVEX, contact our support. We cannot refund ' +
+        'money we never received, but we can help you identify who you are ' +
+        'dealing with and warn others.',
       ]],
       ['How to reach us', [
         'Through the support button in the app, the Discord server, or the Telegram channel.',
