@@ -1,7 +1,13 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { t, getLanguage, setLanguage, catName } from '../../i18n';
 
 // סגנון אחיד לפריטי תפריט הפרופיל — נוסף כשהתפריט גדל מפריט אחד לארבעה.
+// קישור בתוך משפט: כפתור מבחינת הנגישות, קישור מבחינת המראה.
+const freeLinkStyle = {
+  background: "none", border: "none", padding: 0, font: "inherit",
+  color: "#fff", textDecoration: "underline", cursor: "pointer",
+};
+
 const menuItemStyle = {
   padding: "11px 14px", fontSize: 13, color: "#e5e5e5",
   cursor: "pointer", fontWeight: 600,
@@ -20,6 +26,25 @@ export default function HomePage({
   favIds,
 }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // פס ההודעה שלמעלה. נסגר לחודש ולא לתמיד: מי ששילם למישהו על ZOVEX
+  // הוא כמעט תמיד משתמש חדש, ולכן הוא **יראה** אותו; ומי שכבר קרא
+  // וסגר לא מקבל את אותו פס בכל כניסה. לתמיד היה אומר שמשתמש שסגר
+  // אותו לפני שנה לא יידע לעולם.
+  const [freeBar, setFreeBar] = useState(() => {
+    try {
+      const until = Number(localStorage.getItem("zovex_free_bar_until") || 0);
+      return !(until && Date.now() < until);
+    } catch {
+      return true;   // אחסון חסום (גלישה פרטית) — מראים, לא מסתירים
+    }
+  });
+  const closeFreeBar = useCallback(() => {
+    setFreeBar(false);
+    try {
+      localStorage.setItem("zovex_free_bar_until",
+                           String(Date.now() + 30 * 864e5));
+    } catch { /* לא נורא — הפס פשוט יופיע שוב */ }
+  }, []);
   const [showCatModal, setShowCatModal] = useState(false);
   const [showTelegramTip, setShowTelegramTip] = useState(() => !ls("zovex_hide_telegram_tip"));
   const [supportOpen, setSupportOpen] = useState(false);
@@ -40,6 +65,50 @@ export default function HomePage({
       <style>{SPIN}{AMBIENT_KEYFRAMES}</style>
       {/* הזוהר יושב מאחורי הכל ומשתנה לפי הקטגוריה הנבחרת */}
       <AmbientGlow seed={selectedCategory} />
+      {/* פס עליון: ZOVEX חינמי, ומי שגבה כסף אינו אנחנו.
+          למעלה ולא רק בכותרת התחתונה, כי הכותרת התחתונה יושבת מתחת
+          לכל הקטלוג ורוב המבקרים לא מגיעים אליה אף פעם. מי ששילם
+          למישהו על ZOVEX לא יחשוד בכך מעצמו — צריך שזה ייאמר לו. */}
+      {freeBar && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "9px 14px", fontSize: 13, lineHeight: 1.5,
+          color: "#ffd9db", background: "rgba(229,9,20,0.14)",
+          borderBottom: "1px solid rgba(229,9,20,0.35)",
+          // AmbientGlow הוא position:fixed עם zIndex:0, וזה מספיק כדי
+          // לצייר אותו **מעל** תוכן רגיל. בלי המיקום כאן הפס היה בקוד,
+          // נמדד כ"גלוי", ולא נראה על המסך — נתפס רק בצילום מסך.
+          position: "relative", zIndex: 41,
+        }}>
+          <span style={{ flex: 1 }}>
+            {getLanguage() === "he" ? (
+              <>
+                <strong style={{ color: "#fff" }}>ZOVEX חינמי לגמרי</strong>
+                {" — אין מנוי ואין תשלום. מישהו גבה ממך כסף עליו? זה לא אנחנו, "}
+                <button onClick={() => setSupportOpen(true)} style={freeLinkStyle}>
+                  כתוב לנו
+                </button>
+                {"."}
+              </>
+            ) : (
+              <>
+                <strong style={{ color: "#fff" }}>ZOVEX is completely free</strong>
+                {" — no subscription, no payment. Someone charged you for it? That was not us, "}
+                <button onClick={() => setSupportOpen(true)} style={freeLinkStyle}>
+                  tell us
+                </button>
+                {"."}
+              </>
+            )}
+          </span>
+          <button onClick={closeFreeBar}
+            aria-label={getLanguage() === "he" ? "סגור" : "Close"}
+            style={{ background: "none", border: "none", color: "#ffb3b8",
+                     fontSize: 18, lineHeight: 1, cursor: "pointer",
+                     padding: "0 4px", flexShrink: 0 }}>×</button>
+        </div>
+      )}
+
       {/* כותרת "זכוכית": חצי־שקופה עם טשטוש של מה שעובר מתחתיה, ודביקה
           למעלה — כך היא מרחפת מעל התוכן במקום לחתוך אותו בפס אטום. */}
       <header style={{
@@ -122,6 +191,33 @@ export default function HomePage({
                   onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                 >
                   ⚙️ {t("common.language")}: {getLanguage() === "he" ? "עברית → English" : "English → עברית"}
+                </div>
+                {/* אותה הודעה שבכותרת התחתונה, גם כאן — כי הכותרת
+                    התחתונה יושבת מתחת לכל הקטלוג, ומי שגולל בין אלפי
+                    כרטיסים לא בהכרח מגיע אליה אי פעם. תפריט הפרופיל הוא
+                    המקום שאליו הולכים כששואלים "מי עומד מאחורי זה",
+                    וזו בדיוק השאלה של מי ששילם. מקביל ל"הגדרות → אודות"
+                    באפליקציה. */}
+                <div
+                  onClick={() => { setUserMenuOpen(false); setSupportOpen(true); }}
+                  style={{ ...menuItemStyle, borderTop: "1px solid #2a2a2a",
+                           lineHeight: 1.5 }}
+                  onMouseEnter={e => e.currentTarget.style.background = "#262626"}
+                  onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                >
+                  {getLanguage() === "he" ? (
+                    <>🎁 <strong>חינמי לגמרי</strong>
+                      <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
+                        מישהו גבה ממך כסף? כתוב לנו
+                      </div>
+                    </>
+                  ) : (
+                    <>🎁 <strong>Completely free</strong>
+                      <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>
+                        Someone charged you? Tell us
+                      </div>
+                    </>
+                  )}
                 </div>
                 <a
                   href={`${import.meta.env.BASE_URL}legal/`}
