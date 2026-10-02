@@ -157,7 +157,19 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     const action = () => {
       if (item.series_name) setSelectedSeries(item.series_name);
       else setSelectedMovie(item);
-      openWithKalturaRefresh(item);
+      // [resume] המיקום מועבר **בלחיצה עצמה**, מהפריט שכבר בידנו.
+      //
+      // קודם נקרא כאן ‎openWithKalturaRefresh(item)‎ בלי מיקום, ולכן
+      // הנגן נפתח על 0 ובמקביל יצאה קריאה ל-/api/progress. הדילוג
+      // המאוחר חל רק אם התשובה הקדימה את שתי השניות הראשונות של
+      // הנגינה — וברשת איטית היא לא, והסרט התחיל מההתחלה. זה הדיווח.
+      //
+      // ‎/api/history‎ מחזיר עכשיו ‎position‎ לכל פריט (ראה
+      // fix_history_resume.py בשרת), ולכן אין יותר קריאה שנייה ואין
+      // תחרות. שרת שעוד לא עודכן אינו שולח את השדה, ואז ‎null‎ מחזיר
+      // את ההתנהגות הקודמת — כלומר זה נופל אחורה ולא נשבר.
+      openWithKalturaRefresh(
+        item, Number.isFinite(item.position) ? item.position : null);
     };
     setPendingAction(() => action); setShowDonation(true);
   };

@@ -47,7 +47,11 @@ export function usePlayback({ user, loadProgress, saveHistory }) {
     // להיטען פעמיים (עם קפיצה גלויה) כשה-src משתנה אחרי שהתשובה מגיעה.
     const vidForType = movie.video_id || movie.video_url || "";
     const embedsStartInUrl = ["youtube", "vimeo"].includes(movie.type) || vidForType.includes("youtube.com") || vidForType.includes("youtu.be") || vidForType.includes("vimeo.com");
-    if (resumeAt !== null) {
+    // ‎Number.isFinite‎ ולא ‎!== null‎: קורא שמעביר ‎undefined‎ (פריט
+    // היסטוריה משרת שעוד לא עודכן) עבר את התנאי הקודם והציב
+    // ‎resumeSeconds = undefined‎ — כלומר ההמשכה נשברה בשקט במקום ליפול
+    // חזרה לקריאה מהשרת. עכשיו רק מספר אמיתי נחשב למיקום ידוע.
+    if (Number.isFinite(resumeAt)) {
       setResumeSeconds(resumeAt);
     } else if (embedsStartInUrl) {
       setResumeSeconds((await loadProgress(movie.id)) || 0);

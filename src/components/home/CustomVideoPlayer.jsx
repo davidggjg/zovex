@@ -949,6 +949,12 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
 function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onNextEpisode, nextEpisodeLabel, onSilent, onUnsupported }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
+  // [resume] "כבר דילגנו למיקום השמור עבור המקור הזה" ו-"המשתמש בחר מקום
+  // בעצמו". השומר הקודם היה ‎currentTime < 2‎ בלבד, כלומר ההמשכה הייתה
+  // תלויה בזמן תגובה של הרשת: תשובה אחרי שתי שניות נזרקה בשקט והסרט
+  // המשיך מההתחלה. זה בדיוק מה שדווח מהשטח.
+  const resumedForRef = useRef(null);
+  const userSeekedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [skipAnim, setSkipAnim] = useState(null);
   // videoReady: הופך ל-true ברגע שהאלמנט <video> האמיתי נוצר ונשמר ב-ref —
@@ -1253,11 +1259,18 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
   useEffect(() => {
     const v = videoElRef.current;
     if (!v || startTime <= 1) return;
-    if (v.currentTime < 2) { try { v.currentTime = startTime; } catch {} }
-  }, [startTime]);
+    if (resumedForRef.current === src) return;   // דילגנו כבר עבור המקור הזה
+    if (userSeekedRef.current) return;            // המשתמש בחר מקום בעצמו
+    // 30 שניות ולא 2: החלון הקודם היה קצר מזמן תגובה של רשת איטית, ולכן
+    // ההמשכה "עבדה באתר" רק כשהשרת הספיק לענות בזמן. מי שכבר צפה יותר
+    // מחצי דקה — לא נזיז אותו.
+    if (v.currentTime > 30) return;
+    try { v.currentTime = startTime; resumedForRef.current = src; } catch {}
+  }, [startTime, src]);
 
   const handleSkip = useCallback((side) => {
     const v = videoElRef.current;
+    userSeekedRef.current = true;   // [resume] בחירה יזומה גוברת על השמור
     // seekTo ולא השמה ישירה: כשהנגן עוד לא יודע את אורך הסרט (moov בסוף
     // הקובץ, רשת איטית) השמה ישירה נבלעת בשקט והדילוג פשוט לא קורה.
     if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? SKIP_SECONDS : -SKIP_SECONDS)));
@@ -1282,6 +1295,12 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
 function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false, onNextEpisode, nextEpisodeLabel, knownDuration = 0 }) {
   const containerRef = useRef(null);
   const videoElRef = useRef(null);
+  // [resume] "כבר דילגנו למיקום השמור עבור המקור הזה" ו-"המשתמש בחר מקום
+  // בעצמו". השומר הקודם היה ‎currentTime < 2‎ בלבד, כלומר ההמשכה הייתה
+  // תלויה בזמן תגובה של הרשת: תשובה אחרי שתי שניות נזרקה בשקט והסרט
+  // המשיך מההתחלה. זה בדיוק מה שדווח מהשטח.
+  const resumedForRef = useRef(null);
+  const userSeekedRef = useRef(false);
   const playerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [skipAnim, setSkipAnim] = useState(null);
@@ -1431,11 +1450,15 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
   useEffect(() => {
     const v = videoElRef.current;
     if (isLive || !v || startTime <= 1) return;
-    if (v.currentTime < 2) { try { v.currentTime = startTime; } catch {} }
-  }, [startTime, isLive]);
+    if (resumedForRef.current === src) return;
+    if (userSeekedRef.current) return;
+    if (v.currentTime > 30) return;
+    try { v.currentTime = startTime; resumedForRef.current = src; } catch {}
+  }, [startTime, isLive, src]);
 
   const handleSkip = useCallback((side) => {
     const v = videoElRef.current;
+    userSeekedRef.current = true;   // [resume] בחירה יזומה גוברת על השמור
     // seekTo ולא השמה ישירה: כשהנגן עוד לא יודע את אורך הסרט (moov בסוף
     // הקובץ, רשת איטית) השמה ישירה נבלעת בשקט והדילוג פשוט לא קורה.
     if (v) seekTo(v, Math.max(0, v.currentTime + (side === "forward" ? SKIP_SECONDS : -SKIP_SECONDS)));
