@@ -79,11 +79,17 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower().replace("-", " ")).strip()
 
 
-def ask(path: str, timeout=40):
-    """(קוד, גוף מקוצר) מהשרת המקומי."""
+def ask(path: str, timeout=40, base: str = ""):
+    """(קוד, גוף מקוצר). ‎base‎ ריק = השרת המקומי; אחרת דרך nginx.
+
+    ההבחנה הזאת היא כל העניין: בדיקה ל-127.0.0.1 **עוקפת את nginx**,
+    את TLS ואת כל שכבת הקצה. האפליקציה מגיעה מבחוץ, ולכן "עובד מהשרת"
+    אינו אומר "עובד לאפליקציה" — וזה בדיוק הפער שנמדד כאן.
+    """
+    cmd = (CURL if not base else ["curl", "-sS"])
     r = subprocess.run(
-        CURL + ["-o", "/tmp/_vt_body", "-w", "%{http_code}",
-                "--max-time", str(timeout), LOCAL + path],
+        cmd + ["-o", "/tmp/_vt_body", "-w", "%{http_code}",
+               "--max-time", str(timeout), (base or LOCAL) + path],
         capture_output=True)
     code = r.stdout.decode().strip() or "?"
     try:
@@ -141,6 +147,10 @@ def main() -> int:
     ap.add_argument("--gap", type=float, default=3.0,
                     help="הפוגה בין בדיקות — כל אחת מפעילה המרה")
     ap.add_argument("--timeout", type=float, default=40)
+    ap.add_argument("--public", action="store_true",
+                    help="דרך nginx מבחוץ, כמו האפליקציה — ולא ל-127.0.0.1")
+    ap.add_argument("--both", action="store_true",
+                    help="שתי הדרכים, זו מול זו")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -174,6 +184,18 @@ def main() -> int:
     else:
         hits = random.sample(vod, min(a.sample, len(vod)))
 
+    def public_base(url: str) -> str:
+        u = urlsplit(url or "")
+        return f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else ""
+
+    modes = [("מקומי (עוקף nginx)", "")]
+    if a.public or a.both:
+        pb = public_base((hits[0] or {}).get("video_url"))
+        if not pb:
+            sys.exit("❌ אין בקטלוג כתובת מוחלטת — אי אפשר לבדוק מבחוץ")
+        modes = ([("מקומי (עוקף nginx)", "")] if a.both else []) + \
+                [("ציבורי (דרך nginx, כמו האפליקציה)", pb)]
+
     print(f"{len(hits)} פריטים · כל בדיקה מפעילה המרה אמיתית, "
           f"אחת-אחת עם {a.gap:.0f}ש׳ הפוגה\n" + "=" * 60)
     codes = {}
@@ -181,14 +203,16 @@ def main() -> int:
         path = vt_url_from_stream(e.get("video_url"))
         t = title_of(e) or "(בלי שם)"
         print(f"\n{i}. {t[:40]}")
-        t0 = time.time()
-        code, body = ask(path, a.timeout)
-        dt = time.time() - t0
-        codes[code] = codes.get(code, 0) + 1
-        print(f"   {code}  ({dt:.1f} שניות)" + (f"  {body[:90]}" if body
-                                                and code != "200" else ""))
-        if code == "200":
-            print("   ✓ המניפסט נבנה")
+        for label, base in modes:
+            t0 = time.time()
+            code, body = ask(path, a.timeout, base)
+            dt = time.time() - t0
+            codes[code] = codes.get(code, 0) + 1
+            tag = "✓" if code == "200" else "✗"
+            print(f"   {tag} {label:<36} {code}  ({dt:.1f}ש)"
+                  + (f"  {body[:70]}" if body and code != "200" else ""))
+            if len(modes) > 1:
+                time.sleep(1.0)
         if i < len(hits):
             time.sleep(a.gap)
 
@@ -196,9 +220,13 @@ def main() -> int:
     for c, n in sorted(codes.items(), key=lambda kv: -kv[1]):
         print(f"  {n:>3} × {c}   {MEANING.get(c, '')}")
     print()
-    if set(codes) == {"200"}:
-        print("הכל עובד מהשרת. אם בנגן זה נכשל — תסתכל על מה שהאפליקציה")
-        print("באמת מבקשת, כי זה לא מה שנבדק כאן.")
+    if set(codes) == {"200"} and len(modes) > 1:
+        print("עובד גם מבחוץ דרך nginx. כלומר הבעיה אינה בשרת ואינה בקצה —")
+        print("היא בנגן של האפליקציה: מה הוא מבקש, כמה זמן הוא מחכה, ואיך")
+        print("הוא מתנהג כשהמניפסט לוקח ~7 שניות להיבנות.")
+    elif set(codes) == {"200"}:
+        print("עובד מהשרת. אבל זה **עקף את nginx** — הרץ עם --both כדי")
+        print("לראות אם זה עובד גם מבחוץ, כמו שהאפליקציה מבקשת.")
     elif "504" in codes:
         print("504 הוא הסביר ביותר לקובץ גדול: לפני שההמרה מתחילה רצה")
         print("ffprobe, ועל AVI הוא עושה 5 נסיעות — ובהן 2 קפיצות לזנב")
