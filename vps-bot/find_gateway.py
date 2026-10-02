@@ -111,6 +111,46 @@ def mask(s: str, host: str) -> str:
                   r"[A-Za-z0-9]+\b", "<אסימון>", s)
 
 
+def loc_of(ct: str) -> str:
+    """ה-Location מתוך מה ש-ask החזיר (‎"<סוג> → <כתובת>"‎), או ריק."""
+    return ct.split("→", 1)[1].strip() if "→" in ct else ""
+
+
+def redirect_note(loc: str, probed_host: str, probed_port: int) -> str:
+    """מה אומרת הפניה, בלי להדפיס את המארח עצמו.
+
+    ‎mask‎ מחליף כל כתובת ב-‎<ספק>‎, ולכן הפניה הודפסה כ-
+    ‎"→ <ספק>/p/g/s/103/index.m3u8"‎ — כלומר הסתיר בדיוק את הדבר
+    היחיד שבגללו מדפיסים אותה. הפתרון אינו להסיר את המיסוך אלא לפרק
+    את הכתובת ולומר **מה השתנה בה**: זה מספיק כדי לדעת אם יש כאן
+    כתובת חדשה, ואינו מפרסם את התשתית שלהם.
+    """
+    g = re.match(r"^([a-z]+)://([^/:]+)(?::(\d+))?(/.*)?$", loc.strip(),
+                 re.I)
+    if not g:
+        return f"הפניה יחסית: {loc.strip()[:60]}"
+    scheme, host2, port2, path2 = g.group(1), g.group(2), g.group(3), \
+        g.group(4) or "/"
+    port2 = int(port2) if port2 else (443 if scheme == "https" else 80)
+    same_host = host2.lower() == probed_host.lower()
+    bits = []
+    if not same_host:
+        # לא מדפיסים את השם, אבל כן את מה שמאפשר להחליט: האם זה אותו
+        # דומיין עם תת-שם אחר, או מארח אחר לגמרי.
+        p1 = probed_host.lower().split(".")
+        p2 = host2.lower().split(".")
+        if len(p1) >= 2 and len(p2) >= 2 and p1[-2:] == p2[-2:]:
+            bits.append("תת-שם אחר באותו דומיין")
+        else:
+            bits.append("**מארח אחר לגמרי**")
+    else:
+        bits.append("אותו מארח")
+    bits.append(f"פורט {port2}" + (" (אותו)" if port2 == probed_port else ""))
+    bits.append(scheme.lower())
+    bits.append(f"נתיב {path2[:40]}")
+    return " · ".join(bits)
+
+
 def ident_of(path: str) -> str:
     """מזהה הערוץ בנתיב — המקטע המספרי האחרון."""
     hits = re.findall(r"/(\d{1,6})(?=/|\.|$)", "/" + path)
@@ -224,7 +264,26 @@ def selftest() -> int:
     v2 = [x[1] for x in path_variants("a/b/c.m3u8", "")]
     chk(all("{n}" not in x for x in v2), "בלי מזהה — בלי תבניות פתוחות")
 
-    # ④ מיסוך
+    # ④ הפניה: מה שהודפס קודם כ-"<ספק>/..." ולכן לא אמר כלום
+    chk(loc_of("text/html → http://x.tv/a") == "http://x.tv/a", "חילוץ Location")
+    chk(loc_of("text/html") == "", "בלי Location")
+    H = "tv.acme-iptv.tv"
+    n = redirect_note("http://new-farm.other-co.net:9090/p/g/s/103/i.m3u8",
+                      H, 7070)
+    chk("מארח אחר לגמרי" in n, f"מארח אחר מזוהה ⇒ {n[:46]}")
+    chk("9090" in n, "והפורט החדש נאמר במפורש")
+    chk("new-farm" not in n and "other-co" not in n,
+        "אבל שם המארח עצמו אינו מודפס")
+    n2 = redirect_note(f"https://cdn2.acme-iptv.tv:7070/x", H, 7070)
+    chk("תת-שם אחר באותו דומיין" in n2, f"תת-שם ⇒ {n2[:40]}")
+    n3 = redirect_note(f"https://{H}:8443/p/g/s/103/i.m3u8", H, 7070)
+    chk("אותו מארח" in n3 and "8443" in n3, f"אותו מארח, פורט אחר ⇒ {n3[:40]}")
+    chk("(אותו)" in redirect_note(f"https://{H}:7070/x", H, 7070),
+        "אותו פורט מסומן ככזה")
+    chk("יחסית" in redirect_note("/somewhere/else.m3u8", H, 7070),
+        "הפניה יחסית אינה מקריסה")
+
+    # ⑤ מיסוך
     m = mask("https://tv.acme-iptv.tv:86/p/acme/s/1/i.m3u8?token=AB12CD34EF",
              "tv.acme-iptv.tv")
     chk("acme" not in m and "AB12CD34EF" not in m, "מארח ואסימון אינם בפלט")
@@ -318,7 +377,12 @@ def main() -> int:
                 mark = " ←" if c not in ("404", "403") and not c[0].isalpha() \
                     else ""
                 print(f"    {d:<34} {tag}{mark}")
-                if ct and c == "200":
+                # כל Location, בכל קוד. בגרסה הראשונה זה הודפס רק על 200,
+                # ולכן 301 על פורט 80 הודפס בלי לומר **לאן** — והכתובת
+                # שאליה מפנים היא בדיוק מה שהכלי נועד למצוא.
+                if loc_of(ct):
+                    print(f"        ↳ {redirect_note(loc_of(ct), host, port)}")
+                elif ct and c == "200":
                     print(f"        {mask(ct, host)[:70]}")
                 seen[d] = c
                 time.sleep(a.gap)
@@ -366,6 +430,12 @@ def main() -> int:
                         ok = is_pl(b)
                         print(f"    {'✓' if ok else '·'} {sch}:{p:<6} "
                               f"{short(c, b)}")
+                        # ← זה מה שהוחמץ: 301 בלי Location אינו אומר כלום,
+                        #   ו-Location **הוא** הכתובת החדשה אם יש כזאת.
+                        if loc_of(ct):
+                            print(f"        ↳ "
+                                  f"{redirect_note(loc_of(ct), host, p)}")
+                            found.append((idx, "redirect"))
                         opens.append((p, sch, c, ok))
                         if ok:
                             found.append((idx, "port"))
@@ -382,6 +452,11 @@ def main() -> int:
 
     print(f"\n{'=' * 64}")
     kinds = {k for _i, k in found}
+    if "redirect" in kinds and not ({"wrap", "port"} & kinds):
+        print("יש הפניה (301/302) עם כתובת יעד — השורה עם ה-← למעלה.")
+        print("אם היא מצביעה למארח או לפורט אחר, זו הכתובת החדשה,")
+        print("וצריך לבדוק אותה. שלח לי אותה כמו שהיא.")
+        print()
     if "wrap" in kinds or "port" in kinds:
         print("יש צורה שעובדת. זה בדיוק מה שחיפשנו — שלח לי את השורות")
         print("עם ה-✓ ואני מעדכן את הקישורים בקטלוג.")
