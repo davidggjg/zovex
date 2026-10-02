@@ -147,7 +147,17 @@ def redirect_note(loc: str, probed_host: str, probed_port: int) -> str:
         bits.append("אותו מארח")
     bits.append(f"פורט {port2}" + (" (אותו)" if port2 == probed_port else ""))
     bits.append(scheme.lower())
-    bits.append(f"נתיב {path2[:40]}")
+    # הנתיב ממוסך גם הוא. הגרסה הקודמת הסתירה את המארח והדפיסה את
+    # הנתיב כמו שהוא — ושם הספק יושב **בתוך הנתיב** (‎/p/<שם>/s/..‎),
+    # כך שהוא הודפס במלואו. זו אותה טעות בדיוק שתוקנה ב-make_formats
+    # ותועדה שם, וחזרתי עליה כאן.
+    safe = path2
+    for w in sorted(labels(probed_host) | labels(host2), key=len,
+                    reverse=True):
+        safe = re.sub(re.escape(w), "<שם>", safe, flags=re.I)
+    safe = re.sub(r"\b(?=[A-Za-z0-9]{10,}\b)(?=[A-Za-z0-9]*\d)"
+                  r"[A-Za-z0-9]+\b", "<אסימון>", safe)
+    bits.append(f"נתיב {safe[:46]}")
     return " · ".join(bits)
 
 
@@ -274,6 +284,16 @@ def selftest() -> int:
     chk("9090" in n, "והפורט החדש נאמר במפורש")
     chk("new-farm" not in n and "other-co" not in n,
         "אבל שם המארח עצמו אינו מודפס")
+    # והנתיב — שם הספק יושב **בתוכו**, וזה מה שדלף בהרצה אמיתית
+    leak = redirect_note(f"https://{H}:443/p/acme-iptv/s/103/playlist.m3u8",
+                         H, 7070)
+    chk("acme" not in leak, f"שם הספק בתוך הנתיב מוסתר ⇒ {leak[-30:]}")
+    chk("<שם>" in leak, "ומסומן ככזה")
+    chk("103" in leak and "playlist" in leak,
+        "אבל המזהה והצורה נשארים קריאים — בלעדיהם אין בשביל מה להדפיס")
+    chk("<אסימון>" in redirect_note(
+        f"https://{H}:443/p/x/s/AB12CD34EF99/i.m3u8", H, 7070),
+        "אסימון בנתיב מוסתר")
     n2 = redirect_note(f"https://cdn2.acme-iptv.tv:7070/x", H, 7070)
     chk("תת-שם אחר באותו דומיין" in n2, f"תת-שם ⇒ {n2[:40]}")
     n3 = redirect_note(f"https://{H}:8443/p/g/s/103/i.m3u8", H, 7070)
