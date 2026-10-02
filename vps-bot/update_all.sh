@@ -51,7 +51,7 @@ DRY=0; [ "${1:-}" = "--check" ] && DRY=1
 # פאצ'ים שעורכים main.py (ואחד גם את admin.html), לפי הסדר שבו הם מוחלים
 PATCHES=(fix_panel_msg_read.py fix_upload_read_caption.py fix_content_cache.py fix_caption_title_cut.py fix_panel_pass_header.py fix_saved_poster.py fix_custom_poster.py fix_poster_sharp.py fix_stale_sig.py fix_stale_sig2.py fix_live_opengop.py fix_live_robust.py fix_live_autofix.py fix_idr_probe_log.py fix_autofix_debug.py fix_verify_output.py fix_empty_manifest.py fix_profile_memory.py fix_relay_deadline.py fix_edge_evict.py fix_relay_dead_check.py fix_relay_probe_loop.py fix_relay_ffmpeg_probe.py fix_relay_fallback.py fix_saved_userbot.py fix_userbot_by_id.py fix_bulk_episodes.py fix_saved_write_block.py add_upload_bench.py)
 # כלי אבחון — יורדים אבל לא מורצים
-TOOLS=(who_is_watching.py vodinfo_probe.py fix_catalog_meta.py server_headroom.py ai_cost_calc.py free_tier_plan.py scan_video.py hls_fix_probe.py h264_analyze.py live_watch.py fix_opengop_route.py inventory.sh reclaim.sh check_userbot.py gen_session.py set_upload_account.sh make_formats.py hunt_channels.py probe_known.py scan_embyil.py identify_embyil.py zoom_embyil.py)
+TOOLS=(who_is_watching.py vodinfo_probe.py fix_catalog_meta.py server_headroom.py ai_cost_calc.py free_tier_plan.py scan_video.py hls_fix_probe.py h264_analyze.py live_watch.py fix_opengop_route.py inventory.sh reclaim.sh check_userbot.py gen_session.py set_upload_account.sh make_formats.py hunt_channels.py probe_known.py scan_embyil.py identify_embyil.py zoom_embyil.py why_403.py seed_hunt.py dns_check.py)
 
 echo "════════ 1/7 · מוריד ════════"
 # האימות הוא לפי סוג הקובץ ולא תמיד כפייתון: סקריפט bash שנבדק ב-ast
