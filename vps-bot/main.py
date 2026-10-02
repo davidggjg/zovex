@@ -283,8 +283,35 @@ async def get_progress(
 async def get_history(
     x_user_id: str = Header(..., description="Google User ID")
 ):
+    # [fix_history_resume] כל פריט נושא גם את המיקום השמור.
+    #
+    # קודם הנתיב הזה החזיר שם ותמונה בלבד, ולכן האתר היה חייב קריאה
+    # שנייה ל-/api/progress לכל פתיחה מההיסטוריה. הקריאה ההיא חזרה
+    # **אחרי** שהנגן כבר התחיל לנגן, והדילוג למקום השמור מוגן שם
+    # ב-‎currentTime < 2‎ — כלומר ברשת איטית הוא נזרק, והצופה ראה את
+    # הסרט מתחיל מההתחלה. באפליקציה אין תחרות כזאת ולכן שם זה עבד.
+    #
+    # עם המיקום בתוך הפריט אין קריאה שנייה ואין על מה להתחרות.
     db = load_json(HISTORY_FILE)
-    return db.get(x_user_id, [])
+    rows = db.get(x_user_id, [])
+    prog = load_json(PROGRESS_FILE).get(x_user_id, {})
+    out = []
+    for h in rows:
+        if not isinstance(h, dict):
+            continue
+        p = prog.get(h.get("media_id")) or {}
+        try:
+            pos = int(float(p.get("position") or 0))
+        except (TypeError, ValueError):
+            pos = 0
+        try:
+            dur = int(float(p.get("duration") or 0))
+        except (TypeError, ValueError):
+            dur = 0
+        # שדות נוספים בלבד: שום שדה קיים אינו משתנה, ולכן לקוח ישן
+        # ממשיך לעבוד בדיוק כמו קודם.
+        out.append({**h, "position": max(0, pos), "duration": max(0, dur)})
+    return out
 
 @api.post("/api/history")
 async def add_history(
