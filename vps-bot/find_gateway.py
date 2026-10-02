@@ -111,6 +111,55 @@ def mask(s: str, host: str) -> str:
                   r"[A-Za-z0-9]+\b", "<אסימון>", s)
 
 
+def segment_probes(path: str, ident: str):
+    """[(תווית, נתיב)] — אותה צורה, ומקטע אחד משתנה בכל פעם.
+
+    ## למה זה, ולא ההשוואה שעשיתי קודם
+
+    שלב א השווה את הנתיב שלנו לנתיב מומצא בצורה **אחרת לגמרי**
+    (‎/zovex-a3f9/does-not-exist.m3u8‎), קיבל 403 מול 404, והסיק
+    "הנתיב שלנו קיים".
+
+    זו הסקה שגויה. nginx מנתב לפי צורה: ‎/p/<שער>/s/<מספר>/..‎ נכנס
+    לשער ומקבל את תשובתו, וכל צורה אחרת נופלת לברירת המחדל ומקבלת
+    404. כלומר ההבדל הוכיח שה**צורה** מנותבת, ולא שהמזהה קיים.
+
+    הבדיקה הנכונה משנה **מקטע אחד** ומשאירה את כל השאר: אם מזהה
+    מופרך מקבל אותה תשובה כמו שלנו, אז התשובה אינה תלויה במזהה —
+    ואז אי אפשר להבדיל בין מזהה קיים לשאינו קיים, כלומר סריקה לא
+    תמצא דבר. ואם הוא מקבל 404, המזהה שלנו **כן** קיים.
+    """
+    out, seen = [], set()
+    segs = [s for s in path.split("/") if s]
+
+    def add(why, parts):
+        p = "/".join(parts)
+        if p and p not in seen:
+            seen.add(p)
+            out.append((why, p))
+
+    # ① המזהה — שלוש צורות מופרכות, אותה צורת נתיב בדיוק
+    if ident:
+        for i, s in enumerate(segs):
+            stem = re.sub(r"\.(m3u8|ts|mpd)$", "", s)
+            if stem == ident:
+                suf = s[len(stem):]
+                for label, val in (("מזהה 999999", "999999"),
+                                   ("מזהה 0", "0"),
+                                   ("מזהה לא-מספרי", "zzqqzz")):
+                    add(label, segs[:i] + [val + suf] + segs[i + 1:])
+                break
+
+    # ② כל מקטע אחר, אחד בכל פעם — איזה מהם השרת בודק בכלל
+    for i, s in enumerate(segs):
+        stem = re.sub(r"\.(m3u8|ts|mpd)$", "", s)
+        if stem == ident:
+            continue
+        add(f"מקטע {i + 1} מוחלף", segs[:i] + ["zzqqzz"] + segs[i + 1:])
+
+    return out
+
+
 def loc_of(ct: str) -> str:
     """ה-Location מתוך מה ש-ask החזיר (‎"<סוג> → <כתובת>"‎), או ריק."""
     return ct.split("→", 1)[1].strip() if "→" in ct else ""
@@ -274,6 +323,28 @@ def selftest() -> int:
     v2 = [x[1] for x in path_variants("a/b/c.m3u8", "")]
     chk(all("{n}" not in x for x in v2), "בלי מזהה — בלי תבניות פתוחות")
 
+    # ③ב בדיקות המקטעים — הבדיקה שהחליפה את ההשוואה הפגומה
+    sp = segment_probes("p/gate/s/103/playlist.m3u8", "103")
+    names = [w for w, _ in sp]
+    ps = [x[1] for x in sp]
+    chk(len(ps) == len(set(ps)), f"{len(ps)} בדיקות, בלי כפילות")
+    chk(sum(1 for n in names if n.startswith("מזהה")) == 3,
+        "שלוש צורות מזהה מופרך")
+    chk("p/gate/s/999999/playlist.m3u8" in ps, "מזהה מוחלף, הצורה נשמרת")
+    chk("p/gate/s/zzqqzz/playlist.m3u8" in ps, "מזהה לא-מספרי")
+    # כל בדיקה שונה מהמקור במקטע **אחד** בלבד — אחרת היא אינה מדידה
+    orig = "p/gate/s/103/playlist.m3u8".split("/")
+    for _w, v in sp:
+        vs = v.split("/")
+        chk(len(vs) == len(orig)
+            and sum(1 for x, y in zip(vs, orig) if x != y) == 1,
+            f"מקטע אחד בדיוק שונה: /{v}")
+    chk("p/gate/s/103/playlist.m3u8" not in ps, "המקור אינו בין הבדיקות")
+    # ונתיב בלי מזהה אינו מייצר בדיקות מזהה
+    chk(not any(w.startswith("מזהה")
+                for w, _ in segment_probes("a/b/c.m3u8", "")),
+        "בלי מזהה — בלי בדיקות מזהה")
+
     # ④ הפניה: מה שהודפס קודם כ-"<ספק>/..." ולכן לא אמר כלום
     chk(loc_of("text/html → http://x.tv/a") == "http://x.tv/a", "חילוץ Location")
     chk(loc_of("text/html") == "", "בלי Location")
@@ -367,25 +438,51 @@ def main() -> int:
 
         # ── שלב א: 403 לעומת 404 ────────────────────────────────────────
         if "a" in a.phase:
-            print(f"\n  ── שלב א · האם הנתיב הישן בכלל קיים " + "─" * 22)
+            print(f"\n  ── שלב א · איזה מקטע השרת בכלל בודק " + "─" * 22)
+            # ההשוואה הקודמת כאן הייתה מול נתיב בצורה אחרת לגמרי, וקיבלה
+            # 403 מול 404 — ממה שהסקתי "הנתיב שלנו קיים". הסקה שגויה:
+            # nginx מנתב לפי צורה, ולכן ההבדל הוכיח שהצורה מנותבת ולא
+            # שהמזהה קיים. עכשיו משתנה מקטע אחד בכל פעם.
+            base = " ".join(body.split())[:60]
+            print(f"    {'הנתיב שלנו':<22} {short(code, body)}")
+            rows = []
+            for why, p in segment_probes(path, ident):
+                c, b, _ = ask(scheme, host, port, "/" + p, a.timeout)
+                same = (c == code and " ".join(b.split())[:60] == base)
+                rows.append((why, c, same))
+                print(f"    {why:<22} {short(c, b)}"
+                      f"{'   ← אותה תשובה' if same else ''}")
+                time.sleep(a.gap)
             bogus = f"zovex-{secrets.token_hex(6)}/does-not-exist.m3u8"
             bc, bb, _ = ask(scheme, host, port, "/" + bogus, a.timeout)
-            print(f"    נתיב ידוע:  {short(code, body)}")
-            print(f"    נתיב מומצא: {short(bc, bb)}")
-            same = (code == bc and " ".join(body.split())[:60]
-                    == " ".join(bb.split())[:60])
-            if same:
-                print("\n    ⇒ **אותה תשובה בדיוק.** כלומר 'direct' היא תשובה")
-                print("      גורפת ואינה אומרת דבר על קיום הנתיב. אי אפשר")
-                print("      להסיק מכאן שהמספור השתנה — ולכן שלבים ב-ד הם")
-                print("      החיפוש הנכון, וסריקת מספרים אינה.")
-            else:
-                print("\n    ⇒ **תשובות שונות.** הנתיב הישן מקבל יחס אחר")
-                print("      מנתיב שאינו קיים — כלומר הוא **קיים**, והוא רק")
-                print("      מסורב. המספור לא השתנה, וכל סריקה היא בזבוז.")
-                print("      מה שחסר הוא הרשאה, לא כתובת.")
+            print(f"    {'צורה אחרת לגמרי':<22} {short(bc, bb)}")
+
+            id_rows = [r for r in rows if r[0].startswith("מזהה")]
+            id_same = [r for r in id_rows if r[2]]
+            seg_diff = [r for r in rows
+                        if r[0].startswith("מקטע") and not r[2]]
+            if id_rows and len(id_same) == len(id_rows):
+                print("\n    ⇒ **מזהה מופרך מקבל בדיוק אותה תשובה.** כלומר")
+                print("      התשובה אינה תלויה במזהה כלל: השרת מסרב לפני")
+                print("      שהוא בודק איזה ערוץ ביקשנו.")
+                print()
+                print("      מכאן שני דברים, ושניהם חשובים:")
+                print("      · אי אפשר לדעת מהתשובה אם מזהה קיים — ולכן")
+                print("        **סריקה לא תמצא דבר**, כמה שלא נסרוק.")
+                print("      · וגם אי אפשר להסיק שהמספור לא השתנה. הספק")
+                print("        אומר שהקישור הוחלף, ואין לנו שום ראיה נגד.")
+                found.append((idx, "id-blind"))
+            elif id_rows and not id_same:
+                print("\n    ⇒ **מזהה מופרך מקבל תשובה אחרת.** כלומר השרת כן")
+                print("      מבדיל בין מזהה שקיים לשאינו קיים — והמזהה שלנו")
+                print("      מקבל את התשובה של 'קיים'. הוא קיים ומסורב,")
+                print("      והמספור לא השתנה.")
                 found.append((idx, "exists-refused"))
-            time.sleep(a.gap)
+            if seg_diff:
+                print(f"\n    ⇒ {len(seg_diff)} מקטעים כן נבדקים "
+                      f"({', '.join(r[0] for r in seg_diff)}).")
+                print("      אלה החלקים בנתיב שהשרת מאמת, ולכן אם משהו")
+                print("      בהם השתנה — זה מה שצריך לקבל ממנו.")
 
         # ── שלב ב: איזה שער ─────────────────────────────────────────────
         if "b" in a.phase:
