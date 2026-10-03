@@ -341,6 +341,10 @@ def main() -> int:
     ap.add_argument("--only", default="", choices=["", "slug", "image",
                                                    "category"])
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--all", action="store_true",
+                    help="לעבור על **כל** הקטלוג ולא רק על פריטים פגומים. "
+                         "דרוש כדי לתפוס קטגוריה שגויה בפריט שה-slug "
+                         "והתמונה שלו תקינים (~2,250 יחידות, כ-20 דקות)")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--gap", type=float, default=0.3)
     ap.add_argument("--selftest", action="store_true")
@@ -368,6 +372,9 @@ def main() -> int:
                                  bool((e.get("series_name") or "").strip())})
         u["rows"].append(e)
 
+    # ‎--only category‎ מחייב מעבר מלא: אחרת היה בודק רק פריטים שכבר
+    # פגומים במשהו אחר, וזה בדיוק לא מה שנשאל.
+    full = a.all or a.only == "category"
     todo = []
     for t, u in units.items():
         first = u["rows"][0]
@@ -379,19 +386,23 @@ def main() -> int:
             need.append("slug-תעתיק")
         if not any((r.get("thumbnail_url") or "").strip() for r in u["rows"]):
             need.append("תמונה")
-        if need:
+        # מעבר מלא: גם יחידה ללא פגם נבדקת, כי קטגוריה שגויה אינה
+        # "פגם" שאפשר לראות מהנתון שלנו — רק TMDB יודע שסופר סטרייקה
+        # היא סדרת ילדים. בלי זה נבדקו רק פריטים שנתפסו ממילא מסיבה
+        # אחרת, וזו הייתה הגבלה שלא נאמרה.
+        if need or full:
             todo.append((t, u, need, cs))
 
-    if a.only:
-        want = {"slug": ("slug-חסר", "slug-תעתיק"), "image": ("תמונה",),
-                "category": ()}[a.only]
-        todo = [x for x in todo if any(n in want for n in x[2])] \
-            if want else todo
+    if a.only in ("slug", "image"):
+        want = {"slug": ("slug-חסר", "slug-תעתיק"),
+                "image": ("תמונה",)}[a.only]
+        todo = [x for x in todo if any(n in want for n in x[2])]
     if a.limit:
         todo = todo[:a.limit]
 
-    print(f"{len(todo):,} יחידות לטיפול. שואל את TMDB "
-          f"(הפוגה {a.gap}ש׳)...\n" + "=" * 68)
+    mode = "כל הקטלוג" if full else "פריטים פגומים בלבד"
+    eta = len(todo) * (a.gap + 0.35) / 60
+    print(f"{len(todo):,} יחידות · {mode} · כ-{eta:.0f} דקות\n" + "=" * 68)
 
     plan, review = [], []
     for i, (t, u, need, cs) in enumerate(todo, 1):
@@ -414,6 +425,10 @@ def main() -> int:
             ch.append(("תמונה", "—", o["poster"].rsplit("/", 1)[-1]))
         if new_cat and new_cat != cur_cat:
             ch.append(("קטגוריה", cur_cat, new_cat))
+        if a.only:
+            keep = {"slug": "slug", "image": "תמונה",
+                    "category": "קטגוריה"}[a.only]
+            ch = [c for c in ch if c[0] == keep]
         if not ch:
             continue
         row = (t, u, o, ch, conf)
