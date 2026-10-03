@@ -35,11 +35,22 @@ function slugifySeries(seriesName, customSlug) {
 function collectRoutes(movies) {
   const routes = new Map();
   const seriesSeen = new Map(); // series_name -> נציג ראשון (לפוסטר/תיאור)
+  // כתובת ישנה → הכתובת החדשה שלה. ‎old_slugs‎ נכתב ב-seo_fix.py בכל
+  // פעם שהוא מחליף slug, בדיוק כדי שהקישור הישן ישרוד.
+  const aliases = new Map();
+
+  const noteAliases = (m, current) => {
+    for (const old of m.old_slugs || []) {
+      const o = String(old || "").trim();
+      if (o && o !== current && !aliases.has(o)) aliases.set(o, current);
+    }
+  };
 
   for (const m of movies) {
     if (m.series_name) {
       if (!seriesSeen.has(m.series_name)) seriesSeen.set(m.series_name, m);
     } else {
+      noteAliases(m, slugifyMovie(m));
       routes.set(slugifyMovie(m), {
         title: m.title,
         description: m.description,
@@ -51,13 +62,22 @@ function collectRoutes(movies) {
   }
 
   for (const [name, rep] of seriesSeen.entries()) {
-    routes.set(slugifySeries(name, rep.custom_slug), {
+    const slug = slugifySeries(name, rep.custom_slug);
+    noteAliases(rep, slug);
+    routes.set(slug, {
       title: name,
       description: rep.description,
       thumbnail_url: rep.thumbnail_url,
       year: rep.year,
       type: "series",
     });
+  }
+
+  // כתובת ישנה מקבלת דף משלה, שה-canonical שלו מצביע על החדשה. אלא
+  // אם היא במקרה גם כתובת חיה — אז לא נוגעים בה.
+  for (const [old, current] of aliases.entries()) {
+    if (routes.has(old) || !routes.has(current)) continue;
+    routes.set(old, { ...routes.get(current), canonicalTo: current });
   }
 
   return routes;
@@ -81,7 +101,12 @@ function buildPageHtml(baseHtml, route, meta) {
   const description = rawDesc.length > 200 ? rawDesc.slice(0, 197) + "..." : rawDesc;
   // עם לוכסן בסוף - זו הכתובת שבאמת מחזירה 200 ישירות (GitHub Pages מפנה
   // 301 מהגרסה בלי הלוכסן, כי route כאן הוא תיקייה עם index.html בפנים)
-  const url = `${SITE_URL}/${route}/`;
+  // כתובת ישנה שה-slug שלה הוחלף מצביעה על החדשה. בלי זה היא הייתה
+  // נעלמת מהבנייה, וכל מה שגוגל כבר אינדקס עליה היה הופך ל-404 —
+  // כלומר שינוי ה-slug היה מוחק דירוג במקום להעביר אותו.
+  const url = meta.canonicalTo
+    ? `${SITE_URL}/${meta.canonicalTo}/`
+    : `${SITE_URL}/${route}/`;
   const image = meta.thumbnail_url || "";
   const ogType = meta.type === "series" ? "video.tv_show" : "video.movie";
   const schemaType = meta.type === "series" ? "TVSeries" : "Movie";
@@ -112,6 +137,11 @@ function buildPageHtml(baseHtml, route, meta) {
     `<meta name="twitter:description" content="${escapeHtml(description)}" />`,
     image ? `<meta name="twitter:image" content="${escapeHtml(image)}" />` : "",
     `<link rel="canonical" href="${escapeHtml(url)}" />`,
+    // גוגל מתאחד לפי canonical, אבל מבקר אנושי שמגיע מקישור ישן צריך
+    // להגיע לדף עצמו — ה-SPA לא ימצא את הפריט לפי ה-slug שכבר הוחלף.
+    meta.canonicalTo
+      ? `<script>location.replace(${JSON.stringify("/" + meta.canonicalTo + "/")} + location.search + location.hash);</script>`
+      : "",
     `<script type="application/ld+json">${JSON.stringify({
       "@context": "https://schema.org",
       "@type": schemaType,
