@@ -90,7 +90,11 @@ def _apk_version_of(path) -> str:
     return hits[0] if hits else ""
 
 
-_APK_UPLOAD_HTML = """<!doctype html><html lang="he" dir="rtl"><meta charset="utf-8">
+# ‎r"""‎ ולא ‎"""‎: בתוך מחרוזת פייתון רגילה, ‎\\n‎ שנועד ל-JS הופך
+# לשורה חדשה **אמיתית** עוד לפני שהדף נשלח — ומחרוזת JS בגרש יחיד
+# שנקטעת בשורה חדשה היא שגיאת תחביר. התוצאה: הסקריפט כולו אינו
+# נטען, ‎go.onclick‎ לא מוצב, והכפתור פשוט לא מגיב.
+_APK_UPLOAD_HTML = r"""<!doctype html><html lang="he" dir="rtl"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>העלאת APK</title><style>
 body{font-family:system-ui,Arial;background:#0f1115;color:#e8e8e8;margin:0;
@@ -207,6 +211,19 @@ def validate(out: str) -> None:
         ok = (__import__("re").search(need, out, __import__("re").M)
               if need.startswith("^") else need in out)
         assert ok, f"חסר {need} — הפאצ' מסתמך עליו"
+
+    # ── ה-JS בדף חייב להיות תקין ─────────────────────────────────────
+    # באג שקרה: ‎\\n‎ בתוך מחרוזת פייתון רגילה הפך לשורה חדשה אמיתית,
+    # שברה מחרוזת JS בגרש יחיד, והסקריפט כולו לא נטען — הכפתור לא הגיב
+    # ושום שגיאה לא הופיעה בשרת.
+    i_html = out.index("_APK_UPLOAD_HTML")
+    html = out[i_html:out.index('"""', out.index('"""', i_html) + 3)]
+    assert 'r"""' in out[i_html:i_html + 60], "מחרוזת ה-HTML אינה raw"
+    for ln in html.splitlines():
+        if "textContent=" in ln or "msg.textContent" in ln:
+            assert ln.count("'") % 2 == 0, \
+                f"מחרוזת JS נקטעת בשורה חדשה: {ln.strip()[:60]}"
+    assert "\\n" in html, "רצפי השורה ל-JS נעלמו"
 
     up = fn_source(out, "apk_upload")
     assert "check_panel_password" in up, "הנתיב אינו מוגן בסיסמה"
