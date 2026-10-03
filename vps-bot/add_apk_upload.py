@@ -180,6 +180,9 @@ async def apk_upload(request: Request):
             raise HTTPException(400, "לא נמצא AndroidManifest — אינו APK")
         # רק עכשיו, כשהכל אומת, נוגעים במטמון שהמשתמשים מורידים ממנו
         tmp.replace(APK_CACHE_FILE)
+        # והנעילה: בלי זה, 6 שעות אחרי ההעלאה הבקשה הבאה מושכת שוב
+        # מ-APK_SOURCE_URL ודורסת בדיוק את מה שהעלינו.
+        APK_PIN_FILE.write_text(ver, encoding="utf-8")
         log.info("✅ APK הועלה ידנית: %s (%.1f MB)", ver, n / 1e6)
         return {"ok": True, "version": ver, "size": n}
     except HTTPException:
@@ -191,7 +194,66 @@ async def apk_upload(request: Request):
         raise HTTPException(500, f"ההעלאה נכשלה: {e}")
 '''
 
-EDITS = [("נתיבי העלאת APK", A_ANCHOR, N_ANCHOR, 1)]
+# ── 2. המטמון שהועלה ביד אינו מתיישן ─────────────────────────────────────
+#
+# ‎_refresh_apk_cache‎ מחשיב את המטמון "טרי" רק 6 שעות. אחרי זה הבקשה
+# הבאה מושכת שוב מ-‎APK_SOURCE_URL‎ — כלומר מגיטהאב — ודורסת את מה
+# שהעלינו ביד.
+#
+# בזמן **עדכון כפוי** זו לא אי-נוחות אלא מלכודת סגורה: כל המשתמשים
+# חסומים ב-‎min‎, ומה שהם מורידים חוזר להיות דווקא הגרסה הישנה שבגללה
+# הם חסומים. הם יתקינו אותה, ייחסמו שוב, ויורידו שוב — בלי מוצא.
+#
+# ולכן העלאה ידנית מניחה סימון, והסימון עוצר את המשיכה האוטומטית
+# בלבד. רענון יזום מהפאנל (‎force=True‎) עדיין גובר, והוא דרך היציאה.
+A_PIN = '''_apk_lock = asyncio.Lock()
+'''
+
+N_PIN = '''_apk_lock = asyncio.Lock()
+
+# [add_apk_upload] קיים ⇒ המטמון הוכן ביד ואין למשוך עליו מבחוץ.
+APK_PIN_FILE = DATA_DIR / "zovex-latest.apk.pinned"
+'''
+
+A_FRESH = '''        fresh = (APK_CACHE_FILE.exists()
+                 and APK_CACHE_FILE.stat().st_size > 1_000_000
+                 and (time.time() - APK_CACHE_FILE.stat().st_mtime) < 6 * 3600)
+        if fresh and not force:
+            return True
+'''
+
+N_FRESH = '''        # [add_apk_upload] קובץ שהועלה ידנית אינו מתיישן לעולם. גיל של
+        # 6 שעות הוא קריטריון נכון לקובץ שנמשך מבחוץ, ושגוי לחלוטין
+        # לקובץ שנבחר במפורש — שם היישנות פירושה לדרוס את הבחירה.
+        if APK_PIN_FILE.exists() and not force:
+            if APK_CACHE_FILE.exists() and APK_CACHE_FILE.stat().st_size > 1_000_000:
+                return True
+            # הסימון שרד בלי הקובץ (מחיקה ידנית) — הוא חסר משמעות
+            APK_PIN_FILE.unlink(missing_ok=True)
+        fresh = (APK_CACHE_FILE.exists()
+                 and APK_CACHE_FILE.stat().st_size > 1_000_000
+                 and (time.time() - APK_CACHE_FILE.stat().st_mtime) < 6 * 3600)
+        if fresh and not force:
+            return True
+'''
+
+A_DROP = '''            tmp.replace(APK_CACHE_FILE)
+            log.info("✅ APK עודכן במטמון (%.1f MB)", APK_CACHE_FILE.stat().st_size / 1e6)
+'''
+
+N_DROP = '''            tmp.replace(APK_CACHE_FILE)
+            # [add_apk_upload] ירד קובץ מבחוץ — מה שבמטמון כבר אינו
+            # ההעלאה הידנית, והסימון היה הופך לשקר.
+            APK_PIN_FILE.unlink(missing_ok=True)
+            log.info("✅ APK עודכן במטמון (%.1f MB)", APK_CACHE_FILE.stat().st_size / 1e6)
+'''
+
+EDITS = [
+    ("נתיבי העלאת APK", A_ANCHOR, N_ANCHOR, 1),
+    ("הגדרת הסימון", A_PIN, N_PIN, 1),
+    ("הסימון עוצר התיישנות", A_FRESH, N_FRESH, 1),
+    ("משיכה מוצלחת מסירה סימון", A_DROP, N_DROP, 1),
+]
 
 
 def fn_source(src: str, name: str) -> str:
@@ -265,6 +327,104 @@ def validate(out: str) -> None:
     open(p, "wb").write(b"not a zip at all")
     assert ver_of(p) == "", "קובץ שאינו zip לא הוחזר ריק"
     os.unlink(p)
+
+    # ── וההחלטה על המטמון, מורצת באמת ─────────────────────────────────
+    #
+    # זו הבדיקה היחידה שחשובה כאן: "האם השרת ימשוך מגיטהאב ויחליף את
+    # מה שהועלה". טענה טקסטואלית לא הייתה תופסת היפוך תנאי, ולכן
+    # הפונקציה עצמה רצה — מול httpx מזויף שסופר משיכות.
+    assert "APK_PIN_FILE" in fn_source(out, "apk_upload"), \
+        "ההעלאה אינה מניחה סימון"
+    _run_refresh_tests(out)
+
+
+def _run_refresh_tests(out: str) -> None:
+    import asyncio
+    import pathlib
+    import tempfile
+    import time as _time
+
+    pulls = []
+
+    class _Resp:
+        status_code = 200
+
+        async def aiter_bytes(self, n):
+            yield b"x" * 2_000_000
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Cli:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url):
+            pulls.append(url)
+            return _Stream()
+
+    class _Log:
+        def info(self, *a, **k):
+            pass
+
+        warning = info
+
+    d = pathlib.Path(tempfile.mkdtemp())
+    cache = d / "zovex-latest.apk"
+    pin = d / "zovex-latest.apk.pinned"
+    ns = {
+        "asyncio": asyncio, "time": _time, "log": _Log(),
+        "httpx": type("H", (), {"AsyncClient": _Cli}),
+        "APK_CACHE_FILE": cache, "APK_PIN_FILE": pin,
+        "APK_SOURCE_URL": "http://example.invalid/zovex.apk",
+        "_apk_lock": asyncio.Lock(),
+    }
+    exec(fn_source(out, "_refresh_apk_cache"), ns)
+    refresh = ns["_refresh_apk_cache"]
+
+    def run(**kw):
+        pulls.clear()
+        return asyncio.run(refresh(**kw)), list(pulls)
+
+    # א. הועלה ביד, והקובץ ישן בהרבה מ-6 שעות ⇒ אסור למשוך.
+    cache.write_bytes(b"u" * 2_000_000)
+    pin.write_text("1.0.49")
+    old = _time.time() - 48 * 3600
+    os.utime(cache, (old, old))
+    ok, got = run()
+    assert ok and not got, f"המטמון הידני נדרס אחרי 6 שעות (משיכות: {got})"
+    assert cache.read_bytes()[:1] == b"u", "תוכן המטמון הידני הוחלף"
+
+    # ב. אותו מצב בלי סימון ⇒ כן מושך. בלי זה סעיף א' חסר ערך: ייתכן
+    #    שהוא עובר כי שום משיכה לא קורית אף פעם.
+    pin.unlink()
+    ok, got = run()
+    assert ok and len(got) == 1, f"קובץ ישן לא נמשך מחדש (משיכות: {got})"
+
+    # ג. רענון יזום מהפאנל גובר על הסימון — זו דרך היציאה.
+    cache.write_bytes(b"u" * 2_000_000)
+    pin.write_text("1.0.49")
+    ok, got = run(force=True)
+    assert ok and len(got) == 1, f"force לא גבר על הסימון (משיכות: {got})"
+    assert not pin.exists(), "הסימון שרד משיכה מוצלחת — הוא כבר לא נכון"
+
+    # ד. סימון יתום (הקובץ נמחק ביד) אינו חוסם.
+    cache.unlink(missing_ok=True)
+    pin.write_text("1.0.49")
+    ok, got = run()
+    assert ok and len(got) == 1, f"סימון בלי קובץ חסם משיכה (משיכות: {got})"
+
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def main() -> None:
