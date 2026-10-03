@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import CustomVideoPlayer from "@/components/home/CustomVideoPlayer.jsx";
 import AdminPanel from "@/components/AdminPanel.jsx";
@@ -80,6 +80,11 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
 
   const { playerMovie, setPlayerMovie, resumeSeconds, kalturaRefreshing, openWithKalturaRefresh } =
     usePlayback({ user, loadProgress, saveHistory });
+
+  // [resume] "הדילוג למיקום השמור כבר קרה (או שאין לאן לדלג)". מתאפס
+  // לכל סרט, אחרת סרט שני בסשן היה יורש את ההחלטה של הראשון.
+  const resumeSettledRef = useRef(false);
+  useEffect(() => { resumeSettledRef.current = false; }, [playerMovie?.id]);
 
   // ── effects ──
   // נקה state כשנכנסים ישירות למסך הבית (ללא slug)
@@ -240,7 +245,29 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     <CustomVideoPlayer
       movie={playerMovie}
       startTime={resumeSeconds}
-      onProgress={(pos, dur) => saveProgress(playerMovie.id, pos, dur)}
+      onProgress={(pos, dur) => {
+        // [resume] אין שמירה לפני שהדילוג למיקום השמור קרה.
+        //
+        // זה היה ‎saveProgress(id, pos, dur)‎ בלי שום תנאי, וזה הרס את
+        // הנתון: מי שצפה עד 45:00 ולחץ שוב, קיבל נגן שנפתח ב-0, והטיק
+        // הראשון אחרי שנייה שמר 1.0 **במקום** 2700. המיקום האמיתי נמחק
+        // לפני שהספיקו להשתמש בו, ולכן "מתחיל מההתחלה" חזר על עצמו גם
+        // אחרי שתיקנתי את צד הטעינה.
+        //
+        // נמדד ב-progress.json שבשרת: רוב 203 המיקומים השמורים היו
+        // 1, 10, 14, 17, 21, 26 — כלומר "כמה שניות אחרי הפתיחה" ולא
+        // "איפה הצופה הפסיק".
+        //
+        // כל עוד יש יעד חזרה ולא הגענו אליו, הטיק הזה הוא רעש של
+        // לפני-הדילוג. ברגע שעברנו אותו (או שאין יעד) הכל נשמר כרגיל,
+        // כולל גרירה יזומה אחורה.
+        if (!resumeSettledRef.current) {
+          if (resumeSeconds > 1 && pos < resumeSeconds - 10) return;
+          resumeSettledRef.current = true;
+        }
+        if (pos <= 5 && dur > 0 && pos / dur < 0.9) return;  // רעש פתיחה
+        saveProgress(playerMovie.id, pos, dur);
+      }}
       onClose={() => setPlayerMovie(null)}
       onNextEpisode={nextEpisode ? () => openWithKalturaRefresh(nextEpisode) : undefined}
       nextEpisodeLabel={nextEpisode ? (nextEpisode.episode_title || `פרק ${nextEpisode.episode_number}`) : undefined}
