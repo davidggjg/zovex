@@ -16,15 +16,26 @@ const SITEMAP_PATH = path.join(ROOT, "public", "sitemap.xml");
 const SITE_URL = process.env.SITE_URL || "https://zovex.duckdns.org";
 const CATALOG_URL = process.env.CATALOG_URL || "https://zovex.duckdns.org/content/lite";
 
+// כותר שנכנס לכתובת כשאין שם אנגלי. סימנים כמו ‎:‎ הופכים ל-‎%3A‎
+// ומכערים כתובת שממילא מקודדת — נמדד: 66 כותרים בקטלוג מכילים
+// נקודתיים (‎אקס-מן: אפוקליפסה‎). הם יורדים, ורווחים הופכים למקף
+// יחיד. זו רק רשת ביטחון: היעד הוא slug אנגלי אמיתי מ-seo_fix.py.
+function cleanForUrl(name) {
+  return String(name || "")
+    .replace(/[:\u2013\u2014"'`?#\[\]@!$&()*+,;=.]/g, " ")
+    .trim()
+    .replace(/\s+/g, "-");
+}
+
 function slugifyMovie(movie) {
   if (movie.custom_slug) return movie.custom_slug;
-  const base = encodeURIComponent((movie.title || "").replace(/ /g, "-"));
+  const base = encodeURIComponent(cleanForUrl(movie.title));
   return `${base}-${(movie.id || "").slice(0, 6)}`;
 }
 
 function slugifySeries(seriesName, customSlug) {
   if (customSlug) return customSlug;
-  return encodeURIComponent(seriesName.replace(/ /g, "-"));
+  return encodeURIComponent(cleanForUrl(seriesName));
 }
 
 // פריט בלי שם **וגם** בלי custom_slug מייצר כתובת כמו ‎/-a3987a/‎ —

@@ -20,15 +20,26 @@ const INDEX_HTML = path.join(DIST_DIR, "index.html");
 const SITE_URL = process.env.SITE_URL || "https://zovex.duckdns.org";
 const CATALOG_URL = process.env.CATALOG_URL || "https://zovex.duckdns.org/content/lite";
 
+// כותר שנכנס לכתובת כשאין שם אנגלי. סימנים כמו ‎:‎ הופכים ל-‎%3A‎
+// ומכערים כתובת שממילא מקודדת — נמדד: 66 כותרים בקטלוג מכילים
+// נקודתיים (‎אקס-מן: אפוקליפסה‎). הם יורדים, ורווחים הופכים למקף
+// יחיד. זו רק רשת ביטחון: היעד הוא slug אנגלי אמיתי מ-seo_fix.py.
+function cleanForUrl(name) {
+  return String(name || "")
+    .replace(/[:\u2013\u2014"'`?#\[\]@!$&()*+,;=.]/g, " ")
+    .trim()
+    .replace(/\s+/g, "-");
+}
+
 function slugifyMovie(movie) {
   if (movie.custom_slug) return movie.custom_slug;
-  const base = encodeURIComponent((movie.title || "").replace(/ /g, "-"));
+  const base = encodeURIComponent(cleanForUrl(movie.title));
   return `${base}-${(movie.id || "").slice(0, 6)}`;
 }
 
 function slugifySeries(seriesName, customSlug) {
   if (customSlug) return customSlug;
-  return encodeURIComponent(seriesName.replace(/ /g, "-"));
+  return encodeURIComponent(cleanForUrl(seriesName));
 }
 
 // אוסף route -> מטא-דאטה (כותרת/תיאור/פוסטר/סוג) לכל סרט וסדרה
@@ -43,6 +54,18 @@ function collectRoutes(movies) {
     for (const old of m.old_slugs || []) {
       const o = String(old || "").trim();
       if (o && o !== current && !aliases.has(o)) aliases.set(o, current);
+    }
+    // גם הצורה שהכתובת הייתה לפני cleanForUrl. היא אולי כבר מאונדקסת
+    // (‎…%3A…‎), ובלי זה ניקוי הנקודתיים היה מוחק אותה בשקט — בדיוק
+    // התקלה שבגללה נבנה מנגנון ה-canonical מלכתחילה.
+    if (!m.custom_slug) {
+      const name = m.series_name || m.title || "";
+      const legacy = m.series_name
+        ? encodeURIComponent(name.replace(/ /g, "-"))
+        : `${encodeURIComponent(name.replace(/ /g, "-"))}-${(m.id || "").slice(0, 6)}`;
+      if (legacy && legacy !== current && !aliases.has(legacy)) {
+        aliases.set(legacy, current);
+      }
     }
   };
 
