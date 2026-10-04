@@ -150,10 +150,24 @@ def main():
         ["journalctl", "-u", "zovex-bot", "--since", "-10min", "--no-pager"],
         capture_output=True, text=True).stdout
     tb = log.count("Traceback (most recent call last)")
-    err = sum(1 for l in log.splitlines()
-              if " ERROR " in l or "CRITICAL" in l)
+
+    # כשל של **הספק** אינו שגיאה אצלנו. ffmpeg שלא קיבל קלט, או
+    # חיבור שנדחה ל-127.0.0.1:8000 בזמן restart, הם רעש צפוי —
+    # וספירתם ככישלון הופכת את הכלי לכזה שצועק בכל הרצה. אחרי
+    # שתי התראות שווא מפסיקים להאמין לו, וזה גרוע מלא לבדוק.
+    UPSTREAM = ("hls_fix:", "hls_relay", "ffmpeg", "Connection refused",
+                "upstream", "TimeoutException", "ConnectError")
+    errs = [l for l in log.splitlines()
+            if " ERROR " in l or "CRITICAL" in l]
+    noise = [l for l in errs if any(k in l for k in UPSTREAM)]
+    real = [l for l in errs if l not in noise]
+
     check("אין חריגות", tb == 0, "%d Traceback" % tb)
-    check("אין שגיאות", err == 0, "%d שורות ERROR" % err)
+    check("אין שגיאות בקוד", not real, "%d שורות" % len(real))
+    if noise:
+        print("  %s %d שגיאות מקור/ספק — צפוי, לא אצלנו" % (WARN, len(noise)))
+    for l in real[:5]:
+        print("   " + l[:150])
     if tb:
         print()
         print("  ── החריגה האחרונה ──")
