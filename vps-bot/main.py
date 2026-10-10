@@ -4143,6 +4143,11 @@ TMDB_API_KEY     = os.environ.get("TMDB_API_KEY", "").strip()
 STREAM_PUBLIC_BASE = os.environ.get("STREAM_PUBLIC_BASE", BASE_URL).rstrip("/")
 NEW_UPLOADS_FILE = DATA_DIR / "new_uploads.json"
 TMDB_IMG = "https://image.tmdb.org/t/p/w500"
+# גב (backdrop) רוחבי לבאנר הגיבור — w780 מאוזן בין איכות על רוחב מסך מלא לגודל
+# קובץ; w500 (TMDB_IMG) נועד לפוסטר הצר ונראה מטושטש כשנמתח לרוחב מלא.
+TMDB_IMG_BACKDROP = "https://image.tmdb.org/t/p/w780"
+# תמונת שחקן קטנה (אווטאר עגול) — w185 מספיק, ואין טעם למשוך w500 לעיגול 60px.
+TMDB_IMG_PROFILE = "https://image.tmdb.org/t/p/w185"
 
 # ── קישורים ניידים (portable) — לא שומרים את הכתובת בתוך הקישור ────────────────
 # הקישורים שלנו נשמרים עם מציין-מקום %BASE% במקום הכתובת (IP/דומיין). השרת
@@ -4552,6 +4557,9 @@ async def tmdb_search(query: str, year: str = "") -> list:
                     bucket.append({
                         "tmdb_id": tid, "type": mt, "title": title, "year": (date or "")[:4],
                         "poster": (TMDB_IMG + it["poster_path"]) if it.get("poster_path") else "",
+                        # רוחבי (סצנה/עמדה), לא הפוסטר הצר — לבאנר הגיבור. TMDB
+                        # כבר מחזיר אותו בתוצאת החיפוש עצמה, בלי קריאה נוספת.
+                        "backdrop": (TMDB_IMG_BACKDROP + it["backdrop_path"]) if it.get("backdrop_path") else "",
                         "overview": (it.get("overview") or "")[:300],
                         "original": orig,
                         # מטא לזיהוי קטגוריה אוטומטי (ז'אנר/מוצא/שפה)
@@ -4574,6 +4582,33 @@ async def tmdb_search(query: str, year: str = "") -> list:
                 return 3
         out.sort(key=_yr_rank)
     return out[:6]
+
+async def tmdb_credits(tmdb_id, media_type: str) -> list:
+    """שחקנים מובילים (עד 10) לכותר שכבר אותר ב-TMDB (tmdb_id ידוע) — שם
+    ותמונת פרופיל. נקראת פעם אחת לכותר נבחר (לא לכל מועמד ב-tmdb_search,
+    שמחזיר עד 6 — זה היה מבזבז 5 קריאות שלא ישמשו לעולם).
+
+    נכשלת בשקט לרשימה ריקה: חוסר קאסט לא אמור לעצור או לעכב העלאה."""
+    if not TMDB_API_KEY or not tmdb_id or media_type not in ("movie", "tv"):
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=12) as cx:
+            r = await cx.get(f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits",
+                              params={"api_key": TMDB_API_KEY})
+            if r.status_code != 200:
+                return []
+            cast = sorted(r.json().get("cast") or [], key=lambda c: c.get("order", 999))
+            out = []
+            for c in cast[:10]:
+                name = (c.get("name") or "").strip()
+                if not name:
+                    continue
+                prof = c.get("profile_path")
+                out.append({"name": name, "photo": (TMDB_IMG_PROFILE + prof) if prof else ""})
+            return out
+    except Exception as e:
+        log.warning("tmdb_credits נכשל (%s %s): %s", media_type, tmdb_id, e)
+        return []
 
 # ── זיהוי קטגוריה אוטומטי מ-TMDB (ז'אנר/מוצא/שפה) ────────────────────────────
 # מ-genre_ids של TMDB: 16=אנימציה, 27=אימה, 10751=משפחה, 10762=ילדים (טלוויזיה).
@@ -4749,16 +4784,20 @@ def find_existing_episode(series: str, season, episode):
     c, n = _dup_index()
     return c["ep"].get(k) or n["ep"].get(k)
 
-def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None,
+async def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "", chat_id=None,
                     category: str = None, to_content: bool = False) -> dict:
     """בונה כניסת סרט חדשה מהבחירה ב-TMDB + הקישור לערוץ.
     to_content=False → שומר ל-new_uploads.json (ממתין לאישור).
     to_content=True  → מוסיף ישירות ל-content.json (עולה לאתר) עם category.
     שומר קישור נייד (%BASE%) — הכתובת האמיתית מוזרקת בזמן ההגשה/התצוגה.
-    chat_id = הערוץ שאליו הועתק הקובץ (לתמיכה בריבוי ערוצים)."""
+    chat_id = הערוץ שאליו הועתק הקובץ (לתמיכה בריבוי ערוצים).
+
+    async (ולא עוד sync) כדי לקרוא ל-tmdb_credits כאן — פעם אחת, לכותר
+    שכבר נבחר, ולא לכל אחד מ-6 המועמדים שמחזיר tmdb_search."""
     chat_id = chat_id or STREAM_CHANNEL_ID
     stream_url = stored_stream_url(channel_msg_id, chat_id)
     en_title = chosen.get("en_title") or chosen.get("original") or chosen["title"]
+    cast = await tmdb_credits(chosen.get("tmdb_id"), chosen.get("type") or "movie")
     entry = {
         "id": _slugify(en_title, chosen["tmdb_id"]) + "-" + str(channel_msg_id),
         "title": chosen["title"],
@@ -4771,7 +4810,13 @@ def add_movie_entry(chosen: dict, channel_msg_id: int, file_unique_id: str = "",
         "tmdb_id": chosen["tmdb_id"],
         "video_url": stream_url,
         "thumbnail_url": chosen.get("poster", ""),
+        # רוחבי לבאנר הגיבור — ראה ההסבר ליד TMDB_IMG_BACKDROP. ריק לתוכן
+        # ישן/בלי tmdb_id; הלקוח נופל חזרה לטיפול הקודם (blur+contain) אז.
+        "backdrop_url": chosen.get("backdrop", ""),
         "description": chosen.get("overview", ""),
+        # שחקנים מובילים (שם+תמונה) — ריק כשאין TMDB_API_KEY/tmdb_id/קאסט
+        # ב-TMDB. הלקוח מסתיר את השורה כולה כשזה ריק, לא מציג משבצות ריקות.
+        "cast": cast,
         "channel_id": chat_id,
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
@@ -4895,7 +4940,9 @@ def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "", c
         "season_number": ep["season"],
         "episode_number": ep["episode"],
         "episode_title": "",
-        "year": "",
+        # שנת עליית האוויר הראשונה של הסדרה (מ-TMDB, ברמת הסדרה כולה —
+        # לא לכל פרק בנפרד). ריק לסדרה לא-מזוהה, בדיוק כמו poster/overview.
+        "year": meta.get("year", ""),
         "category": category,
         "type": "telegram",
         "media_kind": "tv",
@@ -4903,7 +4950,12 @@ def add_episode_entry(ep: dict, channel_msg_id: int, file_unique_id: str = "", c
         "en_title": meta.get("en_title", ""),
         "video_url": stored_stream_url(channel_msg_id, chat_id),
         "thumbnail_url": meta.get("poster", ""),
+        # ראה ההסבר המלא ליד add_movie_entry/TMDB_IMG_BACKDROP — אותם שדות,
+        # ברמת הסדרה: meta מגיע פעם אחת מה-cache של _series_tmdb, לא נמשך
+        # בנפרד לכל פרק.
+        "backdrop_url": meta.get("backdrop", ""),
         "description": meta.get("overview", ""),
+        "cast": meta.get("cast") or [],
         "channel_id": chat_id,
         "channel_msg_id": channel_msg_id,
         "file_unique_id": file_unique_id,
@@ -4985,7 +5037,7 @@ async def _handle_custom_name(client: Client, message: Message, uid: int):
     options = await tmdb_search(name)
     if not options:
         # אין זיהוי — שומרים בשם המדויק שהוקלד
-        entry = add_movie_entry(
+        entry = await add_movie_entry(
             {"title": name, "year": "", "tmdb_id": 0, "type": "movie",
              "poster": "", "overview": ""}, pending["channel_msg_id"],
             pending.get("file_unique_id", ""), pending.get("dest_channel"))
@@ -5126,10 +5178,10 @@ async def _handle_drive_upload(client, message, uid, text):
             return
         query, options = await smart_tmdb_search(fname)
         if options:
-            entry = add_movie_entry(options[0], channel_msg_id, fuid, dest_channel)
+            entry = await add_movie_entry(options[0], channel_msg_id, fuid, dest_channel)
             await _edit(f"✅ נוסף לרשימת ההעלאות: {entry['title']} ({entry.get('year') or '?'}).\nבדוק ואשר בפאנל.")
         else:
-            entry = add_movie_entry(
+            entry = await add_movie_entry(
                 {"title": query or fname, "year": "", "tmdb_id": 0, "type": "movie",
                  "poster": "", "overview": ""}, channel_msg_id, fuid, dest_channel)
             await _edit(f"✅ נוסף לרשימת ההעלאות בשם: {entry['title']}.\nבדוק ואשר בפאנל.")
@@ -5298,7 +5350,7 @@ async def on_select(client: Client, cq: CallbackQuery):
         return
     if idx == "save":
         raw = pending.get("raw_name") or f"קובץ {pending['channel_msg_id']}"
-        entry = add_movie_entry(
+        entry = await add_movie_entry(
             {"title": raw, "year": "", "tmdb_id": 0, "type": "movie",
              "poster": "", "overview": ""}, pending["channel_msg_id"],
             pending.get("file_unique_id", ""), pending.get("dest_channel"))
@@ -5322,7 +5374,7 @@ async def on_select(client: Client, cq: CallbackQuery):
                 f"הוסף אותה ידנית בפאנל.")
             await cq.answer("כבר קיים")
             return
-    entry = add_movie_entry(chosen, pending["channel_msg_id"],
+    entry = await add_movie_entry(chosen, pending["channel_msg_id"],
                             pending.get("file_unique_id", ""), pending.get("dest_channel"))
     _pending_uploads.pop(cmid, None)
     poster_line = f"\n🖼 {entry['thumbnail_url']}" if entry["thumbnail_url"] else ""
@@ -6242,6 +6294,13 @@ async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "a
         try:
             opts = await tmdb_search(name)
             tv = next((o for o in opts if o.get("type") == "tv"), None)
+            # קאסט נמשך כאן — פעם אחת לסדרה כולה, בזכות ה-cache שעוטף את
+            # הפונקציה הזאת — ולא בכל פרק (חלק מהסדרות כאן מאות פרקים;
+            # קריאת credits לכל אחד הייתה מכפילה בקשות TMDB בלי צורך).
+            # backdrop כבר יושב בתוך tv עצמו — tmdb_search מצרף אותו לכל
+            # תוצאה, אין קריאה נוספת בשבילו.
+            if tv and tv.get("tmdb_id"):
+                tv["cast"] = await tmdb_credits(tv["tmdb_id"], "tv")
         except Exception as e:
             log.warning("import: חיפוש סדרה ב-TMDB נכשל: %s", e)
         _series_cache[key] = tv
@@ -6344,6 +6403,8 @@ async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "a
                             en = tv.get("en_title") or tv.get("original") or tv.get("title")
                             meta = {"poster": tv.get("poster", ""), "overview": tv.get("overview", ""),
                                     "tmdb_id": tv.get("tmdb_id", 0), "en_title": en,
+                                    "backdrop": tv.get("backdrop", ""), "cast": tv.get("cast") or [],
+                                    "year": tv.get("year", ""),
                                     "custom_slug": _custom_slug(en, tv.get("title", ""), tv.get("tmdb_id"))}
                             add_episode_entry(ep, new_id, fuid, dest, category=cat, meta=meta, to_content=True)
                             _import["to_site"] += 1
@@ -6354,7 +6415,7 @@ async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "a
                     elif options:
                         ch = dict(options[0]); ch["year"] = ch.get("year") or ryear
                         cat = _auto_category(ch)
-                        add_movie_entry(ch, new_id, fuid, dest, category=cat, to_content=True)
+                        await add_movie_entry(ch, new_id, fuid, dest, category=cat, to_content=True)
                         _import["to_site"] += 1
                         if ch.get("tmdb_id"):
                             try: seen_mov_tmdb.add(int(ch["tmdb_id"]))
@@ -6364,7 +6425,7 @@ async def _bulk_import_worker(sources, per_min: int, limit: int, kinds: str = "a
                         # לא זוהה ב-TMDB — נכנס לאישור מסומן (tmdb_id=0) לטיפול נפרד
                         _import["unmatched"] += 1; _import["to_pending"] += 1
                         cap_title = (cap.splitlines()[0].strip() if cap.strip() else "") or clean_name(fname)
-                        add_movie_entry({"title": cap_title or f"קובץ {new_id}",
+                        await add_movie_entry({"title": cap_title or f"קובץ {new_id}",
                                          "year": ryear, "tmdb_id": 0, "type": "movie",
                                          "poster": "", "overview": ""}, new_id, fuid, dest)
                         seen_mov_title.add((_norm_title(cap_title), str(ryear or "")))
@@ -6579,7 +6640,13 @@ def _serve_cached(request: Request, c: dict, etag: str, extra: dict = None) -> R
 # הפתרון: מסירים את description (32% מהמשקל, מוצג רק כשפותחים פריט) ואת
 # video_id הכפול (זהה ל-video_url ב-6709 פריטים; הפרונט ממילא נופל אחורה
 # ל-video_url). video_url נשאר — בלעדיו אי אפשר לנגן.
-_LITE_DROP = ("description",)
+#
+# cast מצטרף לאותו חריג מאותה סיבה בדיוק: רשימת שחקנים+תמונות (עד 10 לכל
+# פריט) מוצגת רק כשפותחים פריט, ונמשכת לפי דרישה מ-/content/item/{id} —
+# בדיוק כמו description. backdrop_url *נשאר* בקטלוג המלא בכוונה: זו כתובת
+# בודדת (לא מערך), וה-HeroBanner קורא אותה ישירות מתוך movies שכבר בזיכרון
+# בלי בקשה נוספת — בניגוד ל-description/cast, אין לו רגע "פתיחת פריט".
+_LITE_DROP = ("description", "cast")
 # ה-limit-ים שנשמרים במטמון. כל ערך אחר מוגש מהרשימה בלי גוף שמור, כדי
 # ש-?limit=123 מכל מיני מקורות לא ימלא את הזיכרון בגרסאות של אותו קטלוג.
 _LITE_LIMITS = (0, 800)
