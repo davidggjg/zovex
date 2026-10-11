@@ -326,6 +326,10 @@
 <script>
 const $ = id => document.getElementById(id);
 let PASS="", movies=[], editingId=null, liveEditId=null, _fromUploadCmid=null;
+// [fix_panel_editor_login] תפקיד הכניסה הנוכחית. admin|editor|null.
+// נשמר לשימוש עתידי (הסתרת כפתורים אסורים לעורך) — עדיין לא בשימוש כאן;
+// ההגבלות עצמן כבר נאכפות בשרת בכל פעולה, לא תלויות במה שמוסתר כאן.
+let ROLE=null, EDITOR_MAX_DELETE=null;
 let contentVersion=null;   // גרסת התוכן שנטענה (להגנת עריכה במקביל — optimistic lock)
 function toast(on){ $("saveToast").classList.toggle("hidden", !on); }
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -358,10 +362,16 @@ function detectType(){
 async function doLogin(){
   const p=$("pass").value;
   try{
-    const r=await fetch("/panel/api",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({password:p,action:"list"})});
+    // [fix_panel_editor_login] היה /panel/api עם action:"list", שעובר דרך
+    // check_panel_password — admin-בלבד, ולכן סיסמת עורך תקפה קיבלה 403
+    // כבר בכניסה. /panel/role בודק את שתי הרמות ומחזיר את התפקיד בפועל.
+    const r=await fetch("/panel/role",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:p})});
     if(r.status===401){ $("loginErr").textContent="סיסמה שגויה"; return; }
+    if(r.status===429){ $("loginErr").textContent="יותר מדי ניסיונות — נסה שוב בעוד כמה דקות"; return; }
     if(!r.ok){ $("loginErr").textContent="שגיאת שרת"; return; }
+    const info=await r.json();
+    ROLE=info.role; EDITOR_MAX_DELETE=info.max_delete;
     PASS=p; $("login").classList.add("hidden"); $("app").classList.remove("hidden");
     await loadContent();
     loadSupport();   // מעדכן את מונה ההודעות שלא נקראו על הטאב
