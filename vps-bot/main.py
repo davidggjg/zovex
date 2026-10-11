@@ -1438,19 +1438,33 @@ def _purge_msg_cache(chat_id, message_id):
 
 async def channel_get_media(chat_id, message_id):
     """מחזיר את ה-media של ההודעה מהערוץ (metadata בלבד — אין בעיית reference)."""
+    # [diag_stream_timing] ראה ההסבר המלא ב-channel_stream_range. זו קריאה
+    # *נפרדת* לאותו (chat_id, message_id) — כלומר מחיר ה"קור" עלול להיגבות
+    # כאן *וגם* שוב ב-channel_stream_range לאותה בקשה בדיוק. התיעוד כאן
+    # יראה אם זה אכן קורה פעמיים.
+    t0 = time.time()
+    attempt = 0
     for _ in range(min(max(1, len(_stream_bots)), 5)):
+        attempt += 1
         bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
+            log.warning("[diag_stream_timing] channel_get_media %s/%s: אין בוט זמין "
+                       "(ניסיון %d, %.2fs)", chat_id, message_id, attempt, time.time() - t0)
             return None
         try:
             msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg:
+                log.info("[diag_stream_timing] channel_get_media %s/%s: נמצא דרך %s "
+                         "(ניסיון %d, %.2fs)", chat_id, message_id, bot["name"], attempt,
+                         time.time() - t0)
                 return msg.video or msg.audio or msg.document or msg.video_note
         except FloodWait as e:
             _mark_choked(bot, e.value, hard=True, escalate=False)
         except Exception as e:
             log.warning("channel_get_media שגיאה (%s): %s", chat_id, e)
             _mark_choked(bot, 30, e)
+    log.warning("[diag_stream_timing] channel_get_media %s/%s: נכשל אחרי %d ניסיונות "
+               "(%.2fs)", chat_id, message_id, attempt, time.time() - t0)
     return None
 
 async def channel_stream_range(chat_id, message_id, start, end):
@@ -1458,7 +1472,14 @@ async def channel_stream_range(chat_id, message_id, start, end):
     (file_reference תקף רק בהקשר שלו). בוט שנחנק בהתחלה → עוברים לבא."""
     CHUNK = PYROGRAM_CHUNK_SIZE
     pos = start
+    # [diag_stream_timing] תיעוד זמנים זמני — לאבחון דיווחים מהשטח על צפייה
+    # שלוקחת המון זמן להתחיל בתוכן "קר" (לא נצפה ב-15 הדקות האחרונות, ראה
+    # _BOT_MSG_TTL). רק log.info, אפס שינוי בהתנהגות. אפשר להסיר כשהאבחון
+    # מסתיים — חפש "diag_stream_timing".
+    t0 = time.time()
+    attempt = 0
     for _ in range(min(max(1, len(_stream_bots)), 4)):
+        attempt += 1
         bot = await pick_stream_bot_for(chat_id, message_id)
         if bot is None:
             break
@@ -1466,9 +1487,17 @@ async def channel_stream_range(chat_id, message_id, start, end):
             msg = await _get_bot_msg_fast(bot, chat_id, message_id)
             if msg is None:
                 continue          # כבר נחנק בתוך _get_bot_msg_fast אם נתקע
+            log.info("[diag_stream_timing] stream_range %s/%s: הודעה נמצאה דרך %s "
+                     "(ניסיון %d, %.2fs)", chat_id, message_id, bot["name"], attempt,
+                     time.time() - t0)
             off_chunks = pos // CHUNK
             produced = off_chunks * CHUNK
+            first_chunk = True
             async for chunk in bot["client"].stream_media(msg, offset=off_chunks):
+                if first_chunk:
+                    log.info("[diag_stream_timing] stream_range %s/%s: בייט ראשון "
+                             "אחרי %.2fs", chat_id, message_id, time.time() - t0)
+                    first_chunk = False
                 c_start = produced
                 c_end = produced + len(chunk)
                 lo = max(pos, c_start) - c_start
@@ -1494,8 +1523,9 @@ async def channel_stream_range(chat_id, message_id, start, end):
             if pos > start:
                 break
     if pos <= end:
-        log.error("channel stream: חסרים %d בייטים — מנתק כדי שהנגן יבקש שוב",
-                  end - pos + 1)
+        log.error("channel stream: חסרים %d בייטים אחרי %.2fs (%d ניסיונות) — "
+                  "מנתק כדי שהנגן יבקש שוב",
+                  end - pos + 1, time.time() - t0, attempt)
         raise StreamGap(f"missing {end - pos + 1} bytes")
 
 # ── הזרמה מקבילה (FastTelethon-style, בטוח) ─────────────────────────────────
