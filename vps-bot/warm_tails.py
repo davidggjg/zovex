@@ -36,6 +36,10 @@ MIN_FREE_GB = float(os.environ.get("WARM_MIN_FREE_GB", "5"))
 PAUSE = float(os.environ.get("WARM_PAUSE", "2"))
 FILL_TIMEOUT = float(os.environ.get("WARM_FILL_TIMEOUT", "240"))
 LIMIT = int(os.environ.get("WARM_LIMIT", "0"))
+# כמה פעמים לנסות את /ping לפני ויתור (5 שניות בין ניסיונות).
+WAIT_FOR_SERVER = int(os.environ.get("WARM_WAIT_FOR_SERVER", "60"))
+# כשלים רצופים שאחריהם עוצרים — סימן שהשרת נפל, לא שהפריט בעייתי.
+FAIL_STREAK = int(os.environ.get("WARM_FAIL_STREAK", "10"))
 # חייב להתאים ל-STREAM_EDGE_HEAD/TAIL של השרת, אחרת נדלג על פריטים לא נכון.
 EDGE_HEAD = int(os.environ.get("STREAM_EDGE_HEAD", str(2 * 1024 * 1024)))
 EDGE_TAIL = int(os.environ.get("STREAM_EDGE_TAIL", str(12 * 1024 * 1024)))
@@ -86,6 +90,21 @@ def size_of(path):
 def main():
     if not os.path.isdir(CACHE):
         sys.exit(f"תיקיית המטמון לא נמצאה: {CACHE}")
+    # בדיקה מקדימה: אין טעם להתחיל אם השרת לא מגיש. אחרי restart הוא
+    # יכול להיות דקות ארוכות בלי להאזין — ההפעלה חוסמת עד שהלקוח הראשי
+    # מתחבר — ובלי הבדיקה הזו הריצה מתדרדרת לאלפי ניסיונות ריקים.
+    for attempt in range(WAIT_FOR_SERVER):
+        try:
+            get("/ping", timeout=5).read()
+            break
+        except Exception as e:
+            if attempt == 0:
+                print(f"השרת עוד לא מגיש ({type(e).__name__}) — ממתין...")
+            time.sleep(5)
+    else:
+        sys.exit(f"השרת ב-{BASE} לא ענה — לא מתחיל. "
+                 f"בדוק: systemctl status zovex-bot")
+
     items = catalog()
     if LIMIT:
         items = items[:LIMIT]
@@ -93,6 +112,7 @@ def main():
     print(f"אזור זנב: {EDGE_TAIL // 1024 // 1024}MB   השהיה בין פריטים: {PAUSE}s\n")
 
     done = warmed = skipped = failed = 0
+    streak = 0                      # כשלים רצופים
     t_start = time.time()
     try:
         for chat, msg, qs in items:
@@ -111,6 +131,11 @@ def main():
                 failed += 1
                 print(f"[{done}/{len(items)}] {chat}/{msg}  גודל נכשל: "
                       f"{type(e).__name__}")
+                streak += 1
+                if streak >= FAIL_STREAK:
+                    print(f"\n⚠️  {streak} כשלים רצופים — השרת כנראה לא מגיש. עוצר.")
+                    break
+                time.sleep(PAUSE)       # גם כישלון חייב להאט
                 continue
             if sz <= EDGE_HEAD + EDGE_TAIL:
                 skipped += 1          # קטן מדי — השרת לא מטמן קצוות כאלה
@@ -124,6 +149,11 @@ def main():
                 failed += 1
                 print(f"[{done}/{len(items)}] {chat}/{msg}  טריגר נכשל: "
                       f"{type(e).__name__}")
+                streak += 1
+                if streak >= FAIL_STREAK:
+                    print(f"\n⚠️  {streak} כשלים רצופים — השרת כנראה לא מגיש. עוצר.")
+                    break
+                time.sleep(PAUSE)       # גם כישלון חייב להאט
                 continue
             # ממתינים שהמילוי יסתיים, כדי לא להציף את הבוטים בעשרות
             # מילויים מקבילים. זה גם מה שמקצב אותנו לפי מהירות טלגרם.
@@ -131,6 +161,7 @@ def main():
                 time.sleep(2)
             if os.path.exists(tp):
                 warmed += 1
+                streak = 0
                 print(f"[{done}/{len(items)}] {chat}/{msg}  ✅ "
                       f"{time.time() - t0:.0f}s   (חומם {warmed})")
             else:
