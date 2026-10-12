@@ -1290,7 +1290,27 @@ async def pick_stream_bot():
 WARM_BIAS = float(os.environ.get("STREAM_WARM_BIAS", "0.85"))
 
 
-async def pick_stream_bot_for(chat_id, message_id):
+# ── בקרת כניסה: תקרת צופים לבוט ──────────────────────────────────────────────
+# עד עכשיו ההגנה מפני חניקה הייתה תגובתית: שולחים כמה שיוצא, ומי שנחנק מקבל
+# cooldown. כלומר תמיד נגענו בתקרה של טלגרם ורק אחר כך נסוגנו.
+#
+# החשבון שמונע את זה מראש: בלוק של הפרוטוקול הוא 1MB = בקשה אחת. סרט 1080p
+# בזמן-אמת הוא ~2MB/s, כלומר ~2 בקשות בשנייה לצופה. טלגרם חונק חשבון סביב
+# 15-20 בקשות בשנייה. שלושה צופים לבוט = ~6 בקשות בשנייה, שליש מהתקרה.
+# עם 21 בוטים זה 63 צופים במקביל בלי שאף בוט יתקרב לתקרה. הצופה ה-64 עדיין
+# מוגש (נבחר הפחות עמוס) — התקרה מנתבת, היא לא חוסמת.
+#
+# לכיול: 15-20 אינו מספר שטלגרם מפרסמת, וגם 3 אינו מדידה. /pool/list מראה
+# cooldown ו-chokes לכל בוט; כדאי להעלות בהדרגה ולראות מתי chokes מתחיל לעלות.
+MAX_VIEWERS_PER_BOT = int(os.environ.get("STREAM_MAX_VIEWERS_PER_BOT", "3"))
+_bot_streams: dict = {}        # שם בוט -> מספר הזרמות פעילות כרגע
+
+
+def _bot_load(bot) -> int:
+    return _bot_streams.get(bot["name"], 0)
+
+
+async def pick_stream_bot_for(chat_id, message_id, exclude=None):
     """כמו pick_stream_bot, אבל מעדיף בוט שכבר משך את ההודעה הזו.
 
     נמדד על השרת אחרי הדחת הבוטים התקועים: חלק מהבקשות חזרו ב-0.56 שניות
@@ -1300,18 +1320,34 @@ async def pick_stream_bot_for(chat_id, message_id):
     מקור השונות האחרון במקום לקצר את העונש עליו.
     """
     now = time.time()
+    busy = set(exclude or ())           # בוטים שכבר נכשלו על הבקשה הזו
+    free = [b for b in _stream_bots
+            if b["cooldown_until"] < now and b["name"] not in busy]
+    if not free:
+        return await pick_stream_bot()
+    # תקרת הצופים: כשיש בוטים מתחת לתקרה בוחרים רק מהם; כשכולם מעל — מגישים
+    # דרך הפחות עמוס במקום לסרב.
+    if MAX_VIEWERS_PER_BOT > 0:
+        under = [b for b in free if _bot_load(b) < MAX_VIEWERS_PER_BOT]
+        if under:
+            free = under
+        else:
+            return min(free, key=_bot_load)
     if random.random() < WARM_BIAS:
-        warm = [b for b in _stream_bots
-                if b["cooldown_until"] < now
-                and (_bot_msg_cache.get((b["name"], chat_id, message_id))
-                     or (None, 0.0))[1] > now]
+        warm = [b for b in free
+                if (_bot_msg_cache.get((b["name"], chat_id, message_id))
+                    or (None, 0.0))[1] > now]
         if warm:
             if len(warm) == 1:
                 return warm[0]
             a = warm[random.randrange(len(warm))]
             b = warm[random.randrange(len(warm))]
             return a if _bot_score(a) >= _bot_score(b) else b
-    return await pick_stream_bot()
+    if len(free) == 1:
+        return free[0]
+    a = free[random.randrange(len(free))]
+    b = free[random.randrange(len(free))]
+    return a if _bot_score(a) >= _bot_score(b) else b
 
 # כמה כשלים *רצופים* לפני שמדיחים בוט. כשל בודד הוא בדרך כלל רעש רגעי של
 # טלגרם, לא בוט חולה. הדחה על כשל ראשון יצרה מפל: בוט נחנק ← נשארים פחות ←
@@ -1326,6 +1362,14 @@ CHOKE_AFTER_FAILS = int(os.environ.get("STREAM_CHOKE_AFTER_FAILS", "3"))
 # עם הכפלה פי 4 בכל חניקה רצופה (30ש' → 2ד' → 8ד' → 30ד') בוט מת יוצא
 # מהרוטציה תוך כדקתיים, בעוד בוט שנתקל ברעש רגעי חוזר מיד אחרי 30 שניות.
 CHOKE_BACKOFF_MAX = int(os.environ.get("STREAM_CHOKE_BACKOFF_MAX", "1800"))
+
+# מקדם ההכפלה בין חניקות רצופות. היה 4 (30ש' → 2ד' → 8ד' → 30ד'), וזה
+# התברר כתרופה שגרועה מהמחלה: עונש שמוכפל פי 4 מרוקן את הבריכה בקצב
+# שהחייאה לא מדביקה, ודקה של רעש ברשת הוציאה בוטים בריאים ל-30 דקות.
+# ההדחה הארוכה גם מיותרת: revive_stream_pool בודק בפועל אם בוט מושך
+# בייטים ומרים לו session טרי. ברירת המחדל 1 = cooldown בדיוק כפי
+# שהתבקש; מונה ה-chokes ממשיך לעלות, ולכן ההחייאה עובדת כרגיל.
+CHOKE_BACKOFF_FACTOR = int(os.environ.get("STREAM_CHOKE_BACKOFF_FACTOR", "1"))
 
 # מתי בפעם האחרונה בוט כלשהו מהבריכה סיפק בייטים בהצלחה. ה-Watchdog משתמש
 # בזה כעדות חיה לכך שטלגרם מגיב — ראה telegram_watchdog.
@@ -1360,7 +1404,9 @@ def _mark_choked(bot, seconds, err=None, hard=False, escalate=True):
     n = bot.get("chokes", 0)
     if escalate:
         bot["chokes"] = n + 1
-        seconds = min(CHOKE_BACKOFF_MAX, int(seconds * (4 ** min(n, 5))))
+        if CHOKE_BACKOFF_FACTOR > 1:
+            seconds = min(CHOKE_BACKOFF_MAX,
+                          int(seconds * (CHOKE_BACKOFF_FACTOR ** min(n, 5))))
     bot["cooldown_until"] = time.time() + seconds
     log.warning("🥵 בוט %s נחנק (חניקה %d) — cooldown %ds",
                 bot["name"], n + 1 if escalate else n, seconds)
@@ -1466,6 +1512,66 @@ async def channel_get_media(chat_id, message_id):
     log.warning("[diag_stream_timing] channel_get_media %s/%s: נכשל אחרי %d ניסיונות "
                "(%.2fs)", chat_id, message_id, attempt, time.time() - t0)
     return None
+
+# ── מטמון metadata גלובלי ────────────────────────────────────────────────────
+# זה חסם ההפעלה. stream_from_channel קוראת ל-channel_get_media *בכל בקשת
+# HTTP*, לפני שמוגש בייט אחד, והיא מסתובבת על עד 5 בוטים עם תקציב 8 שניות
+# לכל אחד — עד 40 שניות של שליפת metadata לפני שההזרמה מתחילה. ונגן לא שולח
+# בקשה אחת: bytes=0-, אחר כך הזנב (moov), אחר כך seek. כל אחת שילמה מחדש.
+#
+# והמטמון היחיד שהיה הוא _bot_msg_cache, שהוא *פר-בוט*: אם הבקשה נחתה על בוט
+# חם — אפס; על בוט קר — שליפת רשת מלאה. אותו סרט נפתח פעם מיד ופעם ב-40
+# שניות, תלוי בהגרלה. זה מסביר למה זמן ההפעלה נראה אקראי.
+#
+# מה שנשלף שם הוא גודל, mime ושם — ההערה בקוד עצמו אומרת "metadata בלבד,
+# אין בעיית reference", כלומר בוט-אגנוסטי ולא משתנה. לכן נשמר פעם אחת
+# לפריט, גם לדיסק, וכל בקשה אחריו מתחילה מיד — מכל צופה וגם אחרי restart.
+#
+# ה-TTL הוא רשת ביטחון: הודעות מדיה לא נערכות כאן במקום (העלאה יוצרת הודעה
+# חדשה), אבל אם קובץ הוחלף מאחורי אותו msg_id הגודל השמור יהיה שגוי.
+META_CACHE_FILE = DATA_DIR / "stream_meta.json"
+META_TTL = int(os.environ.get("STREAM_META_TTL", str(7 * 24 * 3600)))
+_meta_cache: dict = load_json(META_CACHE_FILE)
+_meta_save_pending = False
+
+
+async def _meta_save_soon():
+    """שומר בהשהיה, כדי שסדרה שנפתחת כולה לא תכתוב את הקובץ 20 פעם."""
+    global _meta_save_pending
+    if _meta_save_pending:
+        return
+    _meta_save_pending = True
+    try:
+        await asyncio.sleep(10)
+        snapshot = dict(_meta_cache)
+        await asyncio.to_thread(save_json, META_CACHE_FILE, snapshot)
+    except Exception as e:
+        log.warning("שמירת מטמון ה-metadata נכשלה: %s", e)
+    finally:
+        _meta_save_pending = False
+
+
+async def stream_meta(chat_id, message_id):
+    """גודל/mime/שם/DC של פריט, מהמטמון אם אפשר. None אם אין בוט שיכול לשלוף."""
+    key = f"{chat_id}:{message_id}"
+    m = _meta_cache.get(key)
+    if m and (time.time() - m.get("at", 0)) < META_TTL and m.get("size"):
+        return m
+    media = await channel_get_media(chat_id, message_id)
+    if not media or not getattr(media, "file_size", 0):
+        return m if (m and m.get("size")) else None      # ישן עדיף על כלום
+    try:
+        dc = _file_location(media)[0]
+    except Exception:
+        dc = 0
+    m = {"size": media.file_size,
+         "mime": getattr(media, "mime_type", "application/octet-stream"),
+         "name": getattr(media, "file_name", None) or f"file_{message_id}",
+         "dc": dc, "at": time.time()}
+    _meta_cache[key] = m
+    asyncio.create_task(_meta_save_soon())
+    return m
+
 
 async def channel_stream_range(chat_id, message_id, start, end):
     """מזרים [start, end] מהערוץ דרך בוט מה-pool. כל בוט שולף את ההודעה של עצמו
@@ -1687,7 +1793,7 @@ BLOCK_BACKOFF_MAX = float(os.environ.get("STREAM_BLOCK_BACKOFF_MAX", "8"))
 
 
 async def _get_block(session: Session, location, offset: int, limit: int,
-                     owner: str = None) -> bytes:
+                     owner: str = None, timeout: float = None) -> bytes:
     """מושך בלוק בודד, עם ניסיונות חוזרים והשהיה מכפילה.
 
     FloodWait קצר: ישנים בדיוק כמה שטלגרם ביקש. שגיאת חיבור רגעית: משהים
@@ -1699,8 +1805,13 @@ async def _get_block(session: Session, location, offset: int, limit: int,
         try:
             if owner:
                 await _rate_gate(owner)
-            r = await session.invoke(functions.upload.GetFile(
+            # timeout חל רק על הקריאה לטלגרם, לא על ההמתנה בשער הקצב ולא על
+            # שינת ה-FloodWait. בלי ההפרדה הזו הענשנו בוטים על חניקה שאנחנו
+            # עצמנו הטלנו: _rate_gate ישן בתוך התקציב, התקציב נגמר, והבוט
+            # נרשם כאיטי ונחנק.
+            call = session.invoke(functions.upload.GetFile(
                 location=location, offset=offset, limit=limit, precise=False))
+            r = await (asyncio.wait_for(call, timeout=timeout) if timeout else call)
             return getattr(r, "bytes", b"")
         except FloodWait as e:
             # FloodWait ארוך אינו האטה רגעית — עדיף לוותר ולתת לחלון ליפול
@@ -1951,8 +2062,15 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
             e2 = min(s + step - 1, wend)
             rngs.append((s, e2))
             s = e2 + 1
+        # return_exceptions חובה: בלעדיו כשל של תת-טווח עולה מתוך ה-async
+        # generator *אחרי* ש-Content-Length כבר נשלח, Starlette סוגר את
+        # החיבור, והנגן מקבל גוף קצר ממה שהובטח לו בלי שאף אחד יתפוס את זה.
         results = await asyncio.gather(
-            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in rngs])
+            *[_fetch_subrange(chat_id, message_id, a, b) for a, b in rngs],
+            return_exceptions=True)
+        bad = next((r for r in results if isinstance(r, BaseException)), None)
+        if bad is not None:
+            raise StreamGap(f"window {wstart}-{wend}: {type(bad).__name__}: {bad}")
         return b"".join(results)
 
     # חלון שנכשל היה מסיים את כל ההזרמה, ולכן נוסף ניסיון חוזר. אבל ניסיון
@@ -2041,6 +2159,165 @@ async def channel_stream_range_parallel(chat_id, message_id, start, end):
             # שעוזב באמצע. הקולבק אוסף אותה ומשתיק את הרעש.
             ahead[0].add_done_callback(
                 lambda t: t.cancelled() or t.exception())
+
+# ── הזרמה מוצמדת: העברה אחת = session אחד, חלון מחליק שמגיש מיד ──────────────
+# על השרת הזה STREAM_PARALLEL_PARTS הוא 1, כלומר ההזרמה רצה ב-
+# channel_stream_range: בוט אחד, חיבור MTProto אחד, סדרתי. חיבור יחיד חסום
+# ב-~1.25MB/s ו-1080p בזמן-אמת צריך ~2MB/s — הבאפר של הנגן מתרוקן מהר יותר
+# ממה שהוא מתמלא, ומכאן התקיעה כל כמה שניות.
+#
+# המסלול המקבילי הקיים (channel_stream_range_parallel) פותר את הרוחב-פס אבל
+# מכניס שתי בעיות משלו: הוא צובר חלון שלם לפני שהוא מגיש בייט (gather ואז
+# yield, כלומר בייטים בפרצים ואפס ביניהם), והוא בוחר בוט אחר בכל חלון —
+# ולכן בכל גבול חלון משלמים שליפת הודעה מבוט קר ואולי בניית בריכת חיבורים.
+#
+# טלגרם מנחה במפורש להשתמש ב-session וחיבור נפרדים להעברות גדולות, "שבהם
+# לא מורצות שום מתודות אחרות" — כלומר session מוצמד לכל אורך ההעברה.
+# https://core.telegram.org/api/files
+#
+# לכן כאן: בוט נבחר *פעם אחת לבקשת HTTP*, מוחזקות PIPELINE_DEPTH בקשות של
+# 1MB בטיסה על החיבורים שלו, וכל בלוק מוגש ברגע שהוא מגיע בסדר. אין צבירה
+# ואין החלפת בוט באמצע. בוט שנופל מוחלף וההזרמה ממשיכה מהאופסט שהושג.
+PIPELINE_DEPTH = int(os.environ.get("STREAM_PIPELINE_DEPTH", "4"))
+BLOCK_TIMEOUT = float(os.environ.get("STREAM_BLOCK_TIMEOUT", "12"))
+PIN_RETRIES = int(os.environ.get("STREAM_PIN_RETRIES", "3"))
+# מתג חזרה אחורה: STREAM_PINNED=0 מחזיר למסלול הקודם בלי פריסת קוד.
+STREAM_PINNED = os.environ.get("STREAM_PINNED", "1") not in ("0", "false", "no")
+
+
+async def _pinned_stream(chat_id, message_id, start, end, tried):
+    """מזרים [start, end] דרך בוט *אחד* מוצמד, בחלון מחליק שמגיש בלוק-בלוק."""
+    bot = await pick_stream_bot_for(chat_id, message_id, exclude=tried)
+    if bot is None:
+        raise StreamGap("אין בוט בריא")
+    name = bot["name"]
+    tried.add(name)
+    _bot_streams[name] = _bot_streams.get(name, 0) + 1
+    dc_id = gen = None
+    pending = []
+    marked = False          # _get_bot_msg_fast חונק בעצמו — לא להעניש פעמיים
+    try:
+        msg = await _get_bot_msg_fast(bot, chat_id, message_id)
+        if msg is None:
+            marked = True
+            raise StreamGap(f"{name}: שליפת ההודעה נכשלה")
+        media = msg.video or msg.audio or msg.document or msg.video_note
+        if not media:
+            marked = True       # תקלת תוכן, לא תקלת בוט
+            raise StreamGap("אין מדיה בהודעה")
+        dc_id, location = _file_location(media)
+        sessions, gen = await get_media_session_pool_gen(
+            bot["client"], name, dc_id, STREAM_MEDIA_CONNS, block=False)
+        if not sessions:
+            sessions, gen = await get_media_session_pool_gen(
+                bot["client"], name, dc_id, STREAM_MEDIA_CONNS, block=True)
+        if not sessions:
+            raise StreamGap(f"{name}: אין חיבורי media")
+
+        # מיושר ל-1MB: טלגרם דורשת שבקשה לא תחרוג מגבול של 1MB
+        # (offset/(1MB) == (offset+limit-1)/(1MB)) ו-limit לא יעלה על 1MB.
+        first = (start // MEDIA_CHUNK) * MEDIA_CHUNK
+        n_blocks = (end - first) // MEDIA_CHUNK + 1
+        depth = max(1, min(PIPELINE_DEPTH, len(sessions), n_blocks))
+
+        def _launch(i):
+            return asyncio.create_task(_get_block(
+                sessions[i % len(sessions)], location,
+                first + i * MEDIA_CHUNK, MEDIA_CHUNK, name, BLOCK_TIMEOUT))
+
+        nxt = 0
+        while nxt < depth:
+            pending.append(_launch(nxt))
+            nxt += 1
+
+        t0, served = time.time(), 0
+        for i in range(n_blocks):
+            chunk = await pending.pop(0)
+            # ממלאים את המקום הפנוי *לפני* ההגשה, כך שההורדה רצה בזמן
+            # שהנגן צורך. זה מה שמחזיק ~4MB באפר קדימה לאורך הצפייה.
+            if nxt < n_blocks:
+                pending.append(_launch(nxt))
+                nxt += 1
+            if not chunk:
+                raise StreamGap(f"{name}: בלוק ריק ב-{i}")
+            c_start = first + i * MEDIA_CHUNK
+            c_end = c_start + len(chunk)
+            lo = max(start, c_start) - c_start
+            hi = min(end + 1, c_end) - c_start
+            if lo < hi:
+                yield chunk[lo:hi]
+                served += hi - lo
+            if c_end > end or len(chunk) < MEDIA_CHUNK:
+                break
+
+        _mark_ok(bot)
+        _band_timeouts.pop((name, dc_id), None)
+        el = time.time() - t0
+        if el > 0 and served:
+            note_bot_speed(bot, (served / 1024 / 1024) / el)
+    except FloodWait as e:
+        # בדיוק מה שטלגרם ביקשה, בלי הכפלה — זו ההנחיה הרשמית.
+        _mark_choked(bot, e.value, hard=True, escalate=False)
+        raise
+    except FileReferenceExpired:
+        raise                       # הקורא מנקה מטמון ומנסה שוב
+    except (StreamGap, asyncio.TimeoutError) as e:
+        if not marked:
+            note_bot_speed(bot, 0.0)
+            _mark_choked(bot, 30, e)
+        # חיבור MTProto מת *נתקע* ולא מחזיר שגיאה, ולכן רק רצף timeouts
+        # מעיד על בריכה מתה. בודד = איטיות, ואין טעם להפיל עליו חיבורים.
+        if dc_id is not None and gen is not None:
+            key = (name, dc_id)
+            n = _band_timeouts.get(key, 0) + 1
+            _band_timeouts[key] = n
+            if n >= BAND_TIMEOUT_LIMIT:
+                _band_timeouts.pop(key, None)
+                log.warning("pinned (%s) %d timeouts רצופים — מרענן חיבורים", name, n)
+                await drop_media_sessions(name, dc_id, gen)
+        raise
+    except Exception as e:
+        note_bot_speed(bot, 0.0)
+        _mark_choked(bot, 30, e)
+        if dc_id is not None and gen is not None and _is_dead_conn(e):
+            await drop_media_sessions(name, dc_id, gen)
+        raise
+    finally:
+        for t in pending:
+            t.cancel()
+            t.add_done_callback(lambda t: t.cancelled() or t.exception())
+        _bot_streams[name] = max(0, _bot_streams.get(name, 1) - 1)
+
+
+async def channel_stream_range_pinned(chat_id, message_id, start, end):
+    """בוט שנפל באמצע מוחלף, וההזרמה ממשיכה מהאופסט שהושג — לא מאפס,
+    ובלי לחתוך תשובה שכבר התחילה."""
+    pos = start
+    tried = set()
+    for _ in range(max(1, PIN_RETRIES)):
+        if pos > end:
+            return
+        resumed_at = pos
+        try:
+            async for chunk in _pinned_stream(chat_id, message_id, pos, end, tried):
+                yield chunk
+                pos += len(chunk)
+            if pos > end:
+                return
+        except FileReferenceExpired:
+            _purge_msg_cache(chat_id, message_id)   # פג גלובלית; הבוטים תקינים
+            tried.clear()
+        except (StreamGap, asyncio.TimeoutError, FloodWait,
+                OSError, ConnectionError, EOFError) as e:
+            log.info("pinned: נקטע ב-%d/%d (%s) — מצמיד בוט אחר",
+                     pos, end, type(e).__name__)
+        if pos == resumed_at and len(tried) >= len(_stream_bots):
+            break                   # כל הבריכה נוסתה ואף בוט לא סיפק בייט
+    if pos <= end:
+        log.error("pinned: חסרים %d בייטים — מנתק כדי שהנגן יבקש שוב",
+                  end - pos + 1)
+        raise StreamGap(f"missing {end - pos + 1} bytes")
+
 
 # ── מטמון קצוות הקובץ ────────────────────────────────────────────────────────
 # ב-MP4 שלא עבר faststart טבלת האינדקס (moov) יושבת ב*סוף* הקובץ. לכן כל נגן,
@@ -2176,7 +2453,9 @@ async def _edge_fill(chat_id, message_id, which, region_start, region_len):
 
 
 def _channel_range_gen(chat_id, message_id, start, end):
-    """בורר בין הזרמה מקבילה (אם הופעלה) לרגילה."""
+    """בורר בין הזרמה מוצמדת (ברירת מחדל), מקבילה, ורגילה."""
+    if STREAM_PINNED and _stream_bots:
+        return channel_stream_range_pinned(chat_id, message_id, start, end)
     if STREAM_PARALLEL_PARTS > 1 and len(_stream_bots) >= 2:
         return channel_stream_range_parallel(chat_id, message_id, start, end)
     return channel_stream_range(chat_id, message_id, start, end)
@@ -2227,17 +2506,18 @@ async def _stagger_new_stream():
 
 async def stream_from_channel(chat_id: int, message_id: int, request: Request):
     await _stagger_new_stream()
-    media = await channel_get_media(chat_id, message_id)
-    if not media:
+    meta = await stream_meta(chat_id, message_id)
+    if not meta:
         raise HTTPException(status_code=503, detail="No media / no healthy bot")
     # מחממים את בריכות הבוטים ל-DC של הקובץ ברקע, כדי ש'המשך צפייה' יתחיל מהר
-    try:
-        _prewarm_dc(_file_location(media)[0])
-    except Exception:
-        pass
-    file_size = media.file_size
-    mime_type = getattr(media, "mime_type", "application/octet-stream")
-    file_name = getattr(media, "file_name", None) or f"file_{message_id}"
+    if meta.get("dc"):
+        try:
+            _prewarm_dc(meta["dc"])
+        except Exception:
+            pass
+    file_size = meta["size"]
+    mime_type = meta.get("mime") or "application/octet-stream"
+    file_name = meta.get("name") or f"file_{message_id}"
     safe_name = file_name.encode("ascii", "ignore").decode("ascii") or f"file_{message_id}"
     disposition = f'inline; filename="{safe_name}"; filename*=UTF-8\'\'{quote(file_name)}'
     range_header = request.headers.get("Range")
