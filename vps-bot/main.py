@@ -4442,6 +4442,265 @@ async function removeAdmin(id) {
 }
 </script></div></body></html>"""
 
+# ── Emby: קישור קבוע לכל ערוץ ────────────────────────────────────────────────
+# הבעיה: הכתובת של הספק (play.embyil.tv/emby/videos/<id>/master.m3u8?...)
+# מחזירה redirect לכתובת חתומה עם חותמת-זמן, והיא מתחלפת כל כמה שעות. לשמור
+# אותה בפאנל זה לשמור קישור שימות.
+#
+# וגם: אותה כתובת ארוכה מכילה X-Emby-Token אישי. אם היא נשמרת בפאנל, הטוקן
+# יוצא החוצה עם כל קישור ערוץ — ומת ברגע שהוא מתחלף.
+#
+# הפתרון: מדביקים את הכתובת הארוכה פעם אחת, השרת שומר אותה אצלו ומחזיר
+# כתובת קבועה וקצרה:
+#
+#     https://zovex.duckdns.org/emby/3073497/index.m3u8
+#
+# זו הכתובת שנשמרת בפאנל, והיא לא משתנה לעולם. מאחוריה השרת פותר את ה-
+# redirect מחדש כשצריך, ומשכתב את המקטעים דרך /hls-relay הקיים — כך שכל
+# מנגנוני הרלֵיי (מטמון מניפסט, מטמון מקטעים, משיכה מקדימה, הצטרפות לזרימה
+# קיימת, ותיקון ה-open-GOP ב-remux) עובדים בלי שורת קוד נוספת.
+#
+# וכשהטוקן יתחלף: מדביקים כתובת ארוכה חדשה לאותו ערוץ, והקישור הקצר ממשיך
+# לעבוד כרגיל. שום דבר בפאנל או באפליקציה לא צריך להשתנות.
+#
+# ── על העומס ─────────────────────────────────────────────────────────────────
+# כל המסלול הוא *משיכה לפי דרישה*: השרת לא פונה לספק אלא כשנגן ביקש ממנו
+# משהו. ערוץ שאיש לא צופה בו אינו צורך כלום — לא בקשות, לא רוחב פס, לא CPU.
+# אין כאן תהליך רקע שמחזיק ערוצים "דולקים", ולכן אין מה לכבות.
+#
+# לכן ה-40 דקות אינן מנגנון כיבוי אלא ניקוי זיכרון: אחרי EMBY_IDLE_SECS בלי
+# צופה נמחקת הכתובת הפתורה (כמה מאות בתים). ההתעוררות מיידית — הבקשה
+# הראשונה פותרת מחדש, פנייה אחת, וממשיכה כרגיל.
+#
+# שתי בלימות עומס שכן נחוצות:
+#   1. מטמון קצר על ה-playlist (EMBY_PL_TTL): מאה צופים על אותו ערוץ
+#      מייצרים פנייה אחת לספק בכל כמה שניות, לא מאה.
+#   2. נעילה לכל ערוץ: כשערוץ מתעורר וכמה צופים נכנסים יחד, רק אחד פותר את
+#      ה-redirect והשאר ממתינים לתוצאה שלו. בלי זה "התעוררות" הייתה שולחת
+#      צרור פניות זהות לספק — בדיוק מה שגורם לספקים לחנוק.
+EMBY_LINKS_FILE = DATA_DIR / "emby_links.json"
+EMBY_RESOLVE_TTL = int(os.environ.get("EMBY_RESOLVE_TTL", "600"))
+EMBY_IDLE_SECS = int(os.environ.get("EMBY_IDLE_SECS", "2400"))   # 40 דקות
+EMBY_PL_TTL = float(os.environ.get("EMBY_PL_TTL", "4"))
+
+# id -> {"master": הכתובת הארוכה, "name": שם, "added": זמן}
+_emby_links: dict = load_json(EMBY_LINKS_FILE) or {}
+_emby_resolved: dict = {}      # id -> {"url":..., "at":...}
+_emby_seen: dict = {}          # id -> זמן הגישה האחרון
+_emby_pl: dict = {}            # id -> (תפוגה, גוף משוכתב)
+_emby_locks: dict = {}         # id -> asyncio.Lock
+
+# מזהה כתובת Emby ומחלץ ממנה את מזהה הפריט.
+_EMBY_URL_RE = re.compile(r"/emby/videos/(\d+)/master\.m3u8", re.I)
+
+
+def emby_parse(url: str) -> Optional[str]:
+    """מחזיר את מזהה הפריט אם זו כתובת master של Emby, אחרת None."""
+    if not url or "X-Emby-Token" not in url:
+        return None
+    m = _EMBY_URL_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _emby_save_links():
+    try:
+        _atomic_write_text(EMBY_LINKS_FILE,
+                           json.dumps(_emby_links, ensure_ascii=False, indent=2))
+    except Exception as e:
+        log.warning("שמירת emby_links נכשלה: %s", e)
+
+
+def _emby_headers(master: str) -> dict:
+    p = urlparse(master)
+    origin = f"{p.scheme}://{p.netloc}"
+    return {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Referer": origin + "/",
+        "Origin": origin,
+        "Accept": "*/*",
+    }
+
+
+async def _emby_resolve(item_id: str, force: bool = False) -> Optional[str]:
+    """מחזיר את כתובת ה-playlist האמיתית, ורושם את המארח שלה לרלֵיי."""
+    now = time.time()
+    cur = _emby_resolved.get(item_id)
+    if cur and not force and (now - cur["at"]) < EMBY_RESOLVE_TTL:
+        return cur["url"]
+
+    ent = _emby_links.get(item_id)
+    if not ent or not ent.get("master"):
+        return None
+    master = ent["master"]
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=20) as cl:
+            r = await cl.get(master, headers=_emby_headers(master))
+        target = r.headers.get("location")
+        if not target and r.status_code == 200 and \
+                r.text.lstrip().startswith("#EXTM3U"):
+            target = master          # הספק החזיר playlist ישירות
+        if not target:
+            log.warning("emby %s: אין redirect (status %s)", item_id, r.status_code)
+            return None
+        target = urljoin(master, target)
+    except Exception as e:
+        log.warning("emby %s: פתירה נכשלה: %s: %s", item_id, type(e).__name__, e)
+        return None
+
+    # רושמים את המארח שהספק נתן לנו, כדי ש-/hls-relay יסכים להגיש ממנו.
+    p = urlparse(target)
+    if p.hostname and p.scheme in ("http", "https"):
+        _relay_learned_hosts[p.hostname] = {
+            "scheme": p.scheme,
+            "port": p.port or (443 if p.scheme == "https" else 80),
+            "exp": time.time() + RELAY_LEARNED_TTL,
+        }
+    _emby_resolved[item_id] = {"url": target, "at": time.time()}
+    log.info("emby %s → %s", item_id, p.hostname)
+    return target
+
+
+async def _emby_playlist(item_id: str) -> str:
+    """גוף ה-playlist המשוכתב, עם פתירה מחדש אם הכתובת החתומה פגה."""
+    hit = _emby_pl.get(item_id)
+    if hit and hit[0] > time.time():
+        return hit[1]
+
+    lock = _emby_locks.get(item_id)
+    if lock is None:
+        lock = _emby_locks[item_id] = asyncio.Lock()
+    async with lock:
+        # ייתכן שמי שהחזיק את הנעילה לפנינו כבר הביא את התשובה.
+        hit = _emby_pl.get(item_id)
+        if hit and hit[0] > time.time():
+            return hit[1]
+
+        last = ""
+        for attempt in range(2):
+            url = await _emby_resolve(item_id, force=(attempt == 1))
+            if not url:
+                raise HTTPException(502, "emby: לא הצלחתי לפתור את הערוץ")
+            try:
+                async with httpx.AsyncClient(follow_redirects=True,
+                                             timeout=25) as cl:
+                    r = await cl.get(url, headers=_emby_headers(url))
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+                continue
+            if r.status_code == 200 and r.text.lstrip().startswith("#EXTM3U"):
+                body = _rewrite_hls_manifest(r.text, str(r.url))
+                _emby_pl[item_id] = (time.time() + EMBY_PL_TTL, body)
+                return body
+            # כתובת חתומה פגה / נדחתה — שווה פתירה טרייה אחת.
+            last = f"status {r.status_code}"
+        raise HTTPException(502, f"emby: המקור לא החזיר playlist ({last})")
+
+
+@api.get("/emby/{item_id}/index.m3u8")
+async def emby_channel(item_id: str, request: Request):
+    if not item_id.isdigit():
+        raise HTTPException(404, "not found")
+    check_hotlink(request)
+    _emby_seen[item_id] = time.time()
+    body = await _emby_playlist(item_id)
+    return Response(content=body,
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-cache", **CORS_MEDIA})
+
+
+class EmbyReq(BaseModel):
+    password: str
+    url: Optional[str] = ""
+    id: Optional[str] = ""
+    name: Optional[str] = ""
+
+
+@api.post("/emby/register")
+async def emby_register(req: EmbyReq, request: Request):
+    """מקבל את הכתובת הארוכה, שומר אותה, ומחזיר את הקישור הקבוע.
+
+    בודק מיד שהכתובת באמת נפתרת, כדי שתדע בלחיצה אם הערוץ עובד ולא
+    תגלה את זה רק כשצופה ינסה להיכנס.
+    """
+    check_panel_password(request, req.password)
+    url = (req.url or "").strip()
+    item_id = emby_parse(url)
+    if not item_id:
+        raise HTTPException(400, "זו לא כתובת Emby master.m3u8 עם טוקן")
+
+    prev = _emby_links.get(item_id, {})
+    _emby_links[item_id] = {
+        "master": url,
+        "name": (req.name or prev.get("name") or "").strip(),
+        "added": prev.get("added") or time.time(),
+        "updated": time.time(),
+    }
+    _emby_save_links()
+    # הכתובת החדשה מבטלת כל פתירה ישנה של אותו ערוץ.
+    _emby_resolved.pop(item_id, None)
+    _emby_pl.pop(item_id, None)
+
+    base = (STREAM_PUBLIC_BASE or "").rstrip("/")
+    short = f"{base}/emby/{item_id}/index.m3u8"
+
+    ok, detail = True, "נפתר בהצלחה"
+    try:
+        target = await _emby_resolve(item_id, force=True)
+        if not target:
+            ok, detail = False, "נשמר, אבל הספק לא החזיר כתובת זרם"
+        else:
+            detail = "נפתר בהצלחה · " + (urlparse(target).hostname or "")
+    except Exception as e:
+        ok, detail = False, f"נשמר, אבל הבדיקה נכשלה: {e}"
+
+    return {"id": item_id, "url": short, "ok": ok, "detail": detail,
+            "replaced": bool(prev)}
+
+
+@api.post("/emby/links")
+async def emby_links(req: EmbyReq, request: Request):
+    """כל הערוצים הרשומים, עם הקישור הקבוע של כל אחד."""
+    check_panel_password(request, req.password)
+    base = (STREAM_PUBLIC_BASE or "").rstrip("/")
+    now = time.time()
+    return {"count": len(_emby_links), "channels": [
+        {"id": cid,
+         "name": ent.get("name") or "",
+         "url": f"{base}/emby/{cid}/index.m3u8",
+         "updated": ent.get("updated") or ent.get("added") or 0,
+         "active": (now - _emby_seen.get(cid, 0)) < EMBY_IDLE_SECS}
+        for cid, ent in sorted(_emby_links.items(),
+                               key=lambda kv: kv[1].get("name") or kv[0])]}
+
+
+@api.post("/emby/remove")
+async def emby_remove(req: EmbyReq, request: Request):
+    check_panel_password(request, req.password)
+    cid = (req.id or "").strip()
+    if cid not in _emby_links:
+        raise HTTPException(404, "לא נמצא")
+    _emby_links.pop(cid, None)
+    _emby_save_links()
+    for d in (_emby_resolved, _emby_pl, _emby_seen, _emby_locks):
+        d.pop(cid, None)
+    return {"ok": True, "count": len(_emby_links)}
+
+
+async def emby_reaper():
+    """מנקה מצב של ערוצים שאיש לא צפה בהם. אין כאן כיבוי — אין מה לכבות,
+    כי שום דבר לא רץ ברקע מלכתחילה; זו רק החזרת זיכרון."""
+    while True:
+        await asyncio.sleep(300)
+        cut = time.time() - EMBY_IDLE_SECS
+        for k in [k for k, t in _emby_seen.items() if t < cut]:
+            _emby_seen.pop(k, None)
+            _emby_resolved.pop(k, None)
+            _emby_pl.pop(k, None)
+            _emby_locks.pop(k, None)
+
+
 # ── בוט העלאה (טוקן נפרד) + זיהוי TMDB ───────────────────────────────────────
 # בוט נפרד לגמרי (טוקן משלו) שמקבל קבצים מצוות המנהלים (רק Telegram-ID מורשים
 # מ-admins.json). הזרימה: מנהל שולח סרט לבוט → הבוט מעתיק אותו לערוץ התוכן
@@ -8670,6 +8929,7 @@ async def startup():
     asyncio.create_task(seed_content_if_empty())
     asyncio.create_task(keep_alive())
     asyncio.create_task(_hls_fix_reaper())   # סוגר ffmpeg של ערוצים ללא צופים
+    asyncio.create_task(emby_reaper())       # מנקה מצב של ערוצי Emby ללא צופים
     asyncio.create_task(_vt_reaper())   # [fix_vod_transcode]  # סוגר ffmpeg של VOD ללא צופים
     asyncio.create_task(peer_retry_loop())   # מחזיר לפעולה בוטים ששכחו את הערוץ
     asyncio.create_task(revive_stream_pool())  # מרים מחדש בוטים עם session תקוע

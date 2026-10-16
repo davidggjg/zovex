@@ -703,9 +703,27 @@ async function removeRelayHost(h){
   catch(e){ $("rhMsg").textContent=e.message; }
 }
 // ממיר קישור שהודבק לכתובת רלֵיי דרך השרת שלנו — רק אם ה-host מאושר.
-function relayifyUrl(){
+async function relayifyUrl(){
   const el=$("l_url"), msg=$("relayMsg"); msg.style.color="#ff8a8a";
-  let u; try{ u=new URL(el.value.trim()); }catch{ msg.textContent="קישור לא תקין"; return; }
+  const raw=el.value.trim();
+  let u; try{ u=new URL(raw); }catch{ msg.textContent="קישור לא תקין"; return; }
+  // כתובת Emby: מכילה טוקן אישי, ומפנה לכתובת חתומה שמתחלפת כל כמה שעות.
+  // אסור לשמור אותה כמו שהיא. השרת שומר אותה אצלו ומחזיר קישור קבוע.
+  if(/\/emby\/videos\/\d+\/master\.m3u8/i.test(u.pathname) && /X-Emby-Token=/i.test(raw)){
+    msg.style.color="#ffd27a"; msg.textContent="ממיר…";
+    try{
+      const nm=($("l_title")||{}).value||"";
+      const r=await fetch("/emby/register",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({password:PASS,url:raw,name:nm})});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(d.detail||("שגיאה "+r.status));
+      el.value=d.url;
+      msg.style.color=d.ok?"#8aff9e":"#ffd27a";
+      msg.textContent=(d.replaced?"✓ עודכן · ":"✓ הומר · ")+(d.detail||"");
+    }catch(e){ msg.style.color="#ff8a8a"; msg.textContent="ההמרה נכשלה: "+e.message; }
+    return;
+  }
   if(u.protocol!=="http:"&&u.protocol!=="https:"){ msg.textContent="רק http/https"; return; }
   if(!RELAY_HOSTS.some(h=>h.host===u.hostname)){
     msg.textContent="ה-host הזה לא ברשימה המותרת — הוסף אותו קודם למטה."; return; }
