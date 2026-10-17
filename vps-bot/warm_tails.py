@@ -42,7 +42,9 @@ BASE = os.environ.get("WARM_BASE", "http://127.0.0.1:8000")
 CACHE = os.environ.get("WARM_CACHE", "/opt/zovex-bot/data/edge_cache")
 MIN_FREE_GB = float(os.environ.get("WARM_MIN_FREE_GB", "5"))
 PAUSE = float(os.environ.get("WARM_PAUSE", "2"))
-FILL_TIMEOUT = float(os.environ.get("WARM_FILL_TIMEOUT", "240"))
+# נמדד: מילוי אזור שהצליח לקח עד 184 שניות (14MB בכ-110KB/s — זו מהירות
+# המשיכה מטלגרם בקר). תקרה של 240 שניות הפילה פריטים שהיו בדרך.
+FILL_TIMEOUT = float(os.environ.get("WARM_FILL_TIMEOUT", "600"))
 LIMIT = int(os.environ.get("WARM_LIMIT", "0"))
 # כמה פעמים לנסות את /ping לפני ויתור (5 שניות בין ניסיונות).
 WAIT_FOR_SERVER = int(os.environ.get("WARM_WAIT_FOR_SERVER", "60"))
