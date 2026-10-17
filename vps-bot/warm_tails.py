@@ -26,7 +26,16 @@
 # בטוח: קורא בלבד, לא נוגע בקוד ולא בשירות. עוצר לבד אם הדיסק מתמלא. אפשר
 # לעצור אותו ב-Ctrl+C בכל רגע ולהריץ שוב — הוא מדלג על מה שכבר מחומם.
 #
-#   python3 warm_tails.py                 # כל הקטלוג
+# [budget] למה לא כל הקטלוג: נמדד 18,292 פריטים, 14MB לפריט (ראש+זנב) —
+# כלומר 256GB מטמון ו-17 יום ריצה. התקרה של מטמון הקצה קטנה בהרבה, ולכן
+# ריצה כזו הייתה מחממת פריטים שהפינוי מוחק מאחוריה. חימום של דברים שאף
+# אחד לא פתח גם ממילא מיותר: ה-/stream מטמן לבד כל מה שנצפה, והדבר היחיד
+# שהמחמם קונה הוא ביטול ההמתנה של הצופה *הראשון*.
+#
+# לכן עובדים לפי תקציב, על *ראש* הקטלוג. סדר הקטלוג הוא סדר התצוגה במסך
+# הבית, כלומר בדיוק הסדר שבו אנשים לוחצים — שם מרוכזות הצפיות הראשונות.
+#
+#   python3 warm_tails.py                 # ראש הקטלוג עד התקציב
 #   WARM_LIMIT=50 python3 warm_tails.py   # 50 פריטים, לבדיקה
 #   WARM_PAUSE=5 python3 warm_tails.py    # לאט יותר, פחות עומס על הבוטים
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,6 +55,9 @@ PAUSE = float(os.environ.get("WARM_PAUSE", "2"))
 # המשיכה מטלגרם בקר). תקרה של 240 שניות הפילה פריטים שהיו בדרך.
 FILL_TIMEOUT = float(os.environ.get("WARM_FILL_TIMEOUT", "600"))
 LIMIT = int(os.environ.get("WARM_LIMIT", "0"))
+# תקרת הנפח שהמחמם מוכן לתפוס במטמון. חייבת להיות קטנה מ-
+# STREAM_EDGE_CACHE_MAX של השרת, אחרת הפינוי מוחק את מה שחיממנו.
+BUDGET_GB = float(os.environ.get("WARM_BUDGET_GB", "15"))
 # כמה פעמים לנסות את /ping לפני ויתור (5 שניות בין ניסיונות).
 WAIT_FOR_SERVER = int(os.environ.get("WARM_WAIT_FOR_SERVER", "60"))
 # כשלים רצופים שאחריהם עוצרים — סימן שהשרת נפל, לא שהפריט בעייתי.
@@ -69,6 +81,21 @@ def free_gb():
         return shutil.disk_usage(CACHE).free / 1024 ** 3
     except OSError:
         return 0.0
+
+
+def cache_gb():
+    """נפח המטמון כרגע, בגיגה."""
+    total = 0
+    try:
+        for e in os.scandir(CACHE):
+            try:
+                if e.is_file():
+                    total += e.stat().st_size
+            except OSError:
+                continue            # נעלם בדיוק עכשיו
+    except OSError:
+        return 0.0
+    return total / 1024 ** 3
 
 
 def catalog():
@@ -119,7 +146,15 @@ def main():
     if LIMIT:
         items = items[:LIMIT]
     print(f"קטלוג: {len(items)} פריטים   מטמון: {CACHE}   פנוי: {free_gb():.1f}GB")
-    print(f"ראש: {EDGE_HEAD // 1024 // 1024}MB · זנב: {EDGE_TAIL // 1024 // 1024}MB   השהיה בין פריטים: {PAUSE}s\n")
+    per_item = (EDGE_HEAD + EDGE_TAIL) / 1024 ** 3
+    used = cache_gb()
+    room = max(0.0, BUDGET_GB - used)
+    print(f"ראש: {EDGE_HEAD // 1024 // 1024}MB · זנב: "
+          f"{EDGE_TAIL // 1024 // 1024}MB   השהיה בין פריטים: {PAUSE}s")
+    print(f"תקציב: {BUDGET_GB:.0f}GB   תפוס: {used:.1f}GB   "
+          f"מקום ל-{int(room / per_item)} פריטים נוספים")
+    print(f"קצב נמדד: כ-2 דקות לפריט → "
+          f"כ-{int(room / per_item) * 2 / 60:.0f} שעות עד מילוי התקציב\n")
 
     done = warmed = skipped = failed = 0
     streak = 0                      # כשלים רצופים
@@ -127,6 +162,10 @@ def main():
     try:
         for chat, msg, qs in items:
             done += 1
+            if cache_gb() >= BUDGET_GB:
+                print(f"\n✅ התקציב ({BUDGET_GB:.0f}GB) מלא — עוצר. "
+                      f"ראש הקטלוג מחומם, וזה מה שנצפה בפועל.")
+                break
             if free_gb() < MIN_FREE_GB:
                 print(f"\n⚠️  נשארו פחות מ-{MIN_FREE_GB}GB פנויים — עוצר.")
                 break
