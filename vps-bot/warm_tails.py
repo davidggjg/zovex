@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-# מחמם מראש את מטמון הזנבות (ה-moov) של הקטלוג.
+# מחמם מראש את קצוות הקבצים (ראש + moov) של כל הקטלוג.
 #
 # למה: ב-MP4 שלא עבר faststart טבלת האינדקס (moov) יושבת בסוף הקובץ, וכל נגן
 # חייב לקרוא אותה לפני הפריים הראשון. נמדד על השרת הזה: 16MB מתחילת הקובץ
@@ -11,9 +11,17 @@
 # אנחנו מבקשים אותו מראש, בשקט, בשביל כל הקטלוג — ואז כל סרט נפתח מיד, לכל
 # הצופים, גם אחרי restart.
 #
-# איך: מספיק לבקש בייט *אחד* בתוך אזור הזנב. זה מפעיל את המילוי ברקע על כל
-# האזור. בקשה לטווח המלא הייתה גורמת לשרת למשוך את הזנב פעמיים (פעם למילוי
+# איך: מספיק לבקש בייט *אחד* בתוך האזור. זה מפעיל את המילוי ברקע על כל
+# האזור. בקשה לטווח המלא הייתה גורמת לשרת למשוך את האזור פעמיים (פעם למילוי
 # ופעם לתשובה) — כלומר להכפיל את העומס על טלגרם בלי שום תועלת.
+#
+# [head_too] מחמם גם את *ראש* הקובץ, לא רק את הזנב. נמדד מול הקובץ החי:
+# בקשה קרה ל-2MB הראשונים נמשכה 62 שניות, ואחרי חימום אותם 2MB חזרו ב-0.04
+# עד 0.24 שניות — פי 250 עד פי 1500. כלומר גם כשה-moov כבר במטמון, הצופה
+# הראשון עוד חיכה לראש. ממילא ה-/stream מטמן גם ראש (EDGE_HEAD) וגם זנב
+# (EDGE_TAIL), ובקשת הגודל שאנחנו עושים (bytes=0-0) כבר מפעילה את מילוי
+# הראש — רק שקודם דילגנו על פריט ברגע שהזנב שלו היה קיים, ולכן ראש לא
+# מחומם נשאר לא מחומם לנצח.
 #
 # בטוח: קורא בלבד, לא נוגע בקוד ולא בשירות. עוצר לבד אם הדיסק מתמלא. אפשר
 # לעצור אותו ב-Ctrl+C בכל רגע ולהריץ שוב — הוא מדלג על מה שכבר מחומם.
@@ -76,8 +84,8 @@ def catalog():
     return out
 
 
-def tail_path(chat, msg):
-    return os.path.join(CACHE, f"{chat}_{msg}.tail")
+def region_path(chat, msg, which):
+    return os.path.join(CACHE, f"{chat}_{msg}.{which}")
 
 
 def size_of(path):
@@ -109,7 +117,7 @@ def main():
     if LIMIT:
         items = items[:LIMIT]
     print(f"קטלוג: {len(items)} פריטים   מטמון: {CACHE}   פנוי: {free_gb():.1f}GB")
-    print(f"אזור זנב: {EDGE_TAIL // 1024 // 1024}MB   השהיה בין פריטים: {PAUSE}s\n")
+    print(f"ראש: {EDGE_HEAD // 1024 // 1024}MB · זנב: {EDGE_TAIL // 1024 // 1024}MB   השהיה בין פריטים: {PAUSE}s\n")
 
     done = warmed = skipped = failed = 0
     streak = 0                      # כשלים רצופים
@@ -120,12 +128,14 @@ def main():
             if free_gb() < MIN_FREE_GB:
                 print(f"\n⚠️  נשארו פחות מ-{MIN_FREE_GB}GB פנויים — עוצר.")
                 break
-            tp = tail_path(chat, msg)
-            if os.path.exists(tp):
+            path = f"/stream/{chat}/{msg}{qs}"
+            hp = region_path(chat, msg, "head")
+            tp = region_path(chat, msg, "tail")
+            if os.path.exists(hp) and os.path.exists(tp):
                 skipped += 1
                 continue
-            path = f"/stream/{chat}/{msg}{qs}"
             try:
+                # bytes=0-0 מחזיר את הגודל *וגם* מפעיל את מילוי הראש.
                 sz = size_of(path)
             except Exception as e:
                 failed += 1
@@ -140,34 +150,47 @@ def main():
             if sz <= EDGE_HEAD + EDGE_TAIL:
                 skipped += 1          # קטן מדי — השרת לא מטמן קצוות כאלה
                 continue
-            # בייט אחד בתוך אזור הזנב — מפעיל את המילוי ברקע על כל האזור.
+
+            # שני האזורים, בזה אחר זה. הראש כבר בדרך מבקשת הגודל, ולכן
+            # ה"טריגר" שלו הוא בדיוק הבקשה הזו — אין צורך בשנייה.
             t0 = time.time()
-            try:
-                with get(path, f"bytes={sz - 1}-{sz - 1}", timeout=120) as r:
-                    r.read()
-            except Exception as e:
-                failed += 1
-                print(f"[{done}/{len(items)}] {chat}/{msg}  טריגר נכשל: "
-                      f"{type(e).__name__}")
-                streak += 1
-                if streak >= FAIL_STREAK:
-                    print(f"\n⚠️  {streak} כשלים רצופים — השרת כנראה לא מגיש. עוצר.")
+            ok = True
+            for which, want, trigger in (
+                    ("head", hp, None),
+                    ("tail", tp, f"bytes={sz - 1}-{sz - 1}")):
+                if os.path.exists(want):
+                    continue
+                if trigger:
+                    try:
+                        with get(path, trigger, timeout=120) as r:
+                            r.read()
+                    except Exception as e:
+                        ok = False
+                        print(f"[{done}/{len(items)}] {chat}/{msg}  טריגר "
+                              f"{which} נכשל: {type(e).__name__}")
+                        break
+                # ממתינים שהמילוי יסתיים, כדי לא להציף את הבוטים בעשרות
+                # מילויים מקבילים. זה גם מה שמקצב אותנו לפי מהירות טלגרם.
+                deadline = time.time() + FILL_TIMEOUT
+                while time.time() < deadline and not os.path.exists(want):
+                    time.sleep(2)
+                if not os.path.exists(want):
+                    ok = False
+                    print(f"[{done}/{len(items)}] {chat}/{msg}  ⏱️  {which} לא "
+                          f"הסתיים תוך {FILL_TIMEOUT:.0f}s")
                     break
-                time.sleep(PAUSE)       # גם כישלון חייב להאט
-                continue
-            # ממתינים שהמילוי יסתיים, כדי לא להציף את הבוטים בעשרות
-            # מילויים מקבילים. זה גם מה שמקצב אותנו לפי מהירות טלגרם.
-            while time.time() - t0 < FILL_TIMEOUT and not os.path.exists(tp):
-                time.sleep(2)
-            if os.path.exists(tp):
+
+            if ok:
                 warmed += 1
                 streak = 0
                 print(f"[{done}/{len(items)}] {chat}/{msg}  ✅ "
                       f"{time.time() - t0:.0f}s   (חומם {warmed})")
             else:
                 failed += 1
-                print(f"[{done}/{len(items)}] {chat}/{msg}  ⏱️  לא הסתיים תוך "
-                      f"{FILL_TIMEOUT:.0f}s")
+                streak += 1
+                if streak >= FAIL_STREAK:
+                    print(f"\n⚠️  {streak} כשלים רצופים — השרת כנראה לא מגיש. עוצר.")
+                    break
             time.sleep(PAUSE)
     except KeyboardInterrupt:
         print("\nנעצר ידנית.")
