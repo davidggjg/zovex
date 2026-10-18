@@ -83,19 +83,39 @@ systemctl restart "$SVC" || { rm -f "$DROPIN"; systemctl daemon-reload
 wait_up || { rm -f "$DROPIN"; systemctl daemon-reload; systemctl restart "$SVC"
              die "/ping לא ענה תוך 4 דקות — בוטל.  journalctl -u $SVC -n 80"; }
 
-echo "③ מפנה את המטמון הישן"
+# ── אימות שהשירות באמת קלט ─────────────────────────────────────────────────
+# drop-in שנכתב אינו drop-in שנקלט: יחידה עם EnvironmentFile שנטען אחריו,
+# שם קובץ שגוי, או daemon-reload שלא נתפס — כולם נראים כמו הצלחה מבחוץ.
+# הערך היחיד שאפשר לסמוך עליו הוא זה שבתהליך *החי*, ולכן קוראים אותו משם.
+# בלי האימות הזה הצעד הבא (מחיקת המטמון) נעשה על סמך הנחה.
+echo "③ מאמת שהשירות קלט את הערכים"
+PID=$(systemctl show -p MainPID --value "$SVC")
+[ -n "$PID" ] && [ "$PID" != "0" ] || die "אין PID לשירות — משהו לא עלה"
+GOT=$(tr '\0' '\n' < "/proc/$PID/environ" 2>/dev/null | grep -c "^STREAM_EDGE_\(HEAD\|TAIL\)=$SIZE$")
+if [ "$GOT" != "2" ]; then
+  tr '\0' '\n' < "/proc/$PID/environ" 2>/dev/null | grep "^STREAM_EDGE_" || echo "   (אין STREAM_EDGE_* בכלל)"
+  rm -f "$DROPIN"; systemctl daemon-reload; systemctl restart "$SVC"
+  die "השירות לא קלט את הערכים — בוטל, והמטמון *לא* נמחק. שלח לי את הפלט."
+fi
+echo "   ✓ ראש וזנב = $((SIZE / 1024 / 1024))MB בתהליך החי"
+
+echo "④ מפנה את המטמון הישן"
 # הקבצים הישנים הם 2MB ו-12MB. השרת בודק התאמת גודל מדויקת ולכן לא
 # יקרא אותם יותר — הם רק תופסים מקום עד שהפינוי יגיע אליהם.
 BEFORE=$(du -sh "$CACHE" 2>/dev/null | cut -f1)
 rm -f "$CACHE"/*.head "$CACHE"/*.tail 2>/dev/null
 echo "   היה $BEFORE, עכשיו $(du -sh "$CACHE" 2>/dev/null | cut -f1)"
 
-echo "④ מוריד את המחמם המתוקן"
+echo "⑤ מוריד את המחמם המתוקן"
 curl -fsSL "$RAW" -o "$DIR/warm_tails.py" || die "ההורדה נכשלה"
 
-echo "⑤ מחמם 20 פריטים, כדי שתראה את ההפרש"
+echo "⑥ מחמם 20 פריטים, כדי שתראה את ההפרש"
 echo
-cd "$DIR" && WARM_LIMIT=20 python3 -u warm_tails.py
+# המחמם קורא את STREAM_EDGE_* מהסביבה *שלו*, ולא מזו של השירות. בלי
+# הייצוא הזה הוא מדפיס 2MB/12MB ומחשב תקציב לפי ערכים שאינם נכונים —
+# החימום עצמו תקין (השרת קובע מה נטמן), אבל כל מה שעל המסך מטעה.
+cd "$DIR" && STREAM_EDGE_HEAD=$SIZE STREAM_EDGE_TAIL=$SIZE \
+  WARM_LIMIT=20 python3 -u warm_tails.py
 
 cat <<'EOF'
 
@@ -103,8 +123,9 @@ cat <<'EOF'
 בסיכום למעלה יש שתי שורות חדשות: גודל ה-moov הממוצע, וכמה משיכה
 נחסכה בזנבות שאיש לא היה קורא.
 
-להריץ על כל הקטלוג ברקע:
-  cd /opt/zovex-bot && nohup python3 -u warm_tails.py > /var/log/zovex-warm.log 2>&1 &
+להריץ על כל הקטלוג ברקע (עם אותם ערכים כמו השרת):
+  cd /opt/zovex-bot && STREAM_EDGE_HEAD=6291456 STREAM_EDGE_TAIL=6291456 \
+    nohup python3 -u warm_tails.py > /var/log/zovex-warm.log 2>&1 &
 
 לעקוב:   tail -f /var/log/zovex-warm.log
 לעצור:   pkill -f warm_tails.py
