@@ -26,9 +26,9 @@ function hueOf(seed) {
 
 export const AMBIENT_KEYFRAMES = `
 @keyframes zvDrift {
-  0%   { transform: translate3d(0,0,0) scale(1); }
-  50%  { transform: translate3d(3%, -2%, 0) scale(1.12); }
-  100% { transform: translate3d(0,0,0) scale(1); }
+  0%   { transform: translate3d(0,0,0); }
+  50%  { transform: translate3d(4%, -3%, 0); }
+  100% { transform: translate3d(0,0,0); }
 }
 @media (prefers-reduced-motion: reduce) {
   .zv-blob { animation: none !important; }
@@ -49,10 +49,17 @@ export default function AmbientGlow({ seed }) {
     // כמעט נעלם. בדסקטופ אותו ערך הוא 1123 פיקסלים ונראה מצוין, ולכן
     // הכיול המקורי (שנעשה בפרופורציות של מסך רחב) הטעה. vmax נמדד לפי
     // הצלע הגדולה, כך שהאפקט זהה בשני המקרים.
+    // [perf_cap] תקרה בפיקסלים לצד הכתם.
+    //
+    // vmax לבדו אומר שהעלות גדלה עם המסך: בטלפון 390x844 הכתם הוא 692
+    // פיקסלים, ובמסך 1920 הוא 1574 — פי חמישה שטח, וכפול שלושה כתמים.
+    // זה מה שהפך את האתר לכבד דווקא במחשב. התקרה שומרת על אותו מראה
+    // (הכתם ממילא גדול מהמסך) ומנתקת את העלות מגודל הצג.
+    const SZ = (v) => `min(${v}vmax, 1100px)`;
     return [
-      { hue: h, top: "-18%", left: "-14%", size: "82vmax", a: 0.66, dur: "26s", delay: "0s" },
-      { hue: (h + 38) % 360, top: "22%", left: "44%", size: "74vmax", a: 0.54, dur: "34s", delay: "-8s" },
-      { hue: (h + 320) % 360, top: "62%", left: "-6%", size: "78vmax", a: 0.48, dur: "30s", delay: "-16s" },
+      { hue: h, top: "-18%", left: "-14%", size: SZ(82), a: 0.66, dur: "26s", delay: "0s" },
+      { hue: (h + 38) % 360, top: "22%", left: "44%", size: SZ(74), a: 0.54, dur: "34s", delay: "-8s" },
+      { hue: (h + 320) % 360, top: "62%", left: "-6%", size: SZ(78), a: 0.48, dur: "30s", delay: "-16s" },
     ];
   }, [seed]);
 
@@ -83,8 +90,22 @@ export default function AmbientGlow({ seed }) {
             borderRadius: "50%",
             // saturation גבוה עם lightness נמוך: אחרי הטשטוש זה נקרא כזוהר
             // עמוק ולא כפסטל שטוח.
-            background: `radial-gradient(circle at 50% 50%, hsla(${b.hue},72%,48%,${b.a}) 0%, hsla(${b.hue},72%,34%,0) 68%)`,
-            filter: "blur(72px)",
+            // [perf_noblur] אין כאן filter: blur.
+            //
+            // היה כאן blur(72px) מעל ה-gradient, ובמסך מחשב זה אומר
+            // לטשטש משטח של 1574x1574 שלוש פעמים — ומחדש בכל פריים של
+            // האנימציה, בלי הפסקה. זה היה רוב העומס, והוא נגבה גם כשלא
+            // עושים כלום: גלילה נתקעת והווידאו מגמגם.
+            //
+            // ויזואלית הוא כמעט לא תרם. radial-gradient שדועך לאלפא 0
+            // הוא כבר כתם רך; טשטוש על גבי דעיכה רכה אינו מוסיף רכות,
+            // רק עלות. הדעיכה הורחבה מעט (68%→78%) ובאמצע נוספה נקודת
+            // ביניים, וזה מחזיר בדיוק את אותה תחושה בחינם.
+            background:
+              `radial-gradient(circle at 50% 50%,` +
+              ` hsla(${b.hue},72%,48%,${b.a}) 0%,` +
+              ` hsla(${b.hue},72%,42%,${(b.a * 0.45).toFixed(3)}) 38%,` +
+              ` hsla(${b.hue},72%,34%,0) 78%)`,
             animation: `zvDrift ${b.dur} ease-in-out ${b.delay} infinite`,
             willChange: "transform",
             // המעבר בין קטגוריות מתרכך, אחרת הצבע קופץ בבת אחת
