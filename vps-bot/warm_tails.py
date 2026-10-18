@@ -15,6 +15,19 @@
 # האזור. בקשה לטווח המלא הייתה גורמת לשרת למשוך את האזור פעמיים (פעם למילוי
 # ופעם לתשובה) — כלומר להכפיל את העומס על טלגרם בלי שום תועלת.
 #
+# [moov_aware] מחמם רק את מה שהנגן באמת קורא.
+#
+# נמדד על 29 פריטים פרושים על הקטלוג (moov_probe.py): ב-21 מהם (72%)
+# טבלת האינדקס יושבת ב*התחלה* ולא בסוף — הקבצים כבר עברו faststart.
+# עבורם 12MB הזנב הם בזבוז מוחלט: שום נגן לא קורא משם לעולם, והמחמם
+# הכריח את השרת למשוך אותם בכוח על כל פריט.
+#
+# ובאותם קבצים ה-moov מגיע עד 5.46MB, בעוד הראש שנטמן הוא 2MB — כלומר
+# דווקא מה שצריך נחתך באמצע ונמשך קר שוב ושוב.
+#
+# לכן המחמם מאתר קודם את ה-moov (שלוש קריאות של 16 בתים, ראה find_moov),
+# ורק אז מחליט: ראש תמיד, זנב רק כשה-moov באמת בסוף.
+#
 # [head_too] מחמם גם את *ראש* הקובץ, לא רק את הזנב. נמדד מול הקובץ החי:
 # בקשה קרה ל-2MB הראשונים נמשכה 62 שניות, ואחרי חימום אותם 2MB חזרו ב-0.04
 # עד 0.24 שניות — פי 250 עד פי 1500. כלומר גם כשה-moov כבר במטמון, הצופה
@@ -42,6 +55,7 @@
 import os
 import re
 import shutil
+import struct
 import sys
 import time
 import urllib.error
@@ -67,6 +81,10 @@ EDGE_HEAD = int(os.environ.get("STREAM_EDGE_HEAD", str(2 * 1024 * 1024)))
 EDGE_TAIL = int(os.environ.get("STREAM_EDGE_TAIL", str(12 * 1024 * 1024)))
 
 STREAM_RE = re.compile(r"/stream/(-?\d+)/(\d+)(\?[^\"'\s<>\\]*)?")
+
+# תקרת קפיצות באיתור ה-moov. קובץ תקין מגיע אליו תוך 2-4 קופסאות; התקרה
+# מגינה מקובץ פגום שמדווח גודל 0.
+MAX_HOPS = 12
 
 
 def get(path, rng=None, timeout=60):
@@ -113,6 +131,46 @@ def catalog():
     return out
 
 
+def find_moov(path):
+    """(היסט, אורך, בסוף?) של ה-moov, או None אם אינו MP4 או שלא נמצא.
+
+    MP4 הוא שרשרת קופסאות שכל אחת פותחת ב-8 בתים: גודל וסוג. לכן קריאה
+    של 16 בתים בתחילת קופסה מספיקה כדי לקפוץ לבאה — שלוש קריאות זעירות
+    במקום לנחש חלון מהסוף.
+    """
+    off, total, hops = 0, None, 0
+    while hops < MAX_HOPS:
+        hops += 1
+        try:
+            with get(path, f"bytes={off}-{off + 15}", timeout=90) as r:
+                head = r.read()
+                cr = r.headers.get("Content-Range", "")
+        except Exception:
+            return None
+        if total is None:
+            total = int(cr.rsplit("/", 1)[1]) if "/" in cr else 0
+        if len(head) < 8:
+            return None
+        size = struct.unpack_from(">I", head, 0)[0]
+        typ = head[4:8]
+        hdr = 8
+        if size == 1:                       # גודל 64 ביט
+            if len(head) < 16:
+                return None
+            size = struct.unpack_from(">Q", head, 8)[0]
+            hdr = 16
+        elif size == 0:                     # "עד סוף הקובץ"
+            size = total - off
+        if typ == b"moov":
+            return off, size, (off + size == total)
+        if size < hdr:
+            return None
+        off += size
+        if total and off >= total:
+            return None
+    return None
+
+
 def region_path(chat, msg, which):
     return os.path.join(CACHE, f"{chat}_{msg}.{which}")
 
@@ -157,6 +215,8 @@ def main():
           f"כ-{int(room / per_item) * 2 / 60:.0f} שעות עד מילוי התקציב\n")
 
     done = warmed = skipped = failed = 0
+    moov_mb = moov_seen = 0.0        # לסיכום: כמה moov באמת שוקל
+    saved_mb = 0.0                   # זנבות שלא נמשכו כי ה-moov בהתחלה
     streak = 0                      # כשלים רצופים
     t_start = time.time()
     try:
@@ -172,6 +232,10 @@ def main():
             path = f"/stream/{chat}/{msg}{qs}"
             hp = region_path(chat, msg, "head")
             tp = region_path(chat, msg, "tail")
+            # דילוג מהיר: ראש קיים *וגם* זנב קיים — בוודאות אין מה
+            # לעשות. פריט faststart שחומם בגרסה הזו לא ייצור קובץ זנב,
+            # ולכן הוא לא ייתפס כאן; find_moov למטה יגלה שאין צורך בו,
+            # וזו קריאה אחת זולה ולא 12MB.
             if os.path.exists(hp) and os.path.exists(tp):
                 skipped += 1
                 continue
@@ -192,13 +256,30 @@ def main():
                 skipped += 1          # קטן מדי — השרת לא מטמן קצוות כאלה
                 continue
 
-            # שני האזורים, בזה אחר זה. הראש כבר בדרך מבקשת הגודל, ולכן
-            # ה"טריגר" שלו הוא בדיוק הבקשה הזו — אין צורך בשנייה.
+            # ── מה באמת צריך לחמם ────────────────────────────────────
+            #
+            # איתור ה-moov עולה שלוש קריאות של 16 בתים, ומונע משיכה של
+            # 12MB שאיש לא יקרא. ב-72% מהקטלוג ה-moov בהתחלה, ושם הזנב
+            # מיותר לחלוטין.
+            #
+            # כשלא מצאנו moov (לא MP4 — mkv, avi), חוזרים להתנהגות
+            # הישנה: שני הקצוות. עדיף לשלם מיותר מאשר לא לחמם בכלל.
+            mv = find_moov(path)
+            need_tail = True
+            if mv is not None:
+                _, mv_len, mv_at_end = mv
+                need_tail = mv_at_end
+                moov_mb += mv_len / 1024 / 1024
+                moov_seen += 1
+                if not mv_at_end:
+                    saved_mb += EDGE_TAIL / 1024 / 1024
+
             t0 = time.time()
             ok = True
-            for which, want, trigger in (
-                    ("head", hp, None),
-                    ("tail", tp, f"bytes={sz - 1}-{sz - 1}")):
+            plan = [("head", hp, None)]
+            if need_tail:
+                plan.append(("tail", tp, f"bytes={sz - 1}-{sz - 1}"))
+            for which, want, trigger in plan:
                 if os.path.exists(want):
                     continue
                 if trigger:
@@ -239,6 +320,10 @@ def main():
     mins = (time.time() - t_start) / 60
     print(f"\nסיכום: חוממו {warmed} · דולגו {skipped} · נכשלו {failed} · "
           f"מתוך {done} שנבדקו, ב-{mins:.0f} דקות")
+    if moov_seen:
+        print(f"moov: ממוצע {moov_mb / moov_seen:.2f}MB על {int(moov_seen)} פריטים")
+    if saved_mb:
+        print(f"נחסכו {saved_mb / 1024:.1f}GB משיכה — זנבות שאיש לא היה קורא")
     print(f"פנוי בדיסק: {free_gb():.1f}GB")
     if failed:
         print("כשלונות הם בדרך כלל בוטים חנוקים — הרצה חוזרת תתפוס אותם.")
