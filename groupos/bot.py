@@ -619,8 +619,18 @@ async def on_group_message(msg: Message):
         return
     await sync_admins(msg.chat.id)
     _anon_admin(msg)
-    # מנהלים ומנחים פטורים מהכול — כלל שכל בוט ניהול מקיים
+    text_early = (msg.text or msg.caption or "")
+    # מנהלים ומנחים פטורים מהכול — כלל שכל בוט ניהול מקיים.
+    #
+    # **חוץ מתוכן אסור, במצב אגרסיבי.** זה גם מה שהסתיר את הבאג
+    # המקורי: המודעה שנבדקה בקבוצה נשלחה על ידי הבעלים עצמו, ולכן
+    # שום מנגנון לא נגע בה ונראה היה שהזיהוי לא עובד. חשבון מנהל
+    # שנפרץ שולח בדיוק את אותו ספאם, ומנהל אינו נחסם — ההודעה
+    # נמחקת והבעלים מקבל התראה בפרטי.
     if perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["moderator"]:
+        if db.get(msg.chat.id, "strict", "1") == "1" \
+                and db.get(msg.chat.id, "spamguard", "1") == "1":
+            await _spam_check(msg, text_early, lang_of(msg), staff=True)
         return
 
     text = (msg.text or msg.caption or "")
@@ -913,7 +923,27 @@ async def _notify_admins(chat_id: int, text: str) -> int:
     return got
 
 
-async def _ban_spammer(msg: Message, why: str, lg: str) -> None:
+async def _ban_sender_chat(msg: Message) -> bool:
+    """ספאם שנשלח **בשם ערוץ** ולא בשם אדם.
+
+    ‎ban_chat_member‎ על ‎from_user‎ כאן חוסם את הבוט האנונימי של
+    טלגרם ולא את מי ששלח. הערוץ נחסם בקריאה אחרת לגמרי, ובלעדיה
+    אותו ערוץ ממשיך לשלוח אחרי כל מחיקה."""
+    sc = msg.sender_chat
+    if sc is None or sc.id == msg.chat.id:
+        return False
+    try:
+        await bot.ban_chat_sender_chat(msg.chat.id, sc.id)
+    except TelegramAPIError as e:
+        log.warning("חסימת ערוץ %s ב-%s נכשלה: %s", sc.id, msg.chat.id, e)
+        return False
+    audit.log(msg.chat.id, "channel.ban", target_id=sc.id, actor_kind="bot",
+              reason="spam", source="policy", severity="high")
+    return True
+
+
+async def _ban_spammer(msg: Message, why: str, lg: str, *,
+                       staff: bool = False) -> None:
     """המסלול הנפרד: מחיקה, חסימה, יומן, ודיווח למנהלים בפרטי.
 
     לא עובר דרך ‎policy‎ ולא מחכה לצבירת אותות. פרסום תוכן מיני של
@@ -922,10 +952,14 @@ async def _ban_spammer(msg: Message, why: str, lg: str) -> None:
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
     audit.log(msg.chat.id, "spam.illegal", target_id=msg.from_user.id,
-              actor_kind="bot", reason=why, after="ban", source="policy",
+              actor_kind="bot", reason=why,
+              after="delete" if staff else "ban", source="policy",
               severity="critical")
-    await apply_action(msg.chat.id, msg.from_user.id, "ban", None, why, None)
-    rep.penalize(msg.chat.id, msg.from_user.id, 5.0)
+    if not await _ban_sender_chat(msg) and not staff:
+        await apply_action(msg.chat.id, msg.from_user.id, "ban", None, why,
+                           None)
+    if not staff:
+        rep.penalize(msg.chat.id, msg.from_user.id, 5.0)
     repeats.forget(spamguard.fingerprint(
         text=(msg.text or msg.caption or ""), media_id=_media_uid(msg)))
     await _notify_admins(
@@ -937,7 +971,8 @@ async def _ban_spammer(msg: Message, why: str, lg: str) -> None:
                    clean_after=clean_delay(msg.chat.id) or None)
 
 
-async def _spam_check(msg: Message, text: str, lg: str) -> bool:
+async def _spam_check(msg: Message, text: str, lg: str, *,
+                      staff: bool = False) -> bool:
     """תוכן חריג: מודעה אסורה, או אותו תוכן שוב ושוב. ‎True‎ = טופל.
 
     שני הפערים שהתגלו בשטח מטופלים כאן יחד: הכיתוב של תמונה נבדק
@@ -952,11 +987,21 @@ async def _spam_check(msg: Message, text: str, lg: str) -> bool:
             and spamguard.talks_not_sells(text):
         verdict = None
     if verdict is not None and verdict.escalate:
-        await _ban_spammer(msg, f"{verdict.kind}:{verdict.detail}", lg)
+        await _ban_spammer(msg, f"{verdict.kind}:{verdict.detail}", lg,
+                           staff=staff)
         return True
+    if staff:
+        # מנהל: רק המסלול המיידי. אין אזהרות, אין ציונים, אין השתקה
+        # של מי שמנהל את הקבוצה בגלל שתי הודעות דומות.
+        return False
     uid = _media_uid(msg)
     dup = None
-    if text.strip() or uid:
+    # מדבקה שנשלחה פעמיים ו"חחח" אינם הפצה. סף החזרתיות ירד לשתיים
+    # כדי לתפוס את גל הספאם, ובדיוק לכן הוא חייב לא לחול על מה
+    # שאנשים חוזרים עליו בשיחה רגילה.
+    chatty = (msg.sticker is not None or msg.video_note is not None
+              or (not uid and len(text.strip()) < 12))
+    if (text.strip() or uid) and not chatty:
         rp = repeats.note(spamguard.fingerprint(text=text, media_id=uid),
                           msg.chat.id, msg.from_user.id)
         dup = spamguard.repeat_verdict(
@@ -970,6 +1015,10 @@ async def _spam_check(msg: Message, text: str, lg: str) -> bool:
     for v in (verdict, dup):
         if v is not None:
             sigs.append(policy.Signal("content", v.kind, v.weight, v.detail))
+    # הודעה **מועברת** שכבר נראית כמו ספאם היא הצורה שבה הגל הזה
+    # מתפשט: אף אחד לא מקליד אותה מחדש, מעבירים אותה הלאה.
+    if msg.forward_origin is not None and (verdict or dup):
+        sigs.append(policy.Signal("behavior", "forwarded", 0.3))
     d = policy.decide(sigs, policy.rules_for(db, msg.chat.id))
     if not d:
         return False

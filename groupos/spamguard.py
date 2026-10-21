@@ -187,9 +187,19 @@ def classify(text: str) -> Optional[Verdict]:
         # זה המסלול הנפרד. לא צובר, לא ממתין, לא תלוי בסף של הקבוצה.
         why = ",".join((sexual[:2] + minor[:2])) + (" age" if age else "")
         return Verdict("illegal", ILLEGAL, why[:48], escalate=True)
-    if sexual and bait:
-        return Verdict("adult", ADULT + (0.1 if obf else 0.0),
-                       ",".join(sexual[:2] + bait[:1])[:48])
+    if sexual and (bait or solicits(text)):
+        # **מודעה** מינית, לא אזכור: מונח מיני יחד עם קישור, תיוג או
+        # קריאה לפעולה. זה מה שמוצף כל עשר שניות בטלגרם, ולכן הוא
+        # מסלול מהיר ולא ציון שמצטבר — חשבון שמפרסם כך אינו חבר
+        # בקבוצה שצריך להזהיר, הוא ספאמר שצריך לצאת.
+        #
+        # הבלם היחיד: שיחה על יצירה שיש בה מונח מיני אבל אין בה שום
+        # הזמנה לשום מקום. "סדרה על תעשיית הפורנו" אינה מודעה.
+        hard = solicits(text) or not media_context(text)
+        return Verdict("adult_ad" if hard else "adult",
+                       0.95 if hard else ADULT,
+                       ",".join(sexual[:2] + bait[:1])[:48],
+                       escalate=hard)
     if sexual:
         return Verdict("adult", ADULT - 0.2 + (0.1 if obf else 0.0),
                        ",".join(sexual[:2])[:48])
@@ -255,17 +265,21 @@ class RepeatTracker:
 
 
 # סף החזרתיות שמעליו זו כבר הפצה ולא שיחה
-DUP_COUNT = 3           # אותו תוכן, מאותו משתמש, בחלון
+DUP_COUNT = 2           # אותו תוכן, מאותו משתמש, בחלון
 DUP_CHATS = 2           # אותו תוכן בכמה קבוצות — חמור יותר
 
 
 def repeat_verdict(rep: Repeat, *, count: int = DUP_COUNT,
                    chats: int = DUP_CHATS) -> Optional[Verdict]:
-    """חזרתיות כאות, עם משקל שעולה עם הפיזור ולא רק עם הכמות."""
+    """חזרתיות כאות, עם משקל שעולה עם הפיזור ולא רק עם הכמות.
+
+    הסף ירד לשתיים: בהצפה של היום אותה תמונה נשלחת כל עשר שניות,
+    וסף של שלוש פירושו שתי הודעות שעוברות בכל סבב. השלישית כבר
+    שוקלת כמעט כמו הפצה."""
     if rep.chats >= chats and rep.count >= 2:
-        return Verdict("dup", 0.75, f"x{rep.count}/{rep.chats} chats")
+        return Verdict("dup", 0.85, f"x{rep.count}/{rep.chats} chats")
     if rep.count >= count:
-        w = min(0.45 + 0.1 * (rep.count - count), 0.8)
+        w = min(0.55 + 0.15 * (rep.count - count), 0.9)
         return Verdict("dup", w, f"x{rep.count}")
     return None
 

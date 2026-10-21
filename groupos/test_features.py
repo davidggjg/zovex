@@ -187,8 +187,13 @@ def test_spamguard() -> None:
     ok("והיא מסלול נפרד", v is not None and v.escalate and v.weight >= 0.95)
 
     v2 = sg.classify("100% RAW SCANDAL IS FULLY UNLOCKED — GRAB THIS LINK")
-    ok("פיתיון מיני נתפס", v2 is not None and v2.kind == "adult", str(v2))
-    ok("ואינו מסלים לבד", v2 is not None and not v2.escalate)
+    # מודעה, לא אזכור: מונח מיני יחד עם קריאה לפעולה. זה מה שמוצף
+    # בטלגרם כל עשר שניות, ולכן הוא מסלול מהיר ולא ציון מצטבר.
+    ok("פיתיון מיני נתפס", v2 is not None and v2.kind == "adult_ad", str(v2))
+    ok("והוא מסלים", v2 is not None and v2.escalate)
+    v3 = sg.classify("יש פה הרבה דיבורים על סקס לאחרונה")
+    ok("אזכור בלי הזמנה אינו מסלים",
+       v3 is not None and not v3.escalate, str(v3))
 
     for clean in ("שלום לכולם, מה המצב?",
                   "Hey, photos from the kids school trip are up",
@@ -288,12 +293,35 @@ def test_media_talk() -> None:
            f"ctx={sg.media_context(t)} cta={sg.solicits(t)}")
 
 
+def test_aggressive() -> None:
+    section("מצב אגרסיבי")
+    ad = "💋 100% RAW SCANDAL IS FULLY UNLOCKED ✅ GRAB THIS LINK NOW"
+    v = sg.classify(ad)
+    ok("מודעה מינית עם קריאה לפעולה מסלימה",
+       v is not None and v.kind == "adult_ad" and v.escalate, str(v))
+    v2 = sg.classify("Hot nudes, join now @somechannel")
+    ok("גם תיוג נחשב הזמנה",
+       v2 is not None and v2.escalate, str(v2))
+    v3 = sg.classify("מישהו ראה את The Deuce? סדרה על תעשיית הפורנו")
+    ok("שיחה על יצירה אינה מסלימה",
+       v3 is not None and not v3.escalate, str(v3))
+
+    tr = sg.RepeatTracker(window=60)
+    tr.note("fp", -100, 7, now=1.0)
+    second = tr.note("fp", -100, 7, now=11.0)
+    ok("פעם שנייה כבר חזרתיות", sg.repeat_verdict(second) is not None,
+       str(sg.repeat_verdict(second)))
+    ok("ומשקלה גבוה מספיק למחיקה",
+       sg.repeat_verdict(second).weight >= 0.5)
+
+
 def main() -> int:
     test_zmanim()
     test_hours()
     test_spamguard()
     test_prompts()
     test_media_talk()
+    test_aggressive()
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
     if FAILURES:

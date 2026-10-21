@@ -279,6 +279,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("privatenotes", "0", "sw.privatenotes"),
     ("lockwarns",    "0", "sw.lockwarns"),
     ("spamguard",    "1", "sw.spamguard"),
+    ("strict",       "1", "sw.strict"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )

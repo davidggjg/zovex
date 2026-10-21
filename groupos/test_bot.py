@@ -1073,7 +1073,11 @@ async def test_vision():
         await B.on_group_message(photo_msg("UC", mid=203))
         ok("תמונה תמימה לא נמחקת", 203 not in DELETED, str(DELETED))
 
-        # ‎decide‎ מחזיר החלטה תמיד; ‎action="none"‎ אינו מחיקה
+        # ‎decide‎ מחזיר החלטה תמיד; ‎action="none"‎ אינו מחיקה.
+        # המוניטין מתאפס כאן בכוונה: אחרי שתי אכיפות קודמות באותה
+        # בדיקה, "אות חלש" כבר אינו חלש — העבר של המשתמש מצטרף אליו,
+        # וזה נכון. מה שנבדק כאן הוא האות לבדו.
+        B.rep.reset(CHAT, USER)
         VERDICT["json"] = ('{"category":"advertising","confidence":0.2,'
                            '"reason":"קידום"}')
         await B.on_group_message(photo_msg("UD", mid=204))
@@ -1547,6 +1551,65 @@ async def test_button_editing():
     ok("כל שדה נגיש בכפתור", not missing, str(missing))
 
 
+
+async def test_aggressive_paths():
+    """מצב אגרסיבי: מנהל שמפרסם, וערוץ ששולח בשם עצמו."""
+    section("מצב אגרסיבי")
+    DELETED.clear()
+    banned = []
+    chans = []
+    real_apply = B.apply_action
+    real_ban_chat = B.bot.ban_chat_sender_chat if hasattr(
+        B.bot, "ban_chat_sender_chat") else None
+
+    async def fake_apply(chat_id, user_id, kind, duration, reason, by,
+                         source="policy"):
+        banned.append((user_id, kind))
+        return True
+
+    async def fake_ban_chat(chat_id, sender_chat_id):
+        chans.append(sender_chat_id)
+
+    B.apply_action = fake_apply
+    B.bot.ban_chat_sender_chat = fake_ban_chat
+    try:
+        ad = "💋 RAW SCANDAL FULLY UNLOCKED ✅ GRAB THIS LINK https://x.example"
+        # מנהל: ההודעה נמחקת, הוא אינו נחסם
+        B.perms.set_role(CHAT, ADM, "owner")
+        await B.on_group_message(msg(ad, uid=ADM, mid=9960))
+        ok("מודעה של מנהל נמחקת", 9960 in DELETED, str(DELETED[-3:]))
+        ok("ומנהל אינו נחסם", not banned, str(banned))
+
+        # חבר רגיל: נחסם
+        B.perms.set_role(CHAT, BAD, "member")
+        await B.on_group_message(msg(ad, uid=BAD, mid=9961))
+        ok("מודעה של חבר — חסימה", 9961 in DELETED and banned
+           and banned[-1][1] == "ban", str(banned))
+
+        # ערוץ ששולח בשם עצמו: נחסם הערוץ ולא הבוט האנונימי
+        banned.clear()
+        chan_msg = Message(
+            message_id=9962, date=dt.datetime.now(),
+            chat=Chat(id=CHAT, type="supergroup", title="קבוצה"),
+            from_user=User(id=136817688, is_bot=True, first_name="Channel"),
+            sender_chat=Chat(id=-1009999, type="channel", title="ערוץ"),
+            text=ad)
+        await B.on_group_message(chan_msg)
+        ok("ערוץ ספאם נחסם כערוץ", chans == [-1009999], str(chans))
+        ok("ולא נחסם משתמש", not banned, str(banned))
+
+        # מצב אגרסיבי כבוי — מנהל שוב פטור
+        DELETED.clear()
+        B.db.set(CHAT, "strict", "0")
+        await B.on_group_message(msg(ad, uid=ADM, mid=9963))
+        ok("בלי מצב אגרסיבי מנהל פטור", 9963 not in DELETED, str(DELETED))
+    finally:
+        B.db.set(CHAT, "strict", "1")
+        B.apply_action = real_apply
+        if real_ban_chat is not None:
+            B.bot.ban_chat_sender_chat = real_ban_chat
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -1580,6 +1643,7 @@ async def main() -> int:
     await test_usage_names_the_typed_command()
     await test_new_features()
     await test_button_editing()
+    await test_aggressive_paths()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
