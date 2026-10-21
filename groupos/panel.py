@@ -1,0 +1,757 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""panel — מסכי הניהול בצ'אט הפרטי.
+
+## הבקשה שמאחורי המודול
+
+"אני לא אוהב שצריך לשלוח פקודות בתוך הקבוצה בשביל לנעול אותה."
+
+צודק. Rose בנויה סביב פקודות, וזה מציף את הקבוצה בהודעות ניהול שכל
+החברים רואים. כאן: הניהול בפרטי, והקבוצה נשארת נקייה.
+
+## למה המודול הזה לא מכיר את aiogram
+
+כל מסך מחזיר ‎Screen(text, rows)‎ — טקסט ורשימת שורות כפתורים כנתונים
+פשוטים. המתאם הופך אותם למקלדת של טלגרם. כך אפשר לבדוק את כל עץ
+הניווט בלי בוט: שכל כפתור מוביל למסך קיים, שאין מסך ללא חזרה, ושאף
+מזהה כפתור אינו חורג מ-64 בייט — המגבלה של טלגרם, שנשברת בשקט.
+
+## מבנה מזהה הכפתור
+
+    g:<chat_id>:<מסך>:<ארגומנט>
+
+‎chat_id‎ נישא בכל לחיצה כי לצ'אט הפרטי אין הקשר של קבוצה. זה גם מה
+שמאפשר לנהל עשר קבוצות מאותו חלון בלי "להתחבר" לאחת מהן.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+import i18n
+from locks import ACTIONS, GROUPS, LOCK_TYPES
+from moderation import format_policy, parse_policy
+
+CB_MAX = 64          # מגבלת טלגרם למזהה כפתור, בבייטים
+
+def action_label(action: str, lang: str = i18n.DEFAULT) -> str:
+    return i18n.t(f"act.{action}", lang)
+
+
+# שמות הפעולות בעברית, לשימושים שאין להם הקשר של שפה
+ACTION_LABEL = {a: action_label(a) for a in ACTIONS}
+# מחזור הלחיצות על נעילה. לא כל שמונה הפעולות — ארבע שמכסות כמעט הכול,
+# והשאר נגישות מהמסך המפורט. תפריט עם שמונה אפשרויות לכל נעילה הוא
+# בדיוק סוג העומס שהפאנל הזה נועד למנוע.
+CYCLE = ("off", "delete", "warn", "mute", "ban")
+
+
+@dataclass
+class Screen:
+    text: str
+    rows: list[list[tuple[str, str]]] = field(default_factory=list)
+
+    def all_callbacks(self) -> list[str]:
+        return [cb for row in self.rows for _, cb in row]
+
+
+def cb(chat_id: int, screen: str, arg: str = "") -> str:
+    s = f"g:{chat_id}:{screen}" + (f":{arg}" if arg else "")
+    if len(s.encode()) > CB_MAX:
+        raise ValueError(f"מזהה כפתור ארוך מדי ({len(s.encode())}): {s}")
+    return s
+
+
+def parse_cb(data: str) -> Optional[tuple[int, str, str]]:
+    parts = data.split(":", 3)
+    if len(parts) < 3 or parts[0] != "g":
+        return None
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        return None
+    return chat_id, parts[2], (parts[3] if len(parts) > 3 else "")
+
+
+# ── המסכים ────────────────────────────────────────────────────────────────
+def head(key: str, lang: str, extra: str = "") -> str:
+    """כותרת מסך. הודגשה במקום אחד, כדי שהתרגום יישאר טקסט נקי."""
+    return f"<b>{i18n.t(key, lang)}{extra}</b>"
+
+
+def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT) -> Screen:
+    """רשימת הקבוצות שהמשתמש מנהל."""
+    title = head("home.title", lang)
+    if not groups:
+        return Screen(f"{title}\n\n" + i18n.t("home.empty", lang))
+    rows = [[(f"👥 {name[:28]}", cb(cid, "main"))] for cid, name in groups]
+    return Screen(
+        f"{title}\n\n" + i18n.t("home.groups", lang, n=len(groups)) + "\n"
+        + i18n.t("home.hint", lang), rows)
+
+
+def main_menu(chat_id: int, title: str, stats: dict,
+              lang: str = i18n.DEFAULT) -> Screen:
+    txt = f"<b>{title}</b>\n\n" + "\n".join(
+        f"{i18n.t(key, lang)}: {stats.get(field, 0)}"
+        for key, field in (("stat.members", "members"),
+                           ("stat.locks", "locks"),
+                           ("stat.warns", "warns"),
+                           ("stat.today", "actions_today")))
+    rows = [
+        [(i18n.t("menu.locks", lang), cb(chat_id, "locks")),
+         (i18n.t("menu.warns", lang), cb(chat_id, "warns"))],
+        [(i18n.t("menu.audit", lang), cb(chat_id, "audit")),
+         (i18n.t("menu.settings", lang), cb(chat_id, "settings"))],
+        # הכפתור אומר מה הלחיצה **תעשה**, לא מה המצב. כפתור שכתוב בו
+        # "השבתה" בקבוצה שכבר מושבתת נראה כמו כפתור שלא עבד.
+        [(i18n.t("menu.lockdown_on" if stats.get("lockdown")
+                 else "menu.lockdown", lang), cb(chat_id, "ldown")),
+         (i18n.t("sw.title", lang), cb(chat_id, "sws"))],
+        [(i18n.t("menu.security", lang), cb(chat_id, "sec")),
+         (i18n.t("menu.language", lang), cb(chat_id, "lang"))],
+        # נעילת שבת מוצעת בכפתור רק למי שבחר עברית. היא אינה חסומה
+        # לאחרים — ‎/shabbat on‎ עובדת בכל שפה — אבל כפתור שמרבית
+        # הקבוצות בעולם לא ישתמשו בו הוא רעש בתפריט.
+        ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
+         + ([(i18n.t("menu.shabbat", lang), cb(chat_id, "shab"))]
+            if lang == "he" else [])),
+        [(i18n.t("menu.groups", lang), "g:0:home")],
+    ]
+    return Screen(txt, rows)
+
+
+def locks_groups(chat_id: int, counts: dict[str, int],
+                 lang: str = i18n.DEFAULT) -> Screen:
+    txt = head("locks.title", lang) + "\n\n" + i18n.t("locks.hint", lang)
+    rows = [[(f"{i18n.t('group.' + g, lang)} ({counts.get(g, 0)})",
+              cb(chat_id, "lockg", g))] for g in GROUPS]
+    # נעילה או פתיחה של הכול בלחיצה אחת. כשמתחיל ספאם, אף אחד לא
+    # עובר על 32 כפתורים אחד-אחד.
+    rows.append([(i18n.t("locks.all_on", lang), cb(chat_id, "lockall", "on")),
+                 (i18n.t("locks.all_off", lang), cb(chat_id, "lockall", "off"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(txt, rows)
+
+
+def locks_in_group(chat_id: int, group: str,
+                   items: list[tuple[str, str]],
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """items: [(מפתח, פעולה נוכחית)]. השם מתורגם כאן ולא מגיע מוכן."""
+    txt = (head("locks.title", lang, f" · {i18n.t('group.' + group, lang)}")
+           + "\n\n" + i18n.t("locks.cycle", lang))
+    rows = []
+    for key, action in items:
+        mark = "🔴" if action != "off" else "⚪"
+        suffix = f" · {action_label(action, lang)}" if action != "off" else ""
+        rows.append([(f"{mark} {i18n.t('lock.' + key, lang)}{suffix}",
+                      cb(chat_id, "lock", key))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "locks"))])
+    return Screen(txt, rows)
+
+
+def warns_screen(chat_id: int, policy_raw: str,
+                 top: list[tuple[int, str, int]],
+                 lang: str = i18n.DEFAULT) -> Screen:
+    pol = parse_policy(policy_raw)
+    txt = (head("warns.title", lang) + "\n\n"
+           + i18n.t("warns.policy", lang) + "\n"
+           + (format_policy(pol) or i18n.t("warns.none", lang)) + "\n")
+    if top:
+        txt += "\n" + i18n.t("warns.top", lang) + "\n" + "\n".join(
+            f"• {name} — {n}" for _, name, n in top)
+    rows = [
+        [("3 · 5 · 7", cb(chat_id, "wpol", "a")),
+         ("2 · 4 · 6", cb(chat_id, "wpol", "b")),
+         (i18n.t("warns.preset_c", lang), cb(chat_id, "wpol", "c"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
+    ]
+    return Screen(txt, rows)
+
+
+WARN_PRESETS = {
+    "a": "3:mute:3600,5:mute:86400,7:ban:0",
+    "b": "2:mute:1800,4:mute:86400,6:ban:0",
+    "c": "",
+}
+
+
+def audit_screen(chat_id: int, rows_data: list[dict], fmt_time,
+                 lang: str = i18n.DEFAULT) -> Screen:
+    if not rows_data:
+        txt = head("audit.empty", lang) + "\n\n" + i18n.t("audit.none", lang)
+    else:
+        txt = head("audit.title", lang) + "\n\n" + "\n".join(
+            f"<code>{fmt_time(r['ts'])}</code> {r['action']}"
+            + (f" ← {r['target_id']}" if r["target_id"] else "")
+            for r in rows_data)
+    return Screen(txt, [[(i18n.t("menu.back", lang), cb(chat_id, "main"))]])
+
+
+def settings_screen(chat_id: int, current: dict,
+                    lang: str = i18n.DEFAULT) -> Screen:
+    clean = current.get("autoclean", "30")
+    silent = current.get("silent", "1") == "1"
+    on, off = i18n.t("settings.on", lang), i18n.t("settings.off", lang)
+    txt = (head("settings.title", lang) + "\n\n"
+           + i18n.t("settings.clean_help", lang) + "\n\n"
+           + i18n.t("settings.silent_help", lang))
+    clean_txt = (i18n.t("settings.seconds", lang, n=clean)
+                 if clean != "0" else off)
+    rows = [
+        [(f"{i18n.t('settings.clean', lang)}: {clean_txt}",
+          cb(chat_id, "clean"))],
+        [(f"{i18n.t('settings.silent', lang)}: {on if silent else off}",
+          cb(chat_id, "silent"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
+    ]
+    return Screen(txt, rows)
+
+
+CLEAN_CYCLE = ("0", "10", "30", "60", "300")
+
+
+def next_in_cycle(cycle: tuple, current: str) -> str:
+    try:
+        return cycle[(cycle.index(current) + 1) % len(cycle)]
+    except ValueError:
+        return cycle[0]
+
+
+def language_screen(chat_id: int, current: str) -> Screen:
+    """בורר השפה. סימון על הנוכחית, כי בלעדיו אי אפשר לדעת מה פעיל.
+
+    המסך הזה נכתב תמיד בשפה הנוכחית — אחרת מי שבחר שפה שאינו מבין
+    נשאר בלי דרך חזרה."""
+    txt = (head("lang.title", current) + "\n\n"
+           + i18n.t("lang.hint", current))
+    rows, line = [], []
+    for code, name in i18n.available():
+        mark = "● " if code == current else ""
+        line.append((f"{mark}{name}", cb(chat_id, "setlang", code)))
+        if len(line) == 3:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", current), cb(chat_id, "main"))])
+    return Screen(txt, rows)
+
+
+def welcome_screen() -> Screen:
+    """המסך הראשון שמשתמש חדש רואה — בחירת שפה.
+
+    הוא מוצג לפני כל טקסט אחר, ולכן אי אפשר לכתוב אותו בשפה אחת:
+    השורה העליונה היא שם השפה בשפה עצמה. מי שלא קרא עברית מימיו
+    עדיין מזהה את "English" או "العربية" ברשימה."""
+    rows, line = [], []
+    for code, name in i18n.available():
+        line.append((name, cb(0, "pick", code)))
+        if len(line) == 3:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    return Screen("<b>GroupOS</b>\n\n🌐 Choose your language", rows)
+
+
+# ── המתגים ────────────────────────────────────────────────────────────────
+# כל הגדרה של כן/לא במקום אחד. (מפתח, ברירת מחדל, מפתח תרגום)
+#
+# הבעיה שזה פותר: ‎/lockdown‎ בלי ארגומנט היה **מחליף** מצב. מנהל שלא
+# זכר איפה הוא עומד לחץ פעמיים וחזר בדיוק לאותו מקום, ונראה היה
+# שפקודת הכיבוי "לא נלחצה". פקודה לעולם אינה מחליפה בעיוורון: היא
+# מציגה מצב ונותנת שני כפתורים.
+SWITCHES: tuple[tuple[str, str, str], ...] = (
+    ("captcha",      "0", "sec.captcha"),
+    ("flood",        "1", "sec.flood"),
+    ("antiraid",     "1", "sec.antiraid"),
+    ("reports",      "1", "sec.reports"),
+    ("ai",           "0", "sec.ai"),
+    ("aivision",     "0", "sw.aivision"),
+    ("aivoice",      "0", "sw.aivoice"),
+    ("adminpriv",    "1", "sw.adminpriv"),
+    ("silent",       "1", "settings.silent"),
+    ("cleanservice", "0", "cmd.cleanservice"),
+    ("xp",           "1", "sw.xp"),
+    ("levelup",      "0", "sw.levelup"),
+    ("privatenotes", "0", "sw.privatenotes"),
+    ("lockwarns",    "0", "sw.lockwarns"),
+    ("spamguard",    "1", "sw.spamguard"),
+    ("welcome_on",   "1", "sw.welcome"),
+    ("goodbye_on",   "1", "sw.goodbye"),
+)
+
+SWITCH_KEYS = {k for k, _, _ in SWITCHES}
+SWITCH_DEFAULT = {k: d for k, d, _ in SWITCHES}
+
+
+def switches_screen(chat_id: int, values: dict,
+                    lang: str = i18n.DEFAULT) -> Screen:
+    """כל המתגים, כל אחד עם מצבו. לחיצה מחליפה — ורואים את התוצאה."""
+    rows, line = [], []
+    for key, default, label in SWITCHES:
+        on = values.get(key, default) == "1"
+        line.append((("🟢 " if on else "⚪ ") + i18n.t(label, lang),
+                     cb(chat_id, "sw", key)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(head("sw.title", lang) + "\n\n" + i18n.t("sw.hint", lang),
+                  rows)
+
+
+def switch_label(key: str, lang: str = i18n.DEFAULT) -> str:
+    """השם שהאדם רואה למתג — ולעולם לא המפתח שבמסד.
+
+    ‎/lockdown‎ ו-‎/emergency‎ אינם ב-‎SWITCHES‎ (הם לא מופיעים במסך
+    המתגים), ולכן החיפוש כאן נפל עליהם חזרה למפתח והכותרת שהוצגה
+    הייתה ‎<b>lockdown</b>‎ — שם משתנה באנגלית בתוך הודעה בעברית. יש
+    להם תווית מלאה תחת ‎cmd.<שם>‎, ולכן זה נופל לשם לפני שהוא מוותר.
+
+    שתי נפילות ולא אחת, כי ‎t()‎ מחזירה את המפתח עצמו כשאין תרגום —
+    כלומר "יש תשובה" אינו "יש תווית"."""
+    for k, _d, label in SWITCHES:
+        if k == key:
+            return i18n.t(label, lang)
+    alt = f"cmd.{key}"
+    return i18n.t(alt, lang) if i18n.t(alt, lang) != alt else key
+
+
+def switch_screen(chat_id: int, key: str, on: bool,
+                  lang: str = i18n.DEFAULT) -> Screen:
+    """מתג בודד, לתשובה על פקודה. שני כפתורים מפורשים ולא החלפה."""
+    txt = (f"<b>{switch_label(key, lang)}</b>\n"
+           + i18n.t("sw.now", lang,
+                    state=i18n.t("on" if on else "off", lang)))
+    rows = [[("✅ " + i18n.t("sw.enable", lang), cb(chat_id, "sw1", key)),
+             ("⛔ " + i18n.t("sw.disable", lang), cb(chat_id, "sw0", key))]]
+    return Screen(txt, rows)
+
+
+def security_screen(chat_id: int, rows_state: list[tuple[str, bool]],
+                    numbers: dict, lang: str = i18n.DEFAULT) -> Screen:
+    """מה מגן על הקבוצה עכשיו, בשורה אחת לכל הגנה.
+
+    מסך שמראה רק "הכול תקין" חסר ערך. כאן כל הגנה מופיעה עם מצבה,
+    גם כשהיא כבויה — כי הכבויה היא זו שמעניינת."""
+    on, off = i18n.t("on", lang), i18n.t("off", lang)
+    lines = [f"{'🟢' if v else '⚪'} {i18n.t(k, lang)} — {on if v else off}"
+             for k, v in rows_state]
+    txt = (head("sec.title", lang) + "\n\n" + "\n".join(lines) + "\n\n"
+           + i18n.t("sec.locks", lang, n=numbers.get("locks", 0)) + "\n"
+           + i18n.t("sec.blocks", lang, n=numbers.get("blocks", 0)) + "\n"
+           + i18n.t("sec.pending", lang, n=numbers.get("pending", 0)) + "\n"
+           + i18n.t("sec.events", lang, n=numbers.get("events", 0)))
+    rows = [
+        [(i18n.t("menu.emergency", lang), cb(chat_id, "emerg"))],
+        [(i18n.t("sec.captcha", lang) + ": "
+          + (on if numbers.get("captcha") else off), cb(chat_id, "tgl", "captcha")),
+         (i18n.t("sec.flood", lang) + ": "
+          + (on if numbers.get("flood") else off), cb(chat_id, "tgl", "flood"))],
+        [(i18n.t("sec.antiraid", lang) + ": "
+          + (on if numbers.get("antiraid") else off), cb(chat_id, "tgl", "antiraid")),
+         (i18n.t("sec.reports", lang) + ": "
+          + (on if numbers.get("reports") else off), cb(chat_id, "tgl", "reports"))],
+        [(i18n.t("sec.ai", lang) + ": "
+          + (on if numbers.get("ai") else off), cb(chat_id, "tgl", "ai"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
+    ]
+    return Screen(txt, rows)
+
+
+def captcha_screen(challenge, lang: str = i18n.DEFAULT) -> Screen:
+    """האתגר עצמו. הכפתורים נושאים את התשובה, ולכן הם קצרים בכוונה."""
+    secs = max(0, int(challenge.deadline - __import__("time").time()))
+    if challenge.kind == "button":
+        txt = i18n.t("captcha.prompt", lang, mention="{mention}", secs=secs)
+        rows = [[(i18n.t("captcha.button", lang),
+                  f"c:{challenge.user_id}:ok")]]
+        return Screen(txt, rows)
+    key = "captcha.prompt_math" if challenge.kind == "math" else "captcha.prompt_emoji"
+    txt = i18n.t(key, lang, mention="{mention}", q=challenge.prompt, secs=secs)
+    rows = [[(c, f"c:{challenge.user_id}:{c}") for c in challenge.choices]]
+    return Screen(txt, rows)
+
+
+# הפקודות: שם והרשאה. התיאור מגיע מ-i18n לפי מפתח ‎cmd.<שם>‎, כי אותה
+# רשימה מזינה גם את ‎/help‎ וגם את תפריט ✏️ של טלגרם — שם התיאור נרשם
+# בנפרד לכל שפה.
+COMMANDS: list[tuple[str, str]] = [
+    ("start",  ""),
+    ("help",   ""),
+    ("lock",     "locks.write"),
+    ("unlock",   "locks.write"),
+    ("locks",    "settings.read"),
+    ("lockdown", "chat.lockdown"),
+    ("say",      "chat.say"),
+    ("del",      "msg.delete"),
+    ("pin",      "chat.pin"),
+    ("unpin",    "chat.pin"),
+    ("ban",    "user.ban"),
+    ("unban",  "user.unban"),
+    ("mute",   "user.mute"),
+    ("unmute", "user.unmute"),
+    ("kick",   "user.kick"),
+    ("warn",   "user.warn"),
+    ("unwarn", "user.unwarn"),
+    ("warns",  "user.warn"),
+    ("purge",  "chat.purge"),
+    ("role",   "roles.assign"),
+    ("lang",   "settings.write"),
+    ("save",     "notes.write"),
+    ("get",      "notes.read"),
+    ("notes",    "notes.read"),
+    ("clear",    "notes.write"),
+    ("filter",   "filters.write"),
+    ("stop",     "filters.write"),
+    ("filters",  "settings.read"),
+    ("addblock", "blocklist.write"),
+    ("rmblock",  "blocklist.write"),
+    ("blocklist", "settings.read"),
+    ("rules",    ""),
+    ("setrules", "rules.write"),
+    ("welcome",  "welcome.write"),
+    ("goodbye",  "welcome.write"),
+    ("report",   ""),
+    ("reportlist", "reports.handle"),
+    ("resolve",  "reports.handle"),
+    ("dismiss",  "reports.handle"),
+    ("reopen",   "reports.handle"),
+    ("addcmd",   "customcmd.write"),
+    ("delcmd",   "customcmd.write"),
+    ("cmds",     ""),
+    ("info",     "settings.read"),
+    ("sban",     "user.ban"),
+    ("dban",     "user.ban"),
+    ("smute",    "user.mute"),
+    ("dmute",    "user.mute"),
+    ("skick",    "user.kick"),
+    ("dkick",    "user.kick"),
+    ("resetwarns", "user.unwarn"),
+    ("warnings", "user.warn"),
+    ("warnlimit", "settings.write"),
+    ("promote",  "roles.assign"),
+    ("demote",   "roles.assign"),
+    ("adminlist", ""),
+    ("roles",    "settings.read"),
+    ("link",     "settings.read"),
+    ("settitle", "settings.write"),
+    ("setdesc",  "settings.write"),
+    ("pinned",   ""),
+    ("setflood", "settings.write"),
+    ("floodaction", "settings.write"),
+    ("antiraid", "settings.write"),
+    ("reports",  "settings.write"),
+    ("silent",   "settings.write"),
+    ("adminpriv", "settings.write"),
+    ("setclean", "settings.write"),
+    ("cleanservice", "settings.write"),
+    ("allow",    "settings.write"),
+    ("unallow",  "settings.write"),
+    ("allowlist", "settings.read"),
+    ("stats",    "settings.read"),
+    ("actions",  "audit.read"),
+    ("locktypes", ""),
+    ("vars",     ""),
+    ("export",   "chat.export"),
+    ("import",   "chat.import"),
+    ("policy",   "settings.write"),
+    ("simulate", "settings.read"),
+    ("schedule",   "schedule.write"),
+    ("scheduled",  "settings.read"),
+    ("unschedule", "schedule.write"),
+    ("newfed",     "fed.manage"),
+    ("joinfed",    "fed.manage"),
+    ("leavefed",   "fed.manage"),
+    ("fedinfo",    "settings.read"),
+    ("fban",       "fed.ban"),
+    ("unfban",     "fed.ban"),
+    ("fedadmin",   "fed.manage"),
+    ("fedbans",    "settings.read"),
+    ("rep",        ""),
+    ("top",        ""),
+    ("disable",   "settings.write"),
+    ("enable",    "settings.write"),
+    ("disabled",  "settings.read"),
+    ("dwarn",     "user.warn"),
+    ("swarn",     "user.warn"),
+    ("spurge",    "chat.purge"),
+    ("purgefrom", "chat.purge"),
+    ("purgeto",   "chat.purge"),
+    ("stopall",   "filters.write"),
+    ("rmblockall", "blocklist.write"),
+    ("rmallowall", "settings.write"),
+    ("admincache", "settings.read"),
+    ("approve",   "settings.write"),
+    ("unapprove", "settings.write"),
+    ("approved",  "settings.read"),
+    ("setwelcome", "welcome.write"),
+    ("setgoodbye", "welcome.write"),
+    ("captchatime", "settings.write"),
+    ("captchatries", "settings.write"),
+    ("captchafail", "settings.write"),
+    ("blockmode",  "blocklist.write"),
+    ("setwarnmode", "settings.write"),
+    ("echo",      "chat.say"),
+    ("automation", "settings.read"),
+    ("addauto",    "automation.write"),
+    ("rmauto",     "automation.write"),
+    ("analytics",  "settings.read"),
+    ("broadcast",  "broadcast.send"),
+    ("linkcheck",  "settings.read"),
+    ("settings", "settings.read"),
+    ("shabbat",  "settings.write"),
+    ("hours",    "settings.write"),
+    ("ai",       "settings.write"),
+    ("aivision", "settings.write"),
+    ("aivoice",  "settings.write"),
+    ("aikeys",   "settings.read"),
+    ("emergency", "emergency.toggle"),
+    ("captcha",   "settings.write"),
+    ("security",  "settings.read"),
+    ("delall",    "chat.purge"),
+    ("id",     ""),
+    ("diag",   "settings.read"),
+    ("health", ""),
+]
+
+
+def command_list(lang: str = "he") -> list[tuple[str, str]]:
+    """‎[(שם, תיאור)]‎ בשפה המבוקשת, לרישום בתפריט של טלגרם."""
+    return [(name, i18n.t(f"cmd.{name}", lang)) for name, _ in COMMANDS]
+
+
+TG_LIMIT = 4096          # תקרת אורך הודעה בטלגרם
+HELP_CHUNK = 3500        # מתחת לתקרה, עם מרווח לתגיות ולתרגום ארוך
+
+
+def member_commands() -> list[str]:
+    """הפקודות שכל חבר יכול להריץ.
+
+    לא רק "בלי דרישת הרשאה": ‎/notes‎ ו-‎/get‎ דורשות ‎notes.read‎,
+    שמותרת לחבר רגיל. הגדרה לפי מחרוזת ריקה בלבד הייתה מסתירה מהחברים
+    שתי פקודות שהן דווקא בשבילם — ולכן ההגדרה היא **לפי הדירוג הנדרש**,
+    כמו שהבדיקה בפועל עושה.
+
+    זו הרשימה שנרשמת בתפריט ✏️ של טלגרם בקבוצות. עד כה נרשמו שם כל
+    132 הפקודות לכל אחד, כלומר כל חבר ראה את ‎/ban‎ ואת ‎/lockdown‎
+    בהשלמה האוטומטית — רשימה שרובה תיענה לו ב"אין לך הרשאה", וגם
+    חשיפה מיותרת של מה שאפשר לעשות בקבוצה."""
+    from permissions import PERMISSIONS, RANK
+    return [n for n, perm in COMMANDS
+            if not perm or PERMISSIONS.get(perm, 10 ** 9) <= RANK["member"]]
+
+
+def help_pages(lang: str = i18n.DEFAULT,
+               allowed: Optional[set] = None) -> list[str]:
+    """העזרה, מפוצלת להודעות שנכנסות בתקרת טלגרם.
+
+    עם 76 פקודות טקסט אחד חורג מ-4096 תווים, וטלגרם דוחה אותו —
+    כלומר ‎/help‎ פשוט לא היה עונה. הפיצול הוא לפי שורות שלמות, כי
+    חיתוך באמצע שורה קוטע פקודה.
+
+    ‎allowed‎ מסנן לפי מה שהפונה **יכול** להריץ. חבר רגיל שקיבל רשימה
+    של 132 פקודות קיבל בעיקר רשימה של דברים שייענו לו ב"אין לך
+    הרשאה" — וגם ידע בדיוק מה אפשר לעשות בקבוצה הזאת. ‎None‎ = הכול,
+    וזה מה שמשמש את התיעוד ואת הבדיקות."""
+    head_txt = head("help.title", lang)
+    rows = [f"/{name} — {i18n.t(f'cmd.{name}', lang)}"
+            + (f"  <i>{perm}</i>" if perm else "")
+            for name, perm in COMMANDS
+            if allowed is None or name in allowed]
+    hint = i18n.t("help.hint", lang)
+
+    pages, cur = [], [head_txt, ""]
+    size = len(head_txt) + 1
+    for line in rows:
+        if size + len(line) + 1 > HELP_CHUNK:
+            pages.append("\n".join(cur))
+            cur, size = [], 0
+        cur.append(line)
+        size += len(line) + 1
+    cur += ["", hint]
+    pages.append("\n".join(cur))
+    return [p for p in pages if p.strip()]
+
+
+# ── עזרה בקטגוריות ────────────────────────────────────────────────────────
+# 134 פקודות ברשימה אחת הן לא עזרה, הן מפרט. מי שרק רוצה להגדיר ברכה
+# צריך לקרוא 134 שורות כדי למצוא שורה אחת, וזה מה שגורם לאנשים לוותר.
+#
+# לכן: תפריט של קטגוריות עם כפתורים, ובכל קטגוריה רק הפקודות שלה ורק
+# אלה שהפונה יכול להריץ. הרשימה המלאה נשארת — היא מה שמזין את התפריט
+# של טלגרם ואת התיעוד — אבל היא אינה מה שמוצג לאדם.
+#
+# יש בדיקה שמאמתת שכל פקודה נמצאת בקטגוריה **אחת בדיוק**. בלי זה
+# פקודה חדשה נעלמת מהעזרה בלי שאף אחד ישים לב.
+HELP_CATS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("start", "🚀", ("start", "help", "settings", "diag", "id", "health",
+                     "lang", "info", "stats", "adminlist", "roles")),
+    ("greet", "👋", ("welcome", "goodbye", "setwelcome", "setgoodbye",
+                     "rules", "setrules", "vars", "cleanservice")),
+    ("mod", "🛡️", ("ban", "unban", "mute", "unmute", "kick", "sban", "dban",
+                   "smute", "dmute", "skick", "dkick", "del", "purge",
+                   "spurge", "purgefrom", "purgeto", "delall")),
+    ("warns", "⚠️", ("warn", "unwarn", "warns", "dwarn", "swarn",
+                     "warnings", "warnlimit", "resetwarns", "setwarnmode")),
+    ("locks", "🔒", ("lock", "unlock", "locks", "locktypes", "lockdown",
+                     "silent")),
+    ("filters", "🧹", ("filter", "stop", "stopall", "filters", "addblock",
+                       "rmblock", "blocklist", "rmblockall", "blockmode",
+                       "linkcheck")),
+    ("notes", "📝", ("save", "get", "notes", "clear", "addcmd", "delcmd",
+                     "cmds", "say", "echo", "pin", "unpin", "pinned")),
+    ("members", "👥", ("promote", "demote", "role", "approve", "unapprove",
+                       "approved", "allow", "unallow", "allowlist",
+                       "rmallowall", "admincache", "link", "settitle",
+                       "setdesc", "rep", "top")),
+    ("safety", "🚨", ("captcha", "captchatime", "captchatries",
+                      "captchafail", "setflood", "floodaction", "antiraid",
+                      "emergency", "security", "policy", "simulate")),
+    ("reports", "📣", ("report", "reports", "reportlist", "resolve",
+                       "dismiss", "reopen", "actions", "analytics")),
+    ("ai", "🤖", ("ai", "aivision", "aivoice", "aikeys")),
+    ("auto", "⏰", ("schedule", "scheduled", "unschedule", "automation",
+                   "addauto", "rmauto", "broadcast", "setclean",
+                   "adminpriv", "disable", "enable", "disabled",
+                   "shabbat", "hours")),
+    ("fed", "🌐", ("newfed", "joinfed", "leavefed", "fedinfo", "fban",
+                   "unfban", "fedadmin", "fedbans", "export", "import")),
+)
+
+CAT_OF = {name: key for key, _icon, names in HELP_CATS for name in names}
+
+
+def help_menu(lang: str = i18n.DEFAULT, allowed: Optional[set] = None,
+              deep: str = "") -> Screen:
+    """תפריט הקטגוריות. שתי עמודות, כי בטלפון שלוש נחתכות."""
+    rows, line = [], []
+    for key, icon, names in HELP_CATS:
+        shown = [n for n in names if allowed is None or n in allowed]
+        if not shown:
+            continue
+        line.append((f"{icon} {i18n.t('hcat.' + key, lang)}",
+                     cb(0, "hc", key)))
+        if len(line) == 2:
+            rows.append(line)
+            line = []
+    if line:
+        rows.append(line)
+    return Screen(i18n.t("help.menu", lang), rows)
+
+
+def help_category(key: str, lang: str = i18n.DEFAULT,
+                  allowed: Optional[set] = None) -> Optional[Screen]:
+    for k, icon, names in HELP_CATS:
+        if k != key:
+            continue
+        rows = [f"/{n} — {i18n.t('cmd.' + n, lang)}"
+                for n in names if allowed is None or n in allowed]
+        if not rows:
+            return None
+        txt = (f"{icon} <b>{i18n.t('hcat.' + key, lang)}</b>\n\n"
+               + "\n".join(rows))
+        return Screen(txt[:TG_LIMIT - 200],
+                      [[(i18n.t("menu.back", lang), cb(0, "help"))]])
+    return None
+
+
+def help_screen(lang: str = i18n.DEFAULT) -> Screen:
+    """העמוד הראשון בלבד. מי ששולח ‎/help‎ מקבל את כל העמודים."""
+    return Screen(help_pages(lang)[0])
+
+
+# ── שבת, חגים ושעות פתיחה ─────────────────────────────────────────────────
+# מחזורי הלחיצה. מספר חופשי נקבע בפקודה; הכפתור מכסה את מה שרוב
+# הקבוצות בוחרות, ושבעה ערכים הם עדיין לחיצה אחת ולא תפריט.
+BEFORE_CYCLE = ("0", "5", "10", "15", "20", "30", "40")
+AFTER_CYCLE = ("0", "5", "10", "15", "30", "60")
+NOTICE_CYCLE = ("0", "15", "30", "60", "120")
+HOUR_PRESETS = ("off", "closed", "08:00-23:00", "09:00-22:00",
+                "07:00-00:00", "22:00-06:00")
+
+
+def shabbat_screen(chat_id: int, cfg: dict,
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """נעילת שבת וחג: מצב, עיר, היסטים, והודעות.
+
+    הכול במסך אחד ובצ'אט הפרטי. מנהל שמכין את הקבוצה לשבת לא אמור
+    לשלוח ולו פקודה אחת בתוך הקבוצה."""
+    on = cfg.get("on")
+    state = i18n.t("on" if on else "off", lang)
+    nxt = cfg.get("next") or i18n.t("shab.unknown", lang)
+    txt = (head("shab.title", lang) + "\n\n"
+           + i18n.t("shab.hint", lang) + "\n\n"
+           + i18n.t("shab.state", lang, state=state) + "\n"
+           + i18n.t("shab.city", lang, city=cfg.get("city_name", "")) + "\n"
+           + i18n.t("shab.next", lang, when=nxt))
+    rows = [
+        [(("🟢 " if on else "⚪ ") + i18n.t("shab.toggle", lang),
+          cb(chat_id, "shabsw"))],
+        [(f"🏙 {cfg.get('city_name', '')}", cb(chat_id, "shabcity"))],
+        [(i18n.t("shab.before", lang, n=cfg.get("before", 0)),
+          cb(chat_id, "shabofs", "before")),
+         (i18n.t("shab.after", lang, n=cfg.get("after", 0)),
+          cb(chat_id, "shabofs", "after"))],
+        [(i18n.t("shab.notice", lang, n=cfg.get("notice", 0)),
+          cb(chat_id, "shabofs", "notice"))],
+        [(i18n.t("shab.preview", lang), cb(chat_id, "shabprev"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
+    ]
+    return Screen(txt, rows)
+
+
+def cities_screen(chat_id: int, current: str, city_list: list[tuple[str, str]],
+                  lang: str = i18n.DEFAULT) -> Screen:
+    """בורר עיר. העיר היא מה שקובע את הזמנים, ולכן היא בחירה מפורשת
+    ולא ניחוש מאזור הזמן של השרת."""
+    rows, line = [], []
+    for key, name in city_list:
+        mark = "● " if key == current else ""
+        line.append((f"{mark}{name}", cb(chat_id, "setcity", key)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "shab"))])
+    return Screen(head("shab.city_title", lang) + "\n\n"
+                  + i18n.t("shab.city_hint", lang), rows)
+
+
+def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT) -> Screen:
+    """לוח שבועי: יום אחד בשורה, לחיצה פותחת את היום.
+
+    לוח ריק אינו שגיאה — הוא המצב הרגיל של רוב הקבוצות, ולכן הוא
+    נאמר במילים ולא נשאר מסך ריק."""
+    txt = (head("hours.title", lang) + "\n\n" + i18n.t("hours.hint", lang)
+           + "\n\n" + (table or i18n.t("hours.none", lang)))
+    rows, line = [], []
+    for d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun"):
+        line.append((i18n.t(f"day.{d}", lang), cb(chat_id, "hrday", d)))
+        if len(line) == 4:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(txt, rows)
+
+
+def hours_day(chat_id: int, day: str, current: str,
+              lang: str = i18n.DEFAULT) -> Screen:
+    """יום אחד. ערכים מוכנים ללחיצה, וטווח חופשי דרך הפקודה שבטקסט."""
+    txt = (f"<b>{i18n.t(f'day.{day}', lang)}</b>\n\n"
+           + i18n.t("hours.now", lang, value=current or i18n.t("hours.off", lang))
+           + "\n\n" + i18n.t("hours.custom", lang, day=day))
+    rows, line = [], []
+    for val in HOUR_PRESETS:
+        label = (i18n.t("hours.off", lang) if val == "off"
+                 else i18n.t("hours.closed", lang) if val == "closed" else val)
+        mark = "● " if val == current else ""
+        line.append((mark + label, cb(chat_id, "hrset", f"{day}={val}")))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hours"))])
+    return Screen(txt, rows)

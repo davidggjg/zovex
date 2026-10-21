@@ -1,0 +1,4782 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""bot — מתאם טלגרם. השכבה הדקה היחידה שיודעת ש-aiogram קיים.
+
+## הכלל שמחזיק את כל הארכיטקטורה
+
+מודול אחד בלבד מייבא ‎aiogram‎ — זה. ‎db‎, ‎permissions‎, ‎audit‎, ‎locks‎,
+‎moderation‎, ‎panel‎ ו-‎ratelimit‎ אינם יודעים שקיים טלגרם, ולכן 134 בדיקות
+רצות בלי טוקן ובלי רשת.
+
+## הקבוצה נשארת נקייה
+
+שתי החלטות:
+
+  **ניהול בפרטי.** כל ההגדרות דרך ‎/start‎ בצ'אט הפרטי — רשימת הקבוצות,
+  ואז כפתורים. אין צורך לשלוח פקודות בקבוצה כדי לנעול אותה.
+
+  **ניקוי אוטומטי.** פקודה שכן נשלחת בקבוצה, והתשובה עליה, נמחקות אחרי
+  זמן שנקבע בהגדרות. כך הקבוצה לא מתמלאת בהודעות ניהול.
+
+## זיהוי מנהלים
+
+טלגרם היא מקור האמת. מי שמנהל בקבוצה מקבל ‎admin‎ אצלנו, והבעלים מקבל
+‎owner‎ — בסנכרון עצל ששומר תשובה לחמש דקות, כי ‎getChatAdministrators‎
+נספרת במכסת הבקשות.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import io
+import logging
+import os
+import re
+import sys
+import time
+from functools import wraps
+from typing import Callable, Optional
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (BufferedInputFile, BotCommand,
+                           BotCommandScopeAllChatAdministrators,
+                           BotCommandScopeAllGroupChats, BotCommandScopeChat,
+                           CallbackQuery, ChatMemberUpdated,
+                           ChatPermissions, InlineKeyboardButton,
+                           InlineKeyboardMarkup, Message)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import i18n                                     # noqa: E402
+import panel                                    # noqa: E402
+import ai as aimod                              # noqa: E402
+import aiclient                                 # noqa: E402
+import aikeys                                   # noqa: E402
+import backup                                   # noqa: E402
+import analytics                                # noqa: E402
+import automation as auto                       # noqa: E402
+import disabling                                # noqa: E402
+import linksec                                  # noqa: E402
+import policy                                   # noqa: E402
+import scheduler as schedmod                    # noqa: E402
+import captcha as cap                           # noqa: E402
+import customcmd                                # noqa: E402
+import emergency as emerg                       # noqa: E402
+import templates as tpl                         # noqa: E402
+import vision                                   # noqa: E402
+import zmanim                                   # noqa: E402
+import grouphours                               # noqa: E402
+import spamguard                                # noqa: E402
+import voice                                    # noqa: E402
+from allowlist import Allowlist                 # noqa: E402
+from antiflood import AntiFlood                 # noqa: E402
+from federation import Federations              # noqa: E402
+from reputation import Reputation               # noqa: E402
+from audit import Audit                         # noqa: E402
+from blocklist import Blocklist                 # noqa: E402
+from content import (Filters, Notes, GOODBYE_KEY, RULES_KEY,  # noqa: E402
+                     WELCOME_KEY, parse_buttons)
+from db import Db                               # noqa: E402
+from locks import ACTIONS, LOCK_TYPES, Locks    # noqa: E402
+from moderation import Moderation, parse_policy  # noqa: E402
+from permissions import Permissions, RANK       # noqa: E402
+from ratelimit import RateGuard                 # noqa: E402
+from reports import Reports                     # noqa: E402
+
+log = logging.getLogger("groupos")
+
+# 78 = EX_CONFIG. ה-unit מורה לא להפעיל מחדש עליו: טוקן שגוי לא יתקן
+# את עצמו בניסיון ה-12, הוא רק שורף מעבד.
+EX_CONFIG = 78
+
+TOKEN = os.environ.get("GROUPOS_TOKEN", "").strip()
+API_BASE = os.environ.get("GROUPOS_API_BASE", "").strip()
+
+db = Db()
+perms = Permissions(db)
+audit = Audit(db)
+locks = Locks(db)
+mod = Moderation(db, audit)
+notes = Notes(db)
+filters = Filters(db)
+blocks = Blocklist(db)
+flood = AntiFlood()
+pending = cap.Pending()
+allow = Allowlist(db)
+# המפתחות נטענים ממשתני סביבה בלבד ולעולם לא מהמסד: מסד עובר בגיבוי,
+# ו-.env עם הרשאות 600 לא.
+ai = aikeys.Providers.from_env()
+brain = aiclient.AIClient(ai)
+sched = schedmod.Scheduler(db)
+zman = zmanim.Zmanim()
+repeats = spamguard.RepeatTracker()
+feds = Federations(db)
+rep = Reputation(db)
+rpt = Reports(db)
+cmds = customcmd.CustomCmds(db)
+lang = i18n.Lang(db)
+guard = RateGuard()
+dp = Dispatcher()
+bot: Optional[Bot] = None
+
+GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
+_admin_cache: dict[int, tuple[float, dict[int, str]]] = {}
+# ברירות המחדל של הגנת ההצפה, לדריסה פר-קבוצה דרך settings
+AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 8, 10, 4, 8
+# תקרת מחיקה בפעולה אחת. כל מחיקה היא קריאת API, ומחיקה של 5000
+# הודעות תתקע את הבוט לכל הקבוצות האחרות לדקות.
+PURGE_MAX = 200
+ADMIN_TTL = 300
+
+
+# ── שליחה ומחיקה ───────────────────────────────────────────────────────────
+async def send(chat_id: int, text: str, *, is_group: bool = True,
+               markup=None, clean_after: Optional[int] = None) -> Optional[Message]:
+    """היציאה היחידה. עוברת דרך שומר המכסות תמיד."""
+    await guard.acquire(chat_id, is_group)
+    try:
+        m = await bot.send_message(chat_id, text, reply_markup=markup)
+    except TelegramRetryAfter as e:
+        guard.note_flood_wait(chat_id, float(e.retry_after))
+        log.warning("FloodWait %ss בצ'אט %s", e.retry_after, chat_id)
+        return None
+    except TelegramAPIError as e:
+        log.warning("שליחה נכשלה בצ'אט %s: %s", chat_id, e)
+        return None
+    if clean_after:
+        _schedule_delete(chat_id, m.message_id, clean_after)
+    return m
+
+
+def _schedule_delete(chat_id: int, message_id: int, after: int) -> None:
+    """מחיקה מושהית. משימת רקע ולא המתנה, כדי לא לתקוע את הטיפול בהודעה."""
+    async def run():
+        await asyncio.sleep(after)
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(chat_id, message_id)
+    task = asyncio.create_task(run())
+    _bg.add(task)
+    task.add_done_callback(_bg.discard)
+
+
+_bg: set = set()
+
+
+def clean_delay(chat_id: int) -> int:
+    try:
+        return int(db.get(chat_id, "autoclean", "30"))
+    except (TypeError, ValueError):
+        return 30
+
+
+def lang_of(msg: Message) -> str:
+    """השפה שנקבעה לצ'אט הזה, אחרת שפת הטלגרם של מי ששלח, אחרת אנגלית.
+
+    בצ'אט פרטי ‎chat_id‎ שווה ל-‎user_id‎, ולכן אותה שורה במסד מחזיקה
+    גם את שפת הקבוצה וגם את השפה שמשתמש בחר לעצמו."""
+    u = msg.from_user
+    return lang.resolve(msg.chat.id, u.language_code if u else None)
+
+
+def T(msg: Message, key: str, /, **kw) -> str:
+    """טקסט בשפת הצ'אט.
+
+    ‎/‎ אחרי ‎key‎ הוא תיקון של באג ולא קוסמטיקה: ‎T(msg, "set.done",
+    key=key)‎ נתן ‎TypeError: got multiple values for argument 'key'‎,
+    כי המפתח נקשר גם כארגומנט מקומי וגם כמציין מקום. זה הפיל בשקט את
+    כל המתגים עם ‎on‎/‎off‎ מפורש, את ‎/setclean‎, ‎/setflood‎,
+    ‎/floodaction‎, ‎/blockmode‎, ‎/captchatime‎ ואת ‎/aikeys‎ — הערך
+    נשמר, התשובה קרסה, והמנהל הסיק שהפקודה לא עובדת.
+
+    פרמטר שהוא **מיקומי בלבד** אינו יכול להתנגש עם שם של מציין מקום,
+    ולכן כל המשפחה הזאת נסגרת כאן ולא בשבעה מקומות בנפרד."""
+    return i18n.t(key, lang_of(msg), **kw)
+
+
+# פקודות שהתשובה עליהן שייכת לקבוצה גם כשמנהל שאל. אלה פקודות שכל
+# החברים אמורים לראות את התשובה שלהן — חוקים, רשימת מנהלים, הודעה
+# נעוצה. כל השאר הוא ניהול, ולניהול אין מה לעשות בשיחה של הקבוצה.
+GROUP_OUTPUT = frozenset({
+    "rules", "report", "cmds", "adminlist", "pinned", "locktypes",
+    "vars", "id", "health", "rep", "top",
+})
+
+
+async def _bad_html(msg: Message, text: str) -> bool:
+    """‎True‎ אם טלגרם תדחה את הטקסט — ואז נאמר למנהל למה, עכשיו.
+
+    בלי זה הטקסט נשמר בהצלחה, ובפעם הראשונה שהוא אמור להישלח טלגרם
+    דוחה את ההודעה כולה, ‎send_content‎ תופס את החריגה, רושם שורה ביומן
+    ומחזיר ‎None‎. כלומר ברכה עם ‎<‎ אחד מיותר "עובדת" בעיני המנהל
+    ופשוט לא נשלחת לעולם. זה בדיוק תסמין של "הפעלתי ברכה ולא קרה
+    כלום"."""
+    err = tpl.check_html(text)
+    if not err:
+        return False
+    await reply(msg, T(msg, "err.bad_html", why=err))
+    return True
+
+
+def _cmd_of(msg: Message) -> str:
+    t = msg.text or ""
+    if not t.startswith("/"):
+        return ""
+    return t[1:].split()[0].split("@")[0].lower() if len(t) > 1 else ""
+
+
+def _answer_in_private(msg: Message) -> bool:
+    """האם התשובה הזאת צריכה לצאת בפרטי ולא בקבוצה.
+
+    זה התיקון לתלונה "כמעט על הכל הוא מגיב זבל בתוך הקבוצה". פקודת
+    ניהול מייצרת שתי הודעות בקבוצה — הפקודה והתשובה — ובקבוצה פעילה
+    זה רוב הרעש. ניקוי אוטומטי מוחק אותן אחרי 30 שניות, אבל 30 שניות
+    של רעש כפול לכל פעולת ניהול הן עדיין רעש.
+
+    התשובה יוצאת לפרטי רק כשמתקיימים כל אלה:
+
+      * זו קבוצה, וזו פקודה
+      * הפקודה אינה מהרשימה שכולם אמורים לראות
+      * המתג ‎adminpriv‎ דלוק (ברירת מחדל)
+      * הפונה הוא לפחות עוזר — לחבר רגיל אין "ניהול בפרטי", ותשובה
+        שתיעלם לו לפרטי רק תבלבל
+
+    ואם השליחה לפרטי נכשלת — למשל מנהל שלא פתח שיחה עם הבוט — יש
+    נפילה אחורה לקבוצה. תשובה שנעלמת לגמרי גרועה מתשובה רועשת.
+    """
+    if msg.chat.type not in GROUP_TYPES or msg.from_user is None:
+        return False
+    name = _cmd_of(msg)
+    if not name or name in GROUP_OUTPUT:
+        return False
+    if db.get(msg.chat.id, "adminpriv", "1") != "1":
+        return False
+    return perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["helper"]
+
+
+async def reply(msg: Message, text: str, markup=None) -> Optional[Message]:
+    """תשובה בקבוצה שמנקה אחריה — גם את הפקודה עצמה."""
+    is_group = msg.chat.type in GROUP_TYPES
+    if _answer_in_private(msg):
+        # הפקודה עצמה נמחקת מיד ולא אחרי שנייה: אין סיבה שהקבוצה תראה
+        # אפילו לרגע פקודת ניהול שהתשובה עליה ממילא בפרטי.
+        _schedule_delete(msg.chat.id, msg.message_id, 0)
+        got = await send(msg.from_user.id, text, is_group=False,
+                         markup=markup)
+        if got is not None:
+            return got
+        log.info("adminpriv: לא הצלחתי לשלוח בפרטי ל-%s — עונה בקבוצה",
+                 msg.from_user.id)
+        # הסיבה היחידה שכמעט תמיד נכונה: המנהל מעולם לא פתח שיחה עם
+        # הבוט, וטלגרם אוסר לכתוב ראשון. כפתור שפותח את השיחה הוא
+        # ההפרש בין "הבוט לא עונה לי בפרטי" לבין לחיצה אחת — ולכן
+        # הוא כאן ולא בתיעוד.
+        markup = markup or _private_button(msg.chat.id, lang_of(msg))
+    delay = clean_delay(msg.chat.id) if is_group else 0
+    if delay:
+        _schedule_delete(msg.chat.id, msg.message_id, delay)
+    return await send(msg.chat.id, text, is_group=is_group, markup=markup,
+                      clean_after=delay or None)
+
+
+def _private_button(chat_id: int,
+                    lg: str) -> Optional[InlineKeyboardMarkup]:
+    """כפתור שפותח את הבוט בפרטי, על הקבוצה הזאת."""
+    if not _bot_username:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=i18n.t("btn.private", lg),
+        url=f"https://t.me/{_bot_username}?start=g{chat_id}")]])
+
+
+def kb(screen: panel.Screen) -> Optional[InlineKeyboardMarkup]:
+    if not screen.rows:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, callback_data=c) for t, c in row]
+        for row in screen.rows])
+
+
+# ── סנכרון מנהלים ──────────────────────────────────────────────────────────
+async def sync_admins(chat_id: int, force: bool = False) -> dict[int, str]:
+    hit = _admin_cache.get(chat_id)
+    if hit and not force and time.time() - hit[0] < ADMIN_TTL:
+        return hit[1]
+    out: dict[int, str] = {}
+    try:
+        for m in await bot.get_chat_administrators(chat_id):
+            # הבוט עצמו ובוטים אחרים אינם מנהלים אנושיים. בלי הסינון
+            # הזה "זוהו 2 מנהלים" בקבוצה שיש בה מנהל אחד — כי הבוט
+            # ספר את עצמו, וזה נראה כאילו אותו אדם נקלט פעמיים.
+            if m.user.is_bot:
+                continue
+            role = "owner" if m.status == ChatMemberStatus.CREATOR else "admin"
+            out[m.user.id] = role
+    except TelegramAPIError as e:
+        log.warning("שליפת מנהלים נכשלה ב-%s: %s", chat_id, e)
+        return hit[1] if hit else {}
+    for uid, role in out.items():
+        # לא דורסים תפקיד שהוענק אצלנו ידנית והוא גבוה מזה שטלגרם מדווחת
+        cur = perms.role_of(chat_id, uid)
+        if RANK.get(cur, 0) < RANK[role]:
+            perms.set_role(chat_id, uid, role)
+    _admin_cache[chat_id] = (time.time(), out)
+    return out
+
+
+# ההרשאות שהבוט צריך בקבוצה כדי לאכוף משהו. בלעדיהן הוא יזהה הפרה
+# ולא יוכל לעשות איתה כלום — ועדיף לומר את זה מראש מאשר להיכשל בשקט.
+NEEDED_RIGHTS = (
+    ("can_delete_messages", "right.delete"),
+    ("can_restrict_members", "right.restrict"),
+)
+_me_id: Optional[int] = None
+# שם המשתמש של הבוט, לקישור העומק מהקבוצה אל השיחה הפרטית. בלי זה
+# צריך להסביר לאדם "לך לבוט בפרטי ותשלח /start", וזה בדיוק הטרחה
+# שגורמת לאנשים לוותר.
+_bot_username: str = ""
+
+
+async def bot_rights(chat_id: int) -> tuple[bool, list[str]]:
+    """‎(האם מנהל, מפתחות ההרשאות החסרות)‎."""
+    if _me_id is None:
+        return False, [k for _, k in NEEDED_RIGHTS]
+    try:
+        m = await bot.get_chat_member(chat_id, _me_id)
+    except TelegramAPIError as e:
+        log.warning("בדיקת ההרשאות שלי ב-%s נכשלה: %s", chat_id, e)
+        return False, [k for _, k in NEEDED_RIGHTS]
+    if m.status != ChatMemberStatus.ADMINISTRATOR:
+        return False, [k for _, k in NEEDED_RIGHTS]
+    return True, [k for attr, k in NEEDED_RIGHTS if not getattr(m, attr, False)]
+
+
+async def group_status(chat_id: int, lg: str) -> str:
+    """מה חסר כדי שהבוט יעבוד כאן. תשובה אחת שאומרת את כל האמת."""
+    admins = await sync_admins(chat_id, force=True)
+    is_admin, missing = await bot_rights(chat_id)
+    if not is_admin:
+        return i18n.t("status.not_admin", lg, n=len(admins))
+    if missing:
+        return i18n.t("status.missing", lg,
+                      list="\n".join("• " + i18n.t(k, lg) for k in missing))
+    return i18n.t("status.ready", lg, n=len(admins))
+
+
+def my_groups(user_id: int) -> list[tuple[int, str]]:
+    return [(r["chat_id"], r["title"] or str(r["chat_id"])) for r in db.q(
+        """SELECT c.chat_id, c.title FROM chats c
+           JOIN members m ON m.chat_id = c.chat_id
+           WHERE m.user_id=? AND m.role IN ('owner','super_admin','admin')
+             AND c.active=1 ORDER BY c.title""", (user_id,))]
+
+
+# ── רישום ──────────────────────────────────────────────────────────────────
+def register_chat(chat) -> None:
+    """הקבוצה נכנסת למסד. נקרא גם מהודעה וגם מרגע ההוספה לקבוצה."""
+    db.run("""INSERT INTO chats (chat_id,title,username,type,added_at)
+              VALUES (?,?,?,?,?)
+              ON CONFLICT (chat_id) DO UPDATE SET
+                title=excluded.title, username=excluded.username, active=1""",
+           (chat.id, chat.title or "", chat.username, chat.type, time.time()))
+
+
+def typed(msg: Message) -> str:
+    """הפקודה שהאדם באמת הקליד — בלי הסלאש ובלי ‎@שם_הבוט‎.
+
+    פקודות רבות חולקות מטפל: ‎/unlock‎ עם ‎/lock‎, ‎/echo‎ עם ‎/say‎,
+    ‎/approve‎ עם ‎/allow‎, ‎/spurge‎ ו-‎/purgefrom‎ עם ‎/purge‎. הודעת
+    השימוש נכתבה פעם אחת עם שם קבוע, ולכן מי שהקליד ‎/unlock‎ קיבל
+    "שימוש: /lock" — הופנה לפקודה שלא ביקש, ובמקרה של ‎/spurge‎ גם
+    לתחביר שאינו עובד שם (‎/spurge 10‎ אינו עושה דבר; הוא דורש תשובה
+    להודעה).
+
+    ‎/lock@GroupOSbot‎ הוא מה שטלגרם שולחת בקבוצה שיש בה יותר מבוט
+    אחד, ולכן החיתוך ב-‎@‎ אינו קישוט."""
+    head = (msg.text or msg.caption or "").strip().split(maxsplit=1)
+    return head[0].lstrip("/").split("@")[0] if head else ""
+
+
+def touch(msg: Message) -> None:
+    now = time.time()
+    u = msg.from_user
+    if u is None:
+        return
+    db.run("""INSERT INTO users (user_id,username,first_name,language,is_bot,
+                                 first_seen,last_seen)
+              VALUES (?,?,?,?,?,?,?)
+              ON CONFLICT (user_id) DO UPDATE SET
+                username=excluded.username, first_name=excluded.first_name,
+                last_seen=excluded.last_seen""",
+           (u.id, u.username, u.first_name or "", u.language_code,
+            1 if u.is_bot else 0, now, now))
+    if msg.chat.type in GROUP_TYPES:
+        register_chat(msg.chat)
+        db.run("""INSERT INTO members (chat_id,user_id,msg_count,last_msg)
+                  VALUES (?,?,1,?)
+                  ON CONFLICT (chat_id,user_id) DO UPDATE SET
+                    msg_count=members.msg_count+1, last_msg=excluded.last_msg""",
+               (msg.chat.id, u.id, now))
+
+
+# מנהל אנונימי: טלגרם שולחת את ההודעה **בשם הקבוצה**, ולכן
+# ‎from_user‎ הוא ‎GroupAnonymousBot‎ ולא האדם. בלי טיפול מיוחד
+# ‎role_of‎ מחזיר "member" — וכל פקודת ניהול נענית ב"אין לך הרשאה",
+# למנהל שהוא לפעמים בעל הקבוצה עצמו. זה נראה כמו "בקושי הפקודות
+# עובדות", והסיבה היא סימון אחד בהגדרות הקבוצה.
+#
+# ‎sender_chat.id == chat.id‎ הוא ההוכחה: רק מנהל אנונימי **של הקבוצה
+# הזאת** יכול לשלוח כך. ערוץ מקושר שמפרסם בקבוצה שולח עם מזהה של
+# הערוץ, שאינו שווה למזהה הקבוצה, ולכן אינו נכנס לכאן.
+#
+# מה שאי אפשר לדעת הוא **איזה** מנהל זה, ולכן הדירוג הוא ‎admin‎ ולא
+# ‎owner‎: פעולות שמיועדות לבעלים בלבד — ייבוא, פדרציה, הפצה — עדיין
+# ידרשו מנהל מזוהה.
+ANON_BOT_ID = 1087968824
+
+
+def _anon_admin(msg: Message) -> bool:
+    sc = getattr(msg, "sender_chat", None)
+    if not (sc and msg.chat and sc.id == msg.chat.id):
+        return False
+    uid = msg.from_user.id if msg.from_user else ANON_BOT_ID
+    if perms.rank_of(msg.chat.id, uid) < RANK["admin"]:
+        perms.set_role(msg.chat.id, uid, "admin")
+        log.info("מנהל אנונימי ב-%s (%s) — דירוג admin", msg.chat.id, uid)
+    return True
+
+
+def needs(permission: str):
+    def deco(fn: Callable):
+        @wraps(fn)
+        async def inner(msg: Message, *a, **kw):
+            if msg.from_user is None:
+                return
+            _anon_admin(msg)
+            if msg.chat.type == ChatType.PRIVATE:
+                await reply(msg, T(msg, "err.group_only"))
+                return
+            admins = await sync_admins(msg.chat.id)
+            # פקודה מכובה בקבוצה — למעט למנהלים. פקודה שמנהל אינו
+            # יכול להריץ אינה "מכובה", היא שבורה.
+            name = (msg.text or "")[1:].split()[0].split("@")[0].lower() \
+                if (msg.text or "").startswith("/") else ""
+            if name and disabling.is_disabled(db, msg.chat.id, name) \
+                    and perms.rank_of(msg.chat.id,
+                                      msg.from_user.id) < RANK["moderator"]:
+                if disabling.delete_mode(db, msg.chat.id):
+                    with contextlib.suppress(TelegramAPIError):
+                        await bot.delete_message(msg.chat.id, msg.message_id)
+                return
+            d = perms.check(msg.chat.id, msg.from_user.id, permission,
+                            _target_of(msg))
+            if not d:
+                # אבחון ולא רק סירוב. "נדרש admin ומעלה" אינו מסביר
+                # למנהל אמיתי **למה** הבוט לא מזהה אותו, וזה בדיוק
+                # המצב שנראה כמו "בקושי הפקודות עובדות": אם שליפת
+                # המנהלים נכשלה, לבוט חסרות הרשאות ניהול בקבוצה.
+                hint = "" if admins else "\n\n" + T(msg, "err.no_admins")
+                await reply(msg, T(msg, "err.no_permission",
+                                   reason=d.reason) + hint)
+                audit.log(msg.chat.id, "permission.denied",
+                          actor_id=msg.from_user.id, reason=d.reason,
+                          after=permission, severity="low")
+                return
+            return await fn(msg, *a, **kw)
+        return inner
+    return deco
+
+
+def _target_of(msg: Message) -> Optional[int]:
+    """היעד: תשובה להודעה, ‎@שם‎ או מזהה מספרי בארגומנטים.
+
+    Rose מאפשרת את שלושתם, ובצדק: להשיב להודעה של מי שכבר עזב אי אפשר,
+    ומזהה מספרי הוא לעיתים הדרך היחידה לטפל בחשבון שנמחק."""
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        return msg.reply_to_message.from_user.id
+    # ‎text_mention‎ נושא את המזהה גם כשאין למשתמש username
+    for e in (msg.entities or []):
+        if e.type == "text_mention" and e.user:
+            return e.user.id
+    for tok in (msg.text or "").split()[1:]:
+        if tok.isdigit() or (tok.startswith("-") and tok[1:].isdigit()):
+            return int(tok)
+        if tok.startswith("@") and len(tok) > 1:
+            r = db.one("SELECT user_id FROM users WHERE lower(username)=?",
+                       (tok[1:].lower(),))
+            if r:
+                return r["user_id"]
+    return None
+
+
+def _named(msg: Message, uid: int) -> str:
+    r = db.one("SELECT first_name,username FROM users WHERE user_id=?", (uid,))
+    if r and r["username"]:
+        return "@" + r["username"]
+    return tpl.esc((r["first_name"] if r else "") or uid)
+
+
+def _describe(msg: Message) -> dict:
+    """ההודעה כמילון, לשכבת הנעילות — שאינה מכירה טלגרם."""
+    kind = None
+    for attr, name in (("photo", "photo"), ("video", "video"),
+                       ("animation", "gif"), ("sticker", "sticker"),
+                       ("audio", "audio"), ("voice", "voice"),
+                       ("video_note", "video_note"), ("document", "document"),
+                       ("poll", "poll"), ("game", "game"),
+                       ("contact", "contact"), ("location", "location")):
+        if getattr(msg, attr, None):
+            kind = name
+            break
+    st = msg.sticker
+    return {
+        "text": msg.text or "",
+        "caption": msg.caption or "",
+        "media_kind": kind,
+        "is_forward": bool(msg.forward_origin),
+        "via_bot": bool(msg.via_bot),
+        "has_buttons": bool(msg.reply_markup),
+        "is_premium_sticker": bool(st and getattr(st, "premium_animation", None)),
+        "media_group_id": msg.media_group_id,
+        "sender_chat": msg.sender_chat.id if msg.sender_chat else None,
+    }
+
+
+# ── אכיפה ──────────────────────────────────────────────────────────────────
+MUTED = ChatPermissions(can_send_messages=False, can_send_audios=False,
+                        can_send_documents=False, can_send_photos=False,
+                        can_send_videos=False, can_send_video_notes=False,
+                        can_send_voice_notes=False, can_send_polls=False,
+                        can_send_other_messages=False)
+UNMUTED = ChatPermissions(can_send_messages=True, can_send_audios=True,
+                          can_send_documents=True, can_send_photos=True,
+                          can_send_videos=True, can_send_video_notes=True,
+                          can_send_voice_notes=True, can_send_polls=True,
+                          can_send_other_messages=True,
+                          can_add_web_page_previews=True)
+
+# ביטול השבתה הוא **לא** ‎UNMUTED‎. ‎UNMUTED‎ נועד להחזרת משתמש יחיד, ואין
+# בו ‎can_invite_users‎, ‎can_pin_messages‎ ו-‎can_change_info‎ — שלוש
+# הרשאות שקיימות בקבוצה רגילה. שימוש בו כדי "לפתוח" קבוצה השאיר אותה
+# משותקת למחצה: כולם יכלו לכתוב, אף אחד לא יכול היה להזמין או לנעוץ.
+# זה מה שנראה כמו "השבית את הקבוצה בלי אפשרות להחזיר".
+OPEN_CHAT = ChatPermissions(can_send_messages=True, can_send_audios=True,
+                            can_send_documents=True, can_send_photos=True,
+                            can_send_videos=True, can_send_video_notes=True,
+                            can_send_voice_notes=True, can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_invite_users=True, can_pin_messages=True,
+                            can_change_info=False)
+
+
+async def apply_action(chat_id: int, user_id: int, kind: str,
+                       duration: Optional[int], reason: str,
+                       by: Optional[int], source: str = "policy") -> bool:
+    """מבצע מול טלגרם ורושם. מחזיר האם הצליח."""
+    try:
+        if kind == "mute":
+            until = int(time.time() + duration) if duration else None
+            await bot.restrict_chat_member(chat_id, user_id, MUTED,
+                                           until_date=until)
+        elif kind == "ban":
+            until = int(time.time() + duration) if duration else None
+            await bot.ban_chat_member(chat_id, user_id, until_date=until)
+        elif kind == "kick":
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+        else:
+            return False
+    except TelegramAPIError as e:
+        log.warning("%s נכשל על %s ב-%s: %s", kind, user_id, chat_id, e)
+        audit.log(chat_id, f"{kind}.failed", target_id=user_id, reason=str(e),
+                  actor_id=by, severity="medium", source=source)
+        return False
+    if kind != "kick":
+        mod.record(chat_id, user_id, kind, by, reason, duration, source)
+    else:
+        audit.log(chat_id, "user.kick", actor_id=by, target_id=user_id,
+                  reason=reason, source=source, severity="medium")
+    return True
+
+
+# הודעות שירות (הצטרפות, עזיבה) הן הודעות בלי טקסט, ולכן ‎~F.text‎
+# תופס גם אותן — והמטפל הזה רשום ראשון. בלי ההחרגה המפורשת, ברכת
+# הכניסה לעולם לא הייתה נורית: ההודעה נבלעה כאן.
+@dp.message(F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"),
+            ~F.new_chat_members, ~F.left_chat_member)
+async def on_group_message(msg: Message):
+    """הנתיב החם. כל הודעה בכל קבוצה עוברת כאן, ולכן הסדר הוא לפי מחיר.
+
+    קודם בדיקות בזיכרון (נעילות, הצפה), אחר כך שאילתות (חסימות,
+    פילטרים). הודעה של מנהל יוצאת מוקדם ככל האפשר."""
+    touch(msg)
+    if msg.from_user is None:
+        return
+    await sync_admins(msg.chat.id)
+    _anon_admin(msg)
+    # מנהלים ומנחים פטורים מהכול — כלל שכל בוט ניהול מקיים
+    if perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["moderator"]:
+        return
+
+    text = (msg.text or msg.caption or "")
+    lg = lang_of(msg)
+
+    # XP לפני הבדיקות: גם הודעה שתימחק היא נוכחות. מי שנענש מאבד
+    # אמון בהמשך, וזה המדד שקובע — לא ספירת ההודעות.
+    if db.get(msg.chat.id, "xp", "1") == "1":
+        up = rep.on_message(msg.chat.id, msg.from_user.id)
+        if up and db.get(msg.chat.id, "levelup", "0") == "1":
+            await send(msg.chat.id,
+                       i18n.t("rep.levelup", lg,
+                              mention=tpl.mention(msg.from_user.id,
+                                                  _name(msg)),
+                              level=up.level),
+                       clean_after=clean_delay(msg.chat.id) or None)
+
+    # החרגת משתמש קודמת לכל בדיקה. מי שהוחרג במפורש לא נבדק, אחרת
+    # ההחרגה אינה החרגה אלא הצעה.
+    if allow.has_user(msg.chat.id, msg.from_user.id):
+        return
+
+    # 0. תוכן חריג. ראשון, ולפני הנעילות, משתי סיבות: הוא בזיכרון
+    #    בלבד (נרמול והשוואה — בלי מסד ובלי רשת), והוא היחיד שיכול
+    #    להכריע מהודעה אחת. בדיקה שמגיעה אחרי הנעילות הייתה מוחקת
+    #    מודעה אסורה כ"תמונה נעולה" ומשאירה את המפרסם בקבוצה.
+    if db.get(msg.chat.id, "spamguard", "1") == "1":
+        if await _spam_check(msg, text, lg):
+            return
+
+    # 1. נעילות
+    hit = locks.check(msg.chat.id, _describe(msg))
+    if hit and hit.action == "delete" \
+            and db.get(msg.chat.id, "lockwarns", "0") == "1":
+        hit = type(hit)(hit.lock, "warn", hit.duration)
+    # דומיין מותר מבטל נעילת קישורים — וזה מה שהופך נעילת קישורים
+    # לשמישה. ההחרגה חלה רק כש**כל** הדומיינים בהודעה מותרים.
+    if hit and hit.lock in ("url", "invite") and text:
+        if allow.domains_ok(msg.chat.id, _bl_domains(text)):
+            hit = None
+    if hit:
+        await _enforce(msg, hit.action, hit.duration,
+                       i18n.t(hit.key, lg), "lock.triggered")
+        return
+
+    # 2. רשימת חסומים. ‎evaded‎ מסמן ניסיון לעקוף ולא הודעה מקרית —
+    # ההבדל חשוב ביומן, כי הוא מבחין בין טעות לבין כוונה.
+    m = blocks.check(msg.chat.id, text) if text else None
+    if m:
+        await _enforce(msg, m.action, None, m.pattern,
+                       "blocklist.evaded" if m.evaded else "blocklist.hit",
+                       severity="medium" if m.evaded else "low")
+        return
+
+    # 3. הצפה
+    fl = _flood_check(msg, text)
+    if fl:
+        act = db.get(msg.chat.id, "flood_action", "mute")
+        dur = _int(db.get(msg.chat.id, "flood_time", "3600"), 3600)
+        await _enforce(msg, act, dur, fl.kind, "flood." + fl.kind,
+                       severity="medium", notice=f"flood.{fl.kind}")
+        return
+
+    # 4. ניתוח תוכן. אחרון מבין הבדיקות, כי הוא היחיד שעולה כסף
+    #    ולוקח זמן — ומיותר כשמנגנון זול כבר הכריע.
+    if db.get(msg.chat.id, "ai", "0") == "1" and ai.pools:
+        sigs = collect_signals(msg, text)
+        if aimod.worth_asking(text, existing=sigs):
+            v = await brain.analyze(text, lang=lg)
+            sig = v.signal()
+            if sig:
+                sigs.append(sig)
+                d = policy.decide(sigs, policy.rules_for(db, msg.chat.id))
+                if d:
+                    await _enforce(msg, d.action, d.duration, d.explain(),
+                                   "ai.action", severity="medium",
+                                   notice="ai.verdict")
+                    return
+
+    # 4ב. תמונות. היקר מכולם — הורדה ואז שליחה — ולכן אחרון מבין
+    #     בדיקות התוכן, ומאחורי מתג נפרד: כאן יוצאת החוצה תמונה של
+    #     מישהו, ולא רק טקסט.
+    if db.get(msg.chat.id, "aivision", "0") == "1" and brain.can_see:
+        if await _check_image(msg, lg):
+            return
+
+    # 4ג. הקלטות. אותו מסלול בדיוק, מתג נפרד: מה שיוצא החוצה כאן הוא
+    #     הקול של אדם, וזה הדבר הרגיש ביותר שהבוט שולח לספק חיצוני.
+    if db.get(msg.chat.id, "aivoice", "0") == "1" and brain.can_hear:
+        if await _check_voice(msg, lg):
+            return
+
+    # 5. אוטומציות של הקבוצה. אחרי הבדיקות, כי הן צורכות את ‎risk‎
+    #    שנגזר מהן.
+    if await run_automation(msg, "message",
+                            _facts(msg, text, policy.risk_of(
+                                collect_signals(msg, text)))):
+        return
+
+    # 6. קיצור ‎#שם‎ להערה. לפני הפילטרים, כי הוא מפורש יותר.
+    if text.startswith("#") and len(text) > 1:
+        n = notes.get(msg.chat.id, text[1:].split()[0])
+        if n is not None and n.visibility == "public":
+            await send_content(msg.chat.id,
+                               tpl.render_pick(n.content, _ctx(msg)),
+                               n.media_id, n.media_kind, n.buttons)
+            return
+
+    # 7. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
+    fh = filters.check(msg.chat.id, text) if text else None
+    if fh:
+        await _run_filter(msg, fh)
+
+
+def _image_of(msg: Message) -> tuple[str, str, str, str, int]:
+    """‎(סוג, file_id, file_unique_id, mime, גודל)‎ — או סוג ריק."""
+    if msg.photo:
+        s = vision.pick_size(msg.photo)
+        if s is not None:
+            return ("photo", s.file_id, s.file_unique_id, "image/jpeg",
+                    s.file_size or 0)
+    d = msg.document
+    if d is not None:
+        return ("document", d.file_id, d.file_unique_id,
+                (d.mime_type or "").lower(), d.file_size or 0)
+    return ("", "", "", "", 0)
+
+
+async def _fetch_file(file_id: str) -> bytes:
+    """הורדה מטלגרם. כישלון מחזיר ריק — לא מפיל את הטיפול בהודעה."""
+    buf = io.BytesIO()
+    try:
+        await bot.download(file_id, destination=buf)
+    except (TelegramAPIError, OSError, ValueError) as e:
+        log.warning("הורדת קובץ נכשלה: %s", e)
+        return b""
+    return buf.getvalue()
+
+
+async def _check_image(msg: Message, lg: str) -> bool:
+    """בודק תמונה בהודעה. ‎True‎ = טופלה ואין להמשיך בנתיב.
+
+    סדר הפעולות הוא העיקר: קודם **מסתכלים במטמון**, ורק אחר כך מורידים.
+    אותה תמונה שמופצת למאה קבוצות היא ‎file_unique_id‎ אחד, ובדיקה
+    שמורידה קודם הייתה משלמת מאה פעמים על תשובה שכבר יש."""
+    kind, fid, uid, mime, size = _image_of(msg)
+    sigs = collect_signals(msg, msg.caption or "")
+    if not vision.worth_looking(kind, mime=mime, size=size, existing=sigs):
+        return False
+    caption = msg.caption or ""
+    v = brain.seen_image(uid, caption)
+    if v is None:
+        data = await _fetch_file(fid)
+        if not data or len(data) > vision.MAX_BYTES:
+            return False
+        v = await brain.analyze_image(data, mime=vision.mime_of(kind, mime),
+                                      caption=caption, lang=lg,
+                                      unique_id=uid, probed=bool(uid))
+    sig = v.signal()
+    if sig is None:
+        return False
+    # ‎decide‎ מחזיר החלטה **תמיד**, ו-‎action="none"‎ היא "אין מה לעשות".
+    # ‎if d is None‎ היה נראה נכון ומוחק כל תמונה שקיבלה אות חלש.
+    d = policy.decide(sigs + [sig], policy.rules_for(db, msg.chat.id))
+    if not d:
+        return False
+    await _enforce(msg, d.action, d.duration, d.explain(), "vision.action",
+                   severity="medium", notice="ai.verdict")
+    return True
+
+
+def _voice_of(msg: Message) -> tuple[str, str, str, str, int, int]:
+    """‎(סוג, file_id, file_unique_id, mime, גודל, שניות)‎ — או סוג ריק.
+
+    המשך והנפח כתובים בהודעה עצמה, ולכן שתי התקרות נבדקות לפני
+    שמורידים ולא אחרי."""
+    for attr in ("voice", "audio"):
+        m = getattr(msg, attr, None)
+        if m is not None:
+            return (attr, m.file_id, m.file_unique_id,
+                    (getattr(m, "mime_type", "") or "").lower(),
+                    m.file_size or 0, voice.seconds_of(m))
+    return ("", "", "", "", 0, 0)
+
+
+async def _check_voice(msg: Message, lg: str) -> bool:
+    """בודק הודעה קולית. ‎True‎ = טופלה ואין להמשיך בנתיב."""
+    kind, fid, uid, mime, size, secs = _voice_of(msg)
+    sigs = collect_signals(msg, msg.caption or "")
+    if not voice.worth_listening(kind, seconds=secs, mime=mime, size=size,
+                                 existing=sigs):
+        return False
+    caption = msg.caption or ""
+    v = brain.seen_voice(uid, caption)
+    if v is None:
+        data = await _fetch_file(fid)
+        if not data or len(data) > voice.MAX_BYTES:
+            return False
+        v = await brain.analyze_voice(data, mime=voice.mime_of(kind, mime),
+                                     caption=caption, lang=lg, seconds=secs,
+                                     unique_id=uid, probed=bool(uid))
+    sig = v.signal()
+    if sig is None:
+        return False
+    d = policy.decide(sigs + [sig], policy.rules_for(db, msg.chat.id))
+    if not d:
+        return False
+    await _enforce(msg, d.action, d.duration, d.explain(), "voice.action",
+                   severity="medium", notice="ai.verdict")
+    return True
+
+
+def _bl_domains(text: str) -> set[str]:
+    import blocklist as _b
+    return _b.domains(text)
+
+
+def _int(v, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _media_uid(msg: Message) -> str:
+    """‎file_unique_id‎ של המדיה בהודעה, או ריק.
+
+    זה המזהה שטלגרם נותן לאותו קובץ בכל קבוצה ולכל שולח, ולכן הוא
+    מה שמאפשר לזהות שאותה תמונה בדיוק מופצת שוב ושוב — גם כשהכיתוב
+    מתחלף בכל פעם."""
+    ph = msg.photo
+    if ph:
+        s = vision.pick_size(ph)
+        return s.file_unique_id if s is not None else ""
+    for attr in ("video", "animation", "sticker", "document", "audio",
+                 "voice", "video_note"):
+        v = getattr(msg, attr, None)
+        if v is not None:
+            return getattr(v, "file_unique_id", "") or ""
+    return ""
+
+
+async def _notify_admins(chat_id: int, text: str) -> int:
+    """הודעה לכל מנהל **בפרטי**. מחזיר לכמה הגיעה.
+
+    זה המקום שבו "ניהול בפרטי" הוא לא נוחות אלא נכונות: דיווח על
+    תוכן אסור בקבוצה לא אמור להישלח לקבוצה עצמה, שבה הוא הופך
+    להודעה נוספת שכולם רואים ושמפנה תשומת לב למה שנמחק."""
+    got = 0
+    for uid in (await sync_admins(chat_id)):
+        if uid == _me_id:
+            continue
+        if await send(uid, text, is_group=False) is not None:
+            got += 1
+    return got
+
+
+async def _ban_spammer(msg: Message, why: str, lg: str) -> None:
+    """המסלול הנפרד: מחיקה, חסימה, יומן, ודיווח למנהלים בפרטי.
+
+    לא עובר דרך ‎policy‎ ולא מחכה לצבירת אותות. פרסום תוכן מיני של
+    קטינים אינו "סיכון 0.98" שצריך להצטבר עם משהו — הוא הודעה אחת
+    שדי בה."""
+    with contextlib.suppress(TelegramAPIError):
+        await bot.delete_message(msg.chat.id, msg.message_id)
+    audit.log(msg.chat.id, "spam.illegal", target_id=msg.from_user.id,
+              actor_kind="bot", reason=why, after="ban", source="policy",
+              severity="critical")
+    await apply_action(msg.chat.id, msg.from_user.id, "ban", None, why, None)
+    rep.penalize(msg.chat.id, msg.from_user.id, 5.0)
+    repeats.forget(spamguard.fingerprint(
+        text=(msg.text or msg.caption or ""), media_id=_media_uid(msg)))
+    await _notify_admins(
+        msg.chat.id,
+        i18n.t("spam.report", lg, chat=tpl.esc(msg.chat.title or ""),
+               who=tpl.esc(_name(msg)), why=tpl.esc(why)))
+    if db.get(msg.chat.id, "silent", "1") != "1":
+        await send(msg.chat.id, i18n.t("spam.illegal", lg),
+                   clean_after=clean_delay(msg.chat.id) or None)
+
+
+async def _spam_check(msg: Message, text: str, lg: str) -> bool:
+    """תוכן חריג: מודעה אסורה, או אותו תוכן שוב ושוב. ‎True‎ = טופל.
+
+    שני הפערים שהתגלו בשטח מטופלים כאן יחד: הכיתוב של תמונה נבדק
+    כמו טקסט, והחזרתיות נמדדת על **התוכן** (כולל המדיה) ולא על
+    המחרוזת. בלי השני, אותה תמונה עם כיתוב מתחלף הייתה נראית למערכת
+    כעשר הודעות שונות."""
+    verdict = spamguard.classify(text)
+    if verdict is not None and verdict.escalate:
+        await _ban_spammer(msg, f"{verdict.kind}:{verdict.detail}", lg)
+        return True
+    uid = _media_uid(msg)
+    dup = None
+    if text.strip() or uid:
+        rp = repeats.note(spamguard.fingerprint(text=text, media_id=uid),
+                          msg.chat.id, msg.from_user.id)
+        dup = spamguard.repeat_verdict(
+            rp, count=_int(db.get(msg.chat.id, "dup_count", ""),
+                           spamguard.DUP_COUNT),
+            chats=_int(db.get(msg.chat.id, "dup_chats", ""),
+                       spamguard.DUP_CHATS))
+    if verdict is None and dup is None:
+        return False
+    sigs = collect_signals(msg, text)
+    for v in (verdict, dup):
+        if v is not None:
+            sigs.append(policy.Signal("content", v.kind, v.weight, v.detail))
+    d = policy.decide(sigs, policy.rules_for(db, msg.chat.id))
+    if not d:
+        return False
+    await _enforce(msg, d.action, d.duration, d.explain(),
+                   "spam." + (verdict.kind if verdict else "dup"),
+                   severity="high" if d.action in ("ban", "kick") else "medium",
+                   notice="spam.dup" if dup is not None and verdict is None
+                   else None)
+    return True
+
+
+def _flood_check(msg: Message, text: str):
+    if db.get(msg.chat.id, "flood", "1") != "1":
+        return None
+    ents = (msg.entities or []) + (msg.caption_entities or [])
+    mentions = sum(1 for e in ents if e.type in ("mention", "text_mention"))
+    return flood.note(
+        msg.chat.id, msg.from_user.id, text, mentions,
+        rate=_int(db.get(msg.chat.id, "flood_rate", ""), AF_RATE),
+        window=float(_int(db.get(msg.chat.id, "flood_window", ""), AF_WINDOW)),
+        repeat=_int(db.get(msg.chat.id, "flood_repeat", ""), AF_REPEAT),
+        mention_max=_int(db.get(msg.chat.id, "flood_mentions", ""), AF_MENTIONS))
+
+
+async def _enforce(msg: Message, action: str, duration: Optional[int],
+                   label: str, log_action: str, *, severity: str = "low",
+                   notice: Optional[str] = None) -> None:
+    """מחיקה, רישום, ענישה והודעה — במקום אחד.
+
+    לפני זה כל מנגנון אכיפה חזר על ארבעת השלבים בעצמו, וזה בדיוק איך
+    שמנגנון שלישי נולד בלי רישום ביומן."""
+    # ‎none‎ ולא רק ‎off‎: ‎Decision‎ מחזיר ‎none‎ כשאין מה לעשות, וקורא
+    # שיעביר אותו לכאן בטעות היה מוחק הודעה בלי שאף כלל נדרס.
+    if action in ("off", "none"):
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await bot.delete_message(msg.chat.id, msg.message_id)
+    audit.log(msg.chat.id, log_action, target_id=msg.from_user.id,
+              actor_kind="bot", reason=label, after=action,
+              source="policy", severity=severity)
+    rep.penalize(msg.chat.id, msg.from_user.id,
+                 0.5 if action == "delete" else 1.0)
+    if action == "delete":
+        return
+    if action == "warn":
+        out = mod.warn(msg.chat.id, msg.from_user.id, None, label, "policy")
+        if out.threshold_hit:
+            await apply_action(msg.chat.id, msg.from_user.id, out.kind,
+                               out.duration, out.reason, None)
+        if db.get(msg.chat.id, "silent", "1") != "1":
+            await send(msg.chat.id,
+                       T(msg, notice or "lock.violation", name=_name(msg),
+                         label=label, n=out.warns),
+                       clean_after=clean_delay(msg.chat.id) or None)
+        return
+    if action in ("mute", "ban", "kick", "tmute", "tban"):
+        kind = {"tmute": "mute", "tban": "ban"}.get(action, action)
+        await apply_action(msg.chat.id, msg.from_user.id, kind, duration,
+                           label, None)
+        if notice and db.get(msg.chat.id, "silent", "1") != "1":
+            await send(msg.chat.id,
+                       T(msg, notice, name=_name(msg), label=label),
+                       clean_after=clean_delay(msg.chat.id) or None)
+
+
+async def _run_filter(msg: Message, fh) -> None:
+    if fh.action in ("delete", "delete_reply"):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id, msg.message_id)
+    if fh.action in ("reply", "delete_reply") and fh.content:
+        await send_content(msg.chat.id,
+                           tpl.render_pick(fh.content, _ctx(msg)),
+                           None, None, "")
+        return
+    if fh.action in ("warn", "mute", "kick", "ban"):
+        await _enforce(msg, fh.action, None, fh.trigger, "filter.triggered")
+
+
+def _name(msg: Message) -> str:
+    u = msg.from_user
+    return f"@{u.username}" if u and u.username else (u.first_name if u else "משתמש")
+
+
+# ── הצטרפות ושינויי מנהלים ─────────────────────────────────────────────────
+@dp.my_chat_member()
+async def on_my_status(ev: ChatMemberUpdated):
+    """הרגע שבו הבוט נוסף לקבוצה או קודם למנהל.
+
+    בלי זה הקבוצה נרשמת רק כשמישהו שולח בה הודעה — וכל עוד הבוט אינו
+    מנהל, טלגרם לא מוסרת לו הודעות רגילות כלל. כך נוצר מצב שבו הבוט
+    בקבוצה, המשתמש מנהל בה, והפאנל הפרטי מציג "לא ראיתי אותך מנהל
+    באף קבוצה". זה בדיוק מה שקרה."""
+    if ev.chat.type not in GROUP_TYPES:
+        return
+    new = ev.new_chat_member.status
+    if new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        db.run("UPDATE chats SET active=0 WHERE chat_id=?", (ev.chat.id,))
+        log.info("הוסרתי מ-%s", ev.chat.id)
+        return
+    register_chat(ev.chat)
+    admins = await sync_admins(ev.chat.id, force=True)
+    audit.log(ev.chat.id, "bot.status", actor_kind="bot", source="system",
+              before=ev.old_chat_member.status, after=new, severity="info")
+    log.info("מצבי ב-%s: %s · %d מנהלים", ev.chat.id, new, len(admins))
+    if new == ChatMemberStatus.ADMINISTRATOR:
+        lg = lang.for_chat(ev.chat.id)
+        await send(ev.chat.id, await group_status(ev.chat.id, lg),
+                   clean_after=clean_delay(ev.chat.id) or None)
+
+
+ADMIN_STATUSES = (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+JOINED = (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+          ChatMemberStatus.CREATOR, ChatMemberStatus.RESTRICTED)
+
+
+async def _greet(chat_id: int, user, key: str, joined: bool) -> None:
+    """ברכת כניסה או פרידה. ריק = כבוי, וזו ברירת המחדל.
+
+    בוט שמכריז על כל נכנס בקבוצה של אלף איש הוא רעש, ולכן הוא לא
+    מדבר עד שמנהל ביקש."""
+    on_key = "welcome_on" if key == WELCOME_KEY else "goodbye_on"
+    if db.get(chat_id, on_key, "1") != "1":
+        return
+    raw = db.get(chat_id, key, "") or ""
+    if not raw.strip():
+        return
+    lg = lang.for_chat(chat_id)
+    row = db.one("SELECT title FROM chats WHERE chat_id=?", (chat_id,))
+    n = db.one("SELECT COUNT(*) c FROM members WHERE chat_id=?", (chat_id,))
+    ctx = tpl.context(user_id=user.id, first=user.first_name or "",
+                      last=user.last_name or "", username=user.username or "",
+                      chat_title=(row["title"] if row else "") or "",
+                      chat_id=chat_id, count=(n["c"] if n else 0),
+                      language=lg, rules=db.get(chat_id, RULES_KEY, "") or "")
+    secs = _int(db.get(chat_id, "greet_clean", "0"), 0)
+    await send_content(chat_id, tpl.render_pick(raw, ctx), None, None,
+                       db.get(chat_id, key + "_buttons", "") or "",
+                       clean_after=secs or None)
+
+
+# הצטרפות מגיעה משני מקומות, ולא מאחד. עד כה טופל רק הראשון:
+#
+#   1. הודעת שירות ‎new_chat_members‎ — מה שרואים בקבוצה קטנה
+#   2. עדכון ‎chat_member‎ — המקור **היחיד** כשהקבוצה דורשת אישור
+#      הצטרפות, וכשחברים מוסתרים
+#
+# בקבוצה מהסוג השני לא קרה שום דבר לנכנס: לא ברכה, לא קאפצ'ה, לא
+# הגנת פשיטה, ולא אכיפת חסימת פדרציה — כי כל אלה תלו בהודעת השירות
+# שטלגרם פשוט אינה שולחת שם. זה מה שנראה כמו "הפעלתי הודעת כניסה
+# ולא קורה כלום".
+JOIN_DEDUP = 45.0
+_join_seen: dict = {}
+
+
+def _join_once(chat_id: int, user_id: int) -> bool:
+    """‎True‎ אם ההצטרפות הזאת כבר טופלה עכשיו.
+
+    שני המקורות יכולים להגיע שניהם, ואז בלי זה הנכנס היה מקבל שתי
+    ברכות ושתי קאפצ'ות."""
+    now = time.time()
+    for k, t in list(_join_seen.items()):
+        if now - t > JOIN_DEDUP:
+            _join_seen.pop(k, None)
+    key = (chat_id, user_id)
+    if key in _join_seen:
+        return True
+    _join_seen[key] = now
+    return False
+
+
+async def _handle_join(chat, user) -> None:
+    """כל מה שקורה לנכנס. נקרא משני המקורות, פעם אחת בלבד."""
+    if user is None or user.is_bot or _join_once(chat.id, user.id):
+        return
+    db.run("""INSERT INTO members (chat_id,user_id,joined_at,last_msg)
+              VALUES (?,?,?,0)
+              ON CONFLICT (chat_id,user_id) DO UPDATE SET
+                joined_at=COALESCE(members.joined_at,excluded.joined_at)""",
+           (chat.id, user.id, time.time()))
+    # חסימת פדרציה נאכפת לפני הכול: מי שנחסם ברשת לא אמור לראות
+    # ברכה ואז להיזרק
+    fb = feds.banned_here(chat.id, user.id)
+    if fb:
+        if await apply_action(chat.id, user.id, "ban", None,
+                              f"fed:{fb['fed_id']}", None, "automation"):
+            if db.get(chat.id, "silent", "1") != "1":
+                await send(chat.id,
+                           i18n.t("fed.hit", lang.for_chat(chat.id),
+                                  name=tpl.esc(user.first_name or user.id),
+                                  reason=tpl.esc(fb["reason"] or "—")),
+                           clean_after=clean_delay(chat.id) or None)
+            return
+    raid = flood.join(chat.id)
+    if raid and db.get(chat.id, "antiraid", "1") == "1":
+        await _on_raid(chat.id, raid)
+    if db.get(chat.id, "captcha", "0") == "1":
+        # האימות קודם לברכה: אין טעם לברך מי שעוד לא הוכח כאדם
+        if await _start_captcha(chat.id, user):
+            return
+    await _greet(chat.id, user, WELCOME_KEY, True)
+
+
+async def _handle_leave(chat, user) -> None:
+    if user is None or user.is_bot:
+        return
+    await _greet(chat.id, user, GOODBYE_KEY, False)
+
+
+@dp.message(F.new_chat_members)
+async def on_join(msg: Message):
+    """כניסה לקבוצה. גם מונה פשיטה — הצטרפות המונית מתחילה כאן."""
+    register_chat(msg.chat)
+    for u in msg.new_chat_members or []:
+        await _handle_join(msg.chat, u)
+    _clean_service(msg)
+
+
+@dp.message(F.left_chat_member)
+async def on_leave(msg: Message):
+    await _handle_leave(msg.chat, msg.left_chat_member)
+    _clean_service(msg)
+
+
+def _clean_service(msg: Message) -> None:
+    """הודעות "הצטרף" ו"עזב". כבוי כברירת מחדל — יש קבוצות שרוצות לראות
+    מי נכנס, ומחיקה שקטה של זה הייתה מפתיעה."""
+    if db.get(msg.chat.id, "cleanservice", "0") == "1":
+        _schedule_delete(msg.chat.id, msg.message_id, 3)
+
+
+async def _start_captcha(chat_id: int, user) -> bool:
+    """משתיק את הנכנס ושולח אתגר. מחזיר האם האתגר נשלח.
+
+    ההשתקה **קודמת** להודעה. אם השליחה תיכשל ברשת, עדיף משתמש מושתק
+    שמנהל ישחרר מאשר ספאמר שנכנס בלי שנבדק."""
+    try:
+        await bot.restrict_chat_member(chat_id, user.id, MUTED)
+    except TelegramAPIError as e:
+        log.warning("השתקת נכנס ב-%s נכשלה: %s", chat_id, e)
+        return False
+    ch = cap.build(chat_id, user.id,
+                   db.get(chat_id, "captcha_kind", "button"),
+                   timeout=_int(db.get(chat_id, "captcha_time", ""), 120),
+                   tries=_int(db.get(chat_id, "captcha_tries", ""), 3))
+    lg = lang.for_chat(chat_id)
+    sc = panel.captcha_screen(ch, lg)
+    text = sc.text.replace("{mention}",
+                           tpl.mention(user.id, user.first_name or "?"))
+    m = await send(chat_id, text, markup=kb(sc))
+    ch.message_id = m.message_id if m else None
+    pending.add(ch)
+    audit.log(chat_id, "captcha.sent", target_id=user.id, actor_kind="bot",
+              source="policy", after=ch.kind, severity="info")
+    return True
+
+
+async def _captcha_done(ch, passed: bool) -> None:
+    """סוגר אתגר: משחרר או מעניש, ומנקה את ההודעה."""
+    lg = lang.for_chat(ch.chat_id)
+    if ch.message_id:
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(ch.chat_id, ch.message_id)
+    if passed:
+        with contextlib.suppress(TelegramAPIError):
+            await bot.restrict_chat_member(ch.chat_id, ch.user_id, UNMUTED)
+        audit.log(ch.chat_id, "captcha.passed", target_id=ch.user_id,
+                  actor_kind="bot", source="policy", severity="info")
+        row = db.one("SELECT first_name,username FROM users WHERE user_id=?",
+                     (ch.user_id,))
+        u = type("U", (), {"id": ch.user_id,
+                           "first_name": (row["first_name"] if row else ""),
+                           "last_name": "",
+                           "username": (row["username"] if row else "")})
+        await _greet(ch.chat_id, u, WELCOME_KEY, True)
+        return
+    action = db.get(ch.chat_id, "captcha_fail", "kick")
+    audit.log(ch.chat_id, "captcha.failed", target_id=ch.user_id,
+              actor_kind="bot", source="policy", after=action, severity="medium")
+    if action in ("kick", "ban", "mute"):
+        await apply_action(ch.chat_id, ch.user_id, action, None,
+                           "captcha", None, "policy")
+
+
+@dp.callback_query(F.data.startswith("c:"))
+async def on_captcha(q: CallbackQuery):
+    """‎c:<user_id>:<תשובה>‎. רק בעל האתגר יכול לענות עליו."""
+    parts = (q.data or "").split(":", 2)
+    if len(parts) < 3:
+        return
+    try:
+        owner = int(parts[1])
+    except ValueError:
+        return
+    lg = lang.for_chat(q.message.chat.id)
+    if q.from_user.id != owner:
+        await q.answer(i18n.t("captcha.not_yours", lg), show_alert=True)
+        return
+    ch = pending.get(q.message.chat.id, owner)
+    res = pending.answer(q.message.chat.id, owner, parts[2])
+    if res == "gone":
+        await q.answer()
+        return
+    if res == "ok":
+        await q.answer(i18n.t("captcha.ok", lg))
+        await _captcha_done(ch, True)
+        return
+    if res == "retry":
+        await q.answer(i18n.t("captcha.retry", lg, n=ch.tries), show_alert=True)
+        return
+    await q.answer(i18n.t("captcha.fail", lg), show_alert=True)
+    await _captcha_done(ch, False)
+
+
+async def _on_raid(chat_id: int, raid) -> None:
+    """הצטרפות המונית. משביתים ומודיעים — פעם אחת, לא בכל הצטרפות."""
+    if db.get(chat_id, "lockdown", "0") == "1":
+        return
+    lg = lang.for_chat(chat_id)
+    okay = await set_lockdown(chat_id, True, None)
+    audit.log(chat_id, "raid.detected", actor_kind="bot", source="policy",
+              after=f"{raid.count}/{raid.limit}", severity="critical")
+    if okay:
+        await send(chat_id, i18n.t("raid.detected", lg, n=raid.count))
+    for uid in list((await sync_admins(chat_id)))[:10]:
+        await send(uid, i18n.t("raid.alert", lg, n=raid.count,
+                               chat=_title(chat_id)), is_group=False)
+
+
+@dp.chat_member()
+async def on_member_change(ev: ChatMemberUpdated):
+    """הצטרפות, עזיבה, קידום והורדה — כפי שטלגרם מדווחת עליהם.
+
+    זה **המקור היחיד** להצטרפות בקבוצה שדורשת אישור או שחבריה מוסתרים:
+    שם אין הודעת שירות ‎new_chat_members‎ בכלל. עד כה הפונקציה הזאת רק
+    רעננה את מטמון המנהלים, ולכן בקבוצות כאלה לא קרה לנכנס שום דבר."""
+    if ev.chat.type not in GROUP_TYPES:
+        return
+    old = ev.old_chat_member.status
+    new = ev.new_chat_member.status
+    user = ev.new_chat_member.user
+
+    # ‎restricted‎ הוא חבר מוגבל, כלומר בפנים. ולכן מעבר בין שני מצבים
+    # שנחשבים "בפנים" אינו הצטרפות — השתקה אינה כניסה.
+    inside = {ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED,
+              ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
+    outside = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
+    if old in outside and new in inside:
+        register_chat(ev.chat)
+        await _handle_join(ev.chat, user)
+    elif old in inside and new in outside:
+        await _handle_leave(ev.chat, user)
+
+    touched = {old, new}
+    if not touched & set(ADMIN_STATUSES):
+        return
+    _admin_cache.pop(ev.chat.id, None)
+    await sync_admins(ev.chat.id, force=True)
+
+
+# ── פקודות בקבוצה ──────────────────────────────────────────────────────────
+@dp.message(CommandStart())
+async def cmd_start(msg: Message):
+    touch(msg)
+    if msg.chat.type == ChatType.PRIVATE:
+        # מי שטרם בחר שפה רואה קודם את הבורר. הבוט לא מיועד לישראל
+        # בלבד, ולהניח שהפונה קורא עברית זה לאבד אותו במסך הראשון.
+        if lang.chosen(msg.chat.id) is None:
+            sc = panel.welcome_screen()
+        else:
+            sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
+        # ‎/start help‎ — כך מגיע מי שלחץ על הכפתור בקבוצה. הוא ביקש
+        # עזרה, ולכן הוא יקבל עזרה ולא את מסך הבית.
+        payload = ((msg.text or "").split(maxsplit=1) + [""])[1].strip()
+        if payload == "help" and lang.chosen(msg.chat.id) is not None:
+            sc = panel.help_menu(lang_of(msg), _help_for(msg))
+        # ‎/start g-100123‎ — כך מגיע מי שלחץ "נהל בפרטי" בקבוצה.
+        # הוא כבר יודע באיזו קבוצה מדובר, ולכן הוא נוחת ישר בתפריט
+        # שלה ולא ברשימת הקבוצות.
+        elif payload.startswith("g") and payload[1:].lstrip("-").isdigit():
+            cid = int(payload[1:])
+            if perms.rank_of(cid, msg.from_user.id) >= RANK["helper"]:
+                sc = _screen_for(cid, "main", "") or sc
+        await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+        # התפריט ✏️ של השיחה הזאת, לפי מה שהאדם הזה יכול בקבוצות שלו.
+        # ברירת המחדל היא רשימת החברים, ובעל קבוצה שמנהל מכאן צריך
+        # לראות את מה שיש לו.
+        await publish_personal_commands(msg.from_user.id, lang_of(msg))
+    else:
+        await reply(msg, await group_status(msg.chat.id, lang_of(msg)))
+
+
+def _allowed_cmds(chat_id: int, user_id: int) -> set:
+    """שמות הפקודות שהאדם הזה יכול להריץ בקבוצה הזאת.
+
+    ‎list_for‎ ולא ‎check‎ פר-פקודה: ‎check‎ עושה שתי שאילתות לכל קריאה,
+    ו-132 פקודות היו 264 שאילתות על כל ‎/help‎. כאן זו שאילתה אחת
+    לתפקיד ואחת לדריסות, והתוצאה נגזרת ממנה."""
+    role = perms.role_of(chat_id, user_id)
+    granted = perms.list_for(chat_id, role)
+    return {n for n, perm in panel.COMMANDS if not perm or granted.get(perm)}
+
+
+def _help_for(msg: Message) -> set:
+    """מה להציג לפונה. בקבוצה — לפי ההרשאות שלו שם.
+
+    בפרטי אין קבוצה להסתמך עליה, ולכן נלקח האיחוד של מה שהוא יכול
+    בקבוצות שהוא מנהל. מי שאינו מנהל אף קבוצה מקבל את רשימת החברים,
+    ולא 132 פקודות שרובן ייענו לו ב"אין לך הרשאה"."""
+    uid = msg.from_user.id if msg.from_user else 0
+    if msg.chat.type in GROUP_TYPES:
+        return _allowed_cmds(msg.chat.id, uid)
+    out: set = set(panel.member_commands())
+    for chat_id, _title in my_groups(uid):
+        out |= _allowed_cmds(chat_id, uid)
+    return out
+
+
+@dp.message(Command("help"))
+async def cmd_help(msg: Message):
+    """עזרה שאפשר לקרוא, ולא מפרט של 134 שורות.
+
+    בקבוצה: הודעה קצרה וכפתור שפותח את העזרה בשיחה הפרטית — כך
+    הקבוצה לא מתמלאת, ואף אחד לא צריך לחפש איפה הבוט גר. בפרטי:
+    תפריט נושאים, ובכל נושא רק הפקודות שלו ורק אלה שאתה יכול להריץ.
+    """
+    touch(msg)
+    lg = lang_of(msg)
+    allowed = _help_for(msg)
+    if msg.chat.type in GROUP_TYPES:
+        await sync_admins(msg.chat.id)
+        markup = None
+        if _bot_username:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text=i18n.t("help.open", lg),
+                    url=f"https://t.me/{_bot_username}?start=help")]])
+        await reply(msg, T(msg, "help.in_private"), markup=markup)
+        return
+    sc = panel.help_menu(lg, allowed)
+    await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+
+
+# ── תוכן: הערות, פילטרים, חוקים, ברכות ─────────────────────────────────────
+def _ctx(msg: Message, **extra) -> dict:
+    u = msg.from_user
+    return tpl.context(
+        user_id=u.id if u else 0, first=u.first_name if u else "",
+        last=(u.last_name or "") if u else "", username=(u.username or "") if u else "",
+        chat_title=msg.chat.title or "", chat_id=msg.chat.id,
+        language=lang_of(msg), rules=db.get(msg.chat.id, RULES_KEY, "") or "",
+        **extra)
+
+
+def _content_of(msg: Message, args: str) -> tuple[str, Optional[str], Optional[str]]:
+    """‎(טקסט, media_id, media_kind)‎ — מהארגומנטים או מההודעה שהשבת עליה."""
+    src = msg.reply_to_message
+    if src is None:
+        return args, None, None
+    text = args or (src.text or src.caption or "")
+    for attr, kind in (("photo", "photo"), ("video", "video"),
+                       ("animation", "animation"), ("sticker", "sticker"),
+                       ("document", "document"), ("audio", "audio"),
+                       ("voice", "voice")):
+        got = getattr(src, attr, None)
+        if got:
+            fid = got[-1].file_id if attr == "photo" else got.file_id
+            return text, fid, kind
+    return text, None, None
+
+
+async def send_content(chat_id: int, text: str, media_id: Optional[str],
+                       media_kind: Optional[str], buttons: str,
+                       *, clean_after: Optional[int] = None):
+    """שולח הערה/ברכה/תגובת פילטר — טקסט, מדיה וכפתורים כאחד."""
+    rows = parse_buttons(buttons)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, url=u) for t, u in row] for row in rows
+    ]) if rows else None
+    await guard.acquire(chat_id, True)
+    try:
+        if media_id and media_kind:
+            fn = {"photo": bot.send_photo, "video": bot.send_video,
+                  "animation": bot.send_animation, "sticker": bot.send_sticker,
+                  "document": bot.send_document, "audio": bot.send_audio,
+                  "voice": bot.send_voice}[media_kind]
+            kw = {"reply_markup": markup}
+            if media_kind != "sticker":
+                kw["caption"] = text[:1024] or None
+            m = await fn(chat_id, media_id, **kw)
+        else:
+            m = await bot.send_message(chat_id, text, reply_markup=markup)
+    except TelegramAPIError as e:
+        log.warning("שליחת תוכן ל-%s נכשלה: %s", chat_id, e)
+        return None
+    if clean_after:
+        _schedule_delete(chat_id, m.message_id, clean_after)
+    return m
+
+
+@dp.message(Command("save"))
+@needs("notes.write")
+async def cmd_save(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "note.usage"))
+        return
+    name = parts[1]
+    text, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if await _bad_html(msg, text):
+        return
+    if not notes.save(msg.chat.id, name, text, media_id=mid, media_kind=kind,
+                      by=msg.from_user.id):
+        await reply(msg, T(msg, "note.usage"))
+        return
+    audit.log(msg.chat.id, "note.save", actor_id=msg.from_user.id,
+              after=name, severity="info")
+    await reply(msg, T(msg, "note.saved", name=name))
+
+
+@dp.message(Command("get"))
+@needs("notes.read")
+async def cmd_get(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "note.name_usage", cmd=typed(msg)))
+        return
+    await _send_note(msg, parts[1])
+
+
+async def _send_note(msg: Message, name: str) -> bool:
+    n = notes.get(msg.chat.id, name)
+    if n is None:
+        await reply(msg, T(msg, "note.missing", name=name))
+        return False
+    if n.visibility == "admin" and not perms.check(
+            msg.chat.id, msg.from_user.id, "settings.read"):
+        return False
+    # ‎privatenotes‎: ההערה נשלחת בפרטי והקבוצה נשארת נקייה
+    if (db.get(msg.chat.id, "privatenotes", "0") == "1"
+            and msg.chat.type in GROUP_TYPES):
+        got = await send_content(msg.from_user.id,
+                                 tpl.render_pick(n.content, _ctx(msg)),
+                                 n.media_id, n.media_kind, n.buttons)
+        await reply(msg, T(msg, "notes.private_sent" if got
+                           else "notes.private_fail"))
+        return True
+    await send_content(msg.chat.id, tpl.render_pick(n.content, _ctx(msg)),
+                       n.media_id, n.media_kind, n.buttons)
+    return True
+
+
+@dp.message(Command("notes"))
+@needs("notes.read")
+async def cmd_notes(msg: Message):
+    touch(msg)
+    admin = bool(perms.check(msg.chat.id, msg.from_user.id, "settings.read"))
+    names = notes.names(msg.chat.id, include_admin=admin)
+    if not names:
+        await reply(msg, T(msg, "note.none"))
+        return
+    await reply(msg, T(msg, "note.list",
+                       list="\n".join(f"• <code>#{n}</code>" for n in names)))
+
+
+@dp.message(Command("clear"))
+@needs("notes.write")
+async def cmd_clear_note(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "note.name_usage", cmd=typed(msg)))
+        return
+    n = notes.delete(msg.chat.id, parts[1])
+    await reply(msg, T(msg, "note.deleted") if n
+                else T(msg, "note.missing", name=parts[1]))
+
+
+@dp.message(Command("filter"))
+@needs("filters.write")
+async def cmd_filter(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "filter.usage"))
+        return
+    trigger = parts[1]
+    content, _, _ = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if content.strip() and await _bad_html(msg, content):
+        return
+    if not content.strip() or not filters.add(msg.chat.id, trigger, content):
+        await reply(msg, T(msg, "filter.usage"))
+        return
+    audit.log(msg.chat.id, "filter.add", actor_id=msg.from_user.id,
+              after=trigger, severity="info")
+    await reply(msg, T(msg, "filter.saved", trigger=trigger))
+
+
+@dp.message(Command("stop"))
+@needs("filters.write")
+async def cmd_stop(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "filter.stop_usage", cmd=typed(msg)))
+        return
+    n = filters.remove(msg.chat.id, parts[1])
+    await reply(msg, T(msg, "filter.removed") if n else T(msg, "filter.none"))
+
+
+@dp.message(Command("filters"))
+@needs("settings.read")
+async def cmd_filters(msg: Message):
+    touch(msg)
+    trg = filters.triggers(msg.chat.id)
+    await reply(msg, T(msg, "filter.list",
+                       list="\n".join(f"• <code>{t}</code>" for t in trg))
+                if trg else T(msg, "filter.none"))
+
+
+@dp.message(Command("addblock"))
+@needs("blocklist.write")
+async def cmd_addblock(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "block.usage"))
+        return
+    # "/addblock regex: ^..." — קידומת בוחרת סוג התאמה
+    raw, kind = parts[1], "word"
+    for pre in ("regex:", "domain:", "substring:"):
+        if raw.lower().startswith(pre):
+            kind, raw = pre[:-1], raw[len(pre):].strip()
+            break
+    if not blocks.add(msg.chat.id, raw, kind):
+        await reply(msg, T(msg, "block.bad_regex" if kind == "regex"
+                           else "block.usage"))
+        return
+    audit.log(msg.chat.id, "blocklist.add", actor_id=msg.from_user.id,
+              after=f"{kind}:{raw}", severity="medium")
+    await reply(msg, T(msg, "block.added", pattern=raw))
+
+
+@dp.message(Command("rmblock"))
+@needs("blocklist.write")
+async def cmd_rmblock(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "block.rm_usage", cmd=typed(msg)))
+        return
+    n = blocks.remove(msg.chat.id, parts[1])
+    await reply(msg, T(msg, "block.removed") if n else T(msg, "block.none"))
+
+
+@dp.message(Command("blocklist"))
+@needs("settings.read")
+async def cmd_blocklist(msg: Message):
+    touch(msg)
+    rows = blocks.all(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "block.none"))
+        return
+    await reply(msg, T(msg, "block.list", list="\n".join(
+        f"• <code>{r['pattern']}</code> ({r['kind']})" for r in rows)))
+
+
+@dp.message(Command("rules"))
+async def cmd_rules(msg: Message):
+    touch(msg)
+    txt = db.get(msg.chat.id, RULES_KEY, "") or ""
+    await reply(msg, tpl.render(txt, _ctx(msg)) if txt.strip()
+                else T(msg, "rules.none"))
+
+
+@dp.message(Command("setrules"))
+@needs("rules.write")
+async def cmd_setrules(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    body, _, _ = _content_of(msg, parts[1] if len(parts) > 1 else "")
+    if not body.strip():
+        await reply(msg, T(msg, "rules.usage"))
+        return
+    if await _bad_html(msg, body):
+        return
+    db.set(msg.chat.id, RULES_KEY, body, msg.from_user.id)
+    audit.log(msg.chat.id, "rules.write", actor_id=msg.from_user.id,
+              severity="medium")
+    await reply(msg, T(msg, "rules.set"))
+
+
+async def _greet_cmd(msg: Message, key: str, cmd: str):
+    parts = (msg.text or "").split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if arg.lower() in ("off", "0", "no"):
+        db.set(msg.chat.id, key, "", msg.from_user.id)
+        await reply(msg, T(msg, "greet.off"))
+        return
+    if not arg and not msg.reply_to_message:
+        cur = db.get(msg.chat.id, key, "") or ""
+        # כפתור אחד שמגדיר נוסח מוכן. אדם שרוצה ברכה לא צריך ללמוד
+        # תחביר של מציינֵי מקום כדי לקבל אחת — הוא צריך ברכה.
+        which = "welcome" if key == WELCOME_KEY else "goodbye"
+        rows = [[(T(msg, "greet.use_default"), panel.cb(msg.chat.id, "gset",
+                                                        which))]]
+        if cur:
+            rows[0].append((T(msg, "greet.turn_off"),
+                            panel.cb(msg.chat.id, "goff", which)))
+        sc = panel.Screen("", rows)
+        await reply(msg, (tpl.render(cur, _ctx(msg)) if cur else "")
+                    + ("\n\n" if cur else "")
+                    + T(msg, "greet.usage", cmd=cmd,
+                        vars=", ".join("{" + v + "}" for v in tpl.VARIABLES)),
+                    markup=kb(sc))
+        return
+    body, _, _ = _content_of(msg, arg)
+    if await _bad_html(msg, body):
+        return
+    db.set(msg.chat.id, key, body, msg.from_user.id)
+    await reply(msg, T(msg, "greet.set"))
+
+
+@dp.message(Command("welcome"))
+@needs("welcome.write")
+async def cmd_welcome(msg: Message):
+    touch(msg); await _greet_cmd(msg, WELCOME_KEY, "/welcome")
+
+
+@dp.message(Command("goodbye"))
+@needs("welcome.write")
+async def cmd_goodbye(msg: Message):
+    touch(msg); await _greet_cmd(msg, GOODBYE_KEY, "/goodbye")
+
+
+@dp.message(Command("report"))
+async def cmd_report(msg: Message):
+    """דיווח מחבר הקבוצה. לא דורש הרשאה — זו כל הנקודה."""
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    if db.get(msg.chat.id, "reports", "1") != "1":
+        await reply(msg, T(msg, "report.off"))
+        return
+    src = msg.reply_to_message
+    if src is None or src.from_user is None:
+        await reply(msg, T(msg, "report.need_reply"))
+        return
+    reason = " ".join((msg.text or "").split()[1:])
+    audit.log(msg.chat.id, "user.report", actor_id=msg.from_user.id,
+              target_id=src.from_user.id, reason=reason, severity="medium")
+    r, is_new = rpt.add(msg.chat.id, msg.from_user.id, src.from_user.id,
+                        msg_id=src.message_id, reason=reason)
+    if not is_new:
+        # דיווח שמצטרף לדיווח פתוח אינו התראה נוספת. חמש התראות זהות
+        # בפרטי מסתירות את כל השאר, והמונה ממילא נראה ב-/reportlist.
+        await reply(msg, T(msg, "report.merged", n=r.count))
+        return
+    admins = await sync_admins(msg.chat.id)
+    alert = T(msg, "report.alert",
+              reporter=tpl.mention(msg.from_user.id, _name(msg)),
+              target=tpl.mention(src.from_user.id,
+                                 src.from_user.first_name or "?"),
+              reason=tpl.esc(reason))
+    markup = _report_buttons(msg.chat.id, r.id, lang_of(msg))
+    for uid in list(admins)[:10]:
+        await send(uid, alert, is_group=False, markup=markup)
+    await reply(msg, T(msg, "report.sent"))
+
+
+def _report_buttons(chat_id: int, rid: int, lg: str) -> InlineKeyboardMarkup:
+    """שני כפתורים על ההתראה בפרטי — טיפול בלחיצה אחת.
+
+    מנהל שקיבל התראה בשלוש בלילה לא יחזור לקבוצה כדי להקליד ‎/resolve‎.
+    ‎callback_data‎ נושא את מזהה הקבוצה, כי ההתראה נשלחת בפרטי ואין דרך
+    אחרת לדעת על איזו קבוצה מדובר."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=i18n.t("report.btn_close", lg),
+                             callback_data=f"r:{chat_id}:{rid}:ok"),
+        InlineKeyboardButton(text=i18n.t("report.btn_drop", lg),
+                             callback_data=f"r:{chat_id}:{rid}:no"),
+    ]])
+
+
+@dp.message(Command("reportlist"))
+@needs("reports.handle")
+async def cmd_reportlist(msg: Message):
+    touch(msg)
+    open_ = rpt.list(msg.chat.id, limit=20)
+    if not open_:
+        await reply(msg, T(msg, "report.none"))
+        return
+    rows = []
+    for r in open_:
+        row = T(msg, "report.row", id=r.id, target=_named(msg, r.target_id),
+                n=r.count,
+                reason=tpl.esc(r.reason) or T(msg, "report.nothing"))
+        # מדווח שכל דיווחיו הסגורים נדחו הוא עצמו בעיה, ומנהל שרואה
+        # דיווח חדש ממנו צריך לדעת את זה לפני שהוא פועל. ‎0.5‎ פירושו
+        # "אין די נתונים" ולכן אינו מסומן.
+        vs = rpt.voters(r.id)
+        if vs and all(rpt.reporter_credibility(msg.chat.id, v) == 0.0
+                      for v in vs):
+            row += "\n" + T(msg, "report.weak_reporter")
+        rows.append(row)
+    c = rpt.counts(msg.chat.id)
+    await reply(msg, T(msg, "report.list", n=c["open"],
+                       list="\n\n".join(rows))
+                + "\n\n" + T(msg, "report.tally", open=c["open"],
+                             handled=c["handled"], dismissed=c["dismissed"]))
+
+
+async def _close_report(msg: Message, cmd: str, drop: bool):
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
+        await reply(msg, T(msg, "report.usage", cmd=cmd))
+        return
+    rid = int(parts[1].lstrip("#"))
+    note = parts[2] if len(parts) > 2 else ""
+    fn = rpt.dismiss if drop else rpt.resolve
+    r = fn(msg.chat.id, rid, msg.from_user.id, note)
+    if r is None:
+        # או שאין דיווח כזה, או שמנהל אחר הספיק לסגור אותו. בשני
+        # המקרים אין מה לעשות, ובשניהם חשוב לא לדרוס את מי שטיפל.
+        await reply(msg, T(msg, "report.notfound"))
+        return
+    audit.log(msg.chat.id, "report.dismissed" if drop else "report.resolved",
+              actor_id=msg.from_user.id, target_id=r.target_id,
+              reason=note or None, after=str(rid), severity="low")
+    await reply(msg, T(msg, "report.dropped" if drop else "report.closed",
+                       id=rid))
+
+
+@dp.message(Command("resolve"))
+@needs("reports.handle")
+async def cmd_resolve(msg: Message):
+    touch(msg); await _close_report(msg, "/resolve", drop=False)
+
+
+@dp.message(Command("dismiss"))
+@needs("reports.handle")
+async def cmd_dismiss(msg: Message):
+    touch(msg); await _close_report(msg, "/dismiss", drop=True)
+
+
+@dp.message(Command("reopen"))
+@needs("reports.handle")
+async def cmd_reopen(msg: Message):
+    """פתיחה מחדש של דיווח שנסגר.
+
+    בלי זה סגירה היא בלתי הפיכה: מנהל שלחץ "דיווח שווא" בטעות — או
+    שגילה אחר כך שהדיווח היה נכון — נשאר בלי שום דרך להחזיר אותו,
+    והדיווח נעלם מהרשימה לתמיד."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].lstrip("#").split()[0].isdigit():
+        await reply(msg, T(msg, "report.usage", cmd="/reopen"))
+        return
+    rid = int(parts[1].lstrip("#").split()[0])
+    r = rpt.reopen(msg.chat.id, rid)
+    if r is None:
+        # או שאין דיווח כזה, או שהוא **כבר** פתוח. בשני המקרים אין מה
+        # לעשות, ושתיהן אותה תשובה מבחינת המנהל.
+        await reply(msg, T(msg, "report.notfound"))
+        return
+    audit.log(msg.chat.id, "report.reopened", actor_id=msg.from_user.id,
+              target_id=r.target_id, after=str(rid), severity="low")
+    await reply(msg, T(msg, "report.reopened", id=rid))
+
+
+@dp.callback_query(F.data.startswith("r:"))
+async def on_report_button(q: CallbackQuery):
+    parts = (q.data or "").split(":")
+    if len(parts) != 4:
+        return
+    _, cid, rid, what = parts
+    try:
+        chat_id, rid = int(cid), int(rid)
+    except ValueError:
+        return
+    lg = lang.for_chat(chat_id)
+    # ההרשאה נבדקת בלחיצה ולא בשליחה: מי שהודח מהניהול לא יטפל
+    # בדיווחים דרך התראה שנשארה פתוחה אצלו בפרטי.
+    if not perms.check(chat_id, q.from_user.id, "reports.handle"):
+        await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+        return
+    drop = what == "no"
+    fn = rpt.dismiss if drop else rpt.resolve
+    r = fn(chat_id, rid, q.from_user.id)
+    if r is None:
+        await q.answer(i18n.t("report.notfound", lg), show_alert=True)
+        return
+    audit.log(chat_id, "report.dismissed" if drop else "report.resolved",
+              actor_id=q.from_user.id, target_id=r.target_id,
+              after=str(rid), source="button", severity="low")
+    done = i18n.t("report.dropped" if drop else "report.closed", lg, id=rid)
+    body = getattr(q.message, "html_text", None) or (q.message.text or "")
+    with contextlib.suppress(TelegramAPIError):
+        await q.message.edit_text(body + "\n\n" + done)
+    await q.answer(i18n.t("saved", lg))
+
+
+# ── פקודות שהקבוצה מגדירה ──────────────────────────────────────────────────
+@dp.message(Command("addcmd"))
+@needs("customcmd.write")
+async def cmd_addcmd(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "cc.usage"))
+        return
+    body, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if await _bad_html(msg, body):
+        return
+    c, err = cmds.set(msg.chat.id, parts[1], body, by=msg.from_user.id,
+                      media_id=mid, media_kind=kind)
+    if err:
+        await reply(msg, T(msg, err,
+                           name=tpl.esc(customcmd.normalize(parts[1])),
+                           max=(customcmd.CONTENT_MAX if err == "cc.too_long"
+                                else customcmd.MAX_PER_CHAT)))
+        return
+    audit.log(msg.chat.id, "customcmd.set", actor_id=msg.from_user.id,
+              after=c.name, severity="low")
+    await reply(msg, T(msg, "cc.saved", name=c.name))
+
+
+@dp.message(Command("delcmd"))
+@needs("customcmd.write")
+async def cmd_delcmd(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "cc.del_usage", cmd=typed(msg)))
+        return
+    name = customcmd.normalize(parts[1])
+    if not cmds.delete(msg.chat.id, name):
+        await reply(msg, T(msg, "cc.missing", name=tpl.esc(name)))
+        return
+    audit.log(msg.chat.id, "customcmd.delete", actor_id=msg.from_user.id,
+              before=name, severity="low")
+    await reply(msg, T(msg, "cc.deleted", name=tpl.esc(name)))
+
+
+@dp.message(Command("cmds"))
+async def cmd_cmds(msg: Message):
+    """רשימת הפקודות של הקבוצה. פתוחה לכולם — פקודה שאף אחד לא יודע
+    שקיימת אינה פקודה."""
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    await sync_admins(msg.chat.id)
+    admin = bool(perms.check(msg.chat.id, msg.from_user.id, "settings.read"))
+    rows = [c for c in cmds.list(msg.chat.id) if admin or not c.admin_only]
+    if not rows:
+        await reply(msg, T(msg, "cc.none"))
+        return
+    mark = T(msg, "cc.admin_only")
+    await reply(msg, T(msg, "cc.list", list="\n".join(
+        f"• <code>/{c.name}</code>"
+        + (f" <i>{mark}</i>" if c.admin_only else "")
+        for c in rows)))
+
+
+@dp.message(Command("info"))
+@needs("settings.read")
+async def cmd_info(msg: Message):
+    touch(msg)
+    t = _target_of(msg) or msg.from_user.id
+    r = db.one("""SELECT m.role, m.msg_count, m.joined_at, u.first_name,
+                         u.username
+                  FROM members m LEFT JOIN users u ON u.user_id=m.user_id
+                  WHERE m.chat_id=? AND m.user_id=?""", (msg.chat.id, t))
+    joined = (time.strftime("%d/%m/%Y", time.localtime(r["joined_at"]))
+              if r and r["joined_at"] else "—")
+    await reply(msg, T(msg, "info.card",
+                       name=tpl.esc((r["first_name"] if r else "") or t),
+                       id=t, role=(r["role"] if r else "member"),
+                       msgs=(r["msg_count"] if r else 0),
+                       warns=mod.warn_count(msg.chat.id, t), joined=joined))
+
+
+# ── אותות: מה שכל מזהה אומר על הודעה, בלי להחליט בעצמו ────────────────
+def collect_signals(msg: Message, text: str) -> list[policy.Signal]:
+    """כל המזהים מדווחים. אף אחד מהם לא מחליט — זה תפקיד ה-Policy.
+
+    המשקלים כאן הם ברירת מחדל שמרנית: נעילה שהמנהל הגדיר במפורש
+    שוקלת יותר מחשד התנהגותי, כי היא **כלל** ולא ניחוש."""
+    out: list[policy.Signal] = []
+    hit = locks.check(msg.chat.id, _describe(msg))
+    if hit:
+        out.append(policy.Signal("lock", hit.lock, 0.8))
+    m = blocks.check(msg.chat.id, text) if text else None
+    if m:
+        # ניסיון עקיפה שוקל יותר מהפרה ישירה: מי שפיזר אותיות ידע
+        out.append(policy.Signal("blocklist", m.kind,
+                                 0.95 if m.evaded else 0.75,
+                                 "עקיפה" if m.evaded else m.pattern[:24]))
+    fh = filters.check(msg.chat.id, text) if text else None
+    if fh and fh.action not in ("reply", "delete_reply"):
+        out.append(policy.Signal("filter", fh.trigger[:24], 0.5))
+    u = msg.from_user
+    if u:
+        w = mod.warn_count(msg.chat.id, u.id)
+        if w:
+            out.append(policy.Signal("reputation", "warnings",
+                                     min(0.15 * w, 0.6), str(w)))
+        r = db.one("SELECT joined_at FROM members WHERE chat_id=? AND user_id=?",
+                   (msg.chat.id, u.id))
+        if r and r["joined_at"] and time.time() - r["joined_at"] < 300:
+            out.append(policy.Signal("account", "just_joined", 0.35))
+        rs = rep.signal(msg.chat.id, u.id)
+        if rs and rs.weight > 0:
+            out.append(rs)
+    if text:
+        out.extend(linksec.inspect(
+            text, allowed=allow.values(msg.chat.id, "domain")))
+    return out
+
+
+@dp.message(Command("policy"))
+@needs("settings.write")
+async def cmd_policy(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "policy.current",
+                           rules=policy.format_rules(
+                               policy.rules_for(db, msg.chat.id))))
+        return
+    arg = parts[1].strip()
+    if arg.lower() in ("reset", "default"):
+        db.unset(msg.chat.id, "policy_rules")
+        await reply(msg, T(msg, "policy.reset"))
+        return
+    rules = policy.parse_rules(arg)
+    if not rules:
+        await reply(msg, T(msg, "policy.bad"))
+        return
+    db.set(msg.chat.id, "policy_rules", policy.format_rules(rules),
+           msg.from_user.id)
+    audit.log(msg.chat.id, "policy.write", actor_id=msg.from_user.id,
+              after=policy.format_rules(rules), severity="high")
+    await reply(msg, T(msg, "policy.set", rules=policy.format_rules(rules)))
+
+
+@dp.message(Command("simulate"))
+@needs("settings.read")
+async def cmd_simulate(msg: Message):
+    """מה היה קורה להודעה הזאת. בלי לעשות לה כלום.
+
+    מדיניות אבטחה שמופעלת בלי לראות מה היא עושה היא הדרך המהירה
+    ביותר לחסום חצי קבוצה בטעות."""
+    touch(msg)
+    src = msg.reply_to_message
+    if src is None:
+        await reply(msg, T(msg, "sim.usage"))
+        return
+    text = src.text or src.caption or ""
+    sigs = collect_signals(src, text)
+    res = policy.simulate(sigs, policy.rules_for(db, msg.chat.id))
+    if not sigs:
+        await reply(msg, T(msg, "sim.none"))
+        return
+    lines = "\n".join(T(msg, "sim.signal", source=s["source"], kind=s["kind"],
+                        weight=int(s["weight"] * 100),
+                        detail=f" · {tpl.esc(s['detail'])}" if s["detail"] else "")
+                      for s in res["signals"])
+    dur = f" ({res['duration']}s)" if res["duration"] else ""
+    await reply(msg, T(msg, "sim.result", risk=int(res["risk"] * 100),
+                       action=res["action"], dur=dur, signals=lines))
+
+
+@dp.message(Command("ai"))
+@needs("settings.write")
+async def cmd_ai(msg: Message):
+    """הדלקה וכיבוי של ניתוח התוכן, עם אמירה מפורשת מה נשלח החוצה."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "ai", "0") == "1"
+    if arg == "on":
+        if not ai.pools:
+            await reply(msg, T(msg, "ai.no_keys"))
+            return
+        db.set(msg.chat.id, "ai", "1", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="ai=1", severity="high")
+        await reply(msg, T(msg, "ai.on_set", state=T(msg, "on"))
+                    + "\n\n" + T(msg, "ai.privacy"))
+        return
+    if arg == "off":
+        db.set(msg.chat.id, "ai", "0", msg.from_user.id)
+        await reply(msg, T(msg, "ai.on_set", state=T(msg, "off")))
+        return
+    st = brain.stats()
+    await reply(msg, T(msg, "ai.on_set", state=T(msg, "on" if cur else "off"))
+                + "\n" + T(msg, "ai.stats", calls=st["calls"],
+                           failures=st["failures"], size=st["cache"]["size"],
+                           hit_rate=st["cache"]["hit_rate"])
+                + "\n\n" + T(msg, "ai.privacy"))
+
+
+@dp.message(Command("aivision"))
+@needs("settings.write")
+async def cmd_aivision(msg: Message):
+    """בדיקת תמונות. מתג נפרד מ-‎/ai‎ בכוונה: מה שיוצא החוצה שונה.
+
+    ניתוח טקסט שולח טקסט; בדיקת תמונות שולחת **תמונה שמישהו העלה**.
+    מתג אחד לשניהם היה גורר החוצה תמונות של אנשים בלי שמישהו הסכים
+    לזה במפורש."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "aivision", "0") == "1"
+    if arg == "on":
+        if not brain.can_see:
+            await reply(msg, T(msg, "vision.no_keys"))
+            return
+        db.set(msg.chat.id, "aivision", "1", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivision=1", severity="high")
+        await reply(msg, T(msg, "vision.state", state=T(msg, "on"))
+                    + "\n\n" + T(msg, "vision.privacy"))
+        return
+    if arg == "off":
+        db.set(msg.chat.id, "aivision", "0", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivision=0", severity="low")
+        await reply(msg, T(msg, "vision.state", state=T(msg, "off")))
+        return
+    await reply(msg, T(msg, "vision.state", state=T(msg, "on" if cur else "off"))
+                + "\n\n" + T(msg, "vision.privacy"))
+
+
+@dp.message(Command("aivoice"))
+@needs("settings.write")
+async def cmd_aivoice(msg: Message):
+    """בדיקת הקלטות. מתג שלישי, ולא נגרר משני האחרים.
+
+    הקלטה היא הקול של אדם. זה הדבר הרגיש ביותר שהבוט הזה שולח לספק
+    חיצוני, ולכן ההסכמה עליו נפרדת גם מזו של התמונות."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "aivoice", "0") == "1"
+    if arg == "on":
+        if not brain.can_hear:
+            await reply(msg, T(msg, "voice.no_keys"))
+            return
+        db.set(msg.chat.id, "aivoice", "1", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivoice=1", severity="high")
+        await reply(msg, T(msg, "voice.state", state=T(msg, "on"))
+                    + "\n\n" + T(msg, "voice.privacy"))
+        return
+    if arg == "off":
+        db.set(msg.chat.id, "aivoice", "0", msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  after="aivoice=0", severity="low")
+        await reply(msg, T(msg, "voice.state", state=T(msg, "off")))
+        return
+    await reply(msg, T(msg, "voice.state", state=T(msg, "on" if cur else "off"))
+                + "\n\n" + T(msg, "voice.privacy"))
+
+
+@dp.message(Command("aikeys"))
+@needs("settings.read")
+async def cmd_aikeys(msg: Message):
+    """מצב הבריכה. בלי לחשוף מפתח — רק ארבעה תווים מכל קצה."""
+    touch(msg)
+    pools = ai.stats()
+    if not pools:
+        await reply(msg, T(msg, "ai.none"))
+        return
+    lg = lang_of(msg)
+    parts = []
+    for p in pools:
+        lines = [T(msg, "ai.pool", provider=p["provider"], keys=p["keys"],
+                   available=p["available"], cooling=p["cooling"],
+                   dead=p["dead"], used=p["used_today"])]
+        for k in p["detail"]:
+            state = (i18n.t("ai.state_dead", lg) if k["dead"]
+                     else i18n.t("ai.state_cool", lg, n=k["cooling_for"])
+                     if k["cooling_for"] else i18n.t("ai.state_ok", lg))
+            lines.append(T(msg, "ai.key", key=k["key"], used=k["used"],
+                           state=state))
+        parts.append("\n".join(lines))
+    await reply(msg, "\n\n".join(parts)
+                + T(msg, "ai.budget", n=ai.budget()))
+
+
+@dp.message(Command("emergency"))
+@needs("emergency.toggle")
+async def cmd_emergency(msg: Message):
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    if arg not in ("on", "off"):
+        sc = panel.switch_screen(msg.chat.id, "emergency",
+                                 emerg.is_on(db, msg.chat.id), lang_of(msg))
+        await reply(msg, sc.text, markup=kb(sc))
+        return
+    want = arg == "on"
+    if want:
+        if not emerg.enable(db, msg.chat.id, msg.from_user.id):
+            await reply(msg, T(msg, "emergency.already"))
+            return
+        audit.log(msg.chat.id, "emergency.on", actor_id=msg.from_user.id,
+                  severity="critical")
+        await reply(msg, T(msg, "emergency.on"))
+        return
+    if not emerg.disable(db, msg.chat.id, msg.from_user.id):
+        await reply(msg, T(msg, "emergency.not_on"))
+        return
+    audit.log(msg.chat.id, "emergency.off", actor_id=msg.from_user.id,
+              severity="high")
+    await reply(msg, T(msg, "emergency.off"))
+
+
+@dp.message(Command("captcha"))
+@needs("settings.write")
+async def cmd_captcha(msg: Message):
+    """‎/captcha on|off|button|math|emoji‎."""
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    if arg in ("on", "off"):
+        db.set(msg.chat.id, "captcha", "1" if arg == "on" else "0",
+               msg.from_user.id)
+    elif arg in cap.KINDS:
+        db.set(msg.chat.id, "captcha_kind", arg, msg.from_user.id)
+        db.set(msg.chat.id, "captcha", "1", msg.from_user.id)
+    elif arg:
+        await reply(msg, T(msg, "captcha.settings",
+                           kind=db.get(msg.chat.id, "captcha_kind", "button"),
+                           secs=db.get(msg.chat.id, "captcha_time", "120"),
+                           tries=db.get(msg.chat.id, "captcha_tries", "3"),
+                           action=db.get(msg.chat.id, "captcha_fail", "kick")))
+        return
+    await reply(msg, T(msg, "captcha.settings",
+                       kind=db.get(msg.chat.id, "captcha_kind", "button"),
+                       secs=db.get(msg.chat.id, "captcha_time", "120"),
+                       tries=db.get(msg.chat.id, "captcha_tries", "3"),
+                       action=db.get(msg.chat.id, "captcha_fail", "kick")))
+
+
+@dp.message(Command("security"))
+@needs("settings.read")
+async def cmd_security(msg: Message):
+    touch(msg)
+    sc = panel.security_screen(msg.chat.id, emerg.status(db, msg.chat.id),
+                               _sec_numbers(msg.chat.id), lang_of(msg))
+    await reply(msg, sc.text)
+
+
+@dp.message(Command("delall"))
+@needs("chat.purge")
+async def cmd_delall(msg: Message):
+    """מוחק את ההודעות האחרונות של מי שהשבת עליו.
+
+    טלגרם אינה נותנת "מחק הכול ממשתמש". מה שאפשר הוא לעבור על טווח
+    מזהים אחורה ולמחוק את שלו — ולכן הטווח חסום, אחרת זו לולאה של
+    אלפי קריאות API על קבוצה אחת."""
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    start = msg.reply_to_message.message_id
+    n = 0
+    for mid in range(start, max(start - PURGE_MAX, 0), -1):
+        try:
+            await bot.delete_message(msg.chat.id, mid)
+            n += 1
+        except TelegramAPIError:
+            continue
+    audit.log(msg.chat.id, "chat.purge_user", actor_id=msg.from_user.id,
+              target_id=t, after=n, severity="high")
+    await send(msg.chat.id, T(msg, "purge.by_user", n=n,
+                              name=tpl.esc(_name(msg))), clean_after=10)
+
+
+
+# ── וריאנטים שקטים ומוחקים ────────────────────────────────────────────────
+# Rose נותנת לכל פעולה שלוש צורות, וזה לא קישוט: בקבוצה גדולה הודעת
+# "X נחסם" היא רעש, ולפעמים ההודעה שבגללה חסמו צריכה להיעלם איתו.
+async def _mod_variant(msg: Message, kind: str, *, silent: bool = False,
+                       purge: bool = False):
+    if purge and msg.reply_to_message:
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id,
+                                     msg.reply_to_message.message_id)
+    target = _target_of(msg)
+    if target is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    args = [a for a in (msg.text or "").split()[1:]
+            if not a.startswith("@") and not a.lstrip("-").isdigit()]
+    dur = _parse_duration(args[0]) if args else None
+    reason = " ".join(args[1:] if dur else args) or ""
+    okay = await apply_action(msg.chat.id, target, kind, dur, reason,
+                              msg.from_user.id, "command")
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+    if silent:
+        return
+    if not okay:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    lbl = T(msg, {"mute": "act.muted", "ban": "act.banned",
+                  "kick": "act.kicked"}[kind])
+    await reply(msg, f"{_named(msg, target)} — {lbl}."
+                + (T(msg, "act.reason", reason=tpl.esc(reason)) if reason else ""))
+
+
+def _variant(name: str, kind: str, perm: str, **kw):
+    @dp.message(Command(name))
+    @needs(perm)
+    async def handler(msg: Message, _k=kind, _kw=kw):
+        touch(msg)
+        await _mod_variant(msg, _k, **_kw)
+    handler.__name__ = f"cmd_{name}"
+    return handler
+
+
+# שש וריאציות שנבדלות בשני דגלים. כתיבתן ידנית הייתה 120 שורות שבהן
+# ההבדל היחיד הוא מילה אחת — וזה בדיוק המקום שבו אחת מהן נשכחת.
+MOD_VARIANTS = (
+    ("sban", "ban", "user.ban", {"silent": True}),
+    ("dban", "ban", "user.ban", {"purge": True}),
+    ("smute", "mute", "user.mute", {"silent": True}),
+    ("dmute", "mute", "user.mute", {"purge": True}),
+    ("skick", "kick", "user.kick", {"silent": True}),
+    ("dkick", "kick", "user.kick", {"purge": True}),
+)
+for _n, _k, _p, _o in MOD_VARIANTS:
+    _variant(_n, _k, _p, **_o)
+
+
+# ── אזהרות ────────────────────────────────────────────────────────────────
+@dp.message(Command("resetwarns"))
+@needs("user.unwarn")
+async def cmd_resetwarns(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    n = mod.reset_warns(msg.chat.id, t, msg.from_user.id)
+    await reply(msg, T(msg, "warns.reset", name=_named(msg, t), n=n))
+
+
+@dp.message(Command("warnings"))
+@needs("user.warn")
+async def cmd_warnings(msg: Message):
+    touch(msg)
+    t = _target_of(msg) or msg.from_user.id
+    rows = db.q("""SELECT reason, ts, by_id FROM warnings
+                   WHERE chat_id=? AND user_id=? AND revoked_at IS NULL
+                   ORDER BY ts DESC LIMIT 10""", (msg.chat.id, t))
+    if not rows:
+        await reply(msg, T(msg, "warns.history_none", name=_named(msg, t)))
+        return
+    lines = "\n".join(
+        f"• <code>{time.strftime('%d/%m %H:%M', time.localtime(r['ts']))}</code> "
+        f"{tpl.esc(r['reason'] or '—')}" for r in rows)
+    await reply(msg, T(msg, "warns.history", name=_named(msg, t), list=lines))
+
+
+@dp.message(Command("warnlimit"))
+@needs("settings.write")
+async def cmd_warnlimit(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "warns.limit_usage"))
+        return
+    raw = "" if parts[1].strip().lower() in ("off", "none") else parts[1].strip()
+    if raw and not parse_policy(raw):
+        await reply(msg, T(msg, "warns.limit_usage"))
+        return
+    db.set(msg.chat.id, "warn_policy", raw, msg.from_user.id)
+    await reply(msg, T(msg, "warns.limit_set"))
+
+
+# ── מנהלים ────────────────────────────────────────────────────────────────
+@dp.message(Command("promote"))
+@needs("roles.assign")
+async def cmd_promote(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    try:
+        await bot.promote_chat_member(
+            msg.chat.id, t, can_delete_messages=True,
+            can_restrict_members=True, can_pin_messages=True,
+            can_invite_users=True, can_manage_video_chats=True)
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    perms.set_role(msg.chat.id, t, "admin")
+    _admin_cache.pop(msg.chat.id, None)
+    audit.log(msg.chat.id, "admin.promote", actor_id=msg.from_user.id,
+              target_id=t, severity="high")
+    await reply(msg, T(msg, "admin.promoted", name=_named(msg, t)))
+
+
+@dp.message(Command("demote"))
+@needs("roles.assign")
+async def cmd_demote(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    try:
+        await bot.promote_chat_member(
+            msg.chat.id, t, can_delete_messages=False,
+            can_restrict_members=False, can_pin_messages=False,
+            can_invite_users=False, can_manage_video_chats=False,
+            can_promote_members=False, can_change_info=False)
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    perms.set_role(msg.chat.id, t, "member")
+    _admin_cache.pop(msg.chat.id, None)
+    audit.log(msg.chat.id, "admin.demote", actor_id=msg.from_user.id,
+              target_id=t, severity="high")
+    await reply(msg, T(msg, "admin.demoted", name=_named(msg, t)))
+
+
+@dp.message(Command("adminlist"))
+async def cmd_adminlist(msg: Message):
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    admins = await sync_admins(msg.chat.id, force=True)
+    lines = "\n".join(f"• {_named(msg, u)}"
+                      + (" 👑" if r == "owner" else "")
+                      for u, r in admins.items())
+    await reply(msg, T(msg, "admin.list", list=lines or "—"))
+
+
+@dp.message(Command("roles"))
+@needs("settings.read")
+async def cmd_roles(msg: Message):
+    touch(msg)
+    rows = db.q("""SELECT user_id, role FROM members
+                   WHERE chat_id=? AND role!='member' ORDER BY role""",
+                (msg.chat.id,))
+    lines = "\n".join(f"• {_named(msg, r['user_id'])} — {r['role']}"
+                      for r in rows)
+    await reply(msg, T(msg, "roles.list", list=lines or "—"))
+
+
+# ── הקבוצה עצמה ───────────────────────────────────────────────────────────
+@dp.message(Command("link"))
+@needs("settings.read")
+async def cmd_link(msg: Message):
+    touch(msg)
+    try:
+        link = await bot.export_chat_invite_link(msg.chat.id)
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    await reply(msg, T(msg, "chat.link", link=link))
+
+
+@dp.message(Command("settitle"))
+@needs("settings.write")
+async def cmd_settitle(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "set.usage", cmd="/settitle",
+                           cur=tpl.esc(msg.chat.title or "")))
+        return
+    try:
+        await bot.set_chat_title(msg.chat.id, parts[1][:128])
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    audit.log(msg.chat.id, "chat.title", actor_id=msg.from_user.id,
+              before=msg.chat.title, after=parts[1][:128], severity="medium")
+    await reply(msg, T(msg, "chat.title_set"))
+
+
+@dp.message(Command("setdesc"))
+@needs("settings.write")
+async def cmd_setdesc(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    try:
+        await bot.set_chat_description(msg.chat.id,
+                                       parts[1][:255] if len(parts) > 1 else "")
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    await reply(msg, T(msg, "chat.desc_set"))
+
+
+@dp.message(Command("pinned"))
+async def cmd_pinned(msg: Message):
+    touch(msg)
+    try:
+        chat = await bot.get_chat(msg.chat.id)
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    pin = getattr(chat, "pinned_message", None)
+    if pin is None:
+        await reply(msg, T(msg, "chat.no_pinned"))
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await bot.forward_message(msg.chat.id, msg.chat.id, pin.message_id)
+
+
+# ── מתגי הגדרות ───────────────────────────────────────────────────────────
+async def _toggle(msg: Message, key: str, cmd: str, default: str = "1"):
+    """‎on‎/‎off‎ מפורש — או מסך עם שני כפתורים.
+
+    **הפקודה לעולם אינה מחליפה מצב בעיוורון.** קודם ‎/lockdown‎ ריק
+    החליף, ומנהל שלא זכר איפה הוא עומד לחץ פעמיים וחזר לאותו מקום —
+    ונראה היה ש"פקודת הכיבוי לא נלחצה". עכשיו: רואים מצב, לוחצים."""
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, key, default) == "1"
+    if arg in ("on", "off"):
+        lg = lang_of(msg)
+        await _set_switch(msg.chat.id, key, arg == "on", msg.from_user.id)
+        gap = _switch_gap(msg.chat.id, key, lg) if arg == "on" else ""
+        state = i18n.t("settings.on" if arg == "on" else "settings.off", lg)
+        await reply(msg, T(msg, "sw.set", what=_switch_label(key, lg),
+                           state=state)
+                    + (("\n\n" + gap) if gap else ""))
+        return
+    sc = panel.switch_screen(msg.chat.id, key, cur, lang_of(msg))
+    await reply(msg, sc.text, markup=kb(sc))
+
+
+def _switch_label(key: str, lg: str) -> str:
+    """השם שהאדם רואה למתג, ולא המפתח שבמסד.
+
+    ‎"autoclean = 45"‎ אינו משפט שמישהו אומר. הפאנל ממילא מחזיק תווית
+    לכל מתג, ולכן אין סיבה שהאישור ידבר בשפת הטבלה."""
+    return panel.switch_label(key, lg)
+
+
+def _switch_gap(chat_id: int, key: str, lg: str) -> str:
+    """מתג שדלוק אבל אין לו תוכן — ולכן לא יקרה כלום.
+
+    זה הפגם שגרם ל"הפעלתי הודעת כניסה ולא קרה כלום": המתג אומר "דלוק",
+    אין נוסח, והבוט שותק בצדק. מתג שאין לו מה להפעיל חייב לומר את זה
+    ברגע ההפעלה — לא ב-‎/diag‎ שבוע אחר כך."""
+    pairs = {"welcome_on": (WELCOME_KEY, "/welcome"),
+             "goodbye_on": (GOODBYE_KEY, "/goodbye")}
+    if key not in pairs:
+        return ""
+    content_key, cmd = pairs[key]
+    if (db.get(chat_id, content_key, "") or "").strip():
+        return ""
+    return i18n.t("sw.no_content", lg, cmd=cmd)
+
+
+async def _set_switch(chat_id: int, key: str, on: bool,
+                      by: Optional[int]) -> bool:
+    """הנקודה היחידה שמשנה מתג. גם הפקודה וגם הכפתור עוברים דרכה.
+
+    מתגים שיש להם תופעת לוואי מול טלגרם — השבתת קבוצה — מבוצעים כאן
+    ולא רק נשמרים, אחרת ההגדרה והמציאות מתפצלות."""
+    before = db.get(chat_id, key, panel.SWITCH_DEFAULT.get(key, "0")) == "1"
+    if key == "lockdown":
+        if not await set_lockdown(chat_id, on, by):
+            return False
+    elif key == "emergency":
+        (emerg.enable if on else emerg.disable)(db, chat_id, by)
+    else:
+        db.set(chat_id, key, "1" if on else "0", by)
+    audit.log(chat_id, "settings.write", actor_id=by,
+              before=f"{key}={int(before)}", after=f"{key}={int(on)}",
+              source="command", severity="medium")
+    return True
+
+
+async def _number(msg: Message, key: str, cmd: str, default: str,
+                  lo: int, hi: int):
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await reply(msg, T(msg, "set.usage", cmd=cmd,
+                           cur=db.get(msg.chat.id, key, default)))
+        return
+    val = max(lo, min(hi, int(parts[1])))
+    db.set(msg.chat.id, key, str(val), msg.from_user.id)
+    await reply(msg, T(msg, "sw.set", what=_switch_label(key, lang_of(msg)),
+                       state=val))
+
+
+@dp.message(Command("settings"))
+@needs("settings.read")
+async def cmd_settings(msg: Message):
+    """כל המתגים במסך אחד. זה מה שפותר את "מה דלוק ומה כבוי"."""
+    touch(msg)
+    sc = panel.switches_screen(msg.chat.id, _switch_values(msg.chat.id),
+                               lang_of(msg))
+    await reply(msg, sc.text, markup=kb(sc))
+
+
+def _switch_values(chat_id: int) -> dict:
+    return {k: db.get(chat_id, k, d) for k, d, _ in panel.SWITCHES}
+
+
+@dp.message(Command("antiraid"))
+@needs("settings.write")
+async def cmd_antiraid(msg: Message):
+    touch(msg); await _toggle(msg, "antiraid", "/antiraid")
+
+
+@dp.message(Command("reports"))
+@needs("settings.write")
+async def cmd_reports(msg: Message):
+    touch(msg); await _toggle(msg, "reports", "/reports")
+
+
+@dp.message(Command("adminpriv"))
+@needs("settings.write")
+async def cmd_adminpriv(msg: Message):
+    """תשובות ניהול בפרטי או בקבוצה.
+
+    דלוק כברירת מחדל. מי שמעדיף לראות את התשובות בקבוצה — למשל כדי
+    שכל צוות הניהול יראה מה נעשה — מכבה, והתשובות חוזרות לקבוצה עם
+    הניקוי האוטומטי."""
+    touch(msg); await _toggle(msg, "adminpriv", "/adminpriv")
+
+
+@dp.message(Command("silent"))
+@needs("settings.write")
+async def cmd_silent(msg: Message):
+    touch(msg); await _toggle(msg, "silent", "/silent")
+
+
+@dp.message(Command("cleanservice"))
+@needs("settings.write")
+async def cmd_cleanservice(msg: Message):
+    touch(msg); await _toggle(msg, "cleanservice", "/cleanservice", "0")
+
+
+@dp.message(Command("setflood"))
+@needs("settings.write")
+async def cmd_setflood(msg: Message):
+    """‎/setflood 0‎ מכבה. אין פקודה נפרדת לכיבוי, כי סף אפס **הוא** כיבוי."""
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) > 1 and parts[1].lower() == "off":
+        db.set(msg.chat.id, "flood", "0", msg.from_user.id)
+        await reply(msg, T(msg, "flood.off"))
+        return
+    if len(parts) > 1 and parts[1].isdigit():
+        db.set(msg.chat.id, "flood", "1", msg.from_user.id)
+    await _number(msg, "flood_rate", "/setflood", str(AF_RATE), 0, 100)
+
+
+@dp.message(Command("floodaction"))
+@needs("settings.write")
+async def cmd_floodaction(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    valid = ("delete", "warn", "mute", "kick", "ban")
+    if len(parts) < 2 or parts[1].lower() not in valid:
+        await reply(msg, T(msg, "set.usage", cmd="/floodaction " + "|".join(valid),
+                           cur=db.get(msg.chat.id, "flood_action", "mute")))
+        return
+    db.set(msg.chat.id, "flood_action", parts[1].lower(), msg.from_user.id)
+    await reply(msg, T(msg, "set.done", key="flood_action", value=parts[1].lower()))
+
+
+@dp.message(Command("setclean"))
+@needs("settings.write")
+async def cmd_setclean(msg: Message):
+    touch(msg); await _number(msg, "autoclean", "/setclean", "30", 0, 3600)
+
+
+# ── החרגות ────────────────────────────────────────────────────────────────
+def _allow_arg(msg: Message) -> tuple[Optional[str], str]:
+    t = _target_of(msg)
+    if t is not None:
+        return "user", str(t)
+    for tok in (msg.text or "").split()[1:]:
+        if "." in tok:
+            return "domain", tok
+    return None, ""
+
+
+@dp.message(Command("allow"))
+@needs("settings.write")
+async def cmd_allow(msg: Message):
+    touch(msg)
+    scope, value = _allow_arg(msg)
+    if scope is None or not allow.add(msg.chat.id, scope, value):
+        await reply(msg, T(msg, "allow.usage", cmd=typed(msg)))
+        return
+    audit.log(msg.chat.id, "allowlist.add", actor_id=msg.from_user.id,
+              after=f"{scope}:{value}", severity="medium")
+    await reply(msg, T(msg, "allow.added", value=tpl.esc(value)))
+
+
+@dp.message(Command("unallow"))
+@needs("settings.write")
+async def cmd_unallow(msg: Message):
+    touch(msg)
+    scope, value = _allow_arg(msg)
+    n = allow.remove(msg.chat.id, scope, value) if scope else 0
+    await reply(msg, T(msg, "allow.removed") if n else T(msg, "allow.none"))
+
+
+@dp.message(Command("allowlist"))
+@needs("settings.read")
+async def cmd_allowlist(msg: Message):
+    touch(msg)
+    rows = allow.all(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "allow.none"))
+        return
+    await reply(msg, T(msg, "allow.list", list="\n".join(
+        f"• {sc}: <code>{tpl.esc(v)}</code>" for sc, v in rows)))
+
+
+# ── מידע ──────────────────────────────────────────────────────────────────
+@dp.message(Command("stats"))
+@needs("settings.read")
+async def cmd_stats(msg: Message):
+    touch(msg)
+    c = msg.chat.id
+    day, week = time.time() - 86400, time.time() - 7 * 86400
+
+    def n(sql, args):
+        return (db.one(sql, args) or {"c": 0})["c"]
+    await reply(msg, T(msg, "stats.card", chat=tpl.esc(msg.chat.title or ""),
+        members=n("SELECT COUNT(*) c FROM members WHERE chat_id=?", (c,)),
+        msgs=n("SELECT COALESCE(SUM(msg_count),0) c FROM members WHERE chat_id=?", (c,)),
+        active=n("SELECT COUNT(*) c FROM members WHERE chat_id=? AND last_msg>?", (c, day)),
+        today=n("SELECT COUNT(*) c FROM audit_log WHERE chat_id=? AND ts>?", (c, day)),
+        week=n("SELECT COUNT(*) c FROM audit_log WHERE chat_id=? AND ts>?", (c, week)),
+        warns=n("""SELECT COUNT(*) c FROM warnings WHERE chat_id=?
+                   AND revoked_at IS NULL""", (c,)),
+        locks=len(locks.get_all(c))))
+
+
+@dp.message(Command("actions"))
+@needs("audit.read")
+async def cmd_actions(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    rows = audit.for_user(msg.chat.id, t)[:10]
+    if not rows:
+        await reply(msg, T(msg, "actions.none", name=_named(msg, t)))
+        return
+    await reply(msg, T(msg, "actions.title", name=_named(msg, t), list="\n".join(
+        f"<code>{time.strftime('%d/%m %H:%M', time.localtime(r['ts']))}</code> "
+        f"{r['action']}" for r in rows)))
+
+
+@dp.message(Command("locktypes"))
+async def cmd_locktypes(msg: Message):
+    touch(msg)
+    lg = lang_of(msg)
+    by: dict[str, list[str]] = {}
+    for key, grp in LOCK_TYPES.items():
+        by.setdefault(grp, []).append(f"<code>{key}</code>")
+    await reply(msg, T(msg, "locktypes.list", list="\n".join(
+        f"<b>{i18n.t('group.' + g, lg)}</b>\n" + ", ".join(v)
+        for g, v in by.items())))
+
+
+@dp.message(Command("vars"))
+async def cmd_vars(msg: Message):
+    touch(msg)
+    await reply(msg, T(msg, "vars.help",
+                       list=" ".join("<code>{" + v + "}</code>"
+                                     for v in tpl.VARIABLES)))
+
+
+# ── ייצוא וייבוא ──────────────────────────────────────────────────────────
+IMPORT_MAX = 256 * 1024
+
+
+@dp.message(Command("export"))
+@needs("chat.export")
+async def cmd_export(msg: Message):
+    touch(msg)
+    data = backup.export(db, msg.chat.id)
+    raw = backup.dumps(db, msg.chat.id).encode()
+    audit.log(msg.chat.id, "chat.export", actor_id=msg.from_user.id,
+              severity="high")
+    counts = T(msg, "export.counts", **backup.counts(data))
+    with contextlib.suppress(TelegramAPIError):
+        await bot.send_document(
+            msg.from_user.id,
+            BufferedInputFile(raw, filename=f"groupos-{msg.chat.id}.json"),
+            caption=T(msg, "export.done", n=counts))
+    await reply(msg, T(msg, "export.done", n=counts))
+
+
+@dp.message(Command("import"))
+@needs("chat.import")
+async def cmd_import(msg: Message):
+    touch(msg)
+    doc = msg.reply_to_message.document if msg.reply_to_message else None
+    if doc is None:
+        await reply(msg, T(msg, "import.usage"))
+        return
+    if (doc.file_size or 0) > IMPORT_MAX:
+        await reply(msg, T(msg, "import.too_big"))
+        return
+    try:
+        buf = await bot.download(doc)
+        data = backup.parse(buf.read().decode("utf-8", "replace"))
+    except backup.ImportError_ as e:
+        await reply(msg, T(msg, "import." + str(e)))
+        return
+    except (TelegramAPIError, UnicodeError, AttributeError):
+        await reply(msg, T(msg, "err.failed"))
+        return
+    replace = "replace" in (msg.text or "").lower()
+    got = backup.apply(db, msg.chat.id, data, msg.from_user.id, replace=replace)
+    audit.log(msg.chat.id, "chat.import", actor_id=msg.from_user.id,
+              after=str(got), severity="critical")
+    await reply(msg, T(msg, "import.done", n=T(msg, "export.counts", **got)))
+
+
+
+# ── תזמון ─────────────────────────────────────────────────────────────────
+def _when(ts: float) -> str:
+    return time.strftime("%d/%m %H:%M", time.localtime(ts))
+
+
+@dp.message(Command("schedule"))
+@needs("schedule.write")
+async def cmd_schedule(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    # הניסוח הוא 1–3 מילים; מה שאחריהן הוא ההודעה
+    words = parts[1].split()
+    spec = body = None
+    for take in (3, 2, 1):
+        if len(words) > take and schedmod.parse_spec(" ".join(words[:take])):
+            spec, body = " ".join(words[:take]), " ".join(words[take:])
+            break
+    if spec is None:
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    if len(sched.all(msg.chat.id)) >= schedmod.MAX_PER_CHAT:
+        await reply(msg, T(msg, "sched.full", n=schedmod.MAX_PER_CHAT))
+        return
+    if await _bad_html(msg, body):
+        return
+    sid = sched.add(msg.chat.id, spec, body, by=msg.from_user.id)
+    if sid is None:
+        await reply(msg, T(msg, "sched.usage"))
+        return
+    row = next(r for r in sched.all(msg.chat.id) if r["id"] == sid)
+    audit.log(msg.chat.id, "schedule.add", actor_id=msg.from_user.id,
+              after=spec, severity="medium")
+    await reply(msg, T(msg, "sched.added", spec=row["spec"],
+                       when=_when(row["next_run"])))
+
+
+@dp.message(Command("scheduled"))
+@needs("settings.read")
+async def cmd_scheduled(msg: Message):
+    touch(msg)
+    rows = sched.all(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "sched.none"))
+        return
+    await reply(msg, T(msg, "sched.list", list="\n".join(
+        T(msg, "sched.row", id=r["id"], spec=r["spec"],
+          when=_when(r["next_run"]),
+          preview=tpl.esc(r["content"][:60])) for r in rows)))
+
+
+@dp.message(Command("unschedule"))
+@needs("schedule.write")
+async def cmd_unschedule(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
+        await reply(msg, T(msg, "sched.un_usage", cmd=typed(msg)))
+        return
+    n = sched.remove(msg.chat.id, int(parts[1].lstrip("#")))
+    await reply(msg, T(msg, "sched.removed") if n else T(msg, "sched.missing"))
+
+
+# ── שבת, חגים ושעות פתיחה ─────────────────────────────────────────────────
+# שתי תכונות, מנגנון אחד: משהו מחליט שהקבוצה צריכה להיות סגורה, ושכבה
+# אחת מבצעת. הפרדה כזו היא מה שמונע את המצב שבו נעילת שבת ולוח השעות
+# נלחמים זה בזה — אחד נועל בשמונה בערב והשני פותח בשמונה וחצי.
+AUTOLOCK_KEY = "autolock_by"        # מי נעל: ‎shab‎ · ‎hours‎ · ריק
+
+
+def _tz_of(chat_id: int) -> int:
+    return _int(db.get(chat_id, "tz_offset", "0"), 0)
+
+
+def _shab_cfg(chat_id: int) -> dict:
+    lg = lang.for_chat(chat_id)
+    city = db.get(chat_id, "shabbat_city", zmanim.DEFAULT_CITY)
+    if city not in zmanim.CITIES:
+        city = zmanim.DEFAULT_CITY
+    return {
+        "on": db.get(chat_id, "shabbat", "0") == "1",
+        "city": city,
+        "city_name": zmanim.city_name(city, lg),
+        "before": _int(db.get(chat_id, "shabbat_before", ""),
+                       zmanim.DEFAULT_BEFORE),
+        "after": _int(db.get(chat_id, "shabbat_after", ""),
+                      zmanim.DEFAULT_AFTER),
+        "notice": _int(db.get(chat_id, "shabbat_notice", ""),
+                       zmanim.DEFAULT_NOTICE),
+    }
+
+
+async def _shab_windows(chat_id: int, cfg: Optional[dict] = None) -> list:
+    c = cfg or _shab_cfg(chat_id)
+    return await zman.windows(c["city"], before=c["before"], after=c["after"])
+
+
+def _shab_text(chat_id: int, which: str, w, lg: str,
+               cfg: Optional[dict] = None) -> str:
+    """ההודעה כפי שתישלח. תבנית של הקבוצה אם יש, אחרת המתורגמת.
+
+    זה מה שמאפשר "תצוגה מקדימה": אותה פונקציה בדיוק מרכיבה את מה
+    שיישלח ביום שישי ואת מה שהמנהל רואה עכשיו."""
+    c = cfg or _shab_cfg(chat_id)
+    raw = (db.get(chat_id, f"shabbat_msg_{which}", "") or "").strip()
+    if not raw:
+        raw = i18n.t(f"shab.msg_{which}", lg)
+    return zmanim.fill(raw, w, city=c["city_name"], tz_offset=_tz_of(chat_id))
+
+
+async def _shab_panel(chat_id: int, *, force: bool = False) -> dict:
+    """ההגדרות עם השבת הקרובה, לתצוגה. כישלון רשת מחזיר בלי ה'קרובה'.
+
+    כשהתכונה כבויה אין משיכה מהרשת אלא אם ביקשו במפורש (תצוגה
+    מקדימה). אחרת ‎/shabbat‎ בקבוצה שלא מעוניינת בכלל הייתה יוצאת
+    החוצה ומחכה לתשובה — פקודה שנתקעת, בלי שאיש ביקש דבר."""
+    cfg = _shab_cfg(chat_id)
+    if not (cfg["on"] or force):
+        return cfg
+    wins = await _shab_windows(chat_id, cfg)
+    nxt = zmanim.next_window(wins, time.time()) or zmanim.current(wins, time.time())
+    if nxt is not None:
+        lg = lang.for_chat(chat_id)
+        off = _tz_of(chat_id)
+        cfg["next"] = (zmanim.date(nxt.candles, off) + " "
+                       + zmanim.clock(nxt.candles, off) + " – "
+                       + zmanim.clock(nxt.havdalah, off))
+        cfg["window"] = nxt
+    return cfg
+
+
+async def _auto_lock(chat_id: int, close: bool, owner: str, text: str) -> None:
+    """נועל או פותח — ורושם מי עשה זאת.
+
+    הבעלות היא העיקר: קבוצה שמנהל השבית ידנית לא תיפתח ביום ראשון
+    בבוקר רק מפני שלוח השעות חושב שהגיע הזמן. אוטומט פותח רק מה
+    שאוטומט סגר."""
+    if not await set_lockdown(chat_id, close, None):
+        return
+    db.set(chat_id, AUTOLOCK_KEY, owner if close else "")
+    audit.log(chat_id, "autolock." + ("on" if close else "off"),
+              actor_kind="bot", after=owner, source="automation",
+              severity="medium")
+    if text:
+        await send(chat_id, text)
+
+
+async def _tick_shabbat(chat_id: int, now: float) -> bool:
+    """‎True‎ = השבת מחזיקה את הקבוצה סגורה עכשיו."""
+    cfg = _shab_cfg(chat_id)
+    if not cfg["on"]:
+        return False
+    wins = await _shab_windows(chat_id, cfg)
+    if not wins:
+        return db.get(chat_id, AUTOLOCK_KEY, "") == "shab"
+    lg = lang.for_chat(chat_id)
+    cur = zmanim.current(wins, now)
+    owner = db.get(chat_id, AUTOLOCK_KEY, "")
+    if cur is not None:
+        if owner != "shab":
+            await _auto_lock(chat_id, True, "shab",
+                             _shab_text(chat_id, "lock", cur, lg, cfg))
+        return True
+    if owner == "shab":
+        last = zmanim.next_window(wins, now) or wins[0]
+        done = next((w for w in wins if w.open_at <= now), last)
+        await _auto_lock(chat_id, False, "shab",
+                         _shab_text(chat_id, "open", done, lg, cfg))
+        return False
+    # הודעת ההקדמה — פעם אחת לכל שבת, לפי חותם הנעילה עצמו
+    nxt = zmanim.next_window(wins, now)
+    if nxt is not None and cfg["notice"] > 0:
+        due = nxt.lock_at - cfg["notice"] * 60
+        mark = str(int(nxt.lock_at))
+        if due <= now < nxt.lock_at and db.get(chat_id, "shabbat_noticed", "") != mark:
+            db.set(chat_id, "shabbat_noticed", mark)
+            await send(chat_id, _shab_text(chat_id, "notice", nxt, lg, cfg))
+    return False
+
+
+async def _tick_hours(chat_id: int, now: float, shabbat_holds: bool) -> None:
+    raw = db.get(chat_id, "hours", "") or ""
+    owner = db.get(chat_id, AUTOLOCK_KEY, "")
+    if not raw:
+        if owner == "hours" and not shabbat_holds:
+            await _auto_lock(chat_id, False, "", "")
+        return
+    lg = lang.for_chat(chat_id)
+    should_open = grouphours.is_open(raw, now=now, tz_offset=_tz_of(chat_id))
+    if not should_open:
+        if owner == "":
+            await _auto_lock(chat_id, True, "hours", i18n.t("hours.msg_close", lg))
+        return
+    if owner == "hours" and not shabbat_holds:
+        await _auto_lock(chat_id, False, "", i18n.t("hours.msg_open", lg))
+
+
+async def autolock_loop():
+    """לולאת הסגירה האוטומטית. דקה היא הרזולוציה — ושעה היא המדידה.
+
+    למה לא תזמון מראש לכל קבוצה: זמני השבת זזים בכל שבוע, מנהל משנה
+    עיר באמצע, והשירות מתאתחל. סריקה של דקה היא כמה שאילתות מקומיות,
+    והיא **מתאוששת מעצמה** מכל אחד מהמקרים האלה בלי מצב שמור."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        try:
+            rows = db.q("SELECT chat_id FROM chats WHERE active=1")
+        except Exception as e:
+            log.warning("שליפת קבוצות לנעילה אוטומטית נכשלה: %s", e)
+            continue
+        for row in rows:
+            cid = row["chat_id"]
+            if cid >= 0:            # צ'אט פרטי אינו נסגר
+                continue
+            try:
+                holds = await _tick_shabbat(cid, now)
+                await _tick_hours(cid, now, holds)
+            except Exception as e:
+                log.warning("נעילה אוטומטית בקבוצה %s נכשלה: %s", cid, e)
+
+
+# ── הפקודות ───────────────────────────────────────────────────────────────
+@dp.message(Command("shabbat"))
+@needs("settings.write")
+async def cmd_shabbat(msg: Message):
+    """‎/shabbat‎ — הכול. בלי ארגומנט: המסך, ועדיף בפרטי."""
+    touch(msg)
+    lg = lang_of(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else ""
+    rest = parts[2].strip() if len(parts) > 2 else ""
+
+    if sub in ("on", "off"):
+        db.set(msg.chat.id, "shabbat", "1" if sub == "on" else "0",
+               msg.from_user.id)
+        if sub == "off" and db.get(msg.chat.id, AUTOLOCK_KEY, "") == "shab":
+            await _auto_lock(msg.chat.id, False, "", "")
+        await reply(msg, T(msg, "sw.set", what=i18n.t("shab.title", lg),
+                           state=i18n.t("on" if sub == "on" else "off", lg)))
+        return
+    if sub == "city":
+        key = rest.lower().replace(" ", "")
+        if key not in zmanim.CITIES:
+            named = {zmanim.city_name(k, "he"): k for k in zmanim.CITIES}
+            key = named.get(rest.strip(), "")
+        if not key:
+            await reply(msg, i18n.t("shab.city_hint", lg) + "\n"
+                        + ", ".join(k for k in zmanim.CITIES))
+            return
+        db.set(msg.chat.id, "shabbat_city", key, msg.from_user.id)
+        await reply(msg, i18n.t("shab.city", lg,
+                                city=zmanim.city_name(key, lg)))
+        return
+    if sub in ("before", "after", "notice") and rest.isdigit():
+        db.set(msg.chat.id, f"shabbat_{sub}", str(min(360, int(rest))),
+               msg.from_user.id)
+        await reply(msg, i18n.t("shab.saved", lg))
+        return
+    if sub == "msg":
+        which, _, body = rest.partition(" ")
+        which = which.lower()
+        if which not in ("lock", "open", "notice"):
+            await reply(msg, i18n.t("shab.usage", lg))
+            return
+        if await _bad_html(msg, body):
+            return
+        db.set(msg.chat.id, f"shabbat_msg_{which}", body.strip(),
+               msg.from_user.id)
+        await reply(msg, i18n.t("shab.saved", lg) + "\n\n"
+                    + i18n.t("shab.vars", lg,
+                             vars=", ".join("{" + v + "}" for v in zmanim.VARS)))
+        return
+    if sub == "preview":
+        cfg = await _shab_panel(msg.chat.id, force=True)
+        w = cfg.get("window")
+        if w is None:
+            await reply(msg, i18n.t("shab.no_times", lg))
+            return
+        for which in ("notice", "lock", "open"):
+            await reply(msg, _shab_text(msg.chat.id, which, w, lg, cfg))
+        return
+
+    cfg = await _shab_panel(msg.chat.id, force=sub == "status")
+    sc = panel.shabbat_screen(msg.chat.id, cfg, lg)
+    await reply(msg, sc.text + "\n\n" + i18n.t("shab.usage", lg),
+                markup=kb(sc))
+
+
+@dp.message(Command("hours"))
+@needs("settings.write")
+async def cmd_hours(msg: Message):
+    """‎/hours mon 08:00-23:00‎ · ‎/hours sat closed‎ · ‎/hours clear‎."""
+    touch(msg)
+    lg = lang_of(msg)
+    parts = (msg.text or "").split()
+    raw = db.get(msg.chat.id, "hours", "") or ""
+    if len(parts) == 2 and parts[1].lower() == "clear":
+        db.set(msg.chat.id, "hours", "", msg.from_user.id)
+        if db.get(msg.chat.id, AUTOLOCK_KEY, "") == "hours":
+            await _auto_lock(msg.chat.id, False, "", "")
+        await reply(msg, i18n.t("hours.none", lg))
+        return
+    if len(parts) >= 3:
+        day = parts[1].lower()[:3]
+        if day not in grouphours.DAYS:
+            await reply(msg, i18n.t("hours.usage", lg))
+            return
+        new = grouphours.set_day(raw, day, parts[2].lower())
+        if new == raw and parts[2].lower() not in ("off",):
+            await reply(msg, i18n.t("hours.usage", lg))
+            return
+        db.set(msg.chat.id, "hours", new, msg.from_user.id)
+        audit.log(msg.chat.id, "settings.write", actor_id=msg.from_user.id,
+                  before=f"hours={raw}", after=f"hours={new}",
+                  source="command", severity="medium")
+        raw = new
+    sc = panel.hours_screen(msg.chat.id, _hours_table(msg.chat.id, raw, lg), lg)
+    await reply(msg, sc.text + "\n\n" + i18n.t("hours.usage", lg),
+                markup=kb(sc))
+
+
+def _hours_table(chat_id: int, raw: str, lg: str) -> str:
+    return grouphours.describe(
+        raw, {d: i18n.t(f"day.{d}", lg) for d in grouphours.DAYS},
+        i18n.t("hours.closed", lg))
+
+
+# ── פדרציות ───────────────────────────────────────────────────────────────
+def _fed_here(msg: Message):
+    return feds.of_chat(msg.chat.id)
+
+
+@dp.message(Command("newfed"))
+@needs("fed.manage")
+async def cmd_newfed(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "fed.usage"))
+        return
+    f = feds.create(parts[1], msg.from_user.id)
+    if f is None:
+        await reply(msg, T(msg, "fed.usage"))
+        return
+    audit.log(msg.chat.id, "fed.create", actor_id=msg.from_user.id,
+              after=f.fed_id, severity="high")
+    await reply(msg, T(msg, "fed.created", name=tpl.esc(f.name), id=f.fed_id))
+
+
+@dp.message(Command("joinfed"))
+@needs("fed.manage")
+async def cmd_joinfed(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await reply(msg, T(msg, "fed.usage"))
+        return
+    f = feds.get(parts[1])
+    if f is None or not feds.join(f.fed_id, msg.chat.id):
+        await reply(msg, T(msg, "fed.unknown"))
+        return
+    audit.log(msg.chat.id, "fed.join", actor_id=msg.from_user.id,
+              after=f.fed_id, severity="high")
+    await reply(msg, T(msg, "fed.joined", name=tpl.esc(f.name)))
+
+
+@dp.message(Command("leavefed"))
+@needs("fed.manage")
+async def cmd_leavefed(msg: Message):
+    touch(msg)
+    n = feds.leave(msg.chat.id)
+    await reply(msg, T(msg, "fed.left") if n else T(msg, "fed.none"))
+
+
+@dp.message(Command("fedinfo"))
+@needs("settings.read")
+async def cmd_fedinfo(msg: Message):
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None:
+        await reply(msg, T(msg, "fed.none"))
+        return
+    await reply(msg, T(msg, "fed.info", name=tpl.esc(f.name), id=f.fed_id,
+                       chats=len(feds.chats(f.fed_id)),
+                       admins=len(feds.admins(f.fed_id)),
+                       bans=feds.count_bans(f.fed_id)))
+
+
+@dp.message(Command("fban"))
+@needs("fed.ban")
+async def cmd_fban(msg: Message):
+    """חסימה בכל הקבוצות של הפדרציה, לא רק כאן."""
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None:
+        await reply(msg, T(msg, "fed.none"))
+        return
+    if not feds.is_admin(f.fed_id, msg.from_user.id):
+        await reply(msg, T(msg, "fed.not_admin"))
+        return
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    reason = " ".join(a for a in (msg.text or "").split()[1:]
+                      if not a.startswith("@") and not a.lstrip("-").isdigit())
+    feds.ban(f.fed_id, t, reason, msg.from_user.id)
+    chats = feds.chats(f.fed_id)
+    done = 0
+    for cid in chats:
+        if await apply_action(cid, t, "ban", None, f"fed:{f.fed_id} {reason}",
+                              msg.from_user.id, "automation"):
+            done += 1
+    audit.log(msg.chat.id, "fed.ban", actor_id=msg.from_user.id, target_id=t,
+              after=f"{done}/{len(chats)}", reason=reason, severity="critical")
+    await reply(msg, T(msg, "fed.banned", name=_named(msg, t),
+                       fed=tpl.esc(f.name), chats=done))
+
+
+@dp.message(Command("unfban"))
+@needs("fed.ban")
+async def cmd_unfban(msg: Message):
+    """מסיר מהרשימה. **אינו** משחרר אוטומטית בכל הקבוצות — ייתכן
+    שמנהל מקומי חסם את אותו אדם גם מסיבה משלו."""
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None or not feds.is_admin(f.fed_id, msg.from_user.id):
+        await reply(msg, T(msg, "fed.not_admin" if f else "fed.none"))
+        return
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    feds.unban(f.fed_id, t)
+    with contextlib.suppress(TelegramAPIError):
+        await bot.unban_chat_member(msg.chat.id, t, only_if_banned=True)
+    await reply(msg, T(msg, "fed.unbanned"))
+
+
+@dp.message(Command("fedadmin"))
+@needs("fed.manage")
+async def cmd_fedadmin(msg: Message):
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None or f.owner_id != msg.from_user.id:
+        await reply(msg, T(msg, "fed.not_admin" if f else "fed.none"))
+        return
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    feds.add_admin(f.fed_id, t)
+    await reply(msg, T(msg, "fed.promoted", name=_named(msg, t)))
+
+
+@dp.message(Command("fedbans"))
+@needs("settings.read")
+async def cmd_fedbans(msg: Message):
+    touch(msg)
+    f = _fed_here(msg)
+    if f is None:
+        await reply(msg, T(msg, "fed.none"))
+        return
+    rows = feds.bans(f.fed_id)
+    await reply(msg, T(msg, "fed.bans_list", name=tpl.esc(f.name),
+                       list="\n".join(
+                           f"• {_named(msg, r['user_id'])} — "
+                           f"{tpl.esc(r['reason'] or '—')}" for r in rows)
+                       or "—"))
+
+
+# ── מוניטין ───────────────────────────────────────────────────────────────
+@dp.message(Command("rep"))
+async def cmd_rep(msg: Message):
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    t = _target_of(msg) or msg.from_user.id
+    r = rep.get(msg.chat.id, t)
+    await reply(msg, T(msg, "rep.card", name=_named(msg, t), level=r.level,
+                       xp=r.xp, next=r.to_next, trust=f"{r.trust:.2f}",
+                       rank=rep.rank(msg.chat.id, t) or "—"))
+
+
+@dp.message(Command("top"))
+async def cmd_top(msg: Message):
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    rows = rep.top(msg.chat.id)
+    if not rows:
+        await reply(msg, T(msg, "rep.none"))
+        return
+    medals = ("🥇", "🥈", "🥉")
+    await reply(msg, T(msg, "rep.top", list="\n".join(
+        f"{medals[i] if i < 3 else f'{i + 1}.'} {_named(msg, u)} — "
+        f"{xp} ({lv})" for i, (u, xp, lv) in enumerate(rows))))
+
+
+
+# ── כיבוי פקודות ──────────────────────────────────────────────────────────
+@dp.message(Command("disable"))
+@needs("settings.write")
+async def cmd_disable(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await reply(msg, T(msg, "dis.usage"))
+        return
+    name = parts[1].lstrip("/").lower()
+    if not disabling.disable(db, msg.chat.id, name, msg.from_user.id):
+        await reply(msg, T(msg, "dis.protected", name=tpl.esc(name)))
+        return
+    audit.log(msg.chat.id, "command.disable", actor_id=msg.from_user.id,
+              after=name, severity="medium")
+    await reply(msg, T(msg, "dis.done", name=tpl.esc(name)))
+
+
+@dp.message(Command("enable"))
+@needs("settings.write")
+async def cmd_enable(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await reply(msg, T(msg, "dis.usage"))
+        return
+    name = parts[1].lstrip("/").lower()
+    if not disabling.enable(db, msg.chat.id, name, msg.from_user.id):
+        await reply(msg, T(msg, "dis.missing", name=tpl.esc(name)))
+        return
+    await reply(msg, T(msg, "dis.all") if name == "all"
+                else T(msg, "dis.enabled", name=tpl.esc(name)))
+
+
+@dp.message(Command("disabled"))
+@needs("settings.read")
+async def cmd_disabled(msg: Message):
+    touch(msg)
+    names = disabling.disabled(db, msg.chat.id)
+    await reply(msg, T(msg, "dis.list", list="\n".join(
+        f"• <code>/{n}</code>" for n in sorted(names)))
+        if names else T(msg, "dis.none"))
+
+
+# ── וריאציות אזהרה ────────────────────────────────────────────────────────
+async def _warn_variant(msg: Message, *, silent: bool = False,
+                        purge: bool = False):
+    if purge and msg.reply_to_message:
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id,
+                                     msg.reply_to_message.message_id)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "target.usage"))
+        return
+    reason = " ".join(a for a in (msg.text or "").split()[1:]
+                      if not a.startswith("@") and not a.lstrip("-").isdigit())
+    out = mod.warn(msg.chat.id, t, msg.from_user.id, reason, "command")
+    if out.threshold_hit:
+        await apply_action(msg.chat.id, t, out.kind, out.duration,
+                           out.reason, msg.from_user.id, "policy")
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+    if silent:
+        return
+    await reply(msg, T(msg, "warn.triggered", n=out.warns, action=out.label)
+                if out.threshold_hit else T(msg, "warn.added", n=out.warns))
+
+
+@dp.message(Command("dwarn"))
+@needs("user.warn")
+async def cmd_dwarn(msg: Message):
+    touch(msg); await _warn_variant(msg, purge=True)
+
+
+@dp.message(Command("swarn"))
+@needs("user.warn")
+async def cmd_swarn(msg: Message):
+    touch(msg); await _warn_variant(msg, silent=True)
+
+
+@dp.message(Command("setwarnmode"))
+@needs("settings.write")
+async def cmd_setwarnmode(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    valid = ("mute", "kick", "ban")
+    if len(parts) < 2 or parts[1].lower() not in valid:
+        await reply(msg, T(msg, "set.usage", cmd="/setwarnmode " + "|".join(valid),
+                           cur=db.get(msg.chat.id, "warn_mode", "mute")))
+        return
+    db.set(msg.chat.id, "warn_mode", parts[1].lower(), msg.from_user.id)
+    await reply(msg, T(msg, "set.done", key="warn_mode", value=parts[1].lower()))
+
+
+# ── מחיקה: שקטה, וטווח מסומן ──────────────────────────────────────────────
+@dp.message(Command("spurge"))
+@needs("chat.purge")
+async def cmd_spurge(msg: Message):
+    """כמו purge, בלי הודעת סיכום. בקבוצה גדולה גם הסיכום הוא רעש."""
+    touch(msg)
+    if not msg.reply_to_message:
+        await reply(msg, T(msg, "purge.reply_usage", cmd=typed(msg)))
+        return
+    first = msg.reply_to_message.message_id
+    if msg.message_id - first > PURGE_MAX:
+        await reply(msg, T(msg, "purge.too_many", n=PURGE_MAX))
+        return
+    n = 0
+    for mid in range(first, msg.message_id + 1):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id, mid)
+            n += 1
+    audit.log(msg.chat.id, "chat.purge", actor_id=msg.from_user.id,
+              after=n, severity="medium")
+
+
+_purge_marks: dict[tuple[int, int], int] = {}
+
+
+@dp.message(Command("purgefrom"))
+@needs("chat.purge")
+async def cmd_purgefrom(msg: Message):
+    """מסמן התחלה. הסימון לכל מנהל בנפרד, כדי ששניים לא ידרסו זה את זה."""
+    touch(msg)
+    if not msg.reply_to_message:
+        await reply(msg, T(msg, "purge.from_usage"))
+        return
+    _purge_marks[(msg.chat.id, msg.from_user.id)] = \
+        msg.reply_to_message.message_id
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+    await reply(msg, T(msg, "purge.marked"))
+
+
+@dp.message(Command("purgeto"))
+@needs("chat.purge")
+async def cmd_purgeto(msg: Message):
+    touch(msg)
+    start = _purge_marks.pop((msg.chat.id, msg.from_user.id), None)
+    if start is None or not msg.reply_to_message:
+        await reply(msg, T(msg, "purge.no_mark"))
+        return
+    end = msg.reply_to_message.message_id
+    lo, hi = min(start, end), max(start, end)
+    if hi - lo > PURGE_MAX:
+        await reply(msg, T(msg, "purge.too_many", n=PURGE_MAX))
+        return
+    n = 0
+    for mid in range(lo, hi + 1):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id, mid)
+            n += 1
+    audit.log(msg.chat.id, "chat.purge", actor_id=msg.from_user.id,
+              after=n, severity="medium")
+    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10)
+
+
+# ── ניקויים גורפים ────────────────────────────────────────────────────────
+@dp.message(Command("stopall"))
+@needs("filters.write")
+async def cmd_stopall(msg: Message):
+    touch(msg)
+    n = db.change("DELETE FROM filters WHERE chat_id=?", (msg.chat.id,))
+    audit.log(msg.chat.id, "filter.clear", actor_id=msg.from_user.id,
+              after=n, severity="high")
+    await reply(msg, T(msg, "filters.cleared", n=n))
+
+
+@dp.message(Command("rmblockall"))
+@needs("blocklist.write")
+async def cmd_rmblockall(msg: Message):
+    touch(msg)
+    n = blocks.clear(msg.chat.id)
+    audit.log(msg.chat.id, "blocklist.clear", actor_id=msg.from_user.id,
+              after=n, severity="high")
+    await reply(msg, T(msg, "block.cleared", n=n))
+
+
+@dp.message(Command("rmallowall"))
+@needs("settings.write")
+async def cmd_rmallowall(msg: Message):
+    touch(msg)
+    n = db.change("DELETE FROM allowlist WHERE chat_id=?", (msg.chat.id,))
+    await reply(msg, T(msg, "allow.cleared", n=n))
+
+
+@dp.message(Command("admincache"))
+@needs("settings.read")
+async def cmd_admincache(msg: Message):
+    touch(msg)
+    admins = await sync_admins(msg.chat.id, force=True)
+    await reply(msg, T(msg, "admin.cache", n=len(admins)))
+
+
+# ── החרגות בשמות של Rose ──────────────────────────────────────────────────
+@dp.message(Command("approve"))
+@needs("settings.write")
+async def cmd_approve(msg: Message):
+    touch(msg); await cmd_allow(msg)
+
+
+@dp.message(Command("unapprove"))
+@needs("settings.write")
+async def cmd_unapprove(msg: Message):
+    touch(msg); await cmd_unallow(msg)
+
+
+@dp.message(Command("approved"))
+@needs("settings.read")
+async def cmd_approved(msg: Message):
+    touch(msg); await cmd_allowlist(msg)
+
+
+@dp.message(Command("echo"))
+@needs("chat.say")
+async def cmd_echo(msg: Message):
+    touch(msg); await cmd_say(msg)
+
+
+# ── ברכות ואימות בשמות מפורשים ────────────────────────────────────────────
+@dp.message(Command("setwelcome"))
+@needs("welcome.write")
+async def cmd_setwelcome(msg: Message):
+    touch(msg); await _greet_cmd(msg, WELCOME_KEY, "/setwelcome")
+
+
+@dp.message(Command("setgoodbye"))
+@needs("welcome.write")
+async def cmd_setgoodbye(msg: Message):
+    touch(msg); await _greet_cmd(msg, GOODBYE_KEY, "/setgoodbye")
+
+
+@dp.message(Command("captchatime"))
+@needs("settings.write")
+async def cmd_captchatime(msg: Message):
+    touch(msg); await _number(msg, "captcha_time", "/captchatime", "120", 20, 900)
+
+
+@dp.message(Command("captchatries"))
+@needs("settings.write")
+async def cmd_captchatries(msg: Message):
+    touch(msg); await _number(msg, "captcha_tries", "/captchatries", "3", 1, 10)
+
+
+@dp.message(Command("captchafail"))
+@needs("settings.write")
+async def cmd_captchafail(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or parts[1].lower() not in cap.FAIL_ACTIONS:
+        await reply(msg, T(msg, "set.usage",
+                           cmd="/captchafail " + "|".join(cap.FAIL_ACTIONS),
+                           cur=db.get(msg.chat.id, "captcha_fail", "kick")))
+        return
+    db.set(msg.chat.id, "captcha_fail", parts[1].lower(), msg.from_user.id)
+    await reply(msg, T(msg, "set.done", key="captcha_fail", value=parts[1].lower()))
+
+
+@dp.message(Command("blockmode"))
+@needs("blocklist.write")
+async def cmd_blockmode(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    valid = ("delete", "warn", "mute", "kick", "ban")
+    if len(parts) < 2 or parts[1].lower() not in valid:
+        await reply(msg, T(msg, "set.usage", cmd="/blockmode " + "|".join(valid),
+                           cur=db.get(msg.chat.id, "block_action", "delete")))
+        return
+    db.run("UPDATE blocklist SET action=? WHERE chat_id=?",
+           (parts[1].lower(), msg.chat.id))
+    db.set(msg.chat.id, "block_action", parts[1].lower(), msg.from_user.id)
+    await reply(msg, T(msg, "set.done", key="block_action", value=parts[1].lower()))
+
+
+
+# ── אוטומציות ─────────────────────────────────────────────────────────────
+@dp.message(Command("automation"))
+@needs("settings.read")
+async def cmd_automation(msg: Message):
+    touch(msg)
+    rules = auto.rules_for(db, msg.chat.id)
+    if not rules:
+        await reply(msg, T(msg, "auto.none"))
+        return
+    await reply(msg, T(msg, "auto.list", list="\n".join(
+        f"<code>#{i + 1}</code> {tpl.esc(auto.format_rule(r))}"
+        for i, r in enumerate(rules))))
+
+
+@dp.message(Command("addauto"))
+@needs("automation.write")
+async def cmd_addauto(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    rule = auto.parse_rule(parts[1]) if len(parts) > 1 else None
+    if rule is None:
+        await reply(msg, T(msg, "auto.bad",
+                           events=", ".join(auto.EVENTS),
+                           fields=", ".join(auto.FIELDS),
+                           actions=", ".join(auto.ACTIONS)))
+        return
+    cur = auto.rules_for(db, msg.chat.id)
+    if len(cur) >= auto.MAX_RULES:
+        await reply(msg, T(msg, "auto.full", n=auto.MAX_RULES))
+        return
+    cur.append(rule)
+    db.set(msg.chat.id, "automation",
+           "\n".join(auto.format_rule(r) for r in cur), msg.from_user.id)
+    audit.log(msg.chat.id, "automation.add", actor_id=msg.from_user.id,
+              after=auto.format_rule(rule), severity="high")
+    await reply(msg, T(msg, "auto.added", rule=tpl.esc(auto.format_rule(rule))))
+
+
+@dp.message(Command("rmauto"))
+@needs("automation.write")
+async def cmd_rmauto(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split()
+    cur = auto.rules_for(db, msg.chat.id)
+    if len(parts) < 2 or not parts[1].lstrip("#").isdigit():
+        await reply(msg, T(msg, "auto.none") if not cur
+                    else T(msg, "auto.bad", events=", ".join(auto.EVENTS),
+                           fields=", ".join(auto.FIELDS),
+                           actions=", ".join(auto.ACTIONS)))
+        return
+    i = int(parts[1].lstrip("#")) - 1
+    if not 0 <= i < len(cur):
+        await reply(msg, T(msg, "auto.none"))
+        return
+    cur.pop(i)
+    db.set(msg.chat.id, "automation",
+           "\n".join(auto.format_rule(r) for r in cur), msg.from_user.id)
+    await reply(msg, T(msg, "auto.removed"))
+
+
+def _facts(msg: Message, text: str, risk: float = 0.0) -> dict:
+    """העובדות שאוטומציה יכולה לבדוק. נבנות פעם אחת ולא לכל כלל."""
+    u = msg.from_user
+    r = db.one("SELECT joined_at FROM members WHERE chat_id=? AND user_id=?",
+               (msg.chat.id, u.id)) if u else None
+    age = (time.time() - r["joined_at"]) if r and r["joined_at"] else 10 ** 9
+    rp = rep.get(msg.chat.id, u.id) if u else None
+    ents = (msg.entities or []) + (msg.caption_entities or [])
+    return {
+        "risk": risk,
+        "account_age": int(age),
+        "is_new": age < 86400,
+        "warns": mod.warn_count(msg.chat.id, u.id) if u else 0,
+        "level": rp.level if rp else 0,
+        "trust": rp.trust if rp else 0.5,
+        "xp": rp.xp if rp else 0,
+        "msg_len": len(text),
+        "mentions": sum(1 for e in ents
+                        if e.type in ("mention", "text_mention")),
+        "links": len(linksec.find(text)),
+        "has_link": bool(linksec.find(text)),
+        "has_media": bool(_describe(msg)["media_kind"]),
+        "is_forward": bool(msg.forward_origin),
+        "has_button": bool(msg.reply_markup),
+    }
+
+
+async def run_automation(msg: Message, event: str, facts: dict) -> bool:
+    """מבצע את מה שהאוטומציה ביקשה. מחזיר האם ההודעה טופלה.
+
+    האוטומציה **מבקשת**; הביצוע כאן, ולכן אפשר לוודא בנקודה אחת שמה
+    שנעשה הוא מה שהבוט בכלל רשאי לעשות בקבוצה."""
+    rules = auto.rules_for(db, msg.chat.id)
+    if not rules:
+        return False
+    acts = auto.run(rules, event, facts)
+    if not acts:
+        return False
+    audit.log(msg.chat.id, "automation.fired", actor_kind="bot",
+              source="automation", target_id=msg.from_user.id if msg.from_user
+              else None, after=",".join(acts),
+              reason="; ".join(auto.explain(rules, event, facts)),
+              severity="medium")
+    handled = False
+    for a in acts:
+        if a == "log":
+            continue
+        if a == "alert":
+            for uid in list(await sync_admins(msg.chat.id))[:10]:
+                await send(uid, i18n.t("auto.fired", lang.for_chat(msg.chat.id),
+                                       rules="; ".join(
+                                           auto.explain(rules, event, facts))),
+                           is_group=False)
+        elif a == "lockdown":
+            await set_lockdown(msg.chat.id, True, None)
+        elif a == "emergency":
+            emerg.enable(db, msg.chat.id, None)
+        elif a == "captcha" and msg.from_user:
+            await _start_captcha(msg.chat.id, msg.from_user)
+            handled = True
+        elif a in ("delete", "warn", "mute", "kick", "ban"):
+            await _enforce(msg, a, None, "automation", "automation.action",
+                           severity="medium")
+            handled = True
+    return handled
+
+
+# ── אנליטיקה ──────────────────────────────────────────────────────────────
+@dp.message(Command("analytics"))
+@needs("settings.read")
+async def cmd_analytics(msg: Message):
+    touch(msg)
+    span = ((msg.text or "").split() + [""])[1].lower()
+    if span not in analytics.RANGES:
+        span = "today"
+    rp = analytics.report(db, msg.chat.id, span)
+    lines = [T(msg, "an.title", chat=tpl.esc(msg.chat.title or ""), span=span),
+             "", T(msg, "an.members", n=rp["members"])]
+    for key, (n, d) in (("an.joined", rp["joined"]), ("an.active", rp["active"])):
+        lines.append(T(msg, key, n=n) + (f" ({d:+d}%)" if d is not None else ""))
+    if rp["actions"]:
+        lines.append("")
+        for label, (n, d) in sorted(rp["actions"].items(),
+                                    key=lambda kv: -kv[1][0]):
+            lines.append(T(msg, "an.row", label=T(msg, label), n=n,
+                           delta=f" ({d:+d}%)" if d is not None else ""))
+    else:
+        lines += ["", T(msg, "an.nothing")]
+    top = analytics.top_offenders(db, msg.chat.id, span)
+    if top:
+        lines.append(T(msg, "an.offenders", list="\n".join(
+            f"• {_named(msg, u)} — {n}" for u, n in top)))
+    await reply(msg, "\n".join(lines))
+
+
+# ── הפצה ──────────────────────────────────────────────────────────────────
+@dp.message(Command("broadcast"))
+@needs("broadcast.send")
+async def cmd_broadcast(msg: Message):
+    """שליחה לכל הקבוצות שאתה מנהל. תצוגה מקדימה לפני, תמיד."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await reply(msg, T(msg, "bc.usage"))
+        return
+    body = parts[1].strip()
+    preview = body.lower().startswith("preview")
+    if preview:
+        body = body[len("preview"):].strip()
+    groups = my_groups(msg.from_user.id)
+    if not groups or not body:
+        await reply(msg, T(msg, "bc.none") if not groups else T(msg, "bc.usage"))
+        return
+    if preview:
+        await reply(msg, T(msg, "bc.preview", n=len(groups),
+                           chats="\n".join(f"• {tpl.esc(t)}"
+                                           for _, t in groups[:20]),
+                           body=tpl.esc(body)))
+        return
+    okay = 0
+    for cid, _ in groups:
+        if await send(cid, tpl.render(body, tpl.context(chat_id=cid))):
+            okay += 1
+    audit.log(msg.chat.id, "broadcast.send", actor_id=msg.from_user.id,
+              after=f"{okay}/{len(groups)}", severity="high")
+    await reply(msg, T(msg, "bc.sent", ok=okay, n=len(groups)))
+
+
+@dp.message(Command("linkcheck"))
+@needs("settings.read")
+async def cmd_linkcheck(msg: Message):
+    touch(msg)
+    src = msg.reply_to_message
+    text = (src.text or src.caption or "") if src else \
+        (msg.text or "").split(maxsplit=1)[-1]
+    sigs = linksec.inspect(text, allowed=allow.values(msg.chat.id, "domain"))
+    res = policy.simulate(sigs, policy.rules_for(db, msg.chat.id))
+    if not sigs:
+        await reply(msg, T(msg, "sim.none"))
+        return
+    lines = "\n".join(T(msg, "sim.signal", source=s["source"], kind=s["kind"],
+                        weight=int(s["weight"] * 100),
+                        detail=f" · {tpl.esc(s['detail'])}" if s["detail"] else "")
+                      for s in res["signals"])
+    await reply(msg, T(msg, "sim.result", risk=int(res["risk"] * 100),
+                       action=res["action"], dur="", signals=lines))
+
+
+async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
+    """משתיק את כל הקבוצה בבת אחת, או מחזיר אותה.
+
+    זה ‎setChatPermissions‎ — הרשאות ברירת המחדל של הצ'אט — ולא השתקה
+    של כל משתמש בנפרד. לכן זה פועל מיד גם על מי שעוד לא הצטרף, ולכן
+    ביטול הוא פעולה אחת ולא מאה."""
+    try:
+        await bot.set_chat_permissions(chat_id, MUTED if on else OPEN_CHAT)
+    except TelegramAPIError as e:
+        log.warning("השבתת קבוצה %s נכשלה: %s", chat_id, e)
+        return False
+    db.set(chat_id, "lockdown", "1" if on else "0", by)
+    audit.log(chat_id, "chat.lockdown", actor_id=by, after="on" if on else "off",
+              severity="high")
+    return True
+
+
+@dp.message(Command("lockdown"))
+@needs("chat.lockdown")
+async def cmd_lockdown(msg: Message):
+    touch(msg)
+    arg = ((msg.text or "").split() + [""])[1].lower()
+    cur = db.get(msg.chat.id, "lockdown", "0") == "1"
+    if arg not in ("on", "off"):
+        sc = panel.switch_screen(msg.chat.id, "lockdown", cur, lang_of(msg))
+        await reply(msg, sc.text, markup=kb(sc))
+        return
+    on = arg == "on"
+    okay = await set_lockdown(msg.chat.id, on, msg.from_user.id)
+    await reply(msg, T(msg, "lockdown.on" if on else "lockdown.off")
+                if okay else T(msg, "err.failed"))
+
+
+def _lock_arg(msg: Message) -> tuple[Optional[str], str]:
+    """‎(סוג, פעולה)‎ מתוך ‎/lock url ban‎. סוג לא מוכר מחזיר None."""
+    parts = (msg.text or "").split()[1:]
+    if not parts:
+        return None, ""
+    key = parts[0].lower().lstrip("#")
+    action = parts[1].lower() if len(parts) > 1 else ""
+    return (key if key in LOCK_TYPES else None), action
+
+
+async def _lock_cmd(msg: Message, default_action: str):
+    key, action = _lock_arg(msg)
+    lg = lang_of(msg)
+    if key is None:
+        raw = (msg.text or "").split()
+        if len(raw) > 1:
+            await reply(msg, T(msg, "lock.unknown", name=raw[1]))
+            return
+        # רשימת הסוגים במקום "שימוש שגוי": מי ששכח את השם צריך אותו כאן
+        await reply(msg, T(msg, "lock.usage", cmd=typed(msg),
+                           types=", ".join(sorted(LOCK_TYPES))))
+        return
+    if action not in ACTIONS:
+        action = default_action
+    locks.set(msg.chat.id, key, action)
+    audit.log(msg.chat.id, "lock.change", actor_id=msg.from_user.id,
+              after=f"{key}={action}", severity="info")
+    await reply(msg, T(msg, "lock.done", name=i18n.t(f"lock.{key}", lg),
+                       action=panel.action_label(action, lg)))
+
+
+@dp.message(Command("lock"))
+@needs("locks.write")
+async def cmd_lock(msg: Message):
+    touch(msg); await _lock_cmd(msg, "delete")
+
+
+@dp.message(Command("unlock"))
+@needs("locks.write")
+async def cmd_unlock(msg: Message):
+    touch(msg); await _lock_cmd(msg, "off")
+
+
+@dp.message(Command("locks"))
+@needs("settings.read")
+async def cmd_locks(msg: Message):
+    touch(msg)
+    lg = lang_of(msg)
+    active = locks.get_all(msg.chat.id)
+    if not active:
+        await reply(msg, T(msg, "locks.state_none"))
+        return
+    lines = "\n".join(
+        f"• {i18n.t(f'lock.{k}', lg)} — {panel.action_label(a, lg)}"
+        for k, (a, _) in sorted(active.items()))
+    await reply(msg, T(msg, "locks.state", list=lines))
+
+
+@dp.message(Command("say"))
+@needs("chat.say")
+async def cmd_say(msg: Message):
+    """הודעה בשם הבוט. הפקודה עצמה נמחקת — אחרת רואים מי כתב אותה."""
+    touch(msg)
+    text = (msg.text or "").split(maxsplit=1)
+    if len(text) < 2 or not text[1].strip():
+        await reply(msg, T(msg, "say.usage", cmd=typed(msg)))
+        return
+    if await _bad_html(msg, text[1]):
+        return
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+    audit.log(msg.chat.id, "chat.say", actor_id=msg.from_user.id,
+              after=text[1][:200], severity="medium")
+    await send(msg.chat.id, text[1])
+
+
+@dp.message(Command("del"))
+@needs("msg.delete")
+async def cmd_del(msg: Message):
+    touch(msg)
+    if not msg.reply_to_message:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await bot.delete_message(msg.chat.id, msg.reply_to_message.message_id)
+    audit.log(msg.chat.id, "msg.delete", actor_id=msg.from_user.id,
+              target_id=(msg.reply_to_message.from_user.id
+                         if msg.reply_to_message.from_user else None),
+              severity="low")
+    _schedule_delete(msg.chat.id, msg.message_id, 1)
+
+
+@dp.message(Command("pin"))
+@needs("chat.pin")
+async def cmd_pin(msg: Message):
+    touch(msg)
+    if not msg.reply_to_message:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    try:
+        # שקט: נעיצה שמודיעה לכל חבר בקבוצה היא בדיוק הרעש שהבוט הזה
+        # נועד למנוע. מי שרוצה להודיע — יכתוב הודעה.
+        await bot.pin_chat_message(msg.chat.id,
+                                   msg.reply_to_message.message_id,
+                                   disable_notification=True)
+    except TelegramAPIError:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    audit.log(msg.chat.id, "chat.pin", actor_id=msg.from_user.id,
+              after=msg.reply_to_message.message_id, severity="low")
+    await reply(msg, T(msg, "pin.done"))
+
+
+@dp.message(Command("unpin"))
+@needs("chat.pin")
+async def cmd_unpin(msg: Message):
+    touch(msg)
+    mid = msg.reply_to_message.message_id if msg.reply_to_message else None
+    with contextlib.suppress(TelegramAPIError):
+        await bot.unpin_chat_message(msg.chat.id, message_id=mid)
+    await reply(msg, T(msg, "pin.off"))
+
+
+@dp.message(Command("lang"))
+async def cmd_lang(msg: Message):
+    """בורר השפה. בקבוצה — למנהלים בלבד, כי זה משנה לכולם."""
+    touch(msg)
+    if msg.chat.type == ChatType.PRIVATE:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    await sync_admins(msg.chat.id)
+    if not perms.check(msg.chat.id, msg.from_user.id, "settings.write"):
+        await reply(msg, T(msg, "err.need_admin"))
+        return
+    sc = panel.language_screen(msg.chat.id, lang.for_chat(msg.chat.id))
+    await reply(msg, sc.text, markup=kb(sc))
+
+
+@dp.message(Command("id"))
+async def cmd_id(msg: Message):
+    touch(msg)
+    t = _target_of(msg) or (msg.from_user.id if msg.from_user else 0)
+    await reply(msg, T(msg, "id.line", user=t, chat=msg.chat.id))
+
+
+@dp.message(Command("diag"))
+@needs("settings.read")
+async def cmd_diag(msg: Message):
+    """בדיקה עצמית: מה יעבוד בקבוצה הזאת, ומה לא — ולמה.
+
+    נבנה אחרי "הפעלתי הודעת כניסה ולא קרה כלום". לברכה יש **שלושה**
+    מסלולים שבהם היא נכשלת בשקט: המתג כבוי, אין נוסח, או שהנוסח כולל
+    HTML שטלגרם דוחה — ובכל השלושה הבוט פשוט לא מדבר. אותו דבר
+    בקאפצ'ה, בפילטרים, ובניתוח התוכן.
+
+    במקום שמנהל ינחש, הפקודה הזאת אומרת לכל מערכת: תעבוד, או לא
+    תעבוד ובגלל מה."""
+    touch(msg)
+    if msg.chat.type not in GROUP_TYPES:
+        await reply(msg, T(msg, "err.group_only"))
+        return
+    chat_id = msg.chat.id
+    lg = lang_of(msg)
+    admins = await sync_admins(chat_id)
+    is_admin, missing = await bot_rights(chat_id)
+    rows: list[str] = []
+
+    def line(state: str, label: str, detail: str = "") -> None:
+        mark = {"ok": "✅", "warn": "⚠️", "bad": "❌"}[state]
+        rows.append(f"{mark} <b>{label}</b>" + (f" — {detail}" if detail else ""))
+
+    # 1. הבסיס: בלי הרשאות ובלי זיהוי מנהלים שום דבר אחר לא ירוץ
+    if not is_admin:
+        line("bad", i18n.t("diag.rights", lg), i18n.t("diag.not_admin", lg))
+    elif missing:
+        line("warn", i18n.t("diag.rights", lg),
+             ", ".join(i18n.t(k, lg) for k in missing))
+    else:
+        line("ok", i18n.t("diag.rights", lg))
+    line("ok" if admins else "bad", i18n.t("diag.admins", lg),
+         str(len(admins)) if admins else i18n.t("diag.no_admin_list", lg))
+
+    # 2. ברכות — שלושת מסלולי השקט
+    for key, on_key, label, cmd in (
+            (WELCOME_KEY, "welcome_on", "diag.welcome", "/welcome"),
+            (GOODBYE_KEY, "goodbye_on", "diag.goodbye", "/goodbye")):
+        raw = db.get(chat_id, key, "") or ""
+        if db.get(chat_id, on_key, "1") != "1":
+            line("warn", i18n.t(label, lg), i18n.t("diag.switch_off", lg))
+        elif not raw.strip():
+            # לא "שבור" אלא לא מוגדר — וזו בדיוק המלכודת: המתג דלוק,
+            # אין נוסח, ולכן שום דבר לא נשלח ואף אחד לא אומר למה.
+            line("warn", i18n.t(label, lg),
+                 i18n.t("diag.no_text", lg) + f" — <code>{cmd} …</code>")
+        else:
+            bad = tpl.check_html(raw)
+            if bad:
+                line("bad", i18n.t(label, lg), bad)
+            else:
+                line("ok", i18n.t(label, lg),
+                     tpl.esc(raw.splitlines()[0][:40]))
+
+    # 3. שאר המערכות, לפי מה שיש בהן בפועל
+    rules = (db.get(chat_id, RULES_KEY, "") or "").strip()
+    line("ok" if rules else "warn", i18n.t("diag.rules", lg),
+         "" if rules else i18n.t("diag.no_text", lg)
+         + " — <code>/setrules …</code>")
+    line("ok" if db.get(chat_id, "captcha", "0") == "1" else "warn",
+         i18n.t("sec.captcha", lg),
+         "" if db.get(chat_id, "captcha", "0") == "1"
+         else i18n.t("settings.off", lg))
+    line("ok" if db.get(chat_id, "flood", "1") == "1" else "warn",
+         i18n.t("sec.flood", lg),
+         "" if db.get(chat_id, "flood", "1") == "1"
+         else i18n.t("settings.off", lg))
+
+    counts = (
+        ("diag.locks", len(locks.get_all(chat_id))),
+        ("diag.blocks", len(blocks.all(chat_id))),
+        ("diag.filters", len(filters.all(chat_id))),
+        ("diag.notes", len(notes.names(chat_id, include_admin=True))),
+        ("diag.cmds", cmds.count(chat_id)),
+        ("diag.sched", len(sched.all(chat_id))),
+        ("diag.autos", len(auto.rules_for(db, chat_id))),
+        ("diag.reports", rpt.open_count(chat_id)),
+    )
+    rows.append("")
+    rows.append(" · ".join(f"{i18n.t(k, lg)} {n}" for k, n in counts))
+
+    # 4. AI — שלושה מתגים ושלוש סיבות אפשריות לשקט
+    if not ai.pools:
+        line("warn", i18n.t("sec.ai", lg), i18n.t("ai.no_keys", lg))
+    else:
+        for sw, label, need_see in (("ai", "sec.ai", False),
+                                    ("aivision", "sw.aivision", True),
+                                    ("aivoice", "sw.aivoice", True)):
+            on = db.get(chat_id, sw, "0") == "1"
+            if on and need_see and not brain.can_see:
+                line("bad", i18n.t(label, lg), i18n.t("vision.no_keys", lg))
+            else:
+                line("ok" if on else "warn", i18n.t(label, lg),
+                     "" if on else i18n.t("settings.off", lg))
+
+    # 5. אתה
+    role = perms.role_of(chat_id, msg.from_user.id)
+    seen = msg.from_user.id in admins or role in ("owner", "admin",
+                                                  "super_admin")
+    line("ok" if seen else "warn", i18n.t("diag.you", lg),
+         role if seen else f"{role} · {i18n.t('diag.not_seen', lg)}")
+
+    rows.append("")
+    rows.append("<i>" + i18n.t("diag.hint", lg) + "</i>")
+    await reply(msg, i18n.t("diag.title", lg) + "\n\n" + "\n".join(rows))
+
+
+@dp.message(Command("health"))
+async def cmd_health(msg: Message):
+    touch(msg)
+    s = guard.stats()
+    await reply(msg, T(msg, "health.line", v=db.version, calls=s["calls"],
+                       ms=s["avg_wait_ms"]))
+
+
+def _parse_duration(txt: str) -> Optional[int]:
+    m = re.match(r"^(\d+)([smhd])$", txt.strip(), re.I)
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).lower()
+    return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+
+
+async def _mod_cmd(msg: Message, kind: str, perm: str):
+    target = _target_of(msg)
+    if target is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    args = (msg.text or "").split()[1:]
+    dur = _parse_duration(args[0]) if args else None
+    reason = " ".join(args[1:] if dur else args) or ""
+    okay = await apply_action(msg.chat.id, target, kind, dur, reason,
+                              msg.from_user.id, "command")
+    if not okay:
+        await reply(msg, T(msg, "err.failed"))
+        return
+    lbl = T(msg, {"mute": "act.muted", "ban": "act.banned",
+                  "kick": "act.kicked"}[kind])
+    tail = T(msg, "act.reason", reason=reason) if reason else ""
+    await reply(msg, f"{lbl}.{tail}")
+
+
+@dp.message(Command("ban"))
+@needs("user.ban")
+async def cmd_ban(msg: Message):
+    touch(msg); await _mod_cmd(msg, "ban", "user.ban")
+
+
+@dp.message(Command("mute"))
+@needs("user.mute")
+async def cmd_mute(msg: Message):
+    touch(msg); await _mod_cmd(msg, "mute", "user.mute")
+
+
+@dp.message(Command("kick"))
+@needs("user.kick")
+async def cmd_kick(msg: Message):
+    touch(msg); await _mod_cmd(msg, "kick", "user.kick")
+
+
+@dp.message(Command("unban"))
+@needs("user.unban")
+async def cmd_unban(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await bot.unban_chat_member(msg.chat.id, t, only_if_banned=True)
+    mod.lift(msg.chat.id, t, "ban", msg.from_user.id)
+    await reply(msg, T(msg, "act.unbanned"))
+
+
+@dp.message(Command("unmute"))
+@needs("user.unmute")
+async def cmd_unmute(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    with contextlib.suppress(TelegramAPIError):
+        await bot.restrict_chat_member(msg.chat.id, t, UNMUTED)
+    mod.lift(msg.chat.id, t, "mute", msg.from_user.id)
+    await reply(msg, T(msg, "act.unmuted"))
+
+
+@dp.message(Command("warn"))
+@needs("user.warn")
+async def cmd_warn(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    reason = " ".join((msg.text or "").split()[1:])
+    out = mod.warn(msg.chat.id, t, msg.from_user.id, reason, "command")
+    if out.threshold_hit:
+        await apply_action(msg.chat.id, t, out.kind, out.duration,
+                           out.reason, msg.from_user.id, "policy")
+        await reply(msg, T(msg, "warn.triggered", n=out.warns,
+                           action=out.label))
+    else:
+        tail = T(msg, "act.reason", reason=reason) if reason else ""
+        await reply(msg, T(msg, "warn.added", n=out.warns) + tail)
+
+
+@dp.message(Command("unwarn"))
+@needs("user.unwarn")
+async def cmd_unwarn(msg: Message):
+    touch(msg)
+    t = _target_of(msg)
+    if t is None:
+        await reply(msg, T(msg, "err.need_reply"))
+        return
+    n = mod.unwarn(msg.chat.id, t, msg.from_user.id)
+    await reply(msg, T(msg, "warn.removed", n=n))
+
+
+@dp.message(Command("warns"))
+@needs("user.warn")
+async def cmd_warns(msg: Message):
+    touch(msg)
+    t = _target_of(msg) or msg.from_user.id
+    n = mod.warn_count(msg.chat.id, t)
+    await reply(msg, T(msg, "warn.count", n=n))
+
+
+@dp.message(Command("purge"))
+@needs("chat.purge")
+async def cmd_purge(msg: Message):
+    """מוחק מההודעה שהשבת עליה ועד הפקודה."""
+    touch(msg)
+    args = (msg.text or "").split()[1:]
+    count = _int(args[0], 0) if args else 0
+    if count:
+        if count > PURGE_MAX:
+            await reply(msg, T(msg, "purge.too_many", n=PURGE_MAX))
+            return
+        first = max(msg.message_id - count, 1)
+    elif msg.reply_to_message:
+        first = msg.reply_to_message.message_id
+        if msg.message_id - first > PURGE_MAX:
+            await reply(msg, T(msg, "purge.too_many", n=PURGE_MAX))
+            return
+    else:
+        await reply(msg, T(msg, "purge.usage"))
+        return
+    n = 0
+    for mid in range(first, msg.message_id + 1):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id, mid)
+            n += 1
+    audit.log(msg.chat.id, "chat.purge", actor_id=msg.from_user.id,
+              after=n, severity="medium")
+    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10)
+
+
+@dp.message(Command("role"))
+@needs("roles.assign")
+async def cmd_role(msg: Message):
+    touch(msg)
+    target = _target_of(msg)
+    parts = (msg.text or "").split()
+    if target is None or len(parts) < 2 or parts[1] not in RANK:
+        await reply(msg, T(msg, "role.pick", roles=", ".join(RANK)))
+        return
+    old = perms.role_of(msg.chat.id, target)
+    perms.set_role(msg.chat.id, target, parts[1])
+    audit.log(msg.chat.id, "role.change", actor_id=msg.from_user.id,
+              target_id=target, before=old, after=parts[1], severity="medium")
+    await reply(msg, T(msg, "role.changed", before=old, after=parts[1]))
+
+
+# ── פקודה מותאמת: המטפל האחרון ─────────────────────────────────────────────
+# נרשם **אחרי** כל ‎Command(...)‎ בקובץ, כי aiogram מריצה את המטפלים
+# בסדר הרישום והראשון שמתאים מנצח. מטפל כזה למעלה היה קולט את ‎/ban‎
+# לפני הפקודה עצמה — כלומר משתיק את האכיפה בשקט.
+@dp.message(F.chat.type.in_(GROUP_TYPES), F.text.startswith("/"))
+async def on_custom_command(msg: Message):
+    touch(msg)
+    if msg.from_user is None:
+        return
+    c = cmds.resolve(msg.chat.id, msg.text or "")
+    if c is None:
+        return
+    name = c.name
+    await sync_admins(msg.chat.id)
+    if disabling.is_disabled(db, msg.chat.id, name) \
+            and perms.rank_of(msg.chat.id,
+                              msg.from_user.id) < RANK["moderator"]:
+        return
+    if c.admin_only and not perms.check(msg.chat.id, msg.from_user.id,
+                                        "settings.read"):
+        return
+    cmds.bump(msg.chat.id, name)
+    delay = clean_delay(msg.chat.id)
+    if delay:
+        _schedule_delete(msg.chat.id, msg.message_id, delay)
+    await send_content(msg.chat.id, tpl.render_pick(c.content, _ctx(msg)),
+                       c.media_id, c.media_kind, c.buttons or "",
+                       clean_after=delay or None)
+
+
+# ── הפאנל הפרטי ────────────────────────────────────────────────────────────
+def _stats(chat_id: int) -> dict:
+    day = time.time() - 86400
+    return {
+        "members": (db.one("SELECT COUNT(*) c FROM members WHERE chat_id=?",
+                           (chat_id,)) or {"c": 0})["c"],
+        "locks": len(locks.get_all(chat_id)),
+        "warns": (db.one("""SELECT COUNT(*) c FROM warnings
+                            WHERE chat_id=? AND revoked_at IS NULL""",
+                         (chat_id,)) or {"c": 0})["c"],
+        "actions_today": (db.one("""SELECT COUNT(*) c FROM audit_log
+                                    WHERE chat_id=? AND ts>?""",
+                                 (chat_id, day)) or {"c": 0})["c"],
+        "lockdown": db.get(chat_id, "lockdown", "0") == "1",
+    }
+
+
+def _title(chat_id: int) -> str:
+    r = db.one("SELECT title FROM chats WHERE chat_id=?", (chat_id,))
+    return (r["title"] if r else "") or str(chat_id)
+
+
+def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
+    lg = lang.for_chat(chat_id)
+    if name == "main":
+        return panel.main_menu(chat_id, _title(chat_id), _stats(chat_id), lg)
+    if name == "locks":
+        by = locks.by_group(chat_id)
+        counts = {g: sum(1 for _, _, a in items if a != "off")
+                  for g, items in by.items()}
+        return panel.locks_groups(chat_id, counts, lg)
+    if name == "lockg":
+        if arg not in locks.by_group(chat_id):
+            return None
+        return panel.locks_in_group(chat_id, arg,
+                                    locks.by_group(chat_id)[arg], lg)
+    if name == "warns":
+        top = [(r["user_id"], r["user_id"], r["c"]) for r in db.q(
+            """SELECT user_id, COUNT(*) c FROM warnings
+               WHERE chat_id=? AND revoked_at IS NULL
+               GROUP BY user_id ORDER BY c DESC LIMIT 5""", (chat_id,))]
+        return panel.warns_screen(
+            chat_id, db.get(chat_id, "warn_policy", ""), top, lg)
+    if name == "audit":
+        return panel.audit_screen(
+            chat_id, audit.recent(chat_id, 10),
+            lambda t: time.strftime("%d/%m %H:%M", time.localtime(t)), lg)
+    if name == "settings":
+        return panel.settings_screen(chat_id, {
+            "autoclean": db.get(chat_id, "autoclean", "30"),
+            "silent": db.get(chat_id, "silent", "1")}, lg)
+    if name == "lang":
+        return panel.language_screen(chat_id, lg)
+    if name == "sec":
+        return panel.security_screen(chat_id, emerg.status(db, chat_id),
+                                     _sec_numbers(chat_id), lg)
+    if name == "sws":
+        return panel.switches_screen(chat_id, _switch_values(chat_id), lg)
+    return None
+
+
+def _sec_numbers(chat_id: int) -> dict:
+    day = time.time() - 86400
+    return {
+        "locks": len(locks.get_all(chat_id)),
+        "blocks": len(blocks.all(chat_id)),
+        "pending": pending.count(chat_id),
+        "events": (db.one("""SELECT COUNT(*) c FROM audit_log
+                             WHERE chat_id=? AND ts>? AND severity IN
+                               ('medium','high','critical')""",
+                          (chat_id, day)) or {"c": 0})["c"],
+        "captcha": db.get(chat_id, "captcha", "0") == "1",
+        "flood": db.get(chat_id, "flood", "1") == "1",
+        "antiraid": db.get(chat_id, "antiraid", "1") == "1",
+        "reports": db.get(chat_id, "reports", "1") == "1",
+        "ai": db.get(chat_id, "ai", "0") == "1",
+    }
+
+
+@dp.callback_query(F.data.startswith("g:"))
+async def on_callback(q: CallbackQuery):
+    parsed = panel.parse_cb(q.data or "")
+    if parsed is None:
+        await q.answer(i18n.t("btn.unknown", i18n.normalize(
+            q.from_user.language_code)))
+        return
+    chat_id, name, arg = parsed
+    lg = (lang.for_chat(chat_id) if chat_id
+          else i18n.normalize(q.from_user.language_code))
+
+    if name == "pick":
+        # בחירת שפה אישית בצ'אט הפרטי. chat_id=0 כי עוד אין קבוצה.
+        lang.set_chat(q.message.chat.id, arg)
+        lg = i18n.normalize(arg)
+        await _edit(q, panel.home(my_groups(q.from_user.id), lg))
+        await q.answer(i18n.t("lang.set", lg))
+        return
+
+    if name == "home":
+        await _edit(q, panel.home(my_groups(q.from_user.id), lg))
+        return
+
+    # העזרה יושבת לפני בדיקת ההרשאה לקבוצה: היא נפתחת בשיחה פרטית,
+    # שבה ‎chat_id‎ הוא 0 ואין קבוצה להיבדק מולה.
+    if name in ("help", "hc"):
+        allowed = _help_for(q.message) if q.message else None
+        if name == "help":
+            await _edit(q, panel.help_menu(lg, allowed))
+            await q.answer()
+            return
+        sc = panel.help_category(arg, lg, allowed)
+        if sc is None:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        await _edit(q, sc)
+        await q.answer()
+        return
+
+    # כל לחיצה נבדקת מחדש. מי שהודח מהניהול לא ימשיך לנהל דרך מסך פתוח.
+    if not perms.check(chat_id, q.from_user.id, "settings.read"):
+        await q.answer(i18n.t("err.not_your_group", lg), show_alert=True)
+        return
+
+    if name == "lock":
+        if not perms.check(chat_id, q.from_user.id, "locks.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in LOCK_TYPES:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        cur = locks.get_all(chat_id).get(arg, ("off", None))[0]
+        nxt = panel.next_in_cycle(panel.CYCLE, cur)
+        locks.set(chat_id, arg, nxt)
+        audit.log(chat_id, "lock.change", actor_id=q.from_user.id,
+                  before=f"{arg}={cur}", after=f"{arg}={nxt}",
+                  source="button", severity="info")
+        await _edit(q, _screen_for(chat_id, "lockg", LOCK_TYPES[arg][1]))
+        await q.answer(panel.action_label(nxt, lg))
+        return
+
+    if name == "lockall":
+        if not perms.check(chat_id, q.from_user.id, "locks.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        n = locks.set_many(chat_id, "delete" if arg == "on" else "off")
+        audit.log(chat_id, "locks.bulk", actor_id=q.from_user.id,
+                  after=f"{arg}×{n}", source="button", severity="medium")
+        await _edit(q, _screen_for(chat_id, "locks", ""))
+        await q.answer(i18n.t("locks.bulk", lg, n=n))
+        return
+
+    if name in ("sw", "sw1", "sw0"):
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in panel.SWITCH_KEYS | {"lockdown", "emergency"}:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        cur = db.get(chat_id, arg,
+                     panel.SWITCH_DEFAULT.get(arg, "0")) == "1"
+        want = (not cur) if name == "sw" else (name == "sw1")
+        if arg == "ai" and want and not ai.pools:
+            await q.answer(i18n.t("ai.no_keys", lg), show_alert=True)
+            return
+        okay = await _set_switch(chat_id, arg, want, q.from_user.id)
+        if name == "sw":
+            await _edit(q, _screen_for(chat_id, "sws", ""))
+        else:
+            await _edit(q, panel.switch_screen(chat_id, arg, want, lg))
+        gap = _switch_gap(chat_id, arg, lg) if want else ""
+        if gap:
+            await q.answer(gap, show_alert=True)
+        else:
+            await q.answer(i18n.t("saved" if okay else "err.failed", lg))
+        return
+
+    if name in ("gset", "goff"):
+        if not perms.check(chat_id, q.from_user.id, "welcome.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in ("welcome", "goodbye"):
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        key = WELCOME_KEY if arg == "welcome" else GOODBYE_KEY
+        if name == "goff":
+            db.set(chat_id, key, "", q.from_user.id)
+            await q.answer(i18n.t("greet.off", lg), show_alert=True)
+            return
+        db.set(chat_id, key, i18n.t(f"greet.default_{arg}", lg),
+               q.from_user.id)
+        db.set(chat_id, f"{arg}_on", "1", q.from_user.id)
+        await q.answer(i18n.t("greet.set", lg), show_alert=True)
+        return
+
+    if name == "tgl":
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in ("captcha", "flood", "antiraid", "reports", "ai"):
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        cur = db.get(chat_id, arg, "1" if arg != "captcha" else "0") == "1"
+        db.set(chat_id, arg, "0" if cur else "1", q.from_user.id)
+        audit.log(chat_id, "settings.write", actor_id=q.from_user.id,
+                  before=f"{arg}={int(cur)}", after=f"{arg}={int(not cur)}",
+                  source="button", severity="medium")
+        await _edit(q, _screen_for(chat_id, "sec", ""))
+        await q.answer(i18n.t("saved", lg))
+        return
+
+    if name == "emerg":
+        if not perms.check(chat_id, q.from_user.id, "emergency.toggle"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if emerg.is_on(db, chat_id):
+            emerg.disable(db, chat_id, q.from_user.id)
+            audit.log(chat_id, "emergency.off", actor_id=q.from_user.id,
+                      source="button", severity="high")
+            note = "emergency.off"
+        else:
+            emerg.enable(db, chat_id, q.from_user.id)
+            audit.log(chat_id, "emergency.on", actor_id=q.from_user.id,
+                      source="button", severity="critical")
+            note = "emergency.on"
+        await _edit(q, _screen_for(chat_id, "sec", ""))
+        await q.answer(i18n.t(note, lg).replace("<b>", "").replace("</b>", "")
+                       .split("\n")[0], show_alert=True)
+        return
+
+    if name == "ldown":
+        if not perms.check(chat_id, q.from_user.id, "chat.lockdown"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        on = db.get(chat_id, "lockdown", "0") != "1"
+        okay = await set_lockdown(chat_id, on, q.from_user.id)
+        await _edit(q, _screen_for(chat_id, "main", ""))
+        key = "lockdown.short_on" if on else "lockdown.short_off"
+        await q.answer(i18n.t(key if okay else "err.failed", lg),
+                       show_alert=True)
+        return
+
+    if name == "wpol":
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        db.set(chat_id, "warn_policy", panel.WARN_PRESETS.get(arg, ""),
+               q.from_user.id)
+        await _edit(q, _screen_for(chat_id, "warns", ""))
+        await q.answer(i18n.t("policy.updated", lg))
+        return
+
+    if name == "setlang":
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        lang.set_chat(chat_id, arg)
+        audit.log(chat_id, "lang.change", actor_id=q.from_user.id,
+                  before=lg, after=i18n.normalize(arg),
+                  source="button", severity="info")
+        await _edit(q, _screen_for(chat_id, "lang", ""))
+        await q.answer(i18n.t("lang.set", arg))
+        return
+
+    if name in ("clean", "silent"):
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if name == "clean":
+            cur = db.get(chat_id, "autoclean", "30")
+            db.set(chat_id, "autoclean",
+                   panel.next_in_cycle(panel.CLEAN_CYCLE, cur), q.from_user.id)
+        else:
+            db.set(chat_id, "silent",
+                   "0" if db.get(chat_id, "silent", "1") == "1" else "1",
+                   q.from_user.id)
+        await _edit(q, _screen_for(chat_id, "settings", ""))
+        await q.answer(i18n.t("saved", lg))
+        return
+
+    # ── שבת ושעות פתיחה ───────────────────────────────────────────────
+    # המסכים האלה נבנים ב-‎on_callback‎ ולא ב-‎_screen_for‎ מסיבה אחת:
+    # הם צריכים ‎await‎ (משיכת זמנים), ו-‎_screen_for‎ היא סינכרונית.
+    if name in ("shab", "shabsw", "shabcity", "setcity", "shabofs",
+                "shabprev", "hours", "hrday", "hrset"):
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+
+        if name == "shabsw":
+            on = db.get(chat_id, "shabbat", "0") != "1"
+            db.set(chat_id, "shabbat", "1" if on else "0", q.from_user.id)
+            if not on and db.get(chat_id, AUTOLOCK_KEY, "") == "shab":
+                await _auto_lock(chat_id, False, "", "")
+            audit.log(chat_id, "settings.write", actor_id=q.from_user.id,
+                      after=f"shabbat={int(on)}", source="button",
+                      severity="medium")
+        elif name == "setcity":
+            if arg not in zmanim.CITIES:
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            db.set(chat_id, "shabbat_city", arg, q.from_user.id)
+        elif name == "shabofs":
+            cycles = {"before": panel.BEFORE_CYCLE, "after": panel.AFTER_CYCLE,
+                      "notice": panel.NOTICE_CYCLE}
+            if arg not in cycles:
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            key = f"shabbat_{arg}"
+            cur = str(_int(db.get(chat_id, key, ""), {
+                "before": zmanim.DEFAULT_BEFORE, "after": zmanim.DEFAULT_AFTER,
+                "notice": zmanim.DEFAULT_NOTICE}[arg]))
+            db.set(chat_id, key,
+                   panel.next_in_cycle(cycles[arg], cur), q.from_user.id)
+        elif name == "hrset":
+            day, _, val = arg.partition("=")
+            if day not in grouphours.DAYS:
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            raw = db.get(chat_id, "hours", "") or ""
+            db.set(chat_id, "hours", grouphours.set_day(raw, day, val),
+                   q.from_user.id)
+            audit.log(chat_id, "settings.write", actor_id=q.from_user.id,
+                      before=f"hours={raw}", after=f"hours={day}={val}",
+                      source="button", severity="medium")
+
+        if name in ("hours", "hrset"):
+            await _edit(q, panel.hours_screen(
+                chat_id, _hours_table(chat_id, db.get(chat_id, "hours", "") or "",
+                                      lg), lg))
+            await q.answer(i18n.t("saved", lg) if name == "hrset" else "")
+            return
+        if name == "hrday":
+            if arg not in grouphours.DAYS:
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            cur = grouphours.parse(db.get(chat_id, "hours", "") or "").get(arg)
+            shown = grouphours.format_sched({arg: cur}).split("=", 1)[-1] if cur else "off"
+            await _edit(q, panel.hours_day(chat_id, arg, shown, lg))
+            await q.answer()
+            return
+        if name == "shabcity":
+            await _edit(q, panel.cities_screen(
+                chat_id, db.get(chat_id, "shabbat_city", zmanim.DEFAULT_CITY),
+                zmanim.cities(lg), lg))
+            await q.answer()
+            return
+        if name == "shabprev":
+            cfg = await _shab_panel(chat_id, force=True)
+            w = cfg.get("window")
+            if w is None:
+                await q.answer(i18n.t("shab.no_times", lg), show_alert=True)
+                return
+            for which in ("notice", "lock", "open"):
+                await send(q.from_user.id,
+                           _shab_text(chat_id, which, w, lg, cfg),
+                           is_group=False)
+            await q.answer(i18n.t("shab.preview", lg))
+            return
+
+        cfg = await _shab_panel(chat_id)
+        await _edit(q, panel.shabbat_screen(chat_id, cfg, lg))
+        await q.answer(i18n.t("saved", lg) if name != "shab" else "")
+        return
+
+    sc = _screen_for(chat_id, name, arg)
+    if sc is None:
+        await q.answer(i18n.t("screen.unknown", lg))
+        return
+    await _edit(q, sc)
+    await q.answer()
+
+
+async def _edit(q: CallbackQuery, sc: panel.Screen) -> None:
+    with contextlib.suppress(TelegramAPIError):
+        await q.message.edit_text(sc.text, reply_markup=kb(sc))
+
+
+# ── תפריט הפקודות של טלגרם ─────────────────────────────────────────────────
+async def publish_commands() -> None:
+    """רושם את הפקודות בתפריט ✏️, לכל שפה ולפי היקף.
+
+    טלגרם בוחרת לכל משתמש את הרשימה לפי שפת הממשק שלו, ונופלת לברירת
+    המחדל כשאין התאמה. לכן ברירת המחדל נרשמת **בלי** ‎language_code‎,
+    ואחריה כל שפה שיש לה מילון.
+
+    **ההיקף הוא החלק החדש.** עד כה נרשמו כל 132 הפקודות לכולם, כלומר
+    כל חבר בקבוצה ראה בהשלמה האוטומטית את ‎/ban‎, את ‎/lockdown‎ ואת
+    ‎/broadcast‎ — רשימה שרובה תיענה לו ב"אין לך הרשאה", וגם מפרט מלא
+    של מה שאפשר לעשות בקבוצה. עכשיו:
+
+        בקבוצות          13 פקודות של חברים
+        למנהלי הקבוצה    הכול
+        ברירת מחדל       13 — גם מי שפותח שיחה פרטית עם הבוט מהרחוב
+
+    מי שמנהל קבוצה מקבל בפרטי את הרשימה המדויקת שלו ב-‎/start‎, לפי
+    ההיקף של אותה שיחה.
+    """
+    member = set(panel.member_commands())
+    for code in [None] + [c for c in i18n.STRINGS if c != i18n.DEFAULT]:
+        full = [BotCommand(command=n, description=d[:256])
+                for n, d in panel.command_list(code or i18n.DEFAULT)]
+        small = [c for c in full if c.command in member]
+        for scope, items in ((None, small),
+                             (BotCommandScopeAllGroupChats(), small),
+                             (BotCommandScopeAllChatAdministrators(), full)):
+            try:
+                await bot.set_my_commands(items, scope=scope,
+                                          language_code=code)
+            except TelegramAPIError as e:
+                log.warning("רישום פקודות (%s/%s) נכשל: %s",
+                            code or "ברירת מחדל",
+                            type(scope).__name__ if scope else "default", e)
+
+
+async def publish_personal_commands(user_id: int, lg: str) -> None:
+    """הרשימה המדויקת של אדם אחד, בשיחה הפרטית שלו.
+
+    נקרא מ-‎/start‎ בפרטי. בעל קבוצה שמנהל אותה מכאן צריך לראות בתפריט
+    את מה שהוא יכול, ולא את רשימת החברים שנרשמה כברירת מחדל."""
+    allowed = set(panel.member_commands())
+    for chat_id, _t in my_groups(user_id):
+        allowed |= _allowed_cmds(chat_id, user_id)
+    items = [BotCommand(command=n, description=d[:256])
+             for n, d in panel.command_list(lg) if n in allowed]
+    with contextlib.suppress(TelegramAPIError):
+        await bot.set_my_commands(
+            items, scope=BotCommandScopeChat(chat_id=user_id))
+
+
+# ── רקע ────────────────────────────────────────────────────────────────────
+async def expire_loop():
+    """משחרר ענישות שפג תוקפן. טלגרם משחררת לבד לפי until_date, אבל
+    המסד צריך לדעת — אחרת /warns ומסכי הפאנל מציגים מצב שאינו קיים."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            for s in mod.expired():
+                mod.lift(s["chat_id"], s["user_id"], s["kind"], None)
+        except Exception as e:
+            log.warning("שחרור ענישות נכשל: %s", e)
+        try:
+            # אתגר שפג אינו "עוד מעט": הנכנס מושתק כל עוד הוא פתוח,
+            # ולכן ההכרעה חייבת לקרות גם אם אף אחד לא לחץ דבר.
+            for ch in pending.expired():
+                audit.log(ch.chat_id, "captcha.timeout", target_id=ch.user_id,
+                          actor_kind="bot", source="policy", severity="low")
+                await _captcha_done(ch, False)
+        except Exception as e:
+            log.warning("סגירת אתגרים שפגו נכשלה: %s", e)
+
+
+async def upkeep_loop():
+    """תחזוקה יומית. כרגע: מחיקת דיווחים סגורים וישנים.
+
+    ‎Reports.prune‎ נכתב, תועד — ולא נקרא מאף מקום. פונקציית תחזוקה
+    שאין לה קורא אינה "מוכנה להמשך", היא קוד מת שנראה כמו מנגנון:
+    הטבלה הייתה גדלה לנצח ואף אחד לא היה יודע.
+
+    ריצה ראשונה אחרי חמש דקות ולא מיד: העלייה של הבוט היא הרגע העמוס
+    ביותר שלו, וסריקת טבלה אינה דחופה אפילו ביום אחד.
+    """
+    await asyncio.sleep(300)
+    while True:
+        try:
+            n = rpt.prune()
+            if n:
+                log.info("תחזוקה: נמחקו %d דיווחים סגורים מעל %d יום",
+                         n, rpt.KEEP_CLOSED_DAYS)
+        except Exception as e:
+            log.warning("ניקוי דיווחים נכשל: %s", e)
+        await asyncio.sleep(86400)
+
+
+async def schedule_loop():
+    """שולח מה שהגיע זמנו. סריקה כל 30 שניות.
+
+    שגיאה בתזמון אחד אינה עוצרת את השאר — קבוצה אחת שהבוט הוסר ממנה
+    לא אמורה למנוע מתשע האחרות לקבל את ההודעה שלהן."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            rows = sched.due()
+        except Exception as e:
+            log.warning("שליפת תזמונים נכשלה: %s", e)
+            continue
+        for row in rows:
+            try:
+                await send_content(row["chat_id"],
+                                   tpl.render_pick(row["content"], tpl.context(
+                                       chat_id=row["chat_id"])),
+                                   None, None, row["buttons"] or "")
+                audit.log(row["chat_id"], "schedule.run", actor_kind="bot",
+                          source="automation", after=row["spec"],
+                          severity="info")
+            except Exception as e:
+                log.warning("תזמון %s נכשל: %s", row["id"], e)
+            finally:
+                # מקדמים גם כשהשליחה נכשלה, אחרת התזמון יירה שוב
+                # בכל סריקה עד אין־סוף
+                with contextlib.suppress(Exception):
+                    sched.mark_ran(row)
+
+
+async def main() -> int:
+    global bot, _me_id, _bot_username
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if not TOKEN:
+        log.error("חסר GROUPOS_TOKEN. ערוך את /opt/groupos/.env")
+        return EX_CONFIG
+    if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", TOKEN):
+        shown = TOKEN[:12] + "…" if len(TOKEN) > 12 else TOKEN
+        log.error("הטוקן ב-GROUPOS_TOKEN אינו בצורה של טוקן טלגרם.")
+        log.error("  מה שנמצא: %r (%d תווים)", shown, len(TOKEN))
+        log.error("  הצורה הנכונה: 123456789:AA...")
+        log.error("  לתיקון:  bash /opt/groupos/install.sh --token <הטוקן>")
+        return EX_CONFIG
+
+    kw = {}
+    if API_BASE:
+        from aiogram.client.session.aiohttp import AiohttpSession
+        from aiogram.client.telegram import TelegramAPIServer
+        kw["session"] = AiohttpSession(api=TelegramAPIServer.from_base(API_BASE))
+        log.info("שרת Bot API מקומי: %s", API_BASE)
+    bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML), **kw)
+    me = await bot.get_me()
+    _me_id = me.id
+    _bot_username = me.username or ""
+    log.info("GroupOS עלה כ-@%s · סכימה v%s", me.username, db.version)
+    for p in ai.stats():
+        log.info("AI %s: %d מפתחות · תקציב %s", p["provider"], p["keys"],
+                 p["budget"] or "לא ידוע")
+    if not ai.pools:
+        log.info("AI: לא הוגדרו מפתחות (GROUPOS_GEMINI_KEYS / GROUPOS_GROQ_KEYS)")
+    await publish_commands()
+    for loop_fn in (expire_loop, schedule_loop, upkeep_loop, autolock_loop):
+        _bg.add(asyncio.create_task(loop_fn()))
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        for t in list(_bg):
+            t.cancel()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

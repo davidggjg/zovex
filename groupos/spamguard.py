@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""spamguard — זיהוי הודעה חריגה, בלי AI ובלי רשת.
+
+## מה הוביל לזה
+
+קבוצת בדיקה קיבלה תמונה עם כיתוב שמפרסם תוכן מיני של קטינים. היא
+נשלחה שוב ושוב, והבוט הגיב רק אחרי שהחזרתיות עברה את סף ההצפה —
+כלומר **טיפל בכמות ולא בתוכן**. הודעה אחת כזאת היא עילה לחסימה
+מיידית; המערכת ראתה "משתמש שמדבר מהר".
+
+שלושה פערים היו שם, וכולם מטופלים כאן:
+
+    1. הכיתוב של תמונה לא נבדק מול שום רשימה — רק מול נעילות
+    2. הטקסט היה מעורפל בכוונה (‎Ch1ld‎, ‎Te ens‎), ולכן שום
+       השוואת מחרוזות לא תפסה אותו
+    3. חזרתיות נמדדה על טקסט בלבד — אותה תמונה בדיוק, נשלחת עשר
+       פעמים, לא נספרה כחזרה
+
+## הנרמול הוא העיקר
+
+מי שמפרסם תוכן אסור יודע שמסננים קיימים, ולכן כותב ‎Ch1ld‎ עם אחת,
+מפזר רווחים, מערבב אותיות קיריליות שנראות לטיניות, ומשתיל תווים
+בלתי נראים. ‎normalize‎ מפרק את כל אלה לצורה אחת, ורק אחריה משווים.
+הנרמול הוא גם מה שמונע עקיפה חדשה בכל שבוע: לא מוסיפים דפוס לכל
+איות — מבטלים את האיות.
+
+## הציונים
+
+    illegal   0.98   פרסום תוכן מיני של קטינים וכיוצא בו
+    adult     0.55   פרסום מיני בוטה
+    bait      0.35   "לחץ עכשיו", "נפתח ל-24 שעות"
+    obfus     0.20   טקסט מעורפל בכוונה, לעצמו
+
+‎illegal‎ אינו "ציון גבוה" אלא מסלול נפרד: הוא מחזיר גם
+‎escalate=True‎, ומי שמחזיק את הקריאה אמור לחסום, למחוק ולדווח
+למנהלים — בלי להמתין לצבירת אותות ובלי קשר לסף של הקבוצה.
+
+## מה זה לא
+
+זה לא מסווג תוכן ולא מחליף שיקול דעת. זה תופס **פרסומת**: טקסט
+שנכתב כדי למכור. הודעה שמדברת על הנושא — דיווח, אזהרה, ידיעה — לא
+אמורה להיתפס, ולכן הדפוסים דורשים צירוף של נושא ושל קריאה לפעולה,
+ולא מילה בודדת.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+import unicodedata
+from collections import deque
+from dataclasses import dataclass
+from typing import Optional
+
+# ── נרמול ─────────────────────────────────────────────────────────────────
+# אותות שנראות זהות ואינן. מי שמשתיל ‎е‎ קירילית באמצע מילה אנגלית
+# עושה את זה בכוונה אחת בלבד.
+CONFUSABLE = {
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y",
+    "і": "i", "ѕ": "s", "ԁ": "d", "ɡ": "g", "ᴏ": "o", "ʏ": "y", "α": "a",
+    "ο": "o", "ρ": "p", "ι": "i", "ν": "v", "κ": "k", "τ": "t",
+}
+LEET = {"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b",
+        "@": "a", "$": "s", "!": "i", "|": "i", "¡": "i"}
+
+_RX_INVISIBLE = re.compile(r"[​-‏‪-‮⁠﻿­]")
+_RX_NONWORD = re.compile(r"[^a-z֐-׿0-9 ]+")
+_RX_SPACES = re.compile(r"\s+")
+
+
+def normalize(text: str) -> str:
+    """טקסט → צורה אחת שאפשר להשוות.
+
+    הסדר חשוב: קודם מפרקים יוניקוד (‎Ⓒ‎, ‎𝐂‎ ואחיותיהן), אחר כך
+    מסירים בלתי־נראים, אחר כך מחליפים אותיות מתחזות, ורק בסוף
+    פותרים ספרות. ‎1‎ הופך ל-‎i‎ אחרי שכבר ידוע שזו אות באמצע מילה —
+    אחרת כל מספר בהודעה הופך לג'יבריש."""
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKD", text)
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = _RX_INVISIBLE.sub("", t).lower()
+    t = "".join(CONFUSABLE.get(c, c) for c in t)
+    out = []
+    for i, c in enumerate(t):
+        if c in LEET:
+            prev = t[i - 1] if i else " "
+            nxt = t[i + 1] if i + 1 < len(t) else " "
+            # ספרה בתוך מילה היא איות; ספרה בין ספרות היא מספר
+            if prev.isalpha() or nxt.isalpha():
+                out.append(LEET[c])
+                continue
+        out.append(c)
+    t = _RX_NONWORD.sub(" ", "".join(out))
+    return _RX_SPACES.sub(" ", t).strip()
+
+
+def squeeze(text: str) -> str:
+    """כמו ‎normalize‎, בלי רווחים כלל. תופס ‎T e e n s‎ ו-‎c-h-i-l-d‎."""
+    return normalize(text).replace(" ", "")
+
+
+# ── דפוסים ────────────────────────────────────────────────────────────────
+# נבדקים על הצורה **הדחוסה**, ולכן פיזור רווחים אינו עוזר למפרסם.
+MINOR = (
+    "child", "children", "kid", "kids", "teen", "teens", "preteen",
+    "underage", "minor", "loli", "lolita", "shota", "jailbait",
+    "schoolgirl", "schoolboy", "pedo",
+    "ילד", "ילדה", "ילדים", "קטין", "קטינה", "קטינים", "נער", "נערה",
+)
+SEXUAL = (
+    "porn", "pornhub", "xxx", "nude", "nudes", "nsfw", "sex", "sexy",
+    "onlyfans", "hentai", "incest", "rape", "scandal", "leaks", "leaked",
+    "ladyboy", "hookup", "escort", "camgirl", "stripchat",
+    "פורנו", "עירום", "עירומה", "סקס", "סרטון מיני", "תמונות עירום",
+)
+BAIT = (
+    "clickhere", "grabthislink", "getinright", "fullyunlocked", "unlocked",
+    "joinnow", "linkinbio", "freeaccess", "limitedtime", "lastchance",
+    "vipgroup", "privategroup", "dmme", "telegramlink", "fullvideo",
+    "fullalbum", "mega nz", "meganz", "verifyage",
+    "לחץכאן", "לינקבפרופיל", "הצטרפועכשיו", "קישורבתגובה",
+)
+AGE_RANGE = re.compile(r"\b(?:0?[5-9]|1[0-7])\s*[-–]\s*1[0-7]\b")
+
+ILLEGAL = 0.98
+ADULT = 0.55
+BAIT_W = 0.35
+OBFUS = 0.20
+
+# טקסט שנכתב כדי לעקוף: הרבה ספרות בתוך מילים, או מילים מפוזרות
+_RX_INWORD_DIGIT = re.compile(r"[a-z֐-׿][0-9@$!|][a-z֐-׿]")
+_RX_SPREAD = re.compile(r"(?:\b\w\b[ ]){3,}\w")
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """‎kind‎ הוא ‎illegal‎ · ‎adult‎ · ‎bait‎ · ‎obfuscated‎ · ‎dup‎.
+
+    ‎escalate‎ אומר "אל תחכה לצבירת אותות". רק ‎illegal‎ מרים אותו."""
+    kind: str
+    weight: float
+    detail: str = ""
+    escalate: bool = False
+
+    def __bool__(self) -> bool:
+        return self.weight > 0
+
+
+def _hits(blob: str, words: tuple[str, ...]) -> list[str]:
+    return [w for w in words if w.replace(" ", "") in blob]
+
+
+def obfuscated(text: str) -> bool:
+    """האם הטקסט נכתב כדי לא להיקרא במסנן."""
+    low = (text or "").lower()
+    if _RX_INVISIBLE.search(text or ""):
+        return True
+    if any(c in CONFUSABLE for c in low) and re.search(r"[a-z]", low):
+        return True
+    if _RX_INWORD_DIGIT.search(low):
+        return True
+    return bool(_RX_SPREAD.search(low))
+
+
+def classify(text: str) -> Optional[Verdict]:
+    """הפסק על טקסט אחד. ‎None‎ = אין מה לדווח.
+
+    הצירוף הוא מה שמכריע, לא המילה. ‎'teens'‎ לבדה היא מילה; ‎'teens'‎
+    יחד עם מונח מיני ועם קריאה לפעולה היא מודעה."""
+    if not text or not text.strip():
+        return None
+    blob = squeeze(text)
+    if not blob:
+        return None
+    minor = _hits(blob, MINOR)
+    sexual = _hits(blob, SEXUAL)
+    bait = _hits(blob, BAIT)
+    age = bool(AGE_RANGE.search(normalize(text)))
+    obf = obfuscated(text)
+
+    if sexual and (minor or age):
+        # זה המסלול הנפרד. לא צובר, לא ממתין, לא תלוי בסף של הקבוצה.
+        why = ",".join((sexual[:2] + minor[:2])) + (" age" if age else "")
+        return Verdict("illegal", ILLEGAL, why[:48], escalate=True)
+    if sexual and bait:
+        return Verdict("adult", ADULT + (0.1 if obf else 0.0),
+                       ",".join(sexual[:2] + bait[:1])[:48])
+    if sexual:
+        return Verdict("adult", ADULT - 0.2 + (0.1 if obf else 0.0),
+                       ",".join(sexual[:2])[:48])
+    if bait and obf:
+        return Verdict("bait", BAIT_W + 0.15, ",".join(bait[:2])[:48])
+    if bait:
+        return Verdict("bait", BAIT_W, ",".join(bait[:2])[:48])
+    if obf:
+        return Verdict("obfuscated", OBFUS, "")
+    return None
+
+
+# ── חזרתיות על תוכן, ולא על טקסט ──────────────────────────────────────────
+def fingerprint(*, text: str = "", media_id: str = "") -> str:
+    """טביעה של **ההודעה**, לא של הטקסט.
+
+    ‎file_unique_id‎ של טלגרם זהה לאותה תמונה בכל קבוצה ובכל שולח,
+    ולכן תמונה שנשלחת שוב ושוב נספרת כחזרה גם כשהכיתוב מתחלף בכל
+    פעם — וזה בדיוק מה שהוחמץ."""
+    base = (media_id or "") + "|" + squeeze(text)[:160]
+    return hashlib.sha1(base.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class Repeat:
+    count: int
+    chats: int
+    fp: str
+
+
+class RepeatTracker:
+    """אותו תוכן, שוב ושוב — ממשתמש אחד, ועל פני כמה קבוצות.
+
+    שני חלונות ולא אחד: ‎per_user‎ תופס את מי שמציף קבוצה, ו-‎global‎
+    תופס את מי שמפזר את אותה מודעה בעשר קבוצות שהבוט נמצא בהן. לספאמר
+    השני אף חלון של קבוצה בודדת לא היה מגיע לסף.
+
+    הכול בזיכרון: זה חלון של דקות, ולא היסטוריה."""
+
+    def __init__(self, window: float = 900.0, max_keys: int = 20000):
+        self.window = window
+        self.max_keys = max_keys
+        self._seen: dict[str, deque] = {}
+
+    def note(self, fp: str, chat_id: int, user_id: int,
+             *, now: Optional[float] = None) -> Repeat:
+        t = now if now is not None else time.monotonic()
+        q = self._seen.setdefault(fp, deque())
+        q.append((t, chat_id, user_id))
+        while q and t - q[0][0] > self.window:
+            q.popleft()
+        if len(self._seen) > self.max_keys:
+            for k in list(self._seen)[:len(self._seen) - self.max_keys]:
+                self._seen.pop(k, None)
+        mine = [r for r in q if r[2] == user_id]
+        return Repeat(len(mine), len({r[1] for r in mine}), fp)
+
+    def forget(self, fp: str) -> None:
+        self._seen.pop(fp, None)
+
+    def stats(self) -> dict:
+        return {"tracked": len(self._seen)}
+
+
+# סף החזרתיות שמעליו זו כבר הפצה ולא שיחה
+DUP_COUNT = 3           # אותו תוכן, מאותו משתמש, בחלון
+DUP_CHATS = 2           # אותו תוכן בכמה קבוצות — חמור יותר
+
+
+def repeat_verdict(rep: Repeat, *, count: int = DUP_COUNT,
+                   chats: int = DUP_CHATS) -> Optional[Verdict]:
+    """חזרתיות כאות, עם משקל שעולה עם הפיזור ולא רק עם הכמות."""
+    if rep.chats >= chats and rep.count >= 2:
+        return Verdict("dup", 0.75, f"x{rep.count}/{rep.chats} chats")
+    if rep.count >= count:
+        w = min(0.45 + 0.1 * (rep.count - count), 0.8)
+        return Verdict("dup", w, f"x{rep.count}")
+    return None
