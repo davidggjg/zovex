@@ -56,7 +56,12 @@ import policy
 # שהמודל המציא כי הוא חשב שהיא מתאימה יותר.
 CATEGORIES = (
     "spam", "scam", "phishing", "advertising", "harassment",
-    "toxicity", "threat", "malware", "social_engineering", "safe",
+    "toxicity", "threat", "malware", "social_engineering",
+    # פורנוגרפיה והימורים הם מה שקבוצה מבקשת למחוק בפועל, ועד כה הם
+    # נפלו ל-‎spam‎ או ל-‎safe‎ לפי מצב רוחו של המודל. קטגוריה מפורשת
+    # היא גם מה שמאפשר לקבוצה להחליט עליהם בנפרד.
+    "adult", "gambling",
+    "safe",
 )
 
 # כמה שוקלת כל קטגוריה כאות. ‎safe‎ אינו אות ולכן אינו כאן.
@@ -64,6 +69,7 @@ WEIGHT = {
     "scam": 0.85, "phishing": 0.9, "malware": 0.9, "threat": 0.85,
     "social_engineering": 0.8, "harassment": 0.7, "spam": 0.6,
     "advertising": 0.45, "toxicity": 0.5,
+    "adult": 0.8, "gambling": 0.75,
 }
 
 MIN_CHARS = 12          # מתחת לזה אין מה לנתח
@@ -89,6 +95,19 @@ SYSTEM = (
     "between members are NOT violations. A promise of money, a request to "
     "move to private chat, a request for personal details, an unsolicited "
     "investment or giveaway offer, or a link with urgency ARE. "
+    "Use 'adult' for messages that advertise or distribute pornography or "
+    "sexual services, and 'gambling' for messages that promote a casino, "
+    "betting site, lottery or 'guaranteed win' scheme.\n"
+    "NAMING IS NOT ADVERTISING. A film, series, song, book or game title, a "
+    "cast list, a release year, a season or episode number, a rating, a "
+    "review or a question about where to watch something is SAFE even when "
+    "the title or the plot is about casinos, crime, drugs or sex — "
+    "'Casino', 'Casino Royale', 'Shame', 'Poker Face', 'The Deuce' and "
+    "'Lucky Jack' are titles, not offers. Many groups exist to discuss "
+    "films and series, so treat talk about a title as ordinary conversation. "
+    "Answer 'adult' or 'gambling' only when the message itself is the offer: "
+    "it invites the reader to a site, a channel, a bot or a private chat, "
+    "sells access, promises winnings, or distributes the material.\n"
     "The message may be in any language; classify it in its own language "
     "without translating. When unsure, answer safe."
 )

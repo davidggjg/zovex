@@ -25,6 +25,7 @@ moderation.py
 panel.py
 permissions.py
 policy.py
+prompts.py
 ratelimit.py
 reports.py
 reputation.py

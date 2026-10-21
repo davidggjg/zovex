@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import grouphours as gh      # noqa: E402
 import spamguard as sg       # noqa: E402
+import prompts as pr        # noqa: E402
 import zmanim as zm          # noqa: E402
 
 PASS = FAIL = 0
@@ -231,10 +232,68 @@ def test_spamguard() -> None:
     ok("החלון מתיישן", old.count == 1, str(old))
 
 
+
+def test_prompts() -> None:
+    section("עריכה בכפתורים")
+    ok("כל שדה מצהיר על מפתח",
+       all(f.key for f in pr.FIELDS.values()))
+    ok("שמות השדות קצרים למזהה כפתור",
+       all(len(n) <= 10 for n in pr.FIELDS), str(list(pr.FIELDS)))
+    ok("כל שדה ברשימות קיים",
+       all(n in pr.FIELDS for n in
+           pr.TEXT_FIELDS + pr.SHAB_FIELDS + pr.NUMBER_FIELDS))
+
+    p = pr.Pending(ttl=10)
+    ok("שדה לא מוכר אינו נפתח", p.start(5, -100, "nope") is None)
+    w = p.start(5, -100, "welcome", now=100.0)
+    ok("ההמתנה נפתחה", w is not None and p.get(5, 101.0) is w)
+    ok("ולמשתמש אחר אין", p.get(6, 101.0) is None)
+    ok("היא פגה", p.get(5, 200.0) is None)
+    p.start(5, -100, "welcome", now=100.0)
+    p.start(5, -100, "rules", now=101.0)
+    got = p.get(5, 102.0)
+    ok("לחיצה שנייה מחליפה ולא מוסיפה",
+       got is not None and got.field == "rules" and p.count() == 1)
+    p.clear(5)
+    ok("ביטול מנקה", p.get(5, 102.0) is None and p.count() == 0)
+
+    ok("מספר נשמר", pr.validate("floodrate", " 12 ") == ("12", ""))
+    ok("מספר מחוץ לטווח נחתך ולא נדחה",
+       pr.validate("floodrate", "9999") == ("60", ""))
+    ok("טקסט במקום מספר נדחה",
+       pr.validate("floodrate", "הרבה")[0] is None)
+    ok("מקף מוחק", pr.validate("welcome", "-") == ("", ""))
+    ok("טקסט ארוך מדי נדחה",
+       pr.validate("aictx", "א" * 500)[0] is None)
+    ok("טקסט תקין נשמר",
+       pr.validate("aictx", " קבוצת סרטים ") == ("קבוצת סרטים", ""))
+    ok("שדה לא מוכר", pr.validate("nope", "x")[0] is None)
+
+
+def test_media_talk() -> None:
+    section("שיחה על יצירה מול מודעה")
+    talk = ["קזינו 1995 סרט של סקורסזה, יש כתוביות?",
+            "Casino Royale 2006 1080p",
+            "עונה 3 פרק 5 עלה אתמול",
+            "מישהו ראה את The Deuce? סדרה מעולה"]
+    ads = ["קזינו אונליין הצטרפו עכשיו בונוס t.me/x",
+           "סרטי פורנו מלאים בערוץ שלנו",
+           "Full HD porn 2024 free",
+           "סרטי פורנו בלעדיים, הצטרפו לערוץ @xxxxxxx",
+           "הימורים בטוחים! לחצו כאן https://bet.example"]
+    for t in talk:
+        ok(f"שיחה: {t[:26]}", sg.talks_not_sells(t), str(sg.media_context(t)))
+    for t in ads:
+        ok(f"מודעה: {t[:26]}", not sg.talks_not_sells(t),
+           f"ctx={sg.media_context(t)} cta={sg.solicits(t)}")
+
+
 def main() -> int:
     test_zmanim()
     test_hours()
     test_spamguard()
+    test_prompts()
+    test_media_talk()
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
     if FAILURES:

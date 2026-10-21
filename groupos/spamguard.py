@@ -87,8 +87,11 @@ def normalize(text: str) -> str:
         if c in LEET:
             prev = t[i - 1] if i else " "
             nxt = t[i + 1] if i + 1 < len(t) else " "
-            # ספרה בתוך מילה היא איות; ספרה בין ספרות היא מספר
-            if prev.isalpha() or nxt.isalpha():
+            # ספרה **בין שתי אותיות** היא איות (‎Ch1ld‎, ‎fr3e‎). ספרה
+            # שאות נוגעת בה מצד אחד בלבד היא חלק ממספר: ‎1080p‎ הפך
+            # ל-‎108op‎ בכלל הרופף יותר, ואיתו נעלם כל זיהוי של שיחה
+            # על איכות וידאו.
+            if prev.isalpha() and nxt.isalpha():
                 out.append(LEET[c])
                 continue
         out.append(c)
@@ -265,3 +268,70 @@ def repeat_verdict(rep: Repeat, *, count: int = DUP_COUNT,
         w = min(0.45 + 0.1 * (rep.count - count), 0.8)
         return Verdict("dup", w, f"x{rep.count}")
     return None
+
+# ── הקשר: על מה הקבוצה מדברת ──────────────────────────────────────────────
+# קבוצת סרטים מדברת על "קזינו", על "שיימלס" ועל "פוקר פייס" — אלה
+# שמות, לא מודעות. בלי ההבחנה הזאת כל קבוצת תוכן הייתה מוחקת לחבריה
+# את השיחה עצמה, וזה בדיוק סוג הטעות שמכבה בוט ניהול אחרי יומיים.
+MEDIA_WORDS = (
+    "season", "episode", "series", "movie", "film", "trailer", "subtitle",
+    "subs", "imdb", "bluray", "webrip", "hdrip", "dubbed", "boxset",
+    "netflix", "disney", "hbo", "prime video", "episodes",
+    "עונה", "עונות", "פרק", "פרקים", "סדרה", "סדרות", "סרט", "סרטים",
+    "כתוביות", "תרגום", "מדובב", "דיבוב", "טריילר", "במאי", "שחקן",
+    "שחקנית", "נטפליקס", "דיסני", "צפייה", "לצפייה", "שידור",
+)
+_RX_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
+_RX_SXXEYY = re.compile(r"\bs\d{1,2}\s?e\d{1,2}\b", re.I)
+_RX_QUALITY = re.compile(r"\b(?:480|720|1080|2160)p\b|\b4k\b|\bhdr\b", re.I)
+
+# קריאה לפעולה: מה שהופך "דיבור על" ל"מודעה בשביל".
+_RX_LINK = re.compile(r"https?://|www\.|t\.me/|@[A-Za-z][A-Za-z0-9_]{4,}", re.I)
+CTA_WORDS = (
+    "joinnow", "clickhere", "signup", "register", "deposit", "bonus",
+    "freespins", "promocode", "bet", "jackpot", "subscribe", "dm",
+    "הצטרפו", "הצטרף", "לחצו", "לחץ", "הירשמו", "הרשמה", "בונוס",
+    "הפקדה", "קוד קופון", "בפרטי", "פנו אליי", "מקומות אחרונים",
+)
+
+
+def media_context(text: str) -> bool:
+    """האם ההודעה נשמעת כמו שיחה על סרט או סדרה.
+
+    לא 'האם היא מזכירה סרט'. שנה, מספר עונה, רזולוציה או מילה מעולם
+    התוכן — אלה סימנים שההודעה **מדברת על** יצירה, ולכן שם שנשמע
+    כמו הימורים הוא שם."""
+    norm = normalize(text)
+    if not norm:
+        return False
+    if _RX_SXXEYY.search(norm) or _RX_QUALITY.search(norm):
+        return True
+    # מילה אחת מעולם התוכן מספיקה, ובכוונה: הבלם הזה נבדק תמיד יחד
+    # עם ‎solicits‎, כך שמודעה שכתוב בה "סרטים" עדיין נתפסת על הקישור
+    # או על הקריאה לפעולה שבה. דרישת שתי מילים פספסה בדיוק את המשפט
+    # הנפוץ ביותר בקבוצה כזאת — "מישהו ראה את X? סדרה מעולה".
+    return any(w in norm for w in MEDIA_WORDS) or bool(_RX_YEAR.search(norm))
+
+
+def solicits(text: str) -> bool:
+    """האם ההודעה מזמינה לפעולה — קישור, תיוג, או קריאה מפורשת.
+
+    זה הקו בין "ראיתי את קזינו של סקורסזה" לבין "קזינו — הצטרפו
+    עכשיו, בונוס 200%". הראשונה היא שיחה; השנייה היא מה שנמחק."""
+    if _RX_LINK.search(text or ""):
+        return True
+    blob = squeeze(text)
+    return any(w.replace(" ", "") in blob for w in CTA_WORDS)
+
+
+def talks_not_sells(text: str) -> bool:
+    """שיחה על תוכן ולא מודעה בשבילו — הבלם לפני מחיקה על שם של סרט.
+
+    שלושה תנאים, וכולם נדרשים: ההודעה נשמעת כמו דיבור על יצירה, אין
+    בה קריאה לפעולה, **ואין בה מונח מיני מפורש**. התנאי השלישי הוא
+    מה שמונע מ"סרטי פורנו מלאים בערוץ שלנו" להיחשב שיחה על סרטים רק
+    מפני שכתובה בה המילה "סרטי". שם של יצירה אינו מכיל את המילה
+    פורנו; מודעה — כן."""
+    if not media_context(text) or solicits(text):
+        return False
+    return not _hits(squeeze(text), SEXUAL)

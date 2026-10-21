@@ -88,7 +88,19 @@ SYSTEM = (
     "photos of products a member actually owns are NOT violations. "
     "An unsolicited investment offer, a giveaway, a promise of money, a "
     "request to move to private chat, a phone number or a payment link "
-    "presented as an opportunity ARE. When unsure, answer safe."
+    "presented as an opportunity ARE.\n"
+    "Use 'adult' for pornographic or sexually explicit imagery and for "
+    "banners advertising such content, and 'gambling' for casino, betting, "
+    "slot-machine or lottery promotions.\n"
+    "A POSTER IS NOT AN ADVERTISEMENT FOR WHAT IT DEPICTS. Official film, "
+    "series, game or album artwork, a screenshot from a film or an episode, "
+    "a streaming-app library screenshot and a cast photo are SAFE even when "
+    "the title or the scene involves casinos, crime, drugs, violence or "
+    "suggestive posing — many groups exist to discuss films and series. "
+    "Answer 'adult' or 'gambling' only when the picture itself is the offer: "
+    "explicit sexual content, or a banner inviting the reader to a site, a "
+    "channel, a bot or a private chat, selling access or promising winnings. "
+    "When unsure, answer safe."
 )
 
 
@@ -131,12 +143,18 @@ def pick_size(sizes: Iterable[Any]) -> Optional[Any]:
 
 
 # ── מה נשלח ───────────────────────────────────────────────────────────────
-def build_prompt(caption: str = "", *, lang: str = "") -> str:
+def build_prompt(caption: str = "", *, lang: str = "",
+                 context: str = "") -> str:
+    """‎context‎ הוא מה שהקבוצה **היא**: "קבוצת סרטים וסדרות".
+
+    בלי זה המודל מסווג פוסטר של סרט בקבוצת סרטים כמו שהיה מסווג אותו
+    בקבוצת הורים — ובדיוק שם נולדות המחיקות המוטעות."""
     head = f"Group language: {lang}\n" if lang else ""
+    ctx = f"Group context: {context}\n" if context else ""
     cap = (caption or "").strip()[:CAPTION_MAX]
     if not cap:
-        return f"{head}<<<CAP>>>\n(no caption)\n<<<END>>>"
-    return f"{head}<<<CAP>>>\n{cap}\n<<<END>>>"
+        return f"{head}{ctx}<<<CAP>>>\n(no caption)\n<<<END>>>"
+    return f"{head}{ctx}<<<CAP>>>\n{cap}\n<<<END>>>"
 
 
 def fingerprint(unique_id: str = "", data: Optional[bytes] = None,

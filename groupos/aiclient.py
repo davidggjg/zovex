@@ -280,11 +280,11 @@ class AIClient:
 
     async def analyze_image(self, data: bytes, *, mime: str = "image/jpeg",
                             caption: str = "", lang: str = "",
-                            unique_id: str = "",
+                            unique_id: str = "", context: str = "",
                             probed: bool = False) -> ai.Verdict:
         return await self._media(
             data, mime=mime, system=vision.SYSTEM,
-            prompt=vision.build_prompt(caption, lang=lang),
+            prompt=vision.build_prompt(caption, lang=lang, context=context),
             fp=vision.fingerprint(unique_id, data, caption),
             probed=probed, what="תמונה")
 

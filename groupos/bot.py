@@ -70,6 +70,7 @@ import vision                                   # noqa: E402
 import zmanim                                   # noqa: E402
 import grouphours                               # noqa: E402
 import spamguard                                # noqa: E402
+import prompts                                  # noqa: E402
 import voice                                    # noqa: E402
 from allowlist import Allowlist                 # noqa: E402
 from antiflood import AntiFlood                 # noqa: E402
@@ -113,6 +114,7 @@ brain = aiclient.AIClient(ai)
 sched = schedmod.Scheduler(db)
 zman = zmanim.Zmanim()
 repeats = spamguard.RepeatTracker()
+waiting = prompts.Pending()
 feds = Federations(db)
 rep = Reputation(db)
 rpt = Reports(db)
@@ -684,11 +686,12 @@ async def on_group_message(msg: Message):
 
     # 4. ניתוח תוכן. אחרון מבין הבדיקות, כי הוא היחיד שעולה כסף
     #    ולוקח זמן — ומיותר כשמנגנון זול כבר הכריע.
-    if db.get(msg.chat.id, "ai", "0") == "1" and ai.pools:
+    if db.get(msg.chat.id, "ai", "1") == "1" and ai.pools:
         sigs = collect_signals(msg, text)
         if aimod.worth_asking(text, existing=sigs):
-            v = await brain.analyze(text, lang=lg)
-            sig = v.signal()
+            v = await brain.analyze(text, lang=lg,
+                                    context=_ai_context(msg.chat.id))
+            sig = v.signal() if _ai_may_act(msg.chat.id, v, text) else None
             if sig:
                 sigs.append(sig)
                 d = policy.decide(sigs, policy.rules_for(db, msg.chat.id))
@@ -701,7 +704,7 @@ async def on_group_message(msg: Message):
     # 4ב. תמונות. היקר מכולם — הורדה ואז שליחה — ולכן אחרון מבין
     #     בדיקות התוכן, ומאחורי מתג נפרד: כאן יוצאת החוצה תמונה של
     #     מישהו, ולא רק טקסט.
-    if db.get(msg.chat.id, "aivision", "0") == "1" and brain.can_see:
+    if db.get(msg.chat.id, "aivision", "1") == "1" and brain.can_see:
         if await _check_image(msg, lg):
             return
 
@@ -776,8 +779,10 @@ async def _check_image(msg: Message, lg: str) -> bool:
             return False
         v = await brain.analyze_image(data, mime=vision.mime_of(kind, mime),
                                       caption=caption, lang=lg,
-                                      unique_id=uid, probed=bool(uid))
-    sig = v.signal()
+                                      unique_id=uid,
+                                      context=_ai_context(msg.chat.id),
+                                      probed=bool(uid))
+    sig = v.signal() if _ai_may_act(msg.chat.id, v, caption) else None
     if sig is None:
         return False
     # ‎decide‎ מחזיר החלטה **תמיד**, ו-‎action="none"‎ היא "אין מה לעשות".
@@ -841,6 +846,38 @@ def _int(v, default: int) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _ai_context(chat_id: int) -> str:
+    """מה הקבוצה הזאת **היא**, במילים של המנהל.
+
+    "קבוצת סרטים וסדרות", "קבוצת רכב", "קבוצת הורים לכיתה ב". זה
+    נשלח למודל, והוא ההבדל בין פוסטר של "קזינו" שנמחק כפרסומת
+    להימורים לבין פוסטר של סרט בקבוצה שכל כולה סרטים."""
+    return (db.get(chat_id, "ai_context", "") or "").strip()[:200]
+
+
+def _ai_may_act(chat_id: int, v, text: str) -> bool:
+    """בלם מקומי מול הפסק של המודל, לפני שהוא הופך לאות.
+
+    פורנוגרפיה והימורים הם הקטגוריות שבהן קבוצת תוכן נשרפת: שם של
+    סרט, מספר עונה או שאלה איפה יש כתוביות נראים למודל — ולפעמים גם
+    לאדם — כמו פרסומת. לכן כשההודעה **מדברת על** יצירה ואין בה קישור,
+    תיוג או קריאה לפעולה, הפסק נדחה אלא אם המודל בטוח כמעט לחלוטין.
+
+    זה לא מרכך פסק על הונאה, נשק או תוכן של קטינים — רק על שתי
+    הקטגוריות שבהן "מילה" ו"מודעה" נראות אותו דבר."""
+    if getattr(v, "category", "") not in ("adult", "gambling"):
+        return True
+    if db.get(chat_id, "ai_titles_ok", "1") != "1":
+        return True
+    if not spamguard.talks_not_sells(text):
+        return True
+    if getattr(v, "confidence", 0.0) >= 0.9:
+        return True
+    log.info("AI %s בקבוצה %s נדחה: שיחה על יצירה ולא מודעה",
+             v.category, chat_id)
+    return False
 
 
 def _media_uid(msg: Message) -> str:
@@ -908,6 +945,12 @@ async def _spam_check(msg: Message, text: str, lg: str) -> bool:
     המחרוזת. בלי השני, אותה תמונה עם כיתוב מתחלף הייתה נראית למערכת
     כעשר הודעות שונות."""
     verdict = spamguard.classify(text)
+    # ‎illegal‎ אינו מרוכך בשום מקרה. ‎adult‎ ו-‎bait‎ כן: בקבוצת סרטים
+    # הם בדיוק מה שנראה כמו שם של סרט.
+    if verdict is not None and verdict.kind in ("adult", "bait") \
+            and db.get(msg.chat.id, "ai_titles_ok", "1") == "1" \
+            and spamguard.talks_not_sells(text):
+        verdict = None
     if verdict is not None and verdict.escalate:
         await _ban_spammer(msg, f"{verdict.kind}:{verdict.detail}", lg)
         return True
@@ -2009,7 +2052,7 @@ async def cmd_ai(msg: Message):
     """הדלקה וכיבוי של ניתוח התוכן, עם אמירה מפורשת מה נשלח החוצה."""
     touch(msg)
     arg = ((msg.text or "").split() + [""])[1].lower()
-    cur = db.get(msg.chat.id, "ai", "0") == "1"
+    cur = db.get(msg.chat.id, "ai", "1") == "1"
     if arg == "on":
         if not ai.pools:
             await reply(msg, T(msg, "ai.no_keys"))
@@ -2042,7 +2085,7 @@ async def cmd_aivision(msg: Message):
     לזה במפורש."""
     touch(msg)
     arg = ((msg.text or "").split() + [""])[1].lower()
-    cur = db.get(msg.chat.id, "aivision", "0") == "1"
+    cur = db.get(msg.chat.id, "aivision", "1") == "1"
     if arg == "on":
         if not brain.can_see:
             await reply(msg, T(msg, "vision.no_keys"))
@@ -4232,6 +4275,84 @@ async def on_custom_command(msg: Message):
                        clean_after=delay or None)
 
 
+def _field_home(field: str) -> str:
+    """לאיזה מסך חוזרים אחרי עריכת השדה."""
+    if field in prompts.NUMBER_FIELDS:
+        return "nums"
+    if field == "aictx":
+        return "aim"
+    if field in prompts.SHAB_FIELDS:
+        return "texts"
+    return "texts"
+
+
+def _after_field(chat_id: int, f, value: str, by: int) -> None:
+    """תופעות לוואי של שמירה — במקום אחד.
+
+    ברכה שנשמרה בזמן שהמתג שלה כבוי "נשמרה ולא קרה כלום", וזה בדיוק
+    התסמין שאי אפשר לאבחן מבחוץ. לכן טקסט שנכתב מדליק את המתג שלו,
+    ומחיקה שלו מכבה אותו."""
+    pairs = {"welcome": "welcome_on", "goodbye": "goodbye_on"}
+    sw = pairs.get(f.name)
+    if sw:
+        db.set(chat_id, sw, "1" if value.strip() else "0", by)
+    if f.name in prompts.SHAB_FIELDS and value.strip():
+        db.set(chat_id, "shabbat", "1", by)
+
+
+@dp.message(F.chat.type == ChatType.PRIVATE)
+async def on_private_text(msg: Message):
+    """ההודעה שאחרי הלחיצה. זה מה שמחליף את הפקודות עם הטקסט.
+
+    רשום **אחרי** כל הפקודות ולפני כלום: הודעה פרטית שאינה פקודה
+    ואין לה המתנה פתוחה מקבלת את מסך הבית, כי זה מה שאדם שכתב לבוט
+    "היי" מצפה לראות."""
+    touch(msg)
+    if msg.from_user is None:
+        return
+    lg = lang_of(msg)
+    w = waiting.get(msg.from_user.id)
+    if w is None:
+        if (msg.text or "").startswith("/"):
+            return
+        sc = panel.home(my_groups(msg.from_user.id), lg)
+        await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+        return
+
+    waiting.clear(msg.from_user.id)
+    f = prompts.FIELDS[w.field]
+    if not perms.check(w.chat_id, msg.from_user.id, f.perm):
+        await send(msg.chat.id, i18n.t("err.need_admin", lg), is_group=False)
+        return
+    raw = msg.text or msg.caption or ""
+    value, err = prompts.validate(w.field, raw)
+    if value is None:
+        await send(msg.chat.id, i18n.t(err, lg), is_group=False)
+        return
+    if f.kind == prompts.SPEC and value and not parse_policy(value):
+        await send(msg.chat.id, i18n.t("warns.limit_usage", lg),
+                   is_group=False)
+        return
+    if value and f.kind == prompts.TEXT:
+        why = tpl.check_html(value)
+        if why:
+            await send(msg.chat.id, i18n.t("err.bad_html", lg, why=why),
+                       is_group=False)
+            return
+    before = db.get(w.chat_id, f.key, "") or ""
+    db.set(w.chat_id, f.key, value, msg.from_user.id)
+    _after_field(w.chat_id, f, value, msg.from_user.id)
+    audit.log(w.chat_id, "settings.write", actor_id=msg.from_user.id,
+              before=f"{f.key}={before[:40]}", after=f"{f.key}={value[:40]}",
+              source="button", severity="medium")
+    sc = _screen_for(w.chat_id, _field_home(w.field), "")
+    await send(msg.chat.id,
+               i18n.t("field.saved" if value else "field.cleared", lg),
+               is_group=False)
+    if sc is not None:
+        await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+
+
 # ── הפאנל הפרטי ────────────────────────────────────────────────────────────
 def _stats(chat_id: int) -> dict:
     day = time.time() - 86400
@@ -4290,6 +4411,24 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
                                      _sec_numbers(chat_id), lg)
     if name == "sws":
         return panel.switches_screen(chat_id, _switch_values(chat_id), lg)
+    if name == "texts":
+        vals = {f.key: (db.get(chat_id, f.key, "") or "")
+                for f in prompts.FIELDS.values()}
+        return panel.texts_screen(chat_id, vals, lg,
+                                  db.get(chat_id, "shabbat", "0") == "1")
+    if name == "nums":
+        vals = {prompts.FIELDS[n].key:
+                (db.get(chat_id, prompts.FIELDS[n].key, "") or "")
+                for n in prompts.NUMBER_FIELDS}
+        return panel.numbers_screen(chat_id, vals, lg)
+    if name == "aim":
+        return panel.ai_screen(chat_id, {
+            "ai": db.get(chat_id, "ai", "1") == "1",
+            "aivision": db.get(chat_id, "aivision", "1") == "1",
+            "aivoice": db.get(chat_id, "aivoice", "0") == "1",
+            "titles": db.get(chat_id, "ai_titles_ok", "1") == "1",
+            "context": _ai_context(chat_id),
+            "keys": bool(ai.pools)}, lg)
     return None
 
 
@@ -4307,7 +4446,7 @@ def _sec_numbers(chat_id: int) -> dict:
         "flood": db.get(chat_id, "flood", "1") == "1",
         "antiraid": db.get(chat_id, "antiraid", "1") == "1",
         "reports": db.get(chat_id, "reports", "1") == "1",
-        "ai": db.get(chat_id, "ai", "0") == "1",
+        "ai": db.get(chat_id, "ai", "1") == "1",
     }
 
 
@@ -4387,18 +4526,24 @@ async def on_callback(q: CallbackQuery):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
-        if arg not in panel.SWITCH_KEYS | {"lockdown", "emergency"}:
+        if arg not in panel.SWITCH_KEYS | {"lockdown", "emergency",
+                                           "ai_titles_ok"}:
             await q.answer(i18n.t("btn.unknown", lg))
             return
         cur = db.get(chat_id, arg,
-                     panel.SWITCH_DEFAULT.get(arg, "0")) == "1"
+                     panel.SWITCH_DEFAULT.get(
+                         arg, "1" if arg == "ai_titles_ok" else "0")) == "1"
         want = (not cur) if name == "sw" else (name == "sw1")
         if arg == "ai" and want and not ai.pools:
             await q.answer(i18n.t("ai.no_keys", lg), show_alert=True)
             return
         okay = await _set_switch(chat_id, arg, want, q.from_user.id)
         if name == "sw":
-            await _edit(q, _screen_for(chat_id, "sws", ""))
+            # הכפתור הזה יושב בשני מסכים. מי שלחץ עליו במסך ה-AI
+            # צריך לראות את מסך ה-AI מתעדכן, לא לקפוץ לרשימת המתגים.
+            back = "aim" if arg in ("ai", "aivision", "aivoice",
+                                    "ai_titles_ok") else "sws"
+            await _edit(q, _screen_for(chat_id, back, ""))
         else:
             await _edit(q, panel.switch_screen(chat_id, arg, want, lg))
         gap = _switch_gap(chat_id, arg, lg) if want else ""
@@ -4594,6 +4739,38 @@ async def on_callback(q: CallbackQuery):
         cfg = await _shab_panel(chat_id)
         await _edit(q, panel.shabbat_screen(chat_id, cfg, lg))
         await q.answer(i18n.t("saved", lg) if name != "shab" else "")
+        return
+
+    # ── עריכה בלחיצה: ‎ask‎ פותח המתנה, ‎clr‎ מוחק, ‎cancel‎ מבטל ──────
+    if name in ("ask", "clr", "cancel"):
+        if name == "cancel":
+            waiting.clear(q.from_user.id)
+            await _edit(q, _screen_for(chat_id, "main", "")
+                        or panel.home(my_groups(q.from_user.id), lg))
+            await q.answer(i18n.t("btn.canceled", lg))
+            return
+        f = prompts.FIELDS.get(arg)
+        if f is None:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        if not perms.check(chat_id, q.from_user.id, f.perm):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if name == "clr":
+            db.set(chat_id, f.key, "", q.from_user.id)
+            _after_field(chat_id, f, "", q.from_user.id)
+            await _edit(q, _screen_for(chat_id, _field_home(arg), ""))
+            await q.answer(i18n.t("field.cleared", lg))
+            return
+        # ההמתנה היא בצ'אט הפרטי של הלוחץ, על הקבוצה שהוא מנהל.
+        waiting.start(q.from_user.id, chat_id, arg)
+        sc = panel.waiting_screen(chat_id, arg,
+                                  db.get(chat_id, f.key, "") or "", lg)
+        if q.message is not None and q.message.chat.id == q.from_user.id:
+            await _edit(q, sc)
+        else:
+            await send(q.from_user.id, sc.text, is_group=False, markup=kb(sc))
+        await q.answer()
         return
 
     sc = _screen_for(chat_id, name, arg)

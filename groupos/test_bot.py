@@ -1045,6 +1045,9 @@ async def test_vision():
         aikeys.Providers.from_env({"GROUPOS_GEMINI_KEYS": "g1"}),
         transport=ai_transport)
     try:
+        # בדיקת התמונות דולקת כברירת מחדל מאז שהמפתחות מחוברים, ולכן
+        # הכיבוי כאן מפורש: הבדיקה הזאת היא על המתג הכבוי.
+        B.db.set(CHAT, "aivision", "0")
         await B.on_group_message(photo_msg("UA", mid=200))
         ok("כשהמתג כבוי לא מורידים כלום",
            not DOWNLOADS and AI_CALLS["n"] == 0, f"{DOWNLOADS} {AI_CALLS}")
@@ -1472,6 +1475,78 @@ async def test_new_features():
         B.apply_action = real_apply
 
 
+
+async def test_button_editing():
+    """עריכה בלחיצה: ההמתנה, ההודעה שאחריה, והשמירה."""
+    section("עריכה בכפתורים")
+    import prompts as _pr
+    B.perms.set_role(CHAT, ADM, "owner")
+
+    def pm(text: str, uid: int = ADM, mid: int = 9950) -> Message:
+        return Message(message_id=mid, date=dt.datetime.now(),
+                       chat=Chat(id=uid, type="private"),
+                       from_user=User(id=uid, is_bot=False, first_name="דוד"),
+                       text=text)
+
+    # בלי המתנה: הודעה פרטית מקבלת את מסך הבית ולא נבלעת
+    out = await _out(B.on_private_text, pm("היי", mid=9951))
+    ok("הודעה פרטית בלי המתנה מחזירה מסך", bool(out), out[:60])
+
+    B.waiting.start(ADM, CHAT, "welcome")
+    out = await _out(B.on_private_text, pm("ברוך הבא {mention}!", mid=9952))
+    ok("הטקסט נשמר בלי פקודה",
+       B.db.get(CHAT, "welcome", "") == "ברוך הבא {mention}!", out[:60])
+    ok("והמתג נדלק מעצמו", B.db.get(CHAT, "welcome_on", "0") == "1")
+    ok("וההמתנה נסגרה", B.waiting.get(ADM) is None)
+    ok("ההודעה הבאה כבר אינה נלכדת",
+       (await _out(B.on_private_text, pm("סתם משפט", mid=9953))) is not None
+       and B.db.get(CHAT, "welcome", "") == "ברוך הבא {mention}!")
+
+    # מספר
+    B.waiting.start(ADM, CHAT, "floodrate")
+    await _out(B.on_private_text, pm("9999", mid=9954))
+    ok("מספר נחתך לטווח", B.db.get(CHAT, "flood_rate", "") == "60",
+       str(B.db.get(CHAT, "flood_rate", "?")))
+    B.waiting.start(ADM, CHAT, "floodrate")
+    out = await _out(B.on_private_text, pm("הרבה", mid=9955))
+    ok("טקסט במקום מספר אינו נשמר",
+       B.db.get(CHAT, "flood_rate", "") == "60" and bool(out), out[:40])
+
+    # HTML שבור אינו נשמר בשקט
+    rules_before = B.db.get(CHAT, "rules", "") or ""
+    B.waiting.start(ADM, CHAT, "rules")
+    out = await _out(B.on_private_text, pm("<b>לא נסגר", mid=9956))
+    ok("HTML שבור נדחה עם הסבר",
+       (B.db.get(CHAT, "rules", "") or "") == rules_before
+       and "<b>" in out, out[:60])
+
+    # מי שאינו מנהל אינו עורך, גם אם פתחו לו המתנה
+    B.perms.set_role(CHAT, USER, "member")
+    B.waiting.start(USER, CHAT, "welcome")
+    before = B.db.get(CHAT, "welcome", "")
+    await _out(B.on_private_text, pm("שלי עכשיו", uid=USER, mid=9957))
+    ok("חבר רגיל אינו עורך", B.db.get(CHAT, "welcome", "") == before)
+
+    # המסכים החדשים נבנים
+    for name in ("texts", "nums", "aim"):
+        sc = B._screen_for(CHAT, name, "")
+        ok(f"מסך {name} נבנה", sc is not None and bool(sc.rows))
+        ok(f"ומזהי הכפתורים בו תקינים",
+           all(len(c.encode()) <= panel.CB_MAX for c in sc.all_callbacks()))
+
+    # כל שדה מופיע במסך כלשהו, אחרת הוא נגיש רק בפקודה
+    shown = set()
+    B.db.set(CHAT, "shabbat", "1")
+    for name in ("texts", "nums", "aim"):
+        for c in B._screen_for(CHAT, name, "").all_callbacks():
+            parts = c.split(":")
+            if len(parts) > 3 and parts[2] in ("ask", "clr"):
+                shown.add(parts[3])
+    B.db.set(CHAT, "shabbat", "0")
+    missing = set(_pr.FIELDS) - shown - {"warnpol"}
+    ok("כל שדה נגיש בכפתור", not missing, str(missing))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -1504,6 +1579,7 @@ async def main() -> int:
     await test_every_command()
     await test_usage_names_the_typed_command()
     await test_new_features()
+    await test_button_editing()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

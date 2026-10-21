@@ -113,6 +113,9 @@ def main_menu(chat_id: int, title: str, stats: dict,
         # נעילת שבת מוצעת בכפתור רק למי שבחר עברית. היא אינה חסומה
         # לאחרים — ‎/shabbat on‎ עובדת בכל שפה — אבל כפתור שמרבית
         # הקבוצות בעולם לא ישתמשו בו הוא רעש בתפריט.
+        [(i18n.t("menu.texts", lang), cb(chat_id, "texts")),
+         (i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
+        [(i18n.t("menu.ai", lang), cb(chat_id, "aim"))],
         ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
          + ([(i18n.t("menu.shabbat", lang), cb(chat_id, "shab"))]
             if lang == "he" else [])),
@@ -265,8 +268,8 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("flood",        "1", "sec.flood"),
     ("antiraid",     "1", "sec.antiraid"),
     ("reports",      "1", "sec.reports"),
-    ("ai",           "0", "sec.ai"),
-    ("aivision",     "0", "sw.aivision"),
+    ("ai",           "1", "sec.ai"),
+    ("aivision",     "1", "sw.aivision"),
     ("aivoice",      "0", "sw.aivoice"),
     ("adminpriv",    "1", "sw.adminpriv"),
     ("silent",       "1", "settings.silent"),
@@ -754,4 +757,91 @@ def hours_day(chat_id: int, day: str, current: str,
     if line:
         rows.append(line)
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hours"))])
+    return Screen(txt, rows)
+
+
+# ── עריכה בכפתורים ────────────────────────────────────────────────────────
+# כל מה שהיה פקודה עם טקסט הפך לכפתור: לוחצים, הבוט מבקש, שולחים.
+# המזהה הוא ‎ask:<שדה>‎ ו-‎clr:<שדה>‎, והשדות עצמם ב-‎prompts.FIELDS‎.
+def _mark(value: str) -> str:
+    return "✅" if (value or "").strip() else "—"
+
+
+def texts_screen(chat_id: int, values: dict, lang: str = i18n.DEFAULT,
+                 shabbat: bool = False) -> Screen:
+    """ההודעות של הקבוצה. אין כאן פקודה אחת להקליד."""
+    import prompts
+    names = list(prompts.TEXT_FIELDS) + (list(prompts.SHAB_FIELDS)
+                                         if shabbat else [])
+    rows = []
+    for name in names:
+        val = values.get(prompts.FIELDS[name].key, "")
+        rows.append([
+            (f"{_mark(val)} {i18n.t(prompts.FIELDS[name].label_key, lang)}",
+             cb(chat_id, "ask", name)),
+            (i18n.t("btn.clear", lang), cb(chat_id, "clr", name)),
+        ])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(head("texts.title", lang) + "\n\n"
+                  + i18n.t("texts.hint", lang), rows)
+
+
+def numbers_screen(chat_id: int, values: dict,
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """הספים, כל אחד עם ערכו. לחיצה שואלת מספר — בלי לזכור שם הגדרה."""
+    import prompts
+    rows, line = [], []
+    for name in prompts.NUMBER_FIELDS:
+        f = prompts.FIELDS[name]
+        cur = values.get(f.key, "") or i18n.t("nums.default", lang)
+        line.append((f"{i18n.t(f.label_key, lang)}: {cur}",
+                     cb(chat_id, "ask", name)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(head("nums.title", lang) + "\n\n"
+                  + i18n.t("nums.hint", lang), rows)
+
+
+def ai_screen(chat_id: int, state: dict, lang: str = i18n.DEFAULT) -> Screen:
+    """ניתוח תוכן: מה דלוק, ומה הקבוצה **היא**.
+
+    ההקשר אינו קישוט: בלעדיו פוסטר של "קזינו" בקבוצת סרטים נראה
+    למודל כמו פרסומת להימורים, וזו המחיקה שמכבה בוט ניהול."""
+    on, off = i18n.t("on", lang), i18n.t("off", lang)
+    ctx = (state.get("context") or "").strip()
+    txt = (head("aim.title", lang) + "\n\n" + i18n.t("aim.hint", lang)
+           + "\n\n" + i18n.t("aim.context", lang,
+                             value=ctx or i18n.t("aim.no_context", lang)))
+    if not state.get("keys"):
+        txt += "\n\n" + i18n.t("aim.no_keys", lang)
+    rows = [
+        [(("🟢 " if state.get("ai") else "⚪ ") + i18n.t("sec.ai", lang),
+          cb(chat_id, "sw", "ai")),
+         (("🟢 " if state.get("aivision") else "⚪ ")
+          + i18n.t("sw.aivision", lang), cb(chat_id, "sw", "aivision"))],
+        [(("🟢 " if state.get("aivoice") else "⚪ ")
+          + i18n.t("sw.aivoice", lang), cb(chat_id, "sw", "aivoice")),
+         (("🟢 " if state.get("titles") else "⚪ ")
+          + i18n.t("sw.titles_ok", lang), cb(chat_id, "sw", "ai_titles_ok"))],
+        [("✏️ " + i18n.t("field.aictx", lang), cb(chat_id, "ask", "aictx"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
+    ]
+    return Screen(txt, rows)
+
+
+def waiting_screen(chat_id: int, field: str, current: str,
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """"שלח לי עכשיו". המסך שמחליף את הפקודה שהיה צריך להקליד."""
+    import prompts
+    f = prompts.FIELDS[field]
+    txt = (f"<b>{i18n.t(f.label_key, lang)}</b>\n\n"
+           + i18n.t(f.hint_key, lang) + "\n\n"
+           + i18n.t("field.ask", lang))
+    if (current or "").strip():
+        txt += "\n\n" + i18n.t("field.current", lang,
+                               value=(current or "")[:300])
+    rows = [[(i18n.t("btn.cancel", lang), cb(chat_id, "cancel"))]]
     return Screen(txt, rows)
