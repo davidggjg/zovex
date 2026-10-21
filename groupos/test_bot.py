@@ -67,6 +67,7 @@ DELETED: list[int] = []
 DOWNLOADS: list[str] = []
 EDITED: list[str] = []
 ANSWERED: list[str] = []
+THREADS: list = []
 AI_CALLS = {"n": 0}
 VERDICT = {"json": '{"category":"scam","confidence":0.9,"reason":"giveaway"}'}
 
@@ -96,6 +97,7 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, reply_markup=None, **kw):
         SENT.append((chat_id, text, reply_markup is not None))
+        THREADS.append(kw.get("message_thread_id"))
         return Message(message_id=9000 + len(SENT), date=dt.datetime.now(),
                        chat=Chat(id=chat_id, type="private"), text=text)
 
@@ -916,11 +918,12 @@ async def test_quiet_group():
     real_send = B.send
 
     async def no_private(chat_id, text, *, is_group=True, markup=None,
-                         clean_after=None):
+                         clean_after=None, thread_id=None):
         if not is_group:
             return None                    # טלגרם דוחה — אין שיחה פרטית
         return await real_send(chat_id, text, is_group=is_group,
-                               markup=markup, clean_after=clean_after)
+                               markup=markup, clean_after=clean_after,
+                               thread_id=thread_id)
 
     B.send = no_private
     try:
@@ -1610,6 +1613,62 @@ async def test_aggressive_paths():
             B.bot.ban_chat_sender_chat = real_ban_chat
 
 
+
+async def test_forum_topics():
+    """קבוצת נושאים: התשובה חוזרת לנושא שבו נשאלה, לא ל"כללי"."""
+    section("נושאים")
+
+    def topic_msg(text: str, thread: int, mid: int = 9970) -> Message:
+        return Message(message_id=mid, date=dt.datetime.now(),
+                       chat=Chat(id=CHAT, type="supergroup", title="ק",
+                                 is_forum=True),
+                       from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                       text=text, message_thread_id=thread,
+                       is_topic_message=True)
+
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "adminpriv", "0")       # שהתשובה תצא בקבוצה
+    try:
+        THREADS.clear()
+        await _out(B.cmd_rules, topic_msg("/rules", 55, mid=9971))
+        ok("התשובה יצאה לנושא ולא לכללי", THREADS and THREADS[-1] == 55,
+           str(THREADS[-3:]))
+
+        THREADS.clear()
+        await _out(B.cmd_id, msg("/id", mid=9972))
+        ok("בקבוצה רגילה אין נושא", THREADS and THREADS[-1] is None,
+           str(THREADS[-3:]))
+
+        # תשובה בתוך שרשור בקבוצה רגילה אינה נושא: שליחה אליו נכשלת
+        thready = Message(message_id=9973, date=dt.datetime.now(),
+                          chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                          from_user=User(id=ADM, is_bot=False,
+                                         first_name="דוד"),
+                          text="/id", message_thread_id=77)
+        ok("שרשור רגיל אינו נחשב נושא", B._thread_of(thready) is None)
+
+        # הודעת אכיפה חוזרת לנושא שבו נשלחה ההפרה
+        THREADS.clear()
+        B.db.set(CHAT, "silent", "0")
+        B.perms.set_role(CHAT, BAD, "member")
+        bad = Message(message_id=9974, date=dt.datetime.now(),
+                      chat=Chat(id=CHAT, type="supergroup", title="ק",
+                                is_forum=True),
+                      from_user=User(id=BAD, is_bot=False, first_name="ס"),
+                      text="קנו עכשיו קנו עכשיו", message_thread_id=55,
+                      is_topic_message=True)
+        B.locks.set(CHAT, "url", "off")
+        B.filters.add(CHAT, "קנו עכשיו", "", action="warn")
+        await B.on_group_message(bad)
+        ok("הודעת האכיפה בנושא הנכון",
+           not THREADS or all(t in (55, None) for t in THREADS),
+           str(THREADS))
+    finally:
+        B.db.set(CHAT, "adminpriv", "1")
+        B.db.set(CHAT, "silent", "1")
+        B.filters.remove(CHAT, "קנו עכשיו")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -1644,6 +1703,7 @@ async def main() -> int:
     await test_new_features()
     await test_button_editing()
     await test_aggressive_paths()
+    await test_forum_topics()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

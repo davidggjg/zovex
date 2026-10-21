@@ -136,16 +136,31 @@ ADMIN_TTL = 300
 
 # ── שליחה ומחיקה ───────────────────────────────────────────────────────────
 async def send(chat_id: int, text: str, *, is_group: bool = True,
-               markup=None, clean_after: Optional[int] = None) -> Optional[Message]:
-    """היציאה היחידה. עוברת דרך שומר המכסות תמיד."""
+               markup=None, clean_after: Optional[int] = None,
+               thread_id: Optional[int] = None) -> Optional[Message]:
+    """היציאה היחידה. עוברת דרך שומר המכסות תמיד.
+
+    ‎thread_id‎ הוא הנושא בקבוצת נושאים. בלעדיו **כל** מה שהבוט אומר
+    נוחת ב"כללי" — גם תשובה להודעה שנשלחה בנושא אחר לגמרי. מבחוץ זה
+    נראה בדיוק כמו בוט שלא רואה את שאר הנושאים, וזו בדיוק התלונה
+    שהגיעה: הוא רואה הכול, הוא פשוט ענה במקום אחד.
+
+    נושא שנסגר או נמחק מחזיר שגיאה מטלגרם; במקרה כזה נשלחת ההודעה
+    בלי נושא ולא נבלעת."""
     await guard.acquire(chat_id, is_group)
     try:
-        m = await bot.send_message(chat_id, text, reply_markup=markup)
+        m = await bot.send_message(chat_id, text, reply_markup=markup,
+                                   message_thread_id=thread_id)
     except TelegramRetryAfter as e:
         guard.note_flood_wait(chat_id, float(e.retry_after))
         log.warning("FloodWait %ss בצ'אט %s", e.retry_after, chat_id)
         return None
     except TelegramAPIError as e:
+        if thread_id is not None:
+            log.info("שליחה לנושא %s בצ'אט %s נכשלה (%s) — שולח בכללי",
+                     thread_id, chat_id, e)
+            return await send(chat_id, text, is_group=is_group, markup=markup,
+                              clean_after=clean_after)
         log.warning("שליחה נכשלה בצ'אט %s: %s", chat_id, e)
         return None
     if clean_after:
@@ -165,6 +180,19 @@ def _schedule_delete(chat_id: int, message_id: int, after: int) -> None:
 
 
 _bg: set = set()
+
+
+def _thread_of(msg: Optional[Message]) -> Optional[int]:
+    """הנושא שההודעה הגיעה ממנו, בקבוצת נושאים.
+
+    ‎is_topic_message‎ הוא התנאי ולא עצם קיומו של ‎message_thread_id‎:
+    בקבוצה רגילה השדה מאוכלס גם בתשובה בתוך שרשור, ושליחה אליו שם
+    נכשלת."""
+    if msg is None:
+        return None
+    if not getattr(msg, "is_topic_message", False):
+        return None
+    return getattr(msg, "message_thread_id", None)
 
 
 def clean_delay(chat_id: int) -> int:
@@ -280,7 +308,8 @@ async def reply(msg: Message, text: str, markup=None) -> Optional[Message]:
     if delay:
         _schedule_delete(msg.chat.id, msg.message_id, delay)
     return await send(msg.chat.id, text, is_group=is_group, markup=markup,
-                      clean_after=delay or None)
+                      clean_after=delay or None,
+                      thread_id=_thread_of(msg))
 
 
 def _private_button(chat_id: int,
@@ -339,6 +368,11 @@ _me_id: Optional[int] = None
 # צריך להסביר לאדם "לך לבוט בפרטי ותשלח /start", וזה בדיוק הטרחה
 # שגורמת לאנשים לוותר.
 _bot_username: str = ""
+# ‎can_read_all_group_messages‎ מ-‎getMe‎. כשהוא כבוי ("מצב פרטיות"
+# ב-BotFather) הבוט מקבל רק פקודות ותשובות אליו — אלא אם הוא מנהל.
+# זה המקור הנפוץ ביותר ל"הבוט לא רואה חלק מההודעות", ולכן הוא מוצג
+# ב-‎/diag‎ ולא נשאר ידע סמוי.
+_can_read_all: bool = True
 
 
 async def bot_rights(chat_id: int) -> tuple[bool, list[str]]:
@@ -646,7 +680,8 @@ async def on_group_message(msg: Message):
                               mention=tpl.mention(msg.from_user.id,
                                                   _name(msg)),
                               level=up.level),
-                       clean_after=clean_delay(msg.chat.id) or None)
+                       clean_after=clean_delay(msg.chat.id) or None,
+                       thread_id=_thread_of(msg))
 
     # החרגת משתמש קודמת לכל בדיקה. מי שהוחרג במפורש לא נבדק, אחרת
     # ההחרגה אינה החרגה אלא הצעה.
@@ -737,7 +772,8 @@ async def on_group_message(msg: Message):
         if n is not None and n.visibility == "public":
             await send_content(msg.chat.id,
                                tpl.render_pick(n.content, _ctx(msg)),
-                               n.media_id, n.media_kind, n.buttons)
+                               n.media_id, n.media_kind, n.buttons,
+                               thread_id=_thread_of(msg))
             return
 
     # 7. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
@@ -968,7 +1004,8 @@ async def _ban_spammer(msg: Message, why: str, lg: str, *,
                who=tpl.esc(_name(msg)), why=tpl.esc(why)))
     if db.get(msg.chat.id, "silent", "1") != "1":
         await send(msg.chat.id, i18n.t("spam.illegal", lg),
-                   clean_after=clean_delay(msg.chat.id) or None)
+                   clean_after=clean_delay(msg.chat.id) or None,
+                   thread_id=_thread_of(msg))
 
 
 async def _spam_check(msg: Message, text: str, lg: str, *,
@@ -1072,7 +1109,8 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
             await send(msg.chat.id,
                        T(msg, notice or "lock.violation", name=_name(msg),
                          label=label, n=out.warns),
-                       clean_after=clean_delay(msg.chat.id) or None)
+                       clean_after=clean_delay(msg.chat.id) or None,
+                       thread_id=_thread_of(msg))
         return
     if action in ("mute", "ban", "kick", "tmute", "tban"):
         kind = {"tmute": "mute", "tban": "ban"}.get(action, action)
@@ -1081,7 +1119,8 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
         if notice and db.get(msg.chat.id, "silent", "1") != "1":
             await send(msg.chat.id,
                        T(msg, notice, name=_name(msg), label=label),
-                       clean_after=clean_delay(msg.chat.id) or None)
+                       clean_after=clean_delay(msg.chat.id) or None,
+                       thread_id=_thread_of(msg))
 
 
 async def _run_filter(msg: Message, fh) -> None:
@@ -1091,7 +1130,7 @@ async def _run_filter(msg: Message, fh) -> None:
     if fh.action in ("reply", "delete_reply") and fh.content:
         await send_content(msg.chat.id,
                            tpl.render_pick(fh.content, _ctx(msg)),
-                           None, None, "")
+                           None, None, "", thread_id=_thread_of(msg))
         return
     if fh.action in ("warn", "mute", "kick", "ban"):
         await _enforce(msg, fh.action, None, fh.trigger, "filter.triggered")
@@ -1491,7 +1530,8 @@ def _content_of(msg: Message, args: str) -> tuple[str, Optional[str], Optional[s
 
 async def send_content(chat_id: int, text: str, media_id: Optional[str],
                        media_kind: Optional[str], buttons: str,
-                       *, clean_after: Optional[int] = None):
+                       *, clean_after: Optional[int] = None,
+                       thread_id: Optional[int] = None):
     """שולח הערה/ברכה/תגובת פילטר — טקסט, מדיה וכפתורים כאחד."""
     rows = parse_buttons(buttons)
     markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -1504,13 +1544,19 @@ async def send_content(chat_id: int, text: str, media_id: Optional[str],
                   "animation": bot.send_animation, "sticker": bot.send_sticker,
                   "document": bot.send_document, "audio": bot.send_audio,
                   "voice": bot.send_voice}[media_kind]
-            kw = {"reply_markup": markup}
+            kw = {"reply_markup": markup, "message_thread_id": thread_id}
             if media_kind != "sticker":
                 kw["caption"] = text[:1024] or None
             m = await fn(chat_id, media_id, **kw)
         else:
-            m = await bot.send_message(chat_id, text, reply_markup=markup)
+            m = await bot.send_message(chat_id, text, reply_markup=markup,
+                                       message_thread_id=thread_id)
     except TelegramAPIError as e:
+        if thread_id is not None:
+            log.info("שליחת תוכן לנושא %s נכשלה (%s) — שולח בכללי",
+                     thread_id, e)
+            return await send_content(chat_id, text, media_id, media_kind,
+                                      buttons, clean_after=clean_after)
         log.warning("שליחת תוכן ל-%s נכשלה: %s", chat_id, e)
         return None
     if clean_after:
@@ -1568,7 +1614,8 @@ async def _send_note(msg: Message, name: str) -> bool:
                            else "notes.private_fail"))
         return True
     await send_content(msg.chat.id, tpl.render_pick(n.content, _ctx(msg)),
-                       n.media_id, n.media_kind, n.buttons)
+                       n.media_id, n.media_kind, n.buttons,
+                       thread_id=_thread_of(msg))
     return True
 
 
@@ -2297,7 +2344,8 @@ async def cmd_delall(msg: Message):
     audit.log(msg.chat.id, "chat.purge_user", actor_id=msg.from_user.id,
               target_id=t, after=n, severity="high")
     await send(msg.chat.id, T(msg, "purge.by_user", n=n,
-                              name=tpl.esc(_name(msg))), clean_after=10)
+                              name=tpl.esc(_name(msg))), clean_after=10,
+               thread_id=_thread_of(msg))
 
 
 
@@ -3510,7 +3558,8 @@ async def cmd_purgeto(msg: Message):
             n += 1
     audit.log(msg.chat.id, "chat.purge", actor_id=msg.from_user.id,
               after=n, severity="medium")
-    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10)
+    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10,
+               thread_id=_thread_of(msg))
 
 
 # ── ניקויים גורפים ────────────────────────────────────────────────────────
@@ -3944,7 +3993,7 @@ async def cmd_say(msg: Message):
     _schedule_delete(msg.chat.id, msg.message_id, 1)
     audit.log(msg.chat.id, "chat.say", actor_id=msg.from_user.id,
               after=text[1][:200], severity="medium")
-    await send(msg.chat.id, text[1])
+    await send(msg.chat.id, text[1], thread_id=_thread_of(msg))
 
 
 @dp.message(Command("del"))
@@ -4052,6 +4101,17 @@ async def cmd_diag(msg: Message):
         line("ok", i18n.t("diag.rights", lg))
     line("ok" if admins else "bad", i18n.t("diag.admins", lg),
          str(len(admins)) if admins else i18n.t("diag.no_admin_list", lg))
+
+    # קבוצת נושאים: מה הבוט רואה, ואיפה הוא עונה. התלונה "הוא עובד
+    # רק בנושא הראשי" נולדה מכך שהוא **ענה** תמיד בכללי, ולכן זה
+    # נאמר כאן במפורש ולא נשאר לניחוש.
+    if getattr(msg.chat, "is_forum", False):
+        line("ok", i18n.t("diag.forum", lg),
+             i18n.t("diag.forum_here", lg, topic=_thread_of(msg) or 1))
+    if not _can_read_all:
+        line("ok" if is_admin else "bad", i18n.t("diag.privacy", lg),
+             i18n.t("diag.privacy_admin" if is_admin
+                    else "diag.privacy_off", lg))
 
     # 2. ברכות — שלושת מסלולי השקט
     for key, on_key, label, cmd in (
@@ -4275,7 +4335,8 @@ async def cmd_purge(msg: Message):
             n += 1
     audit.log(msg.chat.id, "chat.purge", actor_id=msg.from_user.id,
               after=n, severity="medium")
-    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10)
+    await send(msg.chat.id, T(msg, "purge.done", n=n), clean_after=10,
+               thread_id=_thread_of(msg))
 
 
 @dp.message(Command("role"))
@@ -4321,7 +4382,8 @@ async def on_custom_command(msg: Message):
         _schedule_delete(msg.chat.id, msg.message_id, delay)
     await send_content(msg.chat.id, tpl.render_pick(c.content, _ctx(msg)),
                        c.media_id, c.media_kind, c.buttons or "",
-                       clean_after=delay or None)
+                       clean_after=delay or None,
+                       thread_id=_thread_of(msg))
 
 
 def _field_home(field: str) -> str:
@@ -4962,7 +5024,7 @@ async def schedule_loop():
 
 
 async def main() -> int:
-    global bot, _me_id, _bot_username
+    global bot, _me_id, _bot_username, _can_read_all
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -4987,6 +5049,10 @@ async def main() -> int:
     me = await bot.get_me()
     _me_id = me.id
     _bot_username = me.username or ""
+    _can_read_all = bool(getattr(me, "can_read_all_group_messages", False))
+    log.info("מצב פרטיות: %s",
+             "כבוי — הבוט רואה את כל ההודעות" if _can_read_all
+             else "דלוק — בקבוצה הבוט רואה הכול רק כמנהל")
     log.info("GroupOS עלה כ-@%s · סכימה v%s", me.username, db.version)
     for p in ai.stats():
         log.info("AI %s: %d מפתחות · תקציב %s", p["provider"], p["keys"],
