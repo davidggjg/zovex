@@ -80,9 +80,25 @@ def test_zmanim() -> None:
     half = zm.parse_feed({"items": [FEED["items"][0]]})
     ok("כניסה בלי יציאה אינה חלון", zm.windows(half) == [])
 
+    # ההיסט מגיע מהפיד עצמו ולא מהגדרת הקבוצה — זה התיקון לשעות
+    # שהוצגו ב-UTC (14:18 במקום 17:18).
+    ok("ההיסט נקרא מהפיד", w.tz == 3 * 3600, str(w.tz))
     txt = zm.fill("{city} · {parasha} · {candles}–{havdalah}", w,
-                  city="ירושלים", tz_offset=180)
+                  city="ירושלים")
     ok("תבנית מתמלאת", txt == "ירושלים · פרשת נח · 17:42–18:38", txt)
+    ok("תאריך מלא", zm.fill("{fulldate}", w) == "23/10/2026",
+       zm.fill("{fulldate}", w))
+    rows = [zm.CityTime("jerusalem", "ירושלים", w.candles, w.havdalah, w.tz),
+            zm.CityTime("haifa", "חיפה", w.candles + 600,
+                        w.havdalah + 120, w.tz)]
+    block = zm.times_block(rows)
+    ok("לוח ערים נבנה",
+       "ירושלים — 17:42" in block and "חיפה — 17:52" in block, block)
+    ok("ובשתי קבוצות: כניסה ויציאה",
+       block.count("ירושלים") == 2 and "18:38" in block, block)
+    ok("לוח ריק אינו מייצר רעש", zm.times_block([]) == "")
+    ok("{times} מוצב בתבנית",
+       "חיפה" in zm.fill("א\n\n{times}", w, rows=rows))
     ok("משתנה לא מוכר נשאר",
        zm.fill("{nope}", w) == "{nope}")
     ok("סוגר מסולסל ביד אינו מפיל",
@@ -315,8 +331,47 @@ def test_aggressive() -> None:
        sg.repeat_verdict(second).weight >= 0.5)
 
 
+
+def test_city_rows() -> None:
+    section("לוח רב-ערים")
+    import asyncio as _aio
+    feeds = {
+        "jerusalem": ("2026-10-23T17:18:00+03:00", "2026-10-24T18:34:00+03:00"),
+        "haifa": ("2026-10-23T17:28:00+03:00", "2026-10-24T18:34:00+03:00"),
+        "telaviv": ("2026-10-23T17:39:00+03:00", "2026-10-24T18:36:00+03:00"),
+    }
+    seen = []
+
+    async def fake(url: str, timeout: float) -> str:
+        key = next(k for k, v in zm.CITIES.items() if f"geonameid={v[2]}" in url)
+        seen.append(key)
+        c, h = feeds.get(key, feeds["jerusalem"])
+        return json.dumps({"items": [
+            {"category": "candles", "title": "c", "date": c},
+            {"category": "parashat", "hebrew": "פרשת לך־לך"},
+            {"category": "havdalah", "title": "h", "date": h}]})
+
+    z = zm.Zmanim(transport=fake)
+    now = zm._ts("2026-10-22T12:00:00+03:00")[0]
+    rows = _aio.run(z.city_rows(["jerusalem", "haifa", "telaviv"], now=now))
+    ok("שורה לכל עיר", len(rows) == 3, str(rows))
+    ok("ולכל אחת השעה שלה",
+       [zm.clock(r.candles, r.tz) for r in rows] == ["17:18", "17:28", "17:39"],
+       str([zm.clock(r.candles, r.tz) for r in rows]))
+    ok("עיר לא מוכרת מושמטת",
+       len(_aio.run(z.city_rows(["jerusalem", "atlantis"], now=now))) == 1)
+    n = len(seen)
+    _aio.run(z.city_rows(["jerusalem", "haifa"], now=now))
+    ok("המטמון חוסך בקשות חוזרות", len(seen) == n, str(seen))
+
+    block = zm.times_block(rows)
+    ok("הלוח מכיל את כל הערים",
+       all(c in block for c in ("ירושלים", "חיפה", "תל אביב")), block)
+
+
 def main() -> int:
     test_zmanim()
+    test_city_rows()
     test_hours()
     test_spamguard()
     test_prompts()

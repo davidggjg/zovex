@@ -102,10 +102,17 @@ def cities(lang: str = "en") -> list[tuple[str, str]]:
 # ── מה שחוזר מ-hebcal ─────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Event:
-    """אירוע אחד מהפיד. ‎kind‎ הוא ‎candles‎ · ‎havdalah‎ · ‎parashat‎ · ‎holiday‎."""
+    """אירוע אחד מהפיד. ‎kind‎ הוא ‎candles‎ · ‎havdalah‎ · ‎parashat‎ · ‎holiday‎.
+
+    ‎tz‎ הוא ההיסט **של העיר**, בשניות, כפי שהפיד עצמו החזיר אותו.
+    זה התיקון לבאג שבו ירושלים הוצגה כ-14:18 במקום 17:18: השעה
+    עוצבה לפי ‎tz_offset‎ של הקבוצה — הגדרה שאיש לא מילא ולכן הייתה
+    אפס, כלומר UTC. הזמן הנכון יושב בפיד מלכתחילה, ואין שום סיבה
+    לבקש מהמנהל למלא אותו שוב."""
     kind: str
     title: str
     ts: float = 0.0          # UTC. אפס לאירוע ללא שעה (פרשה, יום חג)
+    tz: int = 0              # היסט העיר בשניות (10800 = UTC+3)
 
     @property
     def dated(self) -> bool:
@@ -124,6 +131,7 @@ class Window:
     open_at: float
     title: str = ""
     parasha: str = ""
+    tz: int = 0              # היסט העיר בשניות — לעיצוב השעות
 
     def active(self, now: float) -> bool:
         return self.lock_at <= now < self.open_at
@@ -132,17 +140,20 @@ class Window:
         return now < self.lock_at
 
 
-def _ts(raw: Any) -> float:
-    """‎'2026-10-23T17:42:00+03:00'‎ → חותם זמן. כישלון מחזיר 0.
+def _ts(raw: Any) -> tuple[float, int]:
+    """‎'2026-10-23T17:42:00+03:00'‎ → ‎(חותם זמן, היסט בשניות)‎.
 
-    הפיד מחזיר שעה **עם היסט**, ולכן אין כאן ניחוש אזור זמן: עיר
-    שעברה לשעון קיץ מחזירה היסט אחר, והחישוב נשאר נכון מעצמו."""
+    הפיד מחזיר שעה **עם היסט**, ולכן אין כאן ניחוש אזור זמן ואין
+    טבלת אזורים לתחזק: עיר שעברה לשעון קיץ מחזירה היסט אחר, והשעה
+    המוצגת נשארת נכונה מעצמה. כישלון מחזיר אפסים."""
     if not isinstance(raw, str) or not raw:
-        return 0.0
+        return 0.0, 0
     try:
-        return datetime.fromisoformat(raw).timestamp()
+        dt = datetime.fromisoformat(raw)
     except ValueError:
-        return 0.0
+        return 0.0, 0
+    off = dt.utcoffset()
+    return dt.timestamp(), int(off.total_seconds()) if off else 0
 
 
 def parse_feed(payload: Any) -> list[Event]:
@@ -164,7 +175,8 @@ def parse_feed(payload: Any) -> list[Event]:
         cat = str(it.get("category") or "")
         title = str(it.get("title") or "")
         if cat in ("candles", "havdalah"):
-            out.append(Event(cat, title, _ts(it.get("date"))))
+            ts, off = _ts(it.get("date"))
+            out.append(Event(cat, title, ts, off))
         elif cat == "parashat":
             out.append(Event("parashat", str(it.get("hebrew") or title)))
         elif cat == "holiday":
@@ -199,7 +211,8 @@ def windows(events: list[Event], *, before: int = DEFAULT_BEFORE,
             break
         c, h = dated[i].ts, dated[j].ts
         out.append(Window(c, h, c - before * 60, h + after * 60,
-                          title=holiday or parasha, parasha=parasha))
+                          title=holiday or parasha, parasha=parasha,
+                          tz=dated[i].tz))
         i = j + 1
     return out
 
@@ -224,17 +237,24 @@ def next_window(wins: list[Window], now: float) -> Optional[Window]:
 VARS = ("city", "parasha", "candles", "havdalah", "lock", "open", "date")
 
 
-def _clock(ts: float, tz_offset: int) -> str:
+def _clock(ts: float, tz: int = 0) -> str:
+    """שעה מקומית. ‎tz‎ **בשניות**, כפי שהפיד מחזיר.
+
+    עד כה הפרמטר היה דקות ובא מהגדרת הקבוצה, שאיש לא מילא — ולכן
+    ירושלים הוצגה ב-UTC: 14:18 במקום 17:18. ההיסט שייך לעיר, לא
+    לקבוצה, והוא מגיע יחד עם הזמן."""
     if ts <= 0:
         return "--:--"
-    lt = time.gmtime(ts + tz_offset * 60)
+    lt = time.gmtime(ts + tz)
     return f"{lt.tm_hour:02d}:{lt.tm_min:02d}"
 
 
-def _date(ts: float, tz_offset: int) -> str:
+def _date(ts: float, tz: int = 0, *, full: bool = False) -> str:
     if ts <= 0:
         return ""
-    lt = time.gmtime(ts + tz_offset * 60)
+    lt = time.gmtime(ts + tz)
+    if full:
+        return f"{lt.tm_mday:02d}/{lt.tm_mon:02d}/{lt.tm_year}"
     return f"{lt.tm_mday:02d}/{lt.tm_mon:02d}"
 
 
@@ -242,25 +262,76 @@ clock = _clock          # שמות ציבוריים: מי שמציג זמן לא
 date = _date
 
 
-def fill(template: str, w: Window, *, city: str = "", tz_offset: int = 0) -> str:
+@dataclass(frozen=True)
+class CityTime:
+    """שורה אחת בלוח רב-ערים."""
+    key: str
+    name: str
+    candles: float
+    havdalah: float
+    tz: int = 0
+
+
+def times_block(rows: list[CityTime], lang: str = "he",
+                labels: Optional[dict[str, str]] = None) -> str:
+    """לוח הזמנים לכמה ערים, כטקסט לטלגרם.
+
+    עמודה אחת ולא שתיים: בטלגרם אין גופן ברוחב קבוע בכל מכשיר, וכל
+    ניסיון ליישר טורים ברווחים נשבר אצל מישהו. שם העיר, מפריד, שעה —
+    ונקרא זהה בכל לקוח.
+
+    ‎labels‎ מאפשר למי שמציג להחליף את הכותרות בלי לגעת כאן."""
+    if not rows:
+        return ""
+    lb = labels or {}
+    inn = lb.get("candles", "🕯 כניסת שבת" if lang == "he"
+                 else "🕯 Candle lighting")
+    out = lb.get("havdalah", "🍷 צאת שבת" if lang == "he"
+                 else "🍷 Havdalah")
+    parts = [inn]
+    parts += [f"· {r.name} — {_clock(r.candles, r.tz)}" for r in rows]
+    parts.append("")
+    parts.append(out)
+    parts += [f"· {r.name} — {_clock(r.havdalah, r.tz)}" for r in rows]
+    return "\n".join(parts)
+
+
+# מה שמנהל יכול לכתוב בתבנית שלו. השמות באנגלית כי הם נכתבים בתוך
+# טקסט בכל שפה, ושם משתנה שמתחלף בין שפות הוא תבנית שנשברת בתרגום.
+VARS = ("city", "parasha", "candles", "havdalah", "lock", "open", "date",
+        "fulldate", "times")
+
+
+def fill(template: str, w: Window, *, city: str = "",
+         tz: Optional[int] = None, lang: str = "he",
+         rows: Optional[list[CityTime]] = None) -> str:
     """מציב את המשתנים בתבנית. משתנה לא מוכר נשאר כמו שהוא.
 
     ‎str.format‎ לא מתאים כאן: תבנית שנכתבה ביד מכילה ‎{‎ אקראי, וכל
     הודעת שבת של הקבוצה הייתה נופלת על ‎KeyError‎ ביום שישי אחר
-    הצהריים — הרגע הכי גרוע לגלות באג."""
+    הצהריים — הרגע הכי גרוע לגלות באג.
+
+    ‎tz‎ ברירת המחדל היא ההיסט של החלון עצמו, כלומר של העיר. מי
+    שרוצה לכפות אחר יכול, אבל אין לו סיבה."""
+    off = w.tz if tz is None else tz
     vals = {
         "city": city,
         "parasha": w.parasha or w.title,
-        "candles": _clock(w.candles, tz_offset),
-        "havdalah": _clock(w.havdalah, tz_offset),
-        "lock": _clock(w.lock_at, tz_offset),
-        "open": _clock(w.open_at, tz_offset),
-        "date": _date(w.candles, tz_offset),
+        "candles": _clock(w.candles, off),
+        "havdalah": _clock(w.havdalah, off),
+        "lock": _clock(w.lock_at, off),
+        "open": _clock(w.open_at, off),
+        "date": _date(w.candles, off),
+        "fulldate": _date(w.candles, off, full=True),
+        "times": times_block(rows or [], lang),
     }
     out = template or ""
     for k, v in vals.items():
         out = out.replace("{" + k + "}", str(v))
-    return out
+    # תבנית שביקשה לוח ערים ולא קיבלה אותו משאירה שורות ריקות
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    return out.strip()
 
 
 # ── הורדה ─────────────────────────────────────────────────────────────────
@@ -318,6 +389,29 @@ class Zmanim:
             return hit[1] if hit else []
         self._cache[city] = (t, evs)
         return evs
+
+    async def city_rows(self, cities: list[str], *,
+                        now: Optional[float] = None,
+                        lang: str = "he") -> list[CityTime]:
+        """שורת זמנים לכל עיר, לשבת הקרובה — או לזו שבתוכה אנחנו.
+
+        בקשה לכל עיר, אבל כל אחת מהן ממוטמעת לשש שעות, ולכן הודעה
+        שבועית לארבע ערים היא ארבע בקשות בשבוע ולא בכל שליחה.
+
+        עיר שהבקשה עליה נכשלה **מושמטת** ולא מוצגת כ-‎--:--‎: לוח עם
+        עיר אחת חסרה עדיף על לוח שנראה שבור."""
+        t = now if now is not None else time.time()
+        out: list[CityTime] = []
+        for key in cities:
+            if key not in CITIES:
+                continue
+            wins = windows(await self.events(key, now=t), before=0, after=0)
+            w = current(wins, t) or next_window(wins, t)
+            if w is None:
+                continue
+            out.append(CityTime(key, city_name(key, lang), w.candles,
+                                w.havdalah, w.tz))
+        return out
 
     async def windows(self, city: str, *, before: int = DEFAULT_BEFORE,
                       after: int = DEFAULT_AFTER,

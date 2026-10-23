@@ -2976,6 +2976,25 @@ def _tz_of(chat_id: int) -> int:
     return _int(db.get(chat_id, "tz_offset", "0"), 0)
 
 
+# הערים שמופיעות בלוח שבהודעה. ברירת מחדל: ארבע הגדולות, כי זה מה
+# שרוב הקבוצות רוצות לראות — ולא רק העיר שלפיה הקבוצה ננעלת.
+DEFAULT_SHAB_CITIES = ("jerusalem", "haifa", "telaviv", "beersheva")
+
+
+def _shab_cities(chat_id: int, main: str = "") -> list[str]:
+    """הערים ללוח, לפי ההגדרה. העיר שלפיה נועלים תמיד ראשונה.
+
+    הגדרה ריקה אינה "בלי ערים" אלא "ברירת המחדל": קבוצה שמעולם לא
+    נגעה בזה צריכה לקבל לוח שימושי ולא הודעה בלי שעות."""
+    raw = (db.get(chat_id, "shabbat_cities", "") or "").strip()
+    keys = [k.strip() for k in raw.split(",") if k.strip() in zmanim.CITIES]
+    if not keys:
+        keys = list(DEFAULT_SHAB_CITIES)
+    if main and main in zmanim.CITIES:
+        keys = [main] + [k for k in keys if k != main]
+    return keys[:8]
+
+
 def _shab_cfg(chat_id: int) -> dict:
     lg = lang.for_chat(chat_id)
     city = db.get(chat_id, "shabbat_city", zmanim.DEFAULT_CITY)
@@ -2984,6 +3003,7 @@ def _shab_cfg(chat_id: int) -> dict:
     return {
         "on": db.get(chat_id, "shabbat", "0") == "1",
         "city": city,
+        "cities": _shab_cities(chat_id, city),
         "city_name": zmanim.city_name(city, lg),
         "before": _int(db.get(chat_id, "shabbat_before", ""),
                        zmanim.DEFAULT_BEFORE),
@@ -2999,8 +3019,8 @@ async def _shab_windows(chat_id: int, cfg: Optional[dict] = None) -> list:
     return await zman.windows(c["city"], before=c["before"], after=c["after"])
 
 
-def _shab_text(chat_id: int, which: str, w, lg: str,
-               cfg: Optional[dict] = None) -> str:
+async def _shab_text(chat_id: int, which: str, w, lg: str,
+                     cfg: Optional[dict] = None) -> str:
     """ההודעה כפי שתישלח. תבנית של הקבוצה אם יש, אחרת המתורגמת.
 
     זה מה שמאפשר "תצוגה מקדימה": אותה פונקציה בדיוק מרכיבה את מה
@@ -3009,7 +3029,10 @@ def _shab_text(chat_id: int, which: str, w, lg: str,
     raw = (db.get(chat_id, f"shabbat_msg_{which}", "") or "").strip()
     if not raw:
         raw = i18n.t(f"shab.msg_{which}", lg)
-    return zmanim.fill(raw, w, city=c["city_name"], tz_offset=_tz_of(chat_id))
+    rows = []
+    if "{times}" in raw:
+        rows = await zman.city_rows(c.get("cities") or [], lang=lg)
+    return zmanim.fill(raw, w, city=c["city_name"], lang=lg, rows=rows)
 
 
 async def _shab_panel(chat_id: int, *, force: bool = False) -> dict:
@@ -3025,10 +3048,9 @@ async def _shab_panel(chat_id: int, *, force: bool = False) -> dict:
     nxt = zmanim.next_window(wins, time.time()) or zmanim.current(wins, time.time())
     if nxt is not None:
         lg = lang.for_chat(chat_id)
-        off = _tz_of(chat_id)
-        cfg["next"] = (zmanim.date(nxt.candles, off) + " "
-                       + zmanim.clock(nxt.candles, off) + " – "
-                       + zmanim.clock(nxt.havdalah, off))
+        cfg["next"] = (zmanim.date(nxt.candles, nxt.tz) + " "
+                       + zmanim.clock(nxt.candles, nxt.tz) + " – "
+                       + zmanim.clock(nxt.havdalah, nxt.tz))
         cfg["window"] = nxt
     return cfg
 
@@ -3063,13 +3085,13 @@ async def _tick_shabbat(chat_id: int, now: float) -> bool:
     if cur is not None:
         if owner != "shab":
             await _auto_lock(chat_id, True, "shab",
-                             _shab_text(chat_id, "lock", cur, lg, cfg))
+                             await _shab_text(chat_id, "lock", cur, lg, cfg))
         return True
     if owner == "shab":
         last = zmanim.next_window(wins, now) or wins[0]
         done = next((w for w in wins if w.open_at <= now), last)
         await _auto_lock(chat_id, False, "shab",
-                         _shab_text(chat_id, "open", done, lg, cfg))
+                         await _shab_text(chat_id, "open", done, lg, cfg))
         return False
     # הודעת ההקדמה — פעם אחת לכל שבת, לפי חותם הנעילה עצמו
     nxt = zmanim.next_window(wins, now)
@@ -3078,7 +3100,7 @@ async def _tick_shabbat(chat_id: int, now: float) -> bool:
         mark = str(int(nxt.lock_at))
         if due <= now < nxt.lock_at and db.get(chat_id, "shabbat_noticed", "") != mark:
             db.set(chat_id, "shabbat_noticed", mark)
-            await send(chat_id, _shab_text(chat_id, "notice", nxt, lg, cfg))
+            await send(chat_id, await _shab_text(chat_id, "notice", nxt, lg, cfg))
     return False
 
 
@@ -3156,6 +3178,17 @@ async def cmd_shabbat(msg: Message):
         await reply(msg, i18n.t("shab.city", lg,
                                 city=zmanim.city_name(key, lg)))
         return
+    if sub == "cities":
+        keys = [k.strip().lower() for k in rest.replace(" ", ",").split(",")]
+        keys = [k for k in keys if k in zmanim.CITIES]
+        if not keys:
+            await reply(msg, i18n.t("shab.cities_hint", lg) + "\n"
+                        + ", ".join(zmanim.CITIES))
+            return
+        db.set(msg.chat.id, "shabbat_cities", ",".join(keys[:8]),
+               msg.from_user.id)
+        await reply(msg, i18n.t("shab.saved", lg))
+        return
     if sub in ("before", "after", "notice") and rest.isdigit():
         db.set(msg.chat.id, f"shabbat_{sub}", str(min(360, int(rest))),
                msg.from_user.id)
@@ -3182,7 +3215,7 @@ async def cmd_shabbat(msg: Message):
             await reply(msg, i18n.t("shab.no_times", lg))
             return
         for which in ("notice", "lock", "open"):
-            await reply(msg, _shab_text(msg.chat.id, which, w, lg, cfg))
+            await reply(msg, await _shab_text(msg.chat.id, which, w, lg, cfg))
         return
 
     cfg = await _shab_panel(msg.chat.id, force=sub == "status")
@@ -4771,7 +4804,8 @@ async def on_callback(q: CallbackQuery):
     # המסכים האלה נבנים ב-‎on_callback‎ ולא ב-‎_screen_for‎ מסיבה אחת:
     # הם צריכים ‎await‎ (משיכת זמנים), ו-‎_screen_for‎ היא סינכרונית.
     if name in ("shab", "shabsw", "shabcity", "setcity", "shabofs",
-                "shabprev", "hours", "hrday", "hrset"):
+                "shabprev", "shabcities", "shabc2",
+                "hours", "hrday", "hrset"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
@@ -4828,6 +4862,29 @@ async def on_callback(q: CallbackQuery):
             await _edit(q, panel.hours_day(chat_id, arg, shown, lg))
             await q.answer()
             return
+        if name == "shabc2":
+            if arg not in zmanim.CITIES:
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            main = db.get(chat_id, "shabbat_city", zmanim.DEFAULT_CITY)
+            cur = _shab_cities(chat_id, main)
+            if arg == main:
+                # העיר שלפיה נועלים אינה יורדת מהלוח
+                await q.answer(i18n.t("shab.cities_hint", lg), show_alert=True)
+                return
+            cur = [k for k in cur if k != arg] if arg in cur else cur + [arg]
+            db.set(chat_id, "shabbat_cities", ",".join(cur[:8]),
+                   q.from_user.id)
+            name = "shabcities"
+        if name == "shabcities":
+            await _edit(q, panel.cities_pick(
+                chat_id,
+                _shab_cities(chat_id,
+                             db.get(chat_id, "shabbat_city",
+                                    zmanim.DEFAULT_CITY)),
+                zmanim.cities(lg), lg))
+            await q.answer()
+            return
         if name == "shabcity":
             await _edit(q, panel.cities_screen(
                 chat_id, db.get(chat_id, "shabbat_city", zmanim.DEFAULT_CITY),
@@ -4842,7 +4899,7 @@ async def on_callback(q: CallbackQuery):
                 return
             for which in ("notice", "lock", "open"):
                 await send(q.from_user.id,
-                           _shab_text(chat_id, which, w, lg, cfg),
+                           await _shab_text(chat_id, which, w, lg, cfg),
                            is_group=False)
             await q.answer(i18n.t("shab.preview", lg))
             return

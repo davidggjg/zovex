@@ -693,7 +693,8 @@ def shabbat_screen(chat_id: int, cfg: dict,
     rows = [
         [(("🟢 " if on else "⚪ ") + i18n.t("shab.toggle", lang),
           cb(chat_id, "shabsw"))],
-        [(f"🏙 {cfg.get('city_name', '')}", cb(chat_id, "shabcity"))],
+        [(f"🏙 {cfg.get('city_name', '')}", cb(chat_id, "shabcity")),
+         (i18n.t("shab.cities", lang), cb(chat_id, "shabcities"))],
         [(i18n.t("shab.before", lang, n=cfg.get("before", 0)),
           cb(chat_id, "shabofs", "before")),
          (i18n.t("shab.after", lang, n=cfg.get("after", 0)),
@@ -721,6 +722,26 @@ def cities_screen(chat_id: int, current: str, city_list: list[tuple[str, str]],
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "shab"))])
     return Screen(head("shab.city_title", lang) + "\n\n"
                   + i18n.t("shab.city_hint", lang), rows)
+
+
+def cities_pick(chat_id: int, chosen: list[str],
+                city_list: list[tuple[str, str]],
+                lang: str = i18n.DEFAULT) -> Screen:
+    """אילו ערים יופיעו בלוח. בחירה מרובה — לחיצה מוסיפה או מורידה.
+
+    העיר שלפיה הקבוצה ננעלת מסומנת תמיד ואינה יורדת מהרשימה: לוח
+    שלא מכיל את העיר שקובעת את הנעילה מבלבל יותר משהוא עוזר."""
+    rows, line = [], []
+    for key, name in city_list:
+        mark = "☑️ " if key in chosen else "▫️ "
+        line.append((f"{mark}{name}", cb(chat_id, "shabc2", key)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "shab"))])
+    return Screen(head("shab.cities_title", lang) + "\n\n"
+                  + i18n.t("shab.cities_hint", lang), rows)
 
 
 def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT) -> Screen:
