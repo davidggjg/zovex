@@ -672,8 +672,8 @@ def help_screen(lang: str = i18n.DEFAULT) -> Screen:
 BEFORE_CYCLE = ("0", "5", "10", "15", "20", "30", "40")
 AFTER_CYCLE = ("0", "5", "10", "15", "30", "60")
 NOTICE_CYCLE = ("0", "15", "30", "60", "120")
-HOUR_PRESETS = ("off", "closed", "08:00-23:00", "09:00-22:00",
-                "07:00-00:00", "22:00-06:00")
+# אין יותר רשימת טווחים מוכנים: הבחירה היא מלוח של 24 שעות, ומי
+# שצריך דקות מדויקות מקליד ‎08:15-23:45‎.
 
 
 def shabbat_screen(chat_id: int, cfg: dict,
@@ -764,22 +764,53 @@ def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT) -> Screen:
 
 def hours_day(chat_id: int, day: str, current: str,
               lang: str = i18n.DEFAULT) -> Screen:
-    """יום אחד. ערכים מוכנים ללחיצה, וטווח חופשי דרך הפקודה שבטקסט."""
+    """יום אחד: קודם **מה** עושים, ורק אחר כך השעות.
+
+    הרשימה הקודמת הציעה שישה טווחים מוכנים, ומי שרצה "סגור מחצות עד
+    שבע" לא מצא אותו שם — הצעה אינה בחירה. כאן בוחרים סוג, ואז
+    שעות מלוח של 24, בלחיצות."""
     txt = (f"<b>{i18n.t(f'day.{day}', lang)}</b>\n\n"
-           + i18n.t("hours.now", lang, value=current or i18n.t("hours.off", lang))
-           + "\n\n" + i18n.t("hours.custom", lang, day=day))
+           + i18n.t("hours.now", lang,
+                    value=current or i18n.t("hours.off", lang)))
+    rows = [
+        [("🟢 " + i18n.t("hours.open_range", lang),
+          cb(chat_id, "hrm", f"{day}.o"))],
+        [("🔴 " + i18n.t("hours.shut_range", lang),
+          cb(chat_id, "hrm", f"{day}.c"))],
+        [(i18n.t("hours.closed", lang), cb(chat_id, "hrset", f"{day}=closed")),
+         (i18n.t("hours.off", lang), cb(chat_id, "hrset", f"{day}=off"))],
+        [("⌨️ " + i18n.t("hours.typed", lang), cb(chat_id, "hrtype", day))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "hours"))],
+    ]
+    return Screen(txt, rows)
+
+
+def hour_grid(chat_id: int, day: str, mode: str, start: Optional[int] = None,
+              lang: str = i18n.DEFAULT) -> Screen:
+    """לוח 24 שעות. ‎start=None‎ = בוחרים התחלה, אחרת בוחרים סיום.
+
+    שש שורות של ארבע, ‎00:00‎ עד ‎23:00‎ — כל שעה ביממה, ולא מה
+    שמישהו ניחש שרוצים. דקות שאינן עגולות נקבעות בהקלדה חופשית,
+    כי מסך של 1,440 כפתורים אינו ממשק."""
+    which = "hours.pick_end" if start is not None else "hours.pick_start"
+    head_txt = (f"<b>{i18n.t(f'day.{day}', lang)}</b> · "
+                + i18n.t("hours.open_range" if mode == "o"
+                         else "hours.shut_range", lang))
+    body = i18n.t(which, lang)
+    if start is not None:
+        body += "\n" + i18n.t("hours.from", lang, time=f"{start:02d}:00")
     rows, line = [], []
-    for val in HOUR_PRESETS:
-        label = (i18n.t("hours.off", lang) if val == "off"
-                 else i18n.t("hours.closed", lang) if val == "closed" else val)
-        mark = "● " if val == current else ""
-        line.append((mark + label, cb(chat_id, "hrset", f"{day}={val}")))
-        if len(line) == 2:
+    for h in range(24):
+        arg = (f"{day}.{mode}.{h}" if start is None
+               else f"{day}.{mode}.{start}.{h}")
+        line.append((f"{h:02d}:00",
+                     cb(chat_id, "hrs" if start is None else "hre", arg)))
+        if len(line) == 4:
             rows.append(line); line = []
     if line:
         rows.append(line)
-    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hours"))])
-    return Screen(txt, rows)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hrday", day))])
+    return Screen(head_txt + "\n\n" + body, rows)
 
 
 # ── עריכה בכפתורים ────────────────────────────────────────────────────────

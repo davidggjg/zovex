@@ -179,6 +179,30 @@ def test_hours() -> None:
        gh.next_change("mon=closed,tue=closed,wed=closed,thu=closed,"
                       "fri=closed,sat=closed,sun=closed", now=wed) is None)
 
+    # טווח סגירה: כך אנשים מנסחים "סגור מחצות עד שבע"
+    night = "mon=!00:00-07:00"
+    mon = float(__import__("calendar").timegm((2026, 10, 19, 0, 0, 0)))
+    ok("נקודת הייחוס היא שני", time.gmtime(mon).tm_wday == 0)
+    ok("אחת בלילה סגור", not gh.is_open(night, now=mon + 3600))
+    ok("שש וחצי סגור", not gh.is_open(night, now=mon + 6 * 3600 + 1800))
+    ok("שמונה בבוקר פתוח", gh.is_open(night, now=mon + 8 * 3600))
+    ok("אחת עשרה בלילה פתוח", gh.is_open(night, now=mon + 23 * 3600))
+    ok("הניסוח נשמר כפי שנבחר",
+       gh.format_sched(gh.parse(night)) == night,
+       gh.format_sched(gh.parse(night)))
+    ok("המעבר הבא הוא פתיחה בשבע",
+       gh.next_change(night, now=mon + 3600)[1] is True
+       and abs(gh.next_change(night, now=mon + 3600)[0]
+               - (mon + 7 * 3600)) < 61,
+       str(gh.next_change(night, now=mon + 3600)))
+    # סגירת לילה שחוצה חצות: ‎!23:00-06:00‎
+    over = "mon=!23:00-06:00"
+    ok("לפני הסגירה פתוח", gh.is_open(over, now=mon + 22 * 3600))
+    ok("אחרי 23 סגור", not gh.is_open(over, now=mon + 23 * 3600 + 600))
+    ok("וגם בשלוש לפנות בוקר למחרת",
+       not gh.is_open(over, now=mon + 27 * 3600))
+    ok("ובשבע כבר פתוח", gh.is_open(over, now=mon + 31 * 3600))
+
     ok("set_day מחליף יום",
        gh.parse(gh.set_day(raw, "mon", "09:00-17:00"))["mon"].open_min == 540)
     # ‎off‎ אינו "יום סגור" אלא "אין כלל ליום הזה", ולכן הוא נעלם

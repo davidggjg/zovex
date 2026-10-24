@@ -49,16 +49,32 @@ CLOSED = "closed"
 OFF = "off"
 
 
+SHUT = "shut"          # טווח **סגירה**: ‎!00:00-07:00‎
+
+
 @dataclass(frozen=True)
 class Day:
-    """‎open_min‎/‎close_min‎ בדקות מחצות. ‎mode‎ הוא ‎range‎ · ‎closed‎ · ‎off‎."""
+    """‎open_min‎/‎close_min‎ בדקות מחצות.
+
+    ‎mode‎ הוא ‎range‎ (פתוח בטווח) · ‎shut‎ (סגור בטווח) · ‎closed‎
+    (סגור כל היום) · ‎off‎ (אין כלל).
+
+    ‎shut‎ קיים כי כך אנשים חושבים: "סגור מ-12 בלילה עד 7 בבוקר".
+    מתמטית זה אותו דבר כמו "פתוח מ-7 עד 12", אבל מי שרוצה לסגור את
+    הלילה ונאלץ לנסח את זה הפוך טועה — ואז הקבוצה סגורה כל היום
+    במקום כל הלילה. הניסוח נשמר כפי שנבחר, גם בתצוגה."""
     mode: str = OFF
     open_min: int = 0
     close_min: int = 0
 
     @property
     def wraps(self) -> bool:
-        return self.mode == "range" and self.close_min <= self.open_min
+        return self.mode in ("range", SHUT) and self.close_min <= self.open_min
+
+    @property
+    def span(self) -> str:
+        return (f"{self.open_min // 60:02d}:{self.open_min % 60:02d}"
+                f"-{self.close_min // 60:02d}:{self.close_min % 60:02d}")
 
 
 def _mins(h: str, m: str) -> Optional[int]:
@@ -85,6 +101,9 @@ def parse(raw: str) -> dict[str, Day]:
         if val in (CLOSED, OFF):
             out[day] = Day(val)
             continue
+        shut = val.startswith("!")
+        if shut:
+            val = val[1:].strip()
         m = _RX.match(val)
         if not m:
             continue
@@ -92,7 +111,7 @@ def parse(raw: str) -> dict[str, Day]:
         b = _mins(m.group(3), m.group(4))
         if a is None or b is None:
             continue
-        out[day] = Day("range", a, b)
+        out[day] = Day(SHUT if shut else "range", a, b)
     return out
 
 
@@ -104,9 +123,10 @@ def format_sched(sched: dict[str, Day]) -> str:
             continue
         if day.mode == CLOSED:
             bits.append(f"{d}={CLOSED}")
+        elif day.mode == SHUT:
+            bits.append(f"{d}=!{day.span}")
         else:
-            bits.append(f"{d}={day.open_min // 60:02d}:{day.open_min % 60:02d}"
-                        f"-{day.close_min // 60:02d}:{day.close_min % 60:02d}")
+            bits.append(f"{d}={day.span}")
     return ", ".join(bits)
 
 
@@ -125,19 +145,27 @@ def _local(ts: float, tz_offset: int) -> tuple[int, int]:
     return lt.tm_wday, lt.tm_hour * 60 + lt.tm_min
 
 
+def _in_span(day: Day, mins: int) -> bool:
+    """האם השעה בתוך הטווח של היום, כולל חציית חצות."""
+    if day.wraps:
+        return mins >= day.open_min
+    return day.open_min <= mins < day.close_min
+
+
 def _open_at(sched: dict[str, Day], wday: int, mins: int) -> bool:
     today = sched.get(DAYS[wday], Day(OFF))
-    # זליגה מאתמול: ‎22:00-02:00‎ של אתמול עדיין פתוח בשתיים בלילה
+    # זליגה מאתמול: טווח שחצה חצות ממשיך לתוך הבוקר של היום הזה —
+    # ‎22:00-02:00‎ פתוח בשתיים, ו-‎!00:00-07:00‎ של אתמול כבר נגמר
+    # בחצות ולכן אינו זולג.
     y = sched.get(DAYS[(wday - 1) % 7], Day(OFF))
     if y.wraps and mins < y.close_min:
-        return True
+        return y.mode == "range"
     if today.mode == OFF:
         return True
     if today.mode == CLOSED:
         return False
-    if today.wraps:
-        return mins >= today.open_min
-    return today.open_min <= mins < today.close_min
+    inside = _in_span(today, mins)
+    return inside if today.mode == "range" else not inside
 
 
 def is_open(raw: str, *, now: Optional[float] = None,
@@ -184,8 +212,8 @@ def describe(raw: str, labels: Optional[dict[str, str]] = None,
         name = (labels or {}).get(d, d)
         if day.mode == CLOSED:
             lines.append(f"{name}: {closed_word}")
+        elif day.mode == SHUT:
+            lines.append(f"{name}: 🔒 {day.span.replace('-', '–')}")
         else:
-            lines.append(
-                f"{name}: {day.open_min // 60:02d}:{day.open_min % 60:02d}"
-                f"–{day.close_min // 60:02d}:{day.close_min % 60:02d}")
+            lines.append(f"{name}: {day.span.replace('-', '–')}")
     return "\n".join(lines)

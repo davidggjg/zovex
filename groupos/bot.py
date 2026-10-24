@@ -3257,6 +3257,38 @@ async def cmd_hours(msg: Message):
                 markup=kb(sc))
 
 
+def _day_label(chat_id: int, day: str, lg: str) -> str:
+    """איך נראה היום הזה כרגע, במילים של המשתמש ולא בתחביר הפנימי."""
+    cur = grouphours.parse(db.get(chat_id, "hours", "") or "").get(day)
+    if cur is None or cur.mode == grouphours.OFF:
+        return ""
+    if cur.mode == grouphours.CLOSED:
+        return i18n.t("hours.closed", lg)
+    if cur.mode == grouphours.SHUT:
+        return i18n.t("hours.shut_range", lg) + " " + cur.span
+    return i18n.t("hours.open_range", lg) + " " + cur.span
+
+
+def _save_day_range(chat_id: int, day: str, raw_value: str,
+                    by: int) -> bool:
+    """טווח שהוקלד ביד. ‎True‎ אם נשמר.
+
+    מקבל גם ‎!08:00-09:00‎ (סגירה) וגם ‎08:00-09:00‎, וגם ‎closed‎/‎off‎,
+    כי מי שהגיע להקלדה חופשית כבר יודע מה הוא רוצה."""
+    val = (raw_value or "").strip().replace("🔒", "!").replace(" ", "")
+    if val.lower() in ("closed", "off", "סגור", "ללא"):
+        val = "closed" if val.lower() in ("closed", "סגור") else "off"
+    raw = db.get(chat_id, "hours", "") or ""
+    new = grouphours.set_day(raw, day, val)
+    parsed = grouphours.parse(new).get(day)
+    if val not in ("off",) and parsed is None:
+        return False
+    if val == "off" and parsed is not None:
+        return False
+    db.set(chat_id, "hours", new, by)
+    return True
+
+
 def _hours_table(chat_id: int, raw: str, lg: str) -> str:
     return grouphours.describe(
         raw, {d: i18n.t(f"day.{d}", lg) for d in grouphours.DAYS},
@@ -4469,6 +4501,18 @@ async def on_private_text(msg: Message):
         await send(msg.chat.id, i18n.t("err.need_admin", lg), is_group=False)
         return
     raw = msg.text or msg.caption or ""
+    if w.field == "hrange":
+        okay = _save_day_range(w.chat_id, w.arg, raw, msg.from_user.id)
+        await send(msg.chat.id,
+                   i18n.t("field.saved" if okay else "hours.usage", lg),
+                   is_group=False)
+        if okay:
+            sc = panel.hours_screen(
+                w.chat_id,
+                _hours_table(w.chat_id,
+                             db.get(w.chat_id, "hours", "") or "", lg), lg)
+            await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+        return
     value, err = prompts.validate(w.field, raw)
     if value is None:
         await send(msg.chat.id, i18n.t(err, lg), is_group=False)
@@ -4805,7 +4849,7 @@ async def on_callback(q: CallbackQuery):
     # הם צריכים ‎await‎ (משיכת זמנים), ו-‎_screen_for‎ היא סינכרונית.
     if name in ("shab", "shabsw", "shabcity", "setcity", "shabofs",
                 "shabprev", "shabcities", "shabc2",
-                "hours", "hrday", "hrset"):
+                "hours", "hrday", "hrset", "hrm", "hrs", "hre", "hrtype"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
@@ -4853,13 +4897,62 @@ async def on_callback(q: CallbackQuery):
                                       lg), lg))
             await q.answer(i18n.t("saved", lg) if name == "hrset" else "")
             return
+        if name in ("hrm", "hrs", "hre"):
+            bits = arg.split(".")
+            day = bits[0] if bits else ""
+            mode = bits[1] if len(bits) > 1 else ""
+            if day not in grouphours.DAYS or mode not in ("o", "c"):
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            if name == "hrm":
+                await _edit(q, panel.hour_grid(chat_id, day, mode, None, lg))
+                await q.answer()
+                return
+            if name == "hrs":
+                await _edit(q, panel.hour_grid(chat_id, day, mode,
+                                               _int(bits[2], 0), lg))
+                await q.answer()
+                return
+            a, b = _int(bits[2], 0) % 24, _int(bits[3], 0) % 24
+            if a == b:
+                # טווח של אפס דקות אינו טווח. ‎08:00-08:00‎ כיבה את
+                # היום בשקט, וזה נראה כמו כפתור שלא עבד.
+                await q.answer(i18n.t("hours.usage", lg), show_alert=True)
+                return
+            val = ("!" if mode == "c" else "") + f"{a:02d}:00-{b:02d}:00"
+            raw = db.get(chat_id, "hours", "") or ""
+            db.set(chat_id, "hours", grouphours.set_day(raw, day, val),
+                   q.from_user.id)
+            audit.log(chat_id, "settings.write", actor_id=q.from_user.id,
+                      before=f"hours={raw}", after=f"hours={day}={val}",
+                      source="button", severity="medium")
+            await _edit(q, panel.hours_screen(
+                chat_id, _hours_table(chat_id,
+                                      db.get(chat_id, "hours", "") or "", lg),
+                lg))
+            await q.answer(i18n.t("saved", lg))
+            return
+
+        if name == "hrtype":
+            if arg not in grouphours.DAYS:
+                await q.answer(i18n.t("btn.unknown", lg))
+                return
+            waiting.start(q.from_user.id, chat_id, "hrange", arg=arg)
+            cur = grouphours.parse(db.get(chat_id, "hours", "") or "").get(arg)
+            sc = panel.waiting_screen(
+                chat_id, "hrange",
+                (("🔒 " if cur.mode == grouphours.SHUT else "") + cur.span)
+                if cur and cur.mode in ("range", grouphours.SHUT) else "", lg)
+            await _edit(q, sc)
+            await q.answer()
+            return
+
         if name == "hrday":
             if arg not in grouphours.DAYS:
                 await q.answer(i18n.t("btn.unknown", lg))
                 return
-            cur = grouphours.parse(db.get(chat_id, "hours", "") or "").get(arg)
-            shown = grouphours.format_sched({arg: cur}).split("=", 1)[-1] if cur else "off"
-            await _edit(q, panel.hours_day(chat_id, arg, shown, lg))
+            await _edit(q, panel.hours_day(chat_id, arg,
+                                           _day_label(chat_id, arg, lg), lg))
             await q.answer()
             return
         if name == "shabc2":

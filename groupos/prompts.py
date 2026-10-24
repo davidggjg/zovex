@@ -87,6 +87,9 @@ FIELDS: dict[str, Field] = {
     "captime": Field("captime", "captcha_time", NUMBER, lo=20, hi=900),
     "captries": Field("captries", "captcha_tries", NUMBER, lo=1, hi=10),
     "dupcount": Field("dupcount", "dup_count", NUMBER, lo=2, hi=20),
+    # לוח השעות: הערך הוא טווח ליום אחד, והיום עובר ב-‎arg‎.
+    "hrange": Field("hrange", "hours", SPEC, maxlen=20,
+                    label="hours.typed", hint="hours.typed_hint"),
 }
 
 # השדות שמוצגים במסך "הודעות", לפי הסדר
@@ -102,6 +105,9 @@ class Waiting:
     chat_id: int        # הקבוצה שעליה עורכים, לא הצ'אט הפרטי
     field: str
     since: float
+    # ‎arg‎ הוא מה שהשדה לבדו אינו מספיק לו: איזה **יום** בלוח
+    # השעות עורכים. בלעדיו היה צריך שדה נפרד לכל יום בשבוע.
+    arg: str = ""
 
     def expired(self, now: float, ttl: float = TTL) -> bool:
         return now - self.since > ttl
@@ -119,11 +125,12 @@ class Pending:
         self._d: dict[int, Waiting] = {}
 
     def start(self, user_id: int, chat_id: int, field: str,
-              *, now: Optional[float] = None) -> Optional[Waiting]:
+              *, arg: str = "",
+              now: Optional[float] = None) -> Optional[Waiting]:
         if field not in FIELDS:
             return None
         w = Waiting(user_id, chat_id, field,
-                    now if now is not None else time.time())
+                    now if now is not None else time.time(), arg)
         self._d[user_id] = w
         return w
 

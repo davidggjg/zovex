@@ -1352,13 +1352,19 @@ async def test_new_features():
     import json as _json
     import zmanim as _zm
 
+    # התאריכים נגזרים מ"עכשיו": פיד עם שבת שעברה אינו חלון קרוב,
+    # והבדיקה הייתה מתחילה להיכשל מעצמה בתאריך מסוים.
+    _tz = dt.timezone(dt.timedelta(hours=3))
+    _fri = (dt.datetime.now(_tz) + dt.timedelta(days=2)).replace(
+        hour=17, minute=42, second=0, microsecond=0)
+    _sat = (_fri + dt.timedelta(days=1)).replace(hour=18, minute=38)
     feed = {"items": [
         {"category": "candles", "title": "Candle lighting: 17:42",
-         "date": "2026-10-23T17:42:00+03:00"},
+         "date": _fri.isoformat()},
         {"category": "parashat", "title": "Parashat Noach",
          "hebrew": "פרשת נח"},
         {"category": "havdalah", "title": "Havdalah: 18:38",
-         "date": "2026-10-24T18:38:00+03:00"}]}
+         "date": _sat.isoformat()}]}
 
     async def fake_feed(url, timeout):
         return _json.dumps(feed)
@@ -1550,7 +1556,9 @@ async def test_button_editing():
             if len(parts) > 3 and parts[2] in ("ask", "clr"):
                 shown.add(parts[3])
     B.db.set(CHAT, "shabbat", "0")
-    missing = set(_pr.FIELDS) - shown - {"warnpol"}
+    # ‎hrange‎ נגיש מכפתור "שעות עם דקות" בתוך מסך היום, לא מהמסכים
+    # האלה, ו-‎warnpol‎ יושב במסך האזהרות.
+    missing = set(_pr.FIELDS) - shown - {"warnpol", "hrange"}
     ok("כל שדה נגיש בכפתור", not missing, str(missing))
 
 
@@ -1669,6 +1677,66 @@ async def test_forum_topics():
         B.filters.remove(CHAT, "קנו עכשיו")
 
 
+
+async def test_hours_picker():
+    """בחירת שעות: סוג, שעת התחלה, שעת סיום — וטווח מוקלד."""
+    section("בחירת שעות")
+    import grouphours as _gh
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "hours", "")
+
+    def pm(text: str, mid: int = 9980) -> Message:
+        return Message(message_id=mid, date=dt.datetime.now(),
+                       chat=Chat(id=ADM, type="private"),
+                       from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                       text=text)
+
+    # הלוח: כל 24 השעות, ולא רשימת הצעות
+    grid = panel.hour_grid(CHAT, "mon", "c", None, "he")
+    ok("לוח של 24 שעות", len(grid.all_callbacks()) == 25,
+       str(len(grid.all_callbacks())))
+    ok("כולל חצות ואחת עשרה בלילה",
+       any("00:00" == t for row in grid.rows for t, _ in row)
+       and any("23:00" == t for row in grid.rows for t, _ in row))
+    ok("מזהי הכפתורים בטווח",
+       all(len(c.encode()) <= panel.CB_MAX for c in grid.all_callbacks()))
+    ok("אחרי בחירת התחלה מוצגת ההתחלה",
+       "00:00" in panel.hour_grid(CHAT, "mon", "c", 0, "he").text)
+
+    # טווח סגירה שנשמר דרך העזר של השמירה
+    ok("סגירת לילה נשמרת",
+       B._save_day_range(CHAT, "mon", "!00:00-07:00", ADM)
+       and _gh.parse(B.db.get(CHAT, "hours", ""))["mon"].mode == _gh.SHUT,
+       B.db.get(CHAT, "hours", ""))
+    ok("והקבוצה סגורה בלילה",
+       not _gh.is_open(B.db.get(CHAT, "hours", ""),
+                       now=float(__import__("calendar").timegm(
+                           (2026, 10, 19, 2, 0, 0)))))
+    ok("התווית מסבירה מה נבחר",
+       "סגור" in B._day_label(CHAT, "mon", "he"),
+       B._day_label(CHAT, "mon", "he"))
+
+    # הקלדה חופשית עם דקות
+    B.waiting.start(ADM, CHAT, "hrange", arg="tue")
+    out = await _out(B.on_private_text, pm("08:15-23:45", mid=9981))
+    ok("דקות מדויקות נשמרות",
+       _gh.parse(B.db.get(CHAT, "hours", ""))["tue"].span == "08:15-23:45",
+       B.db.get(CHAT, "hours", "") + " | " + out[:40])
+
+    B.waiting.start(ADM, CHAT, "hrange", arg="wed")
+    before = B.db.get(CHAT, "hours", "")
+    out = await _out(B.on_private_text, pm("מתישהו בערב", mid=9982))
+    ok("ניסוח שאינו טווח אינו נשמר",
+       B.db.get(CHAT, "hours", "") == before and bool(out), out[:40])
+
+    B.waiting.start(ADM, CHAT, "hrange", arg="tue")
+    await _out(B.on_private_text, pm("off", mid=9983))
+    ok("off מסיר את היום",
+       "tue" not in _gh.parse(B.db.get(CHAT, "hours", "")),
+       B.db.get(CHAT, "hours", ""))
+    B.db.set(CHAT, "hours", "")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -1704,6 +1772,7 @@ async def main() -> int:
     await test_button_editing()
     await test_aggressive_paths()
     await test_forum_topics()
+    await test_hours_picker()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
