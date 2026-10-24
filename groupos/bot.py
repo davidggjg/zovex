@@ -4797,7 +4797,15 @@ async def on_custom_command(msg: Message):
                                         "settings.read"):
         return
     cmds.bump(msg.chat.id, name)
-    delay = clean_delay(msg.chat.id)
+    # **תשובת הפקודה אינה נמחקת.**
+    #
+    # הניקוי האוטומטי נבנה לפקודות ניהול — ‎/ban‎, ‎/settings‎ — שהתשובה
+    # עליהן היא רעש. פקודה שהקבוצה הגדירה היא ההפך הגמור: בקבוצת
+    # בקשות, ‎/סרטים‎ מחזיר את הסרט עצמו, וקובץ שנעלם אחרי חצי דקה
+    # הוא בדיוק מה שהמשתמש בא בשבילו. מי שבכל זאת רוצה ניקוי מדליק
+    # את ‎cleancmds‎.
+    delay = (clean_delay(msg.chat.id)
+             if db.get(msg.chat.id, "cleancmds", "0") == "1" else 0)
     if delay:
         _schedule_delete(msg.chat.id, msg.message_id, delay)
     await send_content(msg.chat.id, tpl.render_pick(c.content, _ctx(msg)),

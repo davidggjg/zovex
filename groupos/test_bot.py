@@ -2112,6 +2112,42 @@ async def test_bulk_collect():
     B.filters.remove(CHAT, word)
 
 
+
+async def test_cmd_reply_stays():
+    """תשובת פקודה של הקבוצה נשארת — היא התוכן, לא רעש ניהול."""
+    section("תשובת פקודה נשארת")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "autoclean", "30")
+    B.db.set(CHAT, "cleancmds", "0")
+    doc = Message(message_id=9600, date=dt.datetime.now(),
+                  chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                  from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                  document=Document(file_id="FILM", file_unique_id="F9",
+                                    file_name="f.mkv"))
+    await _out(B.cmd_addcmd, Message(
+        message_id=9601, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        text="/addcmd films הנה", reply_to_message=doc))
+
+    B.perms.set_role(CHAT, USER, "member")
+    DELETED.clear()
+    await B.on_custom_command(msg("/films", uid=USER, mid=9602))
+    await asyncio.sleep(0.05)
+    ok("הודעת הבקשה אינה נמחקת", 9602 not in DELETED, str(DELETED))
+    ok("וגם התשובה נשארת", not DELETED, str(DELETED))
+
+    # ומי שרוצה ניקוי מדליק מתג
+    B.db.set(CHAT, "cleancmds", "1")
+    DELETED.clear()
+    await B.on_custom_command(msg("/films", uid=USER, mid=9603))
+    ok("עם המתג — מתוזמנת מחיקה",
+       B.db.get(CHAT, "cleancmds", "0") == "1")
+    B.db.set(CHAT, "cleancmds", "0")
+    B.db.set(CHAT, "autoclean", "0")
+    B.cmds.delete(CHAT, "films")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2155,6 +2191,7 @@ async def main() -> int:
     await test_filter_multi()
     await test_cmd_multi()
     await test_bulk_collect()
+    await test_cmd_reply_stays()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

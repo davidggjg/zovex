@@ -285,6 +285,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("keepproof",    "1", "sw.keepproof"),
     ("ephemeral",    "1", "sw.ephemeral"),
     ("welcome_private", "1", "greet.private_sw"),
+    ("cleancmds",    "0", "sw.cleancmds"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )
