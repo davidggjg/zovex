@@ -4849,7 +4849,8 @@ async def on_callback(q: CallbackQuery):
     # הם צריכים ‎await‎ (משיכת זמנים), ו-‎_screen_for‎ היא סינכרונית.
     if name in ("shab", "shabsw", "shabcity", "setcity", "shabofs",
                 "shabprev", "shabcities", "shabc2",
-                "hours", "hrday", "hrset", "hrm", "hrs", "hre", "hrtype"):
+                "hours", "hrday", "hrset", "hrm", "hrs", "hre",
+                "hrh", "hrh2", "hrtype"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
@@ -4897,7 +4898,7 @@ async def on_callback(q: CallbackQuery):
                                       lg), lg))
             await q.answer(i18n.t("saved", lg) if name == "hrset" else "")
             return
-        if name in ("hrm", "hrs", "hre"):
+        if name in ("hrm", "hrs", "hre", "hrh", "hrh2"):
             bits = arg.split(".")
             day = bits[0] if bits else ""
             mode = bits[1] if len(bits) > 1 else ""
@@ -4905,21 +4906,34 @@ async def on_callback(q: CallbackQuery):
                 await q.answer(i18n.t("btn.unknown", lg))
                 return
             if name == "hrm":
-                await _edit(q, panel.hour_grid(chat_id, day, mode, None, lg))
+                await _edit(q, panel.hour_grid(chat_id, day, mode, None,
+                                               False, lg))
+                await q.answer()
+                return
+            if name == "hrh":              # מעבר שעות עגולות ⇄ חצאי שעות
+                await _edit(q, panel.hour_grid(chat_id, day, mode, None,
+                                               bits[2] == "1", lg))
+                await q.answer()
+                return
+            if name == "hrh2":
+                await _edit(q, panel.hour_grid(chat_id, day, mode,
+                                               _int(bits[2], 0),
+                                               bits[3] == "1", lg))
                 await q.answer()
                 return
             if name == "hrs":
                 await _edit(q, panel.hour_grid(chat_id, day, mode,
-                                               _int(bits[2], 0), lg))
+                                               _int(bits[2], 0), False, lg))
                 await q.answer()
                 return
-            a, b = _int(bits[2], 0) % 24, _int(bits[3], 0) % 24
+            a, b = _int(bits[2], 0) % 1440, _int(bits[3], 0) % 1440
             if a == b:
                 # טווח של אפס דקות אינו טווח. ‎08:00-08:00‎ כיבה את
                 # היום בשקט, וזה נראה כמו כפתור שלא עבד.
                 await q.answer(i18n.t("hours.usage", lg), show_alert=True)
                 return
-            val = ("!" if mode == "c" else "") + f"{a:02d}:00-{b:02d}:00"
+            val = ("!" if mode == "c" else "") + \
+                f"{a // 60:02d}:{a % 60:02d}-{b // 60:02d}:{b % 60:02d}"
             raw = db.get(chat_id, "hours", "") or ""
             db.set(chat_id, "hours", grouphours.set_day(raw, day, val),
                    q.from_user.id)

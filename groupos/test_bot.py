@@ -1692,16 +1692,23 @@ async def test_hours_picker():
                        text=text)
 
     # הלוח: כל 24 השעות, ולא רשימת הצעות
-    grid = panel.hour_grid(CHAT, "mon", "c", None, "he")
-    ok("לוח של 24 שעות", len(grid.all_callbacks()) == 25,
+    grid = panel.hour_grid(CHAT, "mon", "c", None, False, "he")
+    ok("לוח של 24 שעות", len(grid.all_callbacks()) == 27,
        str(len(grid.all_callbacks())))
+    half = panel.hour_grid(CHAT, "mon", "c", None, True, "he")
+    ok("חצאי שעות בלחיצה אחת",
+       any(t == "08:30" for row in half.rows for t, _ in row),
+       str(half.rows[2]))
+    ok("והדקות עוברות במזהה כדקות מחצות",
+       any(c.endswith(":mon.c.510") for c in half.all_callbacks()),
+       str(half.all_callbacks()[:3]))
     ok("כולל חצות ואחת עשרה בלילה",
        any("00:00" == t for row in grid.rows for t, _ in row)
        and any("23:00" == t for row in grid.rows for t, _ in row))
     ok("מזהי הכפתורים בטווח",
        all(len(c.encode()) <= panel.CB_MAX for c in grid.all_callbacks()))
     ok("אחרי בחירת התחלה מוצגת ההתחלה",
-       "00:00" in panel.hour_grid(CHAT, "mon", "c", 0, "he").text)
+       "00:00" in panel.hour_grid(CHAT, "mon", "c", 0, False, "he").text)
 
     # טווח סגירה שנשמר דרך העזר של השמירה
     ok("סגירת לילה נשמרת",

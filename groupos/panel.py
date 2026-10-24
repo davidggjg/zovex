@@ -786,29 +786,45 @@ def hours_day(chat_id: int, day: str, current: str,
 
 
 def hour_grid(chat_id: int, day: str, mode: str, start: Optional[int] = None,
-              lang: str = i18n.DEFAULT) -> Screen:
+              half: bool = False, lang: str = i18n.DEFAULT) -> Screen:
     """לוח 24 שעות. ‎start=None‎ = בוחרים התחלה, אחרת בוחרים סיום.
 
-    שש שורות של ארבע, ‎00:00‎ עד ‎23:00‎ — כל שעה ביממה, ולא מה
-    שמישהו ניחש שרוצים. דקות שאינן עגולות נקבעות בהקלדה חופשית,
-    כי מסך של 1,440 כפתורים אינו ממשק."""
+    שש שורות של ארבע — כל שעה ביממה, ולא מה שמישהו ניחש שרוצים.
+    ‎half‎ מזיז את כל הלוח לחצאי שעות (‎08:30‎ במקום ‎08:00‎) בלחיצה
+    אחת, ולכן גם מי שצריך ‎08:30-23:30‎ נשאר בשתי לחיצות ולא עובר
+    להקלדה. זמן שאינו עגול ואינו חצי הוא נדיר מספיק כדי להיות
+    כפתור הקלדה ולא מסך נוסף.
+
+    הערכים במזהה הם **דקות מחצות**, לא שעות: כך אותו מסך משרת כל
+    רזולוציה שתתווסף בלי לשנות את הפרוטוקול."""
     which = "hours.pick_end" if start is not None else "hours.pick_start"
     head_txt = (f"<b>{i18n.t(f'day.{day}', lang)}</b> · "
                 + i18n.t("hours.open_range" if mode == "o"
                          else "hours.shut_range", lang))
     body = i18n.t(which, lang)
     if start is not None:
-        body += "\n" + i18n.t("hours.from", lang, time=f"{start:02d}:00")
+        body += "\n" + i18n.t("hours.from", lang,
+                               time=f"{start // 60:02d}:{start % 60:02d}")
+    mm = 30 if half else 0
     rows, line = [], []
     for h in range(24):
-        arg = (f"{day}.{mode}.{h}" if start is None
-               else f"{day}.{mode}.{start}.{h}")
-        line.append((f"{h:02d}:00",
+        mins = h * 60 + mm
+        arg = (f"{day}.{mode}.{mins}" if start is None
+               else f"{day}.{mode}.{start}.{mins}")
+        line.append((f"{h:02d}:{mm:02d}",
                      cb(chat_id, "hrs" if start is None else "hre", arg)))
         if len(line) == 4:
             rows.append(line); line = []
     if line:
         rows.append(line)
+    flip = "0" if half else "1"
+    toggle = f"{day}.{mode}.{flip}" if start is None \
+        else f"{day}.{mode}.{start}.{flip}"
+    rows.append([
+        (i18n.t("hours.round" if half else "hours.half", lang),
+         cb(chat_id, "hrh" if start is None else "hrh2", toggle)),
+        ("⌨️ " + i18n.t("hours.typed", lang), cb(chat_id, "hrtype", day)),
+    ])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hrday", day))])
     return Screen(head_txt + "\n\n" + body, rows)
 
