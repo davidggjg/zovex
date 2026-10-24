@@ -62,11 +62,14 @@ wait_up || die "/ping לא ענה.  לשחזור: sudo bash $0 --rollback"
 
 echo
 echo "④ בודק שהשדה כבר לא נדרס"
+# בלי f-strings: גרסאות פייתון עד 3.11 אוסרות קו נטוי בתוך ביטוי
+# של f-string, וזה מה שהפיל את השלב הזה בריצה הראשונה.
 curl -fsS -m 15 "$BASE/app/version" \
-  | "$PY" -c 'import json,sys; v=json.load(sys.stdin); print(
-      f"   latest={v.get(\"latest\")}  min={v.get(\"min\")}");print(
-      f"   מקור ההורדה (source_url): {v.get(\"source_url\") or \"(ריק — ברירת מחדל)\"}");print(
-      f"   מה שהאפליקציה מקבלת (url): {v.get(\"url\")}")' \
+  | "$PY" -c 'import json,sys
+v = json.load(sys.stdin)
+print("   latest=" + str(v.get("latest")) + "  min=" + str(v.get("min")))
+print("   מקור ההורדה (source_url): " + (v.get("source_url") or "(ריק — ברירת מחדל)"))
+print("   מה שהאפליקציה מקבלת (url): " + str(v.get("url")))' \
   || echo "   ⚠️ לא הצלחתי לקרוא /app/version"
 
 echo
