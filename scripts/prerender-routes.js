@@ -12,7 +12,11 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const DIST_DIR = path.join(ROOT, "dist");
+// DIST_DIR נשלט מהסביבה. בלעדיו הסקריפט יודע לעבוד רק על dist/ שליד
+// הקוד, ולכן תיקון של דפי ה-SEO חייב בנייה מלאה מחדש. הדפים האלה תלויים
+// רק ב-index.html ובקטלוג, ולכן אפשר לייצר אותם מחדש במקום — על תיקיית
+// האתר החיה — וזה מה שהופך תיקון כזה מ"בנייה ופריסה" לפקודה אחת.
+const DIST_DIR = process.env.DIST_DIR || path.join(ROOT, "dist");
 const MOVIES_PATH = path.join(ROOT, "public", "movies.json");
 const INDEX_HTML = path.join(DIST_DIR, "index.html");
 // build:vps כבר מייצא SITE_URL, אבל איש לא קרא אותו — הערך היה
@@ -104,6 +108,23 @@ function collectRoutes(movies) {
   }
 
   return routes;
+}
+
+// ‎decodeURIComponent‎ על קלט מהקטלוג הוא פענוח של מחרוזת שלא אנחנו
+// כתבנו, והיא הופכת לשם קובץ. ‎%2F‎ היה הופך לקו נטוי ויוצר תיקייה
+// מקוננת, ו-‎%2E%2E%2F‎ היה יוצא מתיקיית האתר. שם שאינו רכיב נתיב אחד
+// ונקי — נדחה, ומדווח בסוף ההרצה.
+function safeDirName(route) {
+  let name;
+  try {
+    name = decodeURIComponent(route);
+  } catch {
+    return null; // קידוד פגום — %ZZ
+  }
+  if (!name || name === "." || name === "..") return null;
+  if (name.includes("/") || name.includes("\\") || name.includes("\0")) return null;
+  if (name.startsWith(".")) return null;
+  return name;
 }
 
 function escapeHtml(str) {
@@ -235,9 +256,29 @@ async function prerender() {
   const routes = collectRoutes(movies);
   let created = 0;
 
+  let skippedUnsafe = 0;
   for (const [route, meta] of routes.entries()) {
     if (!route) continue;
-    const routeDir = path.join(DIST_DIR, route);
+    // [fix_encoded_dirs] שם התיקייה מפוענח, הכתובת נשארת מקודדת.
+    //
+    // ‎slugifyMovie‎ מחזיר ‎encodeURIComponent(...)‎, ועד כאן נוצרה תיקייה
+    // ששמה בפועל ‎%D7%90%D7%95%D7%99%D7%91-aa551c‎. אבל כל שרת מפענח את
+    // הכתובת לפני שהוא פונה לדיסק, ולכן בקשה ל-‎/%D7%90…/‎ חיפשה
+    // ‎אויב-המדינה-aa551c‎ — תיקייה שלא נוצרה מעולם. ‎try_files‎ נפל חזרה
+    // ל-‎/index.html‎ והגיש את דף הבית בקוד 200.
+    //
+    // נמדד על השרת החי: 393 תיקיות בשם מקודד, 0 בעברית. כלומר כל סרט
+    // וסדרה עם כותר עברי הוגשו לגוגל כשיבוט של דף הבית — לא דפים חסרים
+    // אלא מאות כפילויות, שהן סיגנל איכות שלילי לכל הדומיין.
+    //
+    // ‎route‎ ממשיך לשמש ל-‎canonical‎ ולסייטמאפ: שם הצורה המקודדת היא
+    // הנכונה, והיא גם מה שהסורק מבקש בפועל.
+    const diskName = safeDirName(route);
+    if (!diskName) {
+      skippedUnsafe++;
+      continue;
+    }
+    const routeDir = path.join(DIST_DIR, diskName);
     try {
       fs.mkdirSync(routeDir, { recursive: true });
       const pageHtml = buildPageHtml(indexHtml, route, meta);
@@ -248,7 +289,12 @@ async function prerender() {
     }
   }
 
-  console.log(`[prerender] Created ${created} static route folders in dist/ with per-page SEO tags.`);
+  console.log(`[prerender] Created ${created} static route folders in ` +
+              `${DIST_DIR} with per-page SEO tags.`);
+  if (skippedUnsafe) {
+    console.warn(`[prerender] ${skippedUnsafe} routes skipped: ` +
+                 `slug decodes to an unsafe directory name.`);
+  }
 }
 
 await prerender();
