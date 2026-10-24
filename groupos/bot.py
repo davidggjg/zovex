@@ -5226,6 +5226,15 @@ async def main() -> int:
     await publish_commands()
     for loop_fn in (expire_loop, schedule_loop, upkeep_loop, autolock_loop):
         _bg.add(asyncio.create_task(loop_fn()))
+    # לפני המשיכה: ביטול webhook ישן והשלכת מה שהצטבר.
+    #
+    # זה מה שמציל החלפת טוקן. בוט שהוגדר פעם ל-webhook, או שרת שרץ
+    # במקביל, מחזירים ‎Conflict: terminated by other getUpdates‎ —
+    # והבוט פשוט שותק בלי שום שגיאה מובנת. בנוסף, עדכונים שהצטברו
+    # בזמן שהשירות היה כבוי אינם היסטוריה שצריך להשלים: הודעה
+    # מאתמול שנאכפת היום נראית כמו באג.
+    with contextlib.suppress(TelegramAPIError):
+        await bot.delete_webhook(drop_pending_updates=True)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
