@@ -134,8 +134,18 @@ AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 8, 10, 4, 8
 # תקרת מחיקה בפעולה אחת. כל מחיקה היא קריאת API, ומחיקה של 5000
 # הודעות תתקע את הבוט לכל הקבוצות האחרות לדקות.
 PURGE_MAX = 200
-# תקרת הודעות בתשובה אחת של פילטר. מעבר לזה זו הצפה ולא תשובה.
-FILTER_ITEMS_MAX = 9
+# תקרת הודעות בתשובה אחת של הדק.
+#
+# שלושים ולא שלוש מאות, ולא בגלל אחסון: טלגרם מגבילה בוט לכ-20
+# הודעות לדקה בקבוצה, ותשובה של 300 הודעות פירושה בוט חנוק לכל
+# הקבוצות האחרות לרבע שעה. שומר המכסות מווסת את הקצב ממילא, והתקרה
+# הזאת היא מה שמונע מהדק אחד להפוך להצפה.
+FILTER_ITEMS_MAX = 30
+
+# איסוף הודעות למתג אחד: ‎(צ'אט, מנהל) → (סוג, הדק, מתי התחיל)‎.
+# בזיכרון, כי זו פעולה של דקה — לא מצב ששורד אתחול.
+BULK_TTL = 900.0
+_bulk: dict[tuple[int, int], tuple[str, str, float]] = {}
 ADMIN_TTL = 300
 
 
@@ -686,6 +696,11 @@ async def on_group_message(msg: Message):
         return
     await sync_admins(msg.chat.id)
     _anon_admin(msg)
+    # מצב איסוף: המנהל בונה עכשיו תשובה להדק, וכל מה שהוא שולח
+    # מצטרף אליה במקום לעבור בדיקות.
+    if _bulk and await _bulk_take(msg):
+        return
+
     text_early = (msg.text or msg.caption or "")
     # מנהלים ומנחים פטורים מהכול — כלל שכל בוט ניהול מקיים.
     #
@@ -1197,13 +1212,17 @@ async def _run_filter(msg: Message, fh) -> None:
     if fh.action in ("delete", "delete_reply"):
         with contextlib.suppress(TelegramAPIError):
             await bot.delete_message(msg.chat.id, msg.message_id)
-    if fh.action in ("reply", "delete_reply") and (fh.content or fh.media_id):
+    if fh.action in ("reply", "delete_reply"):
         # ההודעה הראשונה, ואז כל מה שהמנהל צירף — לפי הסדר שבו שמר.
         # שלוש הודעות נשארות שלוש הודעות.
-        await send_content(msg.chat.id,
-                           tpl.render_pick(fh.content, _ctx(msg)),
-                           fh.media_id or None, fh.media_kind or None,
-                           fh.buttons or "", thread_id=_thread_of(msg))
+        #
+        # הדק שנבנה במצב איסוף אין לו "הודעה ראשונה" משלו: הוא נוצר
+        # ריק והכול בפריטים. לכן השליחה הראשונה מותנית, והפריטים לא.
+        if fh.content.strip() or fh.media_id:
+            await send_content(msg.chat.id,
+                               tpl.render_pick(fh.content, _ctx(msg)),
+                               fh.media_id or None, fh.media_kind or None,
+                               fh.buttons or "", thread_id=_thread_of(msg))
         for extra in filters.items(msg.chat.id, fh.trigger)[:FILTER_ITEMS_MAX]:
             await send_content(msg.chat.id,
                                tpl.render_pick(extra["content"], _ctx(msg)),
@@ -1769,6 +1788,135 @@ async def cmd_filter(msg: Message):
     await reply(msg, T(msg, "filter.saved", trigger=trigger))
 
 
+def _bulk_get(chat_id: int, user_id: int) -> Optional[tuple[str, str]]:
+    got = _bulk.get((chat_id, user_id))
+    if got is None:
+        return None
+    kind, trigger, since = got
+    if time.time() - since > BULK_TTL:
+        _bulk.pop((chat_id, user_id), None)
+        return None
+    return kind, trigger
+
+
+async def _bulk_start(msg: Message, kind: str, trigger: str) -> None:
+    _bulk[(msg.chat.id, msg.from_user.id)] = (kind, trigger, time.time())
+    await reply(msg, T(msg, "bulk.started", trigger=trigger,
+                       n=FILTER_ITEMS_MAX))
+
+
+async def _bulk_take(msg: Message) -> bool:
+    """הודעה שנאספת להדק. ‎True‎ = נבלעה ואין להמשיך בנתיב הרגיל.
+
+    "אין לי כוח כל פעם לשלוח את הפקודה": במצב איסוף המנהל פשוט
+    שולח או מעביר הודעות, והן מצטרפות לפי הסדר. ההודעה נמחקת
+    מהקבוצה כדי שהבנייה לא תישאר שם כרעש."""
+    if msg.from_user is None:
+        return False
+    got = _bulk_get(msg.chat.id, msg.from_user.id)
+    if got is None:
+        return False
+    kind, trigger = got
+    text, mid, mkind = _content_of(msg, "") if msg.reply_to_message \
+        else ((msg.text or msg.caption or ""), None, None)
+    if mid is None:
+        text, mid, mkind = _collect_media(msg)
+    n = filters.item_count(msg.chat.id, trigger, kind)
+    if n >= FILTER_ITEMS_MAX:
+        _bulk.pop((msg.chat.id, msg.from_user.id), None)
+        await send(msg.chat.id, T(msg, "filter.too_many", n=FILTER_ITEMS_MAX),
+                   thread_id=_thread_of(msg),
+                   clean_after=clean_delay(msg.chat.id) or 30)
+        return True
+    if filters.add_item(msg.chat.id, trigger, text, media_id=mid or "",
+                        media_kind=mkind or "", kind=kind):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(msg.chat.id, msg.message_id)
+    return True
+
+
+def _collect_media(msg: Message) -> tuple[str, Optional[str], Optional[str]]:
+    """המדיה של ההודעה עצמה (ולא של מה שהיא עונה לו)."""
+    ph = msg.photo
+    if ph:
+        return (msg.caption or ""), ph[-1].file_id, "photo"
+    for attr, kind in (("video", "video"), ("animation", "animation"),
+                       ("sticker", "sticker"), ("document", "document"),
+                       ("audio", "audio"), ("voice", "voice")):
+        got = getattr(msg, attr, None)
+        if got is not None:
+            return (msg.caption or ""), got.file_id, kind
+    return (msg.text or msg.caption or ""), None, None
+
+
+@dp.message(Command("filterbulk"))
+@needs("filters.write")
+async def cmd_filterbulk(msg: Message):
+    """‎/filterbulk <מילה>‎ — ואז פשוט שולחים את כל ההודעות ברצף."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "bulk.usage", cmd="/filterbulk"))
+        return
+    trigger = parts[1].strip().lower()
+    if trigger not in filters.triggers(msg.chat.id):
+        # הדק חדש נוצר כאן ועכשיו, ריק, כדי שאפשר יהיה למלא אותו
+        filters.add(msg.chat.id, trigger, "", allow_empty=True)
+    await _bulk_start(msg, "filter", trigger)
+
+
+@dp.message(Command("cmdbulk"))
+@needs("customcmd.write")
+async def cmd_cmdbulk(msg: Message):
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "bulk.usage", cmd="/cmdbulk"))
+        return
+    name = customcmd.normalize(parts[1])
+    if cmds.get(msg.chat.id, name) is None:
+        c, err = cmds.set(msg.chat.id, name, " ", by=msg.from_user.id)
+        if err:
+            await reply(msg, T(msg, err, name=tpl.esc(name),
+                               max=customcmd.MAX_PER_CHAT))
+            return
+    await _bulk_start(msg, "cmd", name)
+
+
+@dp.message(Command("done"))
+async def cmd_done(msg: Message):
+    """סיום האיסוף. מראה כמה הודעות ההדק מחזיר עכשיו."""
+    touch(msg)
+    if msg.from_user is None:
+        return
+    got = _bulk_get(msg.chat.id, msg.from_user.id)
+    _bulk.pop((msg.chat.id, msg.from_user.id), None)
+    if got is None:
+        await reply(msg, T(msg, "bulk.none"))
+        return
+    kind, trigger = got
+    # ההודעה "הראשונה" קיימת רק אם להדק יש תוכן משלו. הדק שנבנה
+    # כולו במצב איסוף נוצר ריק, וספירה שמוסיפה לו אחת משקרת למנהל.
+    n = filters.item_count(msg.chat.id, trigger, kind)
+    if kind == "cmd":
+        c = cmds.get(msg.chat.id, trigger)
+        own = bool(c and ((c.content or "").strip() or c.media_id))
+    else:
+        fh = filters.check(msg.chat.id, trigger)
+        own = bool(fh and ((fh.content or "").strip() or fh.media_id))
+    await reply(msg, T(msg, "bulk.done", trigger=trigger, n=n + int(own)))
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(msg: Message):
+    touch(msg)
+    if msg.from_user is None:
+        return
+    await reply(msg, T(msg, "bulk.canceled"
+                       if _bulk.pop((msg.chat.id, msg.from_user.id), None)
+                       else "bulk.none"))
+
+
 @dp.message(Command("filteradd"))
 @needs("filters.write")
 async def cmd_filteradd(msg: Message):
@@ -2151,6 +2299,56 @@ async def cmd_addcmd(msg: Message):
     await reply(msg, T(msg, "cc.saved", name=c.name))
 
 
+@dp.message(Command("cmdadd"))
+@needs("customcmd.write")
+async def cmd_cmdadd(msg: Message):
+    """‎/cmdadd <שם>‎ בתשובה להודעה — מצרף אותה לתשובת הפקודה.
+
+    אותו דבר בדיוק כמו ‎/filteradd‎, רק שההדק הוא פקודה ולא מילה.
+    מנהל שהגדיר ‎/סרטים‎ שיחזיר קובץ, תמונה והסבר מקבל שלוש הודעות."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "cc.add_usage"))
+        return
+    name = customcmd.normalize(parts[1])
+    if cmds.get(msg.chat.id, name) is None:
+        await reply(msg, T(msg, "cc.missing", name=tpl.esc(name)))
+        return
+    body, mid, kind = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    if body.strip() and await _bad_html(msg, body):
+        return
+    if filters.item_count(msg.chat.id, name, "cmd") >= FILTER_ITEMS_MAX:
+        await reply(msg, T(msg, "filter.too_many", n=FILTER_ITEMS_MAX))
+        return
+    if not filters.add_item(msg.chat.id, name, body, media_id=mid or "",
+                            media_kind=kind or "", kind="cmd"):
+        await reply(msg, T(msg, "cc.add_usage"))
+        return
+    audit.log(msg.chat.id, "customcmd.set", actor_id=msg.from_user.id,
+              after=f"{name}+", severity="low")
+    await reply(msg, T(msg, "cc.added_item", name=name,
+                       n=filters.item_count(msg.chat.id, name, "cmd") + 1))
+
+
+@dp.message(Command("cmditems"))
+@needs("customcmd.write")
+async def cmd_cmditems(msg: Message):
+    """כמה הודעות הפקודה מחזירה, ואיפוס הנוספות."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "cc.items_usage"))
+        return
+    name = customcmd.normalize(parts[1])
+    if len(parts) > 2 and parts[2].strip().lower() in ("clear", "נקה"):
+        n = filters.clear_items(msg.chat.id, name, "cmd")
+        await reply(msg, T(msg, "filter.items_cleared", n=n))
+        return
+    await reply(msg, T(msg, "cc.items", name=name,
+                       n=filters.item_count(msg.chat.id, name, "cmd") + 1))
+
+
 @dp.message(Command("delcmd"))
 @needs("customcmd.write")
 async def cmd_delcmd(msg: Message):
@@ -2165,6 +2363,7 @@ async def cmd_delcmd(msg: Message):
         return
     audit.log(msg.chat.id, "customcmd.delete", actor_id=msg.from_user.id,
               before=name, severity="low")
+    filters.clear_items(msg.chat.id, name, "cmd")
     await reply(msg, T(msg, "cc.deleted", name=tpl.esc(name)))
 
 
@@ -4605,6 +4804,15 @@ async def on_custom_command(msg: Message):
                        c.media_id, c.media_kind, c.buttons or "",
                        clean_after=delay or None,
                        thread_id=_thread_of(msg))
+    # ומה שצורף לפקודה הזאת — אותו מנגנון בדיוק כמו בפילטר.
+    for extra in filters.items(msg.chat.id, name, "cmd")[:FILTER_ITEMS_MAX]:
+        await send_content(msg.chat.id,
+                           tpl.render_pick(extra["content"], _ctx(msg)),
+                           extra["media_id"] or None,
+                           extra["media_kind"] or None,
+                           extra["buttons"] or "",
+                           clean_after=delay or None,
+                           thread_id=_thread_of(msg))
 
 
 def _field_home(field: str) -> str:

@@ -372,6 +372,16 @@ MIGRATIONS: list[tuple[int, str]] = [
     );
     CREATE INDEX idx_fitems ON filter_items (chat_id, trigger, seq);
     """),
+    (7, """
+    -- אותו מנגנון, לשני סוגי הדק.
+    --
+    -- "זה לא ספציפית יוטיוב — זה על כל פקודה שהבן אדם שם." נכון, וגם
+    -- לא רק על מילה: פקודה מותאמת (‎/יוטיוב‎) צריכה להחזיר כמה הודעות
+    -- בדיוק כמו פילטר. ‎kind‎ מפריד ביניהם כדי ששם זהה בשניהם לא יערבב
+    -- פריטים — ‎filter‎ למילה, ‎cmd‎ לפקודה.
+    ALTER TABLE filter_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'filter';
+    CREATE INDEX idx_fitems_kind ON filter_items (chat_id, kind, trigger, seq);
+    """),
 ]
 
 

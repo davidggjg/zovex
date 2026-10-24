@@ -2000,6 +2000,118 @@ async def test_filter_multi():
        B.filters.item_count(CHAT, "youtube") == 0)
 
 
+
+async def test_cmd_multi():
+    """אותו מנגנון על פקודה מותאמת: /סרטים מחזיר כמה הודעות."""
+    section("פקודה בכמה הודעות")
+    B.perms.set_role(CHAT, ADM, "owner")
+    # שם פקודה חייב להיות באותיות לטיניות — זו מגבלה של טלגרם עצמה
+    # ולא שלנו. מילת הדק בעברית עובדת דרך /filter.
+    name = "movies"
+    doc = Message(message_id=9800, date=dt.datetime.now(),
+                  chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                  from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                  document=Document(file_id="MOVIEAPK", file_unique_id="D7",
+                                    file_name="x.apk"))
+    await _out(B.cmd_addcmd, Message(
+        message_id=9801, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        text=f"/addcmd {name} הנה", reply_to_message=doc))
+    ok("הפקודה נוצרה", B.cmds.get(CHAT, name) is not None)
+
+    out = await _out(B.cmd_cmdadd, msg(f"/cmdadd {name} וזה ההסבר", mid=9802))
+    ok("פריט נוסף לפקודה",
+       B.filters.item_count(CHAT, name, "cmd") == 1, out[:60])
+    out = await _out(B.cmd_cmdadd, msg("/cmdadd nope משהו", mid=9803))
+    ok("פקודה שלא קיימת נדחית", "nope" in out, out[:60])
+
+    # הפילטר והפקודה באותו שם אינם מתערבבים
+    B.filters.add(CHAT, name, "תשובת פילטר")
+    B.filters.add_item(CHAT, name, "של הפילטר")
+    ok("סוגים נפרדים",
+       B.filters.item_count(CHAT, name) == 1
+       and B.filters.item_count(CHAT, name, "cmd") == 1)
+
+    B.perms.set_role(CHAT, USER, "member")
+    before = len(SENT)
+    await B.on_custom_command(msg(f"/{name}", uid=USER, mid=9804))
+    sent = [t for _c, t, _m in SENT[before:]]
+    ok("שתי הודעות חזרו מהפקודה", len(sent) == 2, str(sent))
+    ok("הקובץ ואז ההסבר",
+       "MOVIEAPK" in sent[0] and "ההסבר" in sent[1], str(sent))
+
+    out = await _out(B.cmd_cmditems, msg(f"/cmditems {name}", mid=9805))
+    ok("הספירה מוצגת", "2" in out, out[:60])
+    await _out(B.cmd_cmditems, msg(f"/cmditems {name} clear", mid=9806))
+    ok("ואיפוס עובד", B.filters.item_count(CHAT, name, "cmd") == 0)
+    ok("ולא נגע בפילטר", B.filters.item_count(CHAT, name) == 1)
+    B.filters.remove(CHAT, name)
+
+
+
+async def test_bulk_collect():
+    """מצב איסוף: שולחים הודעות ברצף, והן מצטרפות להדק."""
+    section("איסוף הודעות")
+    B.perms.set_role(CHAT, ADM, "owner")
+    word = "fifa"
+    B.filters.remove(CHAT, word)
+    DELETED.clear()
+
+    out = await _out(B.cmd_filterbulk, msg(f"/filterbulk {word}", mid=9700))
+    ok("האיסוף התחיל", "/done" in out, out[:80])
+    ok("וההדק נוצר אם לא היה", word in B.filters.triggers(CHAT))
+
+    # טקסט, תמונה וקובץ — ברצף, בלי פקודה לכל אחד
+    await B.on_group_message(msg("ההסבר על המשחק", uid=ADM, mid=9701))
+    await B.on_group_message(Message(
+        message_id=9702, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        photo=[PhotoSize(file_id="SHOT", file_unique_id="S1", width=90,
+                         height=90)], caption="מסך"))
+    await B.on_group_message(Message(
+        message_id=9703, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        document=Document(file_id="GAMEAPK", file_unique_id="G1",
+                          file_name="g.apk")))
+    ok("שלושתן נאספו", B.filters.item_count(CHAT, word) == 3,
+       str(B.filters.items(CHAT, word)))
+    ok("והן נמחקו מהקבוצה",
+       all(m in DELETED for m in (9701, 9702, 9703)), str(DELETED[-4:]))
+
+    out = await _out(B.cmd_done, msg("/done", mid=9704))
+    # שלוש, ולא ארבע: ההדק נוצר ריק ואין לו "הודעה ראשונה" משלו.
+    ok("סיום מדווח כמה הודעות", "3" in out, out[:60])
+    ok("והאיסוף נסגר", B._bulk_get(CHAT, ADM) is None)
+
+    # אחרי הסיום ההודעות חוזרות להיות רגילות
+    before = B.filters.item_count(CHAT, word)
+    await B.on_group_message(msg("סתם הודעה", uid=ADM, mid=9705))
+    ok("הודעה אחרי /done אינה נאספת",
+       B.filters.item_count(CHAT, word) == before)
+
+    # והחבר שכותב את המילה מקבל את הכול
+    B.perms.set_role(CHAT, USER, "member")
+    sent_before = len(SENT)
+    await B.on_group_message(msg(word, uid=USER, mid=9706))
+    sent = [t for _c, t, _m in SENT[sent_before:]]
+    ok("שלוש הודעות חזרו", len(sent) == 3, str(len(sent)))
+    ok("הקובץ והתמונה בפנים",
+       any("SHOT" in t for t in sent) and any("GAMEAPK" in t for t in sent),
+       str(sent))
+
+    # ביטול
+    await _out(B.cmd_filterbulk, msg(f"/filterbulk {word}", mid=9707))
+    out = await _out(B.cmd_cancel, msg("/cancel", mid=9708))
+    ok("ביטול עובד", B._bulk_get(CHAT, ADM) is None and bool(out), out[:40])
+
+    # תקרה
+    ok("התקרה היא 30", B.FILTER_ITEMS_MAX == 30)
+    B.filters.remove(CHAT, word)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2041,6 +2153,8 @@ async def main() -> int:
     await test_ephemeral()
     await test_welcome_visibility()
     await test_filter_multi()
+    await test_cmd_multi()
+    await test_bulk_collect()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

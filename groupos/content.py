@@ -158,14 +158,16 @@ class Filters:
     def add(self, chat_id: int, trigger: str, content: str, *,
             match_kind: str = "word", action: str = "reply",
             media_id: str = "", media_kind: str = "",
-            buttons: str = "") -> bool:
+            buttons: str = "", allow_empty: bool = False) -> bool:
         trigger = (trigger or "").strip().lower()
         if not trigger or match_kind not in MATCH_KINDS:
             return False
         if action not in FILTER_ACTIONS:
             return False
-        # תוכן ריק לגמרי אינו פילטר — אבל קובץ בלי טקסט כן.
-        if not (content or "").strip() and not media_id \
+        # תוכן ריק לגמרי אינו פילטר — אבל קובץ בלי טקסט כן, ו-‎
+        # ‎allow_empty‎ הוא המקרה של "נוצר עכשיו כדי שימלאו אותו":
+        # מצב איסוף יוצר את ההדק ואז מצרף אליו הודעות.
+        if not (content or "").strip() and not media_id and not allow_empty \
                 and action in ("reply", "delete_reply"):
             return False
         if match_kind == "regex":
@@ -187,7 +189,8 @@ class Filters:
     def remove(self, chat_id: int, trigger: str) -> int:
         trg = (trigger or "").strip().lower()
         self.db.change(
-            "DELETE FROM filter_items WHERE chat_id=? AND trigger=?",
+            """DELETE FROM filter_items
+               WHERE chat_id=? AND trigger=? AND kind='filter'""",
             (chat_id, trg))
         return self.db.change(
             "DELETE FROM filters WHERE chat_id=? AND trigger=?", (chat_id, trg))
@@ -197,39 +200,45 @@ class Filters:
     # לאחת מאבד את מה שהמנהל בנה, ולכן אפשר לצרף פריטים להדק אחד.
     def add_item(self, chat_id: int, trigger: str, content: str = "", *,
                  media_id: str = "", media_kind: str = "",
-                 buttons: str = "") -> int:
+                 buttons: str = "", kind: str = "filter") -> int:
+        """‎kind‎: ‎filter‎ למילה, ‎cmd‎ לפקודה מותאמת. אותו מנגנון לשניהם."""
         trg = (trigger or "").strip().lower()
         if not trg or (not content.strip() and not media_id):
             return 0
         r = self.db.one(
             """SELECT COALESCE(MAX(seq), 0) m FROM filter_items
-               WHERE chat_id=? AND trigger=?""", (chat_id, trg))
+               WHERE chat_id=? AND trigger=? AND kind=?""",
+            (chat_id, trg, kind))
         return self.db.run(
             """INSERT INTO filter_items
                (chat_id,trigger,seq,content,media_id,media_kind,buttons,
-                created_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                kind,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (chat_id, trg, (r["m"] if r else 0) + 1, content, media_id or "",
-             media_kind or "", buttons or "", time.time()))
+             media_kind or "", buttons or "", kind, time.time()))
 
-    def items(self, chat_id: int, trigger: str) -> list[dict]:
+    def items(self, chat_id: int, trigger: str,
+              kind: str = "filter") -> list[dict]:
         """הפריטים הנוספים, לפי הסדר שנשמרו. ריק = תשובה אחת בלבד."""
         return [dict(r) for r in self.db.q(
             """SELECT content,media_id,media_kind,buttons FROM filter_items
-               WHERE chat_id=? AND trigger=? ORDER BY seq""",
-            (chat_id, (trigger or "").strip().lower()))]
+               WHERE chat_id=? AND trigger=? AND kind=? ORDER BY seq""",
+            (chat_id, (trigger or "").strip().lower(), kind))]
 
-    def item_count(self, chat_id: int, trigger: str) -> int:
+    def item_count(self, chat_id: int, trigger: str,
+                   kind: str = "filter") -> int:
         r = self.db.one(
             """SELECT COUNT(*) c FROM filter_items
-               WHERE chat_id=? AND trigger=?""",
-            (chat_id, (trigger or "").strip().lower()))
+               WHERE chat_id=? AND trigger=? AND kind=?""",
+            (chat_id, (trigger or "").strip().lower(), kind))
         return r["c"] if r else 0
 
-    def clear_items(self, chat_id: int, trigger: str) -> int:
+    def clear_items(self, chat_id: int, trigger: str,
+                    kind: str = "filter") -> int:
         return self.db.change(
-            "DELETE FROM filter_items WHERE chat_id=? AND trigger=?",
-            (chat_id, (trigger or "").strip().lower()))
+            """DELETE FROM filter_items
+               WHERE chat_id=? AND trigger=? AND kind=?""",
+            (chat_id, (trigger or "").strip().lower(), kind))
 
     def triggers(self, chat_id: int) -> list[str]:
         return [r["trigger"] for r in self.db.q(
