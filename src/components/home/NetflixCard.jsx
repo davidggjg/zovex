@@ -64,7 +64,16 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
 // את כל האלמנטים מראש. במקום זה טוענים דף ראשון קטן ומרחיבים כשמתקרבים לסוף.
 const ROW_PAGE_SIZE = 20;
 
-function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
+// תקרה לשורה במסך הבית. בלעדיה שורה אחת יכולה להימשך למאות פריטים, ומסך
+// הבית הופך לכל הקטלוג בבת אחת — בדיוק העומס שאין שום סיבה להגיש למי
+// שעוד לא בחר קטגוריה. שלושים זה בערך עשר "דפיקות" של חץ, מספיק כדי
+// להתרשם ולא מספיק כדי להיתקע.
+//
+// התקרה חלה רק כשיש ‎onSeeAll‎, כלומר רק כשיש לאן להמשיך. בלי יעד היא
+// הייתה פשוט מסתירה תוכן בלי דרך להגיע אליו.
+const ROW_MAX = 30;
+
+function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow, onSeeAll }) {
   const rowRef = React.useRef(null);
   // ערוץ חי אינו פוסטר. הלוגו שלו ריבועי או רוחבי, ומלבן 2:3 עם
   // objectFit: cover חתך אותו — זה מה שנראה כמו "מפוצל לחצי, לא רואים
@@ -85,16 +94,23 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
   // השורה מוצגת ב-direction: ltr (למטה) בלי קשר לכיווניות שאר האתר, אז
   // "הקצה הרחוק" יכול להיות תחילת הגלילה או סופה בהתאם לדפדפן - בודקים את
   // שני הקצוות במקום להניח כיוון ספציפי.
+  if (!items || items.length === 0) return null;
+
+  // ‎capped‎ הוא מה שהשורה מוכנה להציג בכלל; ‎visibleCount‎ הוא כמה מתוכו
+  // כבר נטען ל-DOM. הספירה בכותרת נשארת על ‎items.length‎ — המספר האמיתי,
+  // כי הוא מה שמסביר למה יש "ראה הכל".
+  const capped = onSeeAll ? items.slice(0, ROW_MAX) : items;
+  const hasMore = onSeeAll && items.length > capped.length;
+
   const handleScroll = () => {
     const el = rowRef.current;
-    if (!el || visibleCount >= items.length) return;
+    if (!el || visibleCount >= capped.length) return;
     const nearEnd = el.scrollWidth - el.clientWidth - el.scrollLeft < cardW * 6;
     const nearStart = el.scrollLeft < cardW * 6;
-    if (nearEnd || nearStart) setVisibleCount(v => Math.min(v + ROW_PAGE_SIZE, items.length));
+    if (nearEnd || nearStart) setVisibleCount(v => Math.min(v + ROW_PAGE_SIZE, capped.length));
   };
 
-  if (!items || items.length === 0) return null;
-  const visibleItems = items.slice(0, visibleCount);
+  const visibleItems = capped.slice(0, visibleCount);
 
   return (
     <div style={{ marginBottom: isDesktop ? 36 : 28, direction: "rtl" }}>
@@ -105,7 +121,17 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
           <h2 style={{ fontSize: isDesktop ? 21 : 18, fontWeight: 900, color: "#fff", margin: 0, letterSpacing: "-0.3px" }}>{title}</h2>
           <span style={{ fontSize: 12, color: "#888" }}>({items.length})</span>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* "ראה הכל" בצד השני של החיצים: החיצים מזיזים בתוך השורה,
+              וזה יוצא ממנה אל הקטגוריה כולה. */}
+          {onSeeAll && (
+            <button
+              onClick={onSeeAll}
+              style={{ background: "none", border: "none", color: "#bbb", cursor: "pointer", fontFamily: "inherit", fontSize: isDesktop ? 14 : 13, fontWeight: 700, padding: "6px 8px", marginLeft: 2, whiteSpace: "nowrap" }}
+            >
+              ראה הכל ›
+            </button>
+          )}
           <button onClick={() => scroll("right")} style={{ background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", color: "#fff", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, boxShadow: "0 2px 10px rgba(0,0,0,0.35)" }}>›</button>
           <button onClick={() => scroll("left")} style={{ background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", color: "#fff", borderRadius: "50%", width: 32, height: 32, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, boxShadow: "0 2px 10px rgba(0,0,0,0.35)" }}>‹</button>
         </div>
@@ -127,6 +153,32 @@ function NetflixRow({ title, items, isDesktop, handleItemClick, isLiveRow }) {
             />
           );
         })}
+        {/* אריח הסיום. מי שהגיע לקצה השורה בחיצים לא רואה את הכותרת יותר,
+            ולכן "ראה הכל" שיושב רק שם היה מחייב אותו לגלול חזרה. */}
+        {hasMore && (
+          <button
+            onClick={onSeeAll}
+            style={{
+              flexShrink: 0, width: cardW, height: cardH, cursor: "pointer",
+              display: "flex", flexDirection: "column", alignItems: "center",
+              justifyContent: "center", gap: 10, borderRadius: 12,
+              fontFamily: "inherit", color: "#fff",
+              background: "rgba(255,255,255,0.055)",
+              backdropFilter: "blur(14px) saturate(150%)",
+              WebkitBackdropFilter: "blur(14px) saturate(150%)",
+              border: "1px solid rgba(255,255,255,0.11)",
+            }}
+          >
+            <span style={{
+              width: 42, height: 42, borderRadius: "50%", fontSize: 22,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(255,255,255,0.08)",
+              border: "1px solid rgba(255,255,255,0.14)",
+            }}>›</span>
+            <span style={{ fontSize: 13, fontWeight: 800 }}>ראה הכל</span>
+            <span style={{ fontSize: 11, color: "#999" }}>{items.length} פריטים</span>
+          </button>
+        )}
       </div>
     </div>
   );

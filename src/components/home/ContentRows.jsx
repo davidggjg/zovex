@@ -17,8 +17,26 @@ function CardGrid({ title, items, isDesktop, handleItemClick }) {
   const [shown, setShown] = useState(GRID_PAGE);
   useEffect(() => { setShown(GRID_PAGE); }, [items]);
 
-  const cardW = isDesktop ? 184 : 143;
-  const cardH = isDesktop ? 260 : 202;
+  // ── שלוש בשורה בטלפון ──────────────────────────────────────────────
+  //
+  // ‎auto-fill‎ עם רוחב קבוע של 143 נתן שתיים בשורה בכל טלפון מתחת ל-460
+  // פיקסלים, כלומר כמעט בכולם: 143×2 + מרווח נכנס, 143×3 לא. התוצאה היא
+  // שליש מהתוכן על המסך לעומת האפליקציה, שמציגה שלוש.
+  //
+  // הפתרון הוא לחשב את הרוחב מרוחב המסך במקום לקוות שהוא יתאים: שלוש
+  // עמודות קודם, והכרטיס מקבל את מה שנשאר. היחס 1.41 הוא זה של הכרטיס
+  // הקיים (143×202) ולכן הפוסטרים לא נמתחים.
+  const [vw, setVw] = useState(() => { try { return window.innerWidth; } catch { return 390; } });
+  useEffect(() => {
+    const onResize = () => setVw(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const PAD = 16;
+  const gap = isDesktop ? 18 : 10;
+  const cardW = isDesktop ? 184 : Math.max(96, Math.floor((vw - PAD * 2 - gap * 2) / 3));
+  const cardH = isDesktop ? 260 : Math.round(cardW * 1.41);
   const visible = items.slice(0, shown);
 
   return (
@@ -29,8 +47,11 @@ function CardGrid({ title, items, isDesktop, handleItemClick }) {
       </div>
       <div style={{
         display: "grid",
-        gridTemplateColumns: `repeat(auto-fill, minmax(${cardW}px, 1fr))`,
-        gap: isDesktop ? 18 : 12,
+        gridTemplateColumns: isDesktop
+          ? `repeat(auto-fill, minmax(${cardW}px, 1fr))`
+          : `repeat(3, ${cardW}px)`,
+        gap,
+        justifyContent: "center",
         justifyItems: "center",
       }}>
         {visible.map(item => {
@@ -68,7 +89,7 @@ function CardGrid({ title, items, isDesktop, handleItemClick }) {
   );
 }
 
-function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user, favIds }) {
+function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedCategory, setSelectedCategory, searchTerm, isDesktop, handleItemClick, onContinueWatchingClick, history, user, favIds }) {
   const q = searchTerm.toLowerCase();
 
   // בנה map: קטגוריה → פריטים
@@ -99,7 +120,7 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
     const cats = allCategories.filter(c => c !== "הכל" && c !== "שידורים חיים");
     cats.forEach(cat => {
       const items = buildItems(cat);
-      if (items.length > 0) rowsToShow.push({ title: cat, items, isLive: false });
+      if (items.length > 0) rowsToShow.push({ title: cat, cat, items, isLive: false });
     });
   }
   // קטגוריה ספציפית ושידורים חיים מטופלים למטה כרשת/כשורות ז'אנר, לא כאן.
@@ -214,6 +235,15 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
           isDesktop={isDesktop}
           handleItemClick={handleItemClick}
           isLiveRow={row.isLive}
+          // בחירת הקטגוריה היא בדיוק מה שמחליף את מסך הבית ברשת של אותה
+          // קטגוריה (ראה ה-return של selectedCategory !== "הכל" למטה), אז
+          // "ראה הכל" אינו מסך חדש — הוא אותו מסך שכבר קיים.
+          // הגלילה למעלה חיונית: בלעדיה הרשת החדשה נפתחת באמצע, בדיוק
+          // בגובה שבו השורה ישבה, ונראית כאילו לא קרה כלום.
+          onSeeAll={setSelectedCategory ? () => {
+            setSelectedCategory(row.cat);
+            try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { window.scrollTo(0, 0); }
+          } : undefined}
         />
       ))}
     </div>

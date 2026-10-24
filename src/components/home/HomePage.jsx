@@ -330,6 +330,7 @@ export default function HomePage({
           liveChannels={liveChannels}
           allCategories={allCategories}
           selectedCategory={selectedCategory}
+          setSelectedCategory={setSelectedCategory}
           searchTerm={searchTerm}
           isDesktop={isDesktop}
           handleItemClick={handleItemClick}
