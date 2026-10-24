@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import i18n
+import templates as _tpl
 from locks import ACTIONS, GROUPS, LOCK_TYPES
 from moderation import format_policy, parse_policy
 
@@ -113,8 +114,9 @@ def main_menu(chat_id: int, title: str, stats: dict,
         # נעילת שבת מוצעת בכפתור רק למי שבחר עברית. היא אינה חסומה
         # לאחרים — ‎/shabbat on‎ עובדת בכל שפה — אבל כפתור שמרבית
         # הקבוצות בעולם לא ישתמשו בו הוא רעש בתפריט.
-        [(i18n.t("menu.texts", lang), cb(chat_id, "texts")),
-         (i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
+        [(i18n.t("menu.proofs", lang), cb(chat_id, "proofs")),
+         (i18n.t("menu.texts", lang), cb(chat_id, "texts"))],
+        [(i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
         [(i18n.t("menu.ai", lang), cb(chat_id, "aim"))],
         ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
          + ([(i18n.t("menu.shabbat", lang), cb(chat_id, "shab"))]
@@ -280,6 +282,8 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("lockwarns",    "0", "sw.lockwarns"),
     ("spamguard",    "1", "sw.spamguard"),
     ("strict",       "1", "sw.strict"),
+    ("keepproof",    "1", "sw.keepproof"),
+    ("ephemeral",    "1", "sw.ephemeral"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )
@@ -914,3 +918,76 @@ def waiting_screen(chat_id: int, field: str, current: str,
                                value=(current or "")[:300])
     rows = [[(i18n.t("btn.cancel", lang), cb(chat_id, "cancel"))]]
     return Screen(txt, rows)
+
+
+# ── יומן האכיפה ───────────────────────────────────────────────────────────
+# "אני רוצה לראות על מה הוא העיף אנשים." רשימה, ולחיצה פותחת את ההודעה
+# עצמה — הטקסט, ואם הייתה מדיה אפשר לבקש שתישלח בפרטי.
+ACTION_ICON = {"ban": "⛔", "kick": "👢", "mute": "🔇", "warn": "⚠️",
+               "delete": "🗑", "tmute": "🔇", "tban": "⛔"}
+
+
+def proof_list(chat_id: int, items: list, fmt_time,
+               lang: str = i18n.DEFAULT, page: int = 0,
+               more: bool = False) -> Screen:
+    """מה הבוט עשה לאחרונה, שורה למקרה.
+
+    הזמן והשם בשורה, כי בלעדיהם הרשימה היא רק רצף של פעולות; והתוכן
+    בתצוגה מקדימה, כי לרוב השאלה "על מה?" נענית כבר בשורה."""
+    if not items:
+        return Screen(head("proof.title", lang) + "\n\n"
+                      + i18n.t("proof.empty", lang),
+                      [[(i18n.t("menu.back", lang), cb(chat_id, "main"))]])
+    rows = []
+    for it in items:
+        icon = ACTION_ICON.get(it.action, "•")
+        label = f"{icon} {it.name or it.user_id}: {it.preview(28)}"
+        rows.append([(label[:60], cb(chat_id, "pf", str(it.id)))])
+    nav = []
+    if page > 0:
+        nav.append(("◀︎", cb(chat_id, "proofs", str(page - 1))))
+    if more:
+        nav.append(("▶︎", cb(chat_id, "proofs", str(page + 1))))
+    if nav:
+        rows.append(nav)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    lines = [f"{fmt_time(it.ts)} · {i18n.t('act.' + it.action, lang)} · "
+             f"{it.name or it.user_id}" for it in items]
+    return Screen(head("proof.title", lang) + "\n\n"
+                  + i18n.t("proof.hint", lang) + "\n\n" + "\n".join(lines),
+                  rows)
+
+
+def proof_item(chat_id: int, it, when: str, others: int,
+               lang: str = i18n.DEFAULT) -> Screen:
+    """המקרה עצמו: מי, מה נעשה, למה — ומה היה כתוב שם.
+
+    כפתורי הביטול כאן ולא במסך נפרד: הרגע שבו מנהל מגלה שהבוט טעה
+    הוא הרגע שבו הוא רוצה לבטל, ולא אחרי חיפוש הפקודה הנכונה."""
+    body = [
+        f"<b>{i18n.t('act.' + it.action, lang)}</b> · {when}",
+        i18n.t("proof.who", lang, who=it.name or it.user_id, id=it.user_id),
+        i18n.t("proof.why", lang, why=it.reason or "—"),
+    ]
+    if it.risk:
+        body.append(i18n.t("proof.risk", lang, pct=int(it.risk * 100)))
+    if others > 1:
+        body.append(i18n.t("proof.others", lang, n=others - 1))
+    body.append("")
+    body.append(i18n.t("proof.content", lang))
+    if (it.text or "").strip():
+        body.append(f"<blockquote>{_tpl.esc(it.text[:600])}</blockquote>")
+    if it.media_kind:
+        body.append(i18n.t("proof.media", lang, kind=it.media_kind))
+    if not (it.text or "").strip() and not it.media_kind:
+        body.append("—")
+    rows = []
+    if it.has_media:
+        rows.append([("📎 " + i18n.t("proof.send_media", lang),
+                      cb(chat_id, "pfm", str(it.id)))])
+    rows.append([("↩︎ " + i18n.t("proof.undo", lang),
+                  cb(chat_id, "pfu", str(it.id))),
+                 ("👤 " + i18n.t("proof.user", lang),
+                  cb(chat_id, "pfuser", str(it.user_id)))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "proofs"))])
+    return Screen("\n".join(body), rows)

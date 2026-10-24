@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import grouphours as gh      # noqa: E402
 import spamguard as sg       # noqa: E402
 import prompts as pr        # noqa: E402
+import evidence as ev       # noqa: E402
 import zmanim as zm          # noqa: E402
 
 PASS = FAIL = 0
@@ -393,12 +394,77 @@ def test_city_rows() -> None:
        all(c in block for c in ("ירושלים", "חיפה", "תל אביב")), block)
 
 
+
+def test_evidence() -> None:
+    section("יומן אכיפה")
+    import os as _os
+    import tempfile as _tmp
+    _os.environ["GROUPOS_DB"] = _os.path.join(
+        _tmp.mkdtemp(prefix="groupos_ev_"), "t.db")
+    import importlib
+    import db as _db
+    importlib.reload(_db)
+    d = _db.Db()
+    e = ev.Evidence(d)
+    CHAT, U = -100, 7
+
+    i1 = e.add(CHAT, U, action="ban", reason="spam.adult_ad", risk=0.95,
+               text="💋 RAW SCANDAL — GRAB THIS LINK", media_kind="photo",
+               media_id="AgACfile", name="ספאמר", now=1000.0)
+    e.add(CHAT, U, action="delete", reason="lock.url", text="t.me/x",
+          name="ספאמר", now=900.0)
+    e.add(CHAT, 8, action="mute", reason="flood.rate", text="aaa",
+          name="דנה", now=800.0)
+    ok("נשמר", i1 > 0)
+    ok("שלושה מקרים", e.count(CHAT) == 3, str(e.count(CHAT)))
+    rec = e.recent(CHAT, 10)
+    ok("החדש ראשון", rec[0].id == i1 and rec[0].action == "ban")
+    ok("הטקסט נשמר", "SCANDAL" in rec[0].text)
+    ok("והמדיה כ-file_id", rec[0].has_media and rec[0].media_id == "AgACfile")
+    ok("תצוגה מקדימה נחתכת", len(rec[0].preview(10)) <= 11, rec[0].preview(10))
+    ok("מדיה בלי טקסט מתוארת",
+       ev.Item(1, CHAT, U, 0, "ban", "", 0, "", "photo", "f", "x")
+       .preview() == "[photo]")
+    ok("לפי משתמש", len(e.for_user(CHAT, U)) == 2)
+    ok("ספירה לפי משתמש", e.count_user(CHAT, U) == 2)
+    ok("שליפה לפי מזהה", e.get(CHAT, i1) is not None)
+    ok("קבוצה אחרת אינה רואה", e.get(-200, i1) is None)
+
+    # טקסט ארוך נחתך, ושמירה כושלת אינה זורקת
+    long_id = e.add(CHAT, U, action="warn", text="א" * 5000, now=1100.0)
+    ok("טקסט ארוך נחתך",
+       len(e.get(CHAT, long_id).text) <= ev.MAX_TEXT)
+
+    class Broken:
+        def run(self, *a, **k):
+            raise RuntimeError("מסד נפל")
+
+    ok("כישלון שמירה אינו מפיל אכיפה",
+       ev.Evidence(Broken()).add(CHAT, U, action="ban") == 0)
+
+    # תפוגה: גיל ותקרה. חותמי זמן אמיתיים, אחרת חישוב הגיל מוחק הכול.
+    base = 1_700_000_000.0
+    e.add(CHAT, U, action="ban", text="ישן", now=base - 40 * 86400)
+    e.add(CHAT, U, action="ban", text="טרי", now=base - 86400)
+    before = e.count(CHAT)
+    gone = e.prune(days=30, rows=500, now=base)
+    ok("ישן נמחק והטרי נשאר",
+       gone >= 1 and e.count(CHAT) == before - gone
+       and any(x.text == "טרי" for x in e.recent(CHAT, 50)),
+       f"{gone} {e.count(CHAT)}")
+    for i in range(12):
+        e.add(CHAT, 9, action="delete", text=f"x{i}", now=base + i)
+    e.prune(days=3650, rows=5, now=base + 100)
+    ok("תקרה לכל קבוצה נאכפת", e.count(CHAT) == 5, str(e.count(CHAT)))
+
+
 def main() -> int:
     test_zmanim()
     test_city_rows()
     test_hours()
     test_spamguard()
     test_prompts()
+    test_evidence()
     test_media_talk()
     test_aggressive()
     print(f"\n{'─' * 46}")

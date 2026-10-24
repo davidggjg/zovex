@@ -15,6 +15,7 @@ customcmd.py
 db.py
 disabling.py
 emergency.py
+evidence.py
 federation.py
 grouphours.py
 i18n.py

@@ -43,6 +43,7 @@ from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, BotCommand,
+                           EphemeralMessageParameters,
                            BotCommandScopeAllChatAdministrators,
                            BotCommandScopeAllGroupChats, BotCommandScopeChat,
                            CallbackQuery, ChatMemberUpdated,
@@ -71,6 +72,7 @@ import zmanim                                   # noqa: E402
 import grouphours                               # noqa: E402
 import spamguard                                # noqa: E402
 import prompts                                  # noqa: E402
+import evidence as evi                          # noqa: E402
 import voice                                    # noqa: E402
 from allowlist import Allowlist                 # noqa: E402
 from antiflood import AntiFlood                 # noqa: E402
@@ -115,6 +117,7 @@ sched = schedmod.Scheduler(db)
 zman = zmanim.Zmanim()
 repeats = spamguard.RepeatTracker()
 waiting = prompts.Pending()
+proof = evi.Evidence(db)
 feds = Federations(db)
 rep = Reputation(db)
 rpt = Reports(db)
@@ -135,9 +138,23 @@ ADMIN_TTL = 300
 
 
 # ── שליחה ומחיקה ───────────────────────────────────────────────────────────
+def _ephemeral(chat_id: int, user_id: Optional[int]):
+    """פרמטרי "רק הוא רואה", או ‎None‎.
+
+    טלגרם הוסיפה ב-2026 הודעות שנראות למשתמש אחד בלבד בתוך הקבוצה
+    (‎EphemeralMessageParameters‎). זה בדיוק מה שברכת כניסה צריכה
+    להיות: הנכנס רואה אותה, ואלף החברים האחרים לא רואים כלום.
+
+    המתג הוא פר-קבוצה, כי יש קבוצות שדווקא רוצות שכולם יראו מי נכנס."""
+    if not user_id or db.get(chat_id, "ephemeral", "1") != "1":
+        return None
+    return EphemeralMessageParameters(receiver_user_id=user_id)
+
+
 async def send(chat_id: int, text: str, *, is_group: bool = True,
                markup=None, clean_after: Optional[int] = None,
-               thread_id: Optional[int] = None) -> Optional[Message]:
+               thread_id: Optional[int] = None,
+               to_user: Optional[int] = None) -> Optional[Message]:
     """היציאה היחידה. עוברת דרך שומר המכסות תמיד.
 
     ‎thread_id‎ הוא הנושא בקבוצת נושאים. בלעדיו **כל** מה שהבוט אומר
@@ -149,13 +166,22 @@ async def send(chat_id: int, text: str, *, is_group: bool = True,
     בלי נושא ולא נבלעת."""
     await guard.acquire(chat_id, is_group)
     try:
-        m = await bot.send_message(chat_id, text, reply_markup=markup,
-                                   message_thread_id=thread_id)
+        m = await bot.send_message(
+            chat_id, text, reply_markup=markup,
+            message_thread_id=thread_id,
+            ephemeral_message_parameters=_ephemeral(chat_id, to_user))
     except TelegramRetryAfter as e:
         guard.note_flood_wait(chat_id, float(e.retry_after))
         log.warning("FloodWait %ss בצ'אט %s", e.retry_after, chat_id)
         return None
     except TelegramAPIError as e:
+        # הודעה אישית שנדחתה (שרת ישן, או צ'אט שאינו תומך) נשלחת
+        # כרגיל. עדיף שכולם יראו ברכה מאשר שאיש לא יראה אותה.
+        if to_user is not None:
+            log.info("הודעה אישית בצ'אט %s נדחתה (%s) — שולח לכולם",
+                     chat_id, e)
+            return await send(chat_id, text, is_group=is_group, markup=markup,
+                              clean_after=clean_after, thread_id=thread_id)
         if thread_id is not None:
             log.info("שליחה לנושא %s בצ'אט %s נכשלה (%s) — שולח בכללי",
                      thread_id, chat_id, e)
@@ -304,6 +330,11 @@ async def reply(msg: Message, text: str, markup=None) -> Optional[Message]:
         # ההפרש בין "הבוט לא עונה לי בפרטי" לבין לחיצה אחת — ולכן
         # הוא כאן ולא בתיעוד.
         markup = markup or _private_button(msg.chat.id, lang_of(msg))
+        # ואם גם זה לא — לפחות שרק הוא יראה את התשובה בקבוצה.
+        return await send(msg.chat.id, text, is_group=True, markup=markup,
+                          clean_after=clean_delay(msg.chat.id) or None,
+                          thread_id=_thread_of(msg),
+                          to_user=msg.from_user.id)
     delay = clean_delay(msg.chat.id) if is_group else 0
     if delay:
         _schedule_delete(msg.chat.id, msg.message_id, delay)
@@ -985,6 +1016,7 @@ async def _ban_spammer(msg: Message, why: str, lg: str, *,
     לא עובר דרך ‎policy‎ ולא מחכה לצבירת אותות. פרסום תוכן מיני של
     קטינים אינו "סיכון 0.98" שצריך להצטבר עם משהו — הוא הודעה אחת
     שדי בה."""
+    _keep_proof(msg, "ban" if not staff else "delete", why, 1.0)
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
     audit.log(msg.chat.id, "spam.illegal", target_id=msg.from_user.id,
@@ -1080,6 +1112,39 @@ def _flood_check(msg: Message, text: str):
         mention_max=_int(db.get(msg.chat.id, "flood_mentions", ""), AF_MENTIONS))
 
 
+def _keep_proof(msg: Message, action: str, reason: str,
+                risk: float = 0.0) -> None:
+    """צילום ההודעה לפני שהיא נמחקת.
+
+    נקרא **לפני** ‎delete_message‎ בכוונה: אחרי המחיקה אין ממה לצלם,
+    וזו בדיוק הסיבה שעד כה המנהל לא יכול היה לראות על מה הבוט העיף
+    מישהו. ‎file_id‎ נשמר ולא הקובץ."""
+    if msg.from_user is None or db.get(msg.chat.id, "keepproof", "1") != "1":
+        return
+    kind, fid = "", ""
+    ph = msg.photo
+    if ph:
+        s = vision.pick_size(ph)
+        kind, fid = "photo", (s.file_id if s is not None else "")
+    else:
+        for attr in ("video", "animation", "sticker", "document", "audio",
+                     "voice", "video_note"):
+            got = getattr(msg, attr, None)
+            if got is not None:
+                kind, fid = attr, getattr(got, "file_id", "") or ""
+                break
+    proof.add(msg.chat.id, msg.from_user.id, action=action, reason=reason,
+              risk=risk, text=(msg.text or msg.caption or ""),
+              media_kind=kind, media_id=fid, name=_name(msg),
+              message_id=msg.message_id)
+
+
+def _risk_of(label: str) -> float:
+    """הציון שמופיע בתוך ‎explain()‎ ("83% — ..."), או אפס."""
+    m = re.match(r"^(\d{1,3})%", label or "")
+    return (int(m.group(1)) / 100.0) if m else 0.0
+
+
 async def _enforce(msg: Message, action: str, duration: Optional[int],
                    label: str, log_action: str, *, severity: str = "low",
                    notice: Optional[str] = None) -> None:
@@ -1091,6 +1156,7 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
     # שיעביר אותו לכאן בטעות היה מוחק הודעה בלי שאף כלל נדרס.
     if action in ("off", "none"):
         return
+    _keep_proof(msg, action, f"{log_action} · {label}", _risk_of(label))
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
     audit.log(msg.chat.id, log_action, target_id=msg.from_user.id,
@@ -1110,7 +1176,8 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
                        T(msg, notice or "lock.violation", name=_name(msg),
                          label=label, n=out.warns),
                        clean_after=clean_delay(msg.chat.id) or None,
-                       thread_id=_thread_of(msg))
+                       thread_id=_thread_of(msg),
+                       to_user=msg.from_user.id)
         return
     if action in ("mute", "ban", "kick", "tmute", "tban"):
         kind = {"tmute": "mute", "tban": "ban"}.get(action, action)
@@ -1120,17 +1187,19 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
             await send(msg.chat.id,
                        T(msg, notice, name=_name(msg), label=label),
                        clean_after=clean_delay(msg.chat.id) or None,
-                       thread_id=_thread_of(msg))
+                       thread_id=_thread_of(msg),
+                       to_user=msg.from_user.id)
 
 
 async def _run_filter(msg: Message, fh) -> None:
     if fh.action in ("delete", "delete_reply"):
         with contextlib.suppress(TelegramAPIError):
             await bot.delete_message(msg.chat.id, msg.message_id)
-    if fh.action in ("reply", "delete_reply") and fh.content:
+    if fh.action in ("reply", "delete_reply") and (fh.content or fh.media_id):
         await send_content(msg.chat.id,
                            tpl.render_pick(fh.content, _ctx(msg)),
-                           None, None, "", thread_id=_thread_of(msg))
+                           fh.media_id or None, fh.media_kind or None,
+                           fh.buttons or "", thread_id=_thread_of(msg))
         return
     if fh.action in ("warn", "mute", "kick", "ban"):
         await _enforce(msg, fh.action, None, fh.trigger, "filter.triggered")
@@ -1193,9 +1262,12 @@ async def _greet(chat_id: int, user, key: str, joined: bool) -> None:
                       chat_id=chat_id, count=(n["c"] if n else 0),
                       language=lg, rules=db.get(chat_id, RULES_KEY, "") or "")
     secs = _int(db.get(chat_id, "greet_clean", "0"), 0)
+    # ברכה היא הודעה לאדם אחד. הודעת פרידה — לא: מי שעזב כבר אינו
+    # שם כדי לראות אותה, ולכן היא נשארת גלויה.
     await send_content(chat_id, tpl.render_pick(raw, ctx), None, None,
                        db.get(chat_id, key + "_buttons", "") or "",
-                       clean_after=secs or None)
+                       clean_after=secs or None,
+                       to_user=user.id if joined else None)
 
 
 # הצטרפות מגיעה משני מקומות, ולא מאחד. עד כה טופל רק הראשון:
@@ -1531,7 +1603,8 @@ def _content_of(msg: Message, args: str) -> tuple[str, Optional[str], Optional[s
 async def send_content(chat_id: int, text: str, media_id: Optional[str],
                        media_kind: Optional[str], buttons: str,
                        *, clean_after: Optional[int] = None,
-                       thread_id: Optional[int] = None):
+                       thread_id: Optional[int] = None,
+                       to_user: Optional[int] = None):
     """שולח הערה/ברכה/תגובת פילטר — טקסט, מדיה וכפתורים כאחד."""
     rows = parse_buttons(buttons)
     markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -1544,14 +1617,22 @@ async def send_content(chat_id: int, text: str, media_id: Optional[str],
                   "animation": bot.send_animation, "sticker": bot.send_sticker,
                   "document": bot.send_document, "audio": bot.send_audio,
                   "voice": bot.send_voice}[media_kind]
-            kw = {"reply_markup": markup, "message_thread_id": thread_id}
+            kw = {"reply_markup": markup, "message_thread_id": thread_id,
+                  "ephemeral_message_parameters": _ephemeral(chat_id, to_user)}
             if media_kind != "sticker":
                 kw["caption"] = text[:1024] or None
             m = await fn(chat_id, media_id, **kw)
         else:
-            m = await bot.send_message(chat_id, text, reply_markup=markup,
-                                       message_thread_id=thread_id)
+            m = await bot.send_message(
+                chat_id, text, reply_markup=markup,
+                message_thread_id=thread_id,
+                ephemeral_message_parameters=_ephemeral(chat_id, to_user))
     except TelegramAPIError as e:
+        if to_user is not None:
+            log.info("תוכן אישי בצ'אט %s נדחה (%s) — שולח לכולם", chat_id, e)
+            return await send_content(chat_id, text, media_id, media_kind,
+                                      buttons, clean_after=clean_after,
+                                      thread_id=thread_id)
         if thread_id is not None:
             log.info("שליחת תוכן לנושא %s נכשלה (%s) — שולח בכללי",
                      thread_id, e)
@@ -1654,10 +1735,16 @@ async def cmd_filter(msg: Message):
         await reply(msg, T(msg, "filter.usage"))
         return
     trigger = parts[1]
-    content, _, _ = _content_of(msg, parts[2] if len(parts) > 2 else "")
+    # ‎/filter יוטיוב‎ בתשובה לקובץ שומר את הקובץ עצמו — כלומר את
+    # ‎file_id‎ שלו. הקובץ נשאר אצל טלגרם, ולכן ארבעה ג'יגה אינם שונים
+    # מתמונה: אנחנו לא מאחסנים בייט אחד ואין מגבלת גודל בשליחה חוזרת.
+    content, media_id, media_kind = _content_of(
+        msg, parts[2] if len(parts) > 2 else "")
     if content.strip() and await _bad_html(msg, content):
         return
-    if not content.strip() or not filters.add(msg.chat.id, trigger, content):
+    if (not content.strip() and not media_id) or not filters.add(
+            msg.chat.id, trigger, content, media_id=media_id or "",
+            media_kind=media_kind or ""):
         await reply(msg, T(msg, "filter.usage"))
         return
     audit.log(msg.chat.id, "filter.add", actor_id=msg.from_user.id,
@@ -4541,6 +4628,33 @@ async def on_private_text(msg: Message):
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
 
 
+async def _undo_action(chat_id: int, it, by: int) -> bool:
+    """ביטול של מה שהבוט עשה: שחרור חסימה או השתקה, ומחיקת אזהרה.
+
+    זה הצד השני של היומן. בלי כפתור ביטול, "ראיתי שהוא טעה" נשאר
+    ידיעה; איתו זה תיקון בלחיצה — וזה ההבדל בין מנהל שסומך על הבוט
+    לבין מנהל שמכבה אותו."""
+    done = False
+    try:
+        if it.action in ("ban", "tban"):
+            await bot.unban_chat_member(chat_id, it.user_id,
+                                        only_if_banned=True)
+            done = True
+        elif it.action in ("mute", "tmute"):
+            await bot.restrict_chat_member(chat_id, it.user_id, OPEN_CHAT)
+            done = True
+    except TelegramAPIError as e:
+        log.warning("ביטול %s על %s נכשל: %s", it.action, it.user_id, e)
+        return False
+    if it.action == "warn":
+        done = bool(mod.unwarn(chat_id, it.user_id, by))
+    if done:
+        audit.log(chat_id, "proof.undo", actor_id=by, target_id=it.user_id,
+                  before=it.action, after="undone", source="button",
+                  severity="medium")
+    return done
+
+
 # ── הפאנל הפרטי ────────────────────────────────────────────────────────────
 def _stats(chat_id: int) -> dict:
     day = time.time() - 86400
@@ -5048,6 +5162,64 @@ async def on_callback(q: CallbackQuery):
         await q.answer()
         return
 
+    # ── יומן האכיפה ───────────────────────────────────────────────────
+    if name in ("proofs", "pf", "pfm", "pfu", "pfuser"):
+        if not perms.check(chat_id, q.from_user.id, "audit.read"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        when = (lambda t: time.strftime("%d/%m %H:%M", time.localtime(t)))
+
+        if name == "proofs":
+            page = max(0, _int(arg, 0))
+            items = proof.recent(chat_id, 11, page * 10)
+            await _edit(q, panel.proof_list(chat_id, items[:10], when, lg,
+                                            page, len(items) > 10))
+            await q.answer()
+            return
+
+        if name == "pfuser":
+            uid = _int(arg, 0)
+            items = proof.for_user(chat_id, uid, 10)
+            await _edit(q, panel.proof_list(chat_id, items, when, lg))
+            await q.answer()
+            return
+
+        it = proof.get(chat_id, _int(arg, 0))
+        if it is None:
+            await q.answer(i18n.t("proof.gone", lg), show_alert=True)
+            return
+
+        if name == "pfm":
+            # הקובץ עצמו, בפרטי. ‎file_id‎ תקף גם אחרי שההודעה נמחקה
+            # מהקבוצה, ולכן אין כאן שום עותק שלנו.
+            okay = await send_content(
+                q.from_user.id,
+                i18n.t("proof.why", lg, why=it.reason or "—"),
+                it.media_id, it.media_kind, "")
+            await q.answer(i18n.t("proof.send_media" if okay
+                                  else "proof.media_failed", lg),
+                           show_alert=not okay)
+            return
+
+        if name == "pfu":
+            if not perms.check(chat_id, q.from_user.id, "user.ban"):
+                await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+                return
+            okay = await _undo_action(chat_id, it, q.from_user.id)
+            await q.answer(i18n.t("proof.undone" if okay
+                                  else "proof.undo_failed", lg),
+                           show_alert=True)
+            await _edit(q, panel.proof_item(
+                chat_id, it, when(it.ts),
+                proof.count_user(chat_id, it.user_id), lg))
+            return
+
+        await _edit(q, panel.proof_item(
+            chat_id, it, when(it.ts),
+            proof.count_user(chat_id, it.user_id), lg))
+        await q.answer()
+        return
+
     sc = _screen_for(chat_id, name, arg)
     if sc is None:
         await q.answer(i18n.t("screen.unknown", lg))
@@ -5154,6 +5326,13 @@ async def upkeep_loop():
                          n, rpt.KEEP_CLOSED_DAYS)
         except Exception as e:
             log.warning("ניקוי דיווחים נכשל: %s", e)
+        try:
+            # ראיה בת חצי שנה אינה ראיה, היא מאגר.
+            n = proof.prune()
+            if n:
+                log.info("תחזוקה: נמחקו %d מקרים מיומן האכיפה", n)
+        except Exception as e:
+            log.warning("ניקוי יומן האכיפה נכשל: %s", e)
         await asyncio.sleep(86400)
 
 

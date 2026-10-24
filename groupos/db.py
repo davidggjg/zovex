@@ -310,6 +310,45 @@ MIGRATIONS: list[tuple[int, str]] = [
         PRIMARY KEY (chat_id, name)
     );
     """),
+    (5, """
+    -- יומן האכיפה: מה הבוט ראה ברגע שלפני המחיקה.
+    --
+    -- בלי זה אי אפשר לבדוק אותו. היומן רשם ש"הודעה נמחקה ומשתמש הועף"
+    -- ואת הסיבה במילה אחת, אבל ההודעה עצמה כבר לא קיימת — כלומר בדיוק
+    -- מה שמנהל רוצה לראות הוא הדבר היחיד שלא נשמר.
+    --
+    -- ‎media_id‎ הוא ‎file_id‎ של טלגרם, שנשאר תקף גם אחרי שההודעה נמחקה
+    -- מהצ'אט. לכן אפשר לשלוח למנהל את התמונה **עצמה** בפרטי, ולא תיאור
+    -- שלה — ובלי לאחסן אצלנו בייט אחד של מדיה.
+    --
+    -- נשמרות רק הודעות שהבוט פעל עליהן. הודעה שעברה בשלום אינה נכתבת
+    -- לשום מקום: זה ההבדל בין יומן אכיפה לבין ציתות.
+    CREATE TABLE evidence (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id      INTEGER NOT NULL,
+        user_id      INTEGER NOT NULL,
+        ts           REAL    NOT NULL,
+        action       TEXT    NOT NULL,
+        reason       TEXT    NOT NULL DEFAULT '',
+        risk         REAL    NOT NULL DEFAULT 0,
+        text         TEXT    NOT NULL DEFAULT '',
+        media_kind   TEXT    NOT NULL DEFAULT '',
+        media_id     TEXT    NOT NULL DEFAULT '',
+        name         TEXT    NOT NULL DEFAULT '',
+        message_id   INTEGER
+    );
+    CREATE INDEX idx_evidence_chat ON evidence (chat_id, ts DESC);
+    CREATE INDEX idx_evidence_user ON evidence (chat_id, user_id, ts DESC);
+
+    -- פילטר שמשיב בקובץ ולא רק בטקסט.
+    --
+    -- "מישהו כותב 'יוטיוב' והבוט מחזיר את מה שהמנהל הגדיר — כולל קובץ
+    -- של ארבעה ג'יגה." זה עובד כי מה שנשמר הוא ‎file_id‎ ולא הקובץ:
+    -- הקובץ יושב אצל טלגרם, ואין לו מגבלת גודל בשליחה חוזרת.
+    ALTER TABLE filters ADD COLUMN media_id TEXT;
+    ALTER TABLE filters ADD COLUMN media_kind TEXT;
+    ALTER TABLE filters ADD COLUMN buttons TEXT;
+    """),
 ]
 
 

@@ -137,6 +137,11 @@ class FilterHit:
     trigger: str
     action: str
     content: str
+    # פילטר יכול להשיב גם בקובץ. ‎media_id‎ הוא ‎file_id‎ של טלגרם,
+    # ולכן קובץ של ארבעה ג'יגה אינו שונה מתמונה: לא מאחסנים אותו.
+    media_id: str = ""
+    media_kind: str = ""
+    buttons: str = ""
 
 
 class Filters:
@@ -145,15 +150,23 @@ class Filters:
 
     def all(self, chat_id: int) -> list[dict]:
         return [dict(r) for r in self.db.q(
-            """SELECT id,trigger,match_kind,action,content FROM filters
-               WHERE chat_id=? AND enabled=1 ORDER BY id""", (chat_id,))]
+            """SELECT id,trigger,match_kind,action,content,media_id,
+                      media_kind,buttons
+               FROM filters WHERE chat_id=? AND enabled=1 ORDER BY id""",
+            (chat_id,))]
 
     def add(self, chat_id: int, trigger: str, content: str, *,
-            match_kind: str = "word", action: str = "reply") -> bool:
+            match_kind: str = "word", action: str = "reply",
+            media_id: str = "", media_kind: str = "",
+            buttons: str = "") -> bool:
         trigger = (trigger or "").strip().lower()
         if not trigger or match_kind not in MATCH_KINDS:
             return False
         if action not in FILTER_ACTIONS:
+            return False
+        # תוכן ריק לגמרי אינו פילטר — אבל קובץ בלי טקסט כן.
+        if not (content or "").strip() and not media_id \
+                and action in ("reply", "delete_reply"):
             return False
         if match_kind == "regex":
             try:
@@ -163,9 +176,12 @@ class Filters:
         self.db.run("DELETE FROM filters WHERE chat_id=? AND trigger=?",
                     (chat_id, trigger))
         self.db.run("""INSERT INTO filters
-                       (chat_id,trigger,match_kind,action,content,created_at)
-                       VALUES (?,?,?,?,?,?)""",
-                    (chat_id, trigger, match_kind, action, content, time.time()))
+                       (chat_id,trigger,match_kind,action,content,media_id,
+                        media_kind,buttons,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (chat_id, trigger, match_kind, action, content,
+                     media_id or "", media_kind or "", buttons or "",
+                     time.time()))
         return True
 
     def remove(self, chat_id: int, trigger: str) -> int:
@@ -204,5 +220,9 @@ def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
             p = re.escape(_bl.normalize(trg))
             hit = bool(p) and re.search(r"(?<!\w)" + p + r"(?!\w)", norm)
         if hit:
-            return FilterHit(trg, r.get("action", "reply"), r.get("content") or "")
+            return FilterHit(trg, r.get("action", "reply"),
+                             r.get("content") or "",
+                             r.get("media_id") or "",
+                             r.get("media_kind") or "",
+                             r.get("buttons") or "")
     return None

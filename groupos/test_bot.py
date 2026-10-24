@@ -51,7 +51,7 @@ import aiclient                                      # noqa: E402
 import aikeys                                        # noqa: E402
 from aiogram.enums import ChatMemberStatus                # noqa: E402
 from aiogram.filters import Command, CommandStart          # noqa: E402
-from aiogram.types import (Chat, ChatMemberLeft,           # noqa: E402
+from aiogram.types import (Chat, ChatMemberLeft, Document,  # noqa: E402
                            ChatMemberMember, ChatMemberUpdated,
                            Message, PhotoSize, User, Voice)
 import panel                                               # noqa: E402
@@ -68,6 +68,7 @@ DOWNLOADS: list[str] = []
 EDITED: list[str] = []
 ANSWERED: list[str] = []
 THREADS: list = []
+TO_USER: list = []
 AI_CALLS = {"n": 0}
 VERDICT = {"json": '{"category":"scam","confidence":0.9,"reason":"giveaway"}'}
 
@@ -98,6 +99,8 @@ class FakeBot:
     async def send_message(self, chat_id, text, reply_markup=None, **kw):
         SENT.append((chat_id, text, reply_markup is not None))
         THREADS.append(kw.get("message_thread_id"))
+        ep = kw.get("ephemeral_message_parameters")
+        TO_USER.append(getattr(ep, "receiver_user_id", None) if ep else None)
         return Message(message_id=9000 + len(SENT), date=dt.datetime.now(),
                        chat=Chat(id=chat_id, type="private"), text=text)
 
@@ -105,6 +108,8 @@ class FakeBot:
                          reply_markup=None, **kw):
         SENT.append((chat_id, f"[photo {media}] {caption or ''}",
                      reply_markup is not None))
+        ep = kw.get("ephemeral_message_parameters")
+        TO_USER.append(getattr(ep, "receiver_user_id", None) if ep else None)
         return Message(message_id=9000 + len(SENT), date=dt.datetime.now(),
                        chat=Chat(id=chat_id, type="private"),
                        text=caption or "")
@@ -918,12 +923,12 @@ async def test_quiet_group():
     real_send = B.send
 
     async def no_private(chat_id, text, *, is_group=True, markup=None,
-                         clean_after=None, thread_id=None):
+                         clean_after=None, thread_id=None, to_user=None):
         if not is_group:
             return None                    # טלגרם דוחה — אין שיחה פרטית
         return await real_send(chat_id, text, is_group=is_group,
                                markup=markup, clean_after=clean_after,
-                               thread_id=thread_id)
+                               thread_id=thread_id, to_user=to_user)
 
     B.send = no_private
     try:
@@ -1744,6 +1749,157 @@ async def test_hours_picker():
     B.db.set(CHAT, "hours", "")
 
 
+
+async def test_evidence_flow():
+    """האכיפה נשמרת עם ההודעה שגרמה לה, ואפשר לבטל אותה."""
+    section("יומן אכיפה")
+    B.perms.set_role(CHAT, BAD, "member")
+    B.db.set(CHAT, "keepproof", "1")
+    before = B.proof.count(CHAT)
+
+    bad = Message(
+        message_id=9990, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=BAD, is_bot=False, first_name="ספאמר"),
+        photo=[PhotoSize(file_id="BIGFILE", file_unique_id="UZ", width=1280,
+                         height=720, file_size=400_000)],
+        caption="💋 RAW SCANDAL FULLY UNLOCKED ✅ GRAB THIS LINK https://x.tv")
+    banned = []
+    real_apply = B.apply_action
+
+    async def fake_apply(chat_id, user_id, kind, duration, reason, by,
+                         source="policy"):
+        banned.append(kind)
+        return True
+
+    B.apply_action = fake_apply
+    try:
+        await B.on_group_message(bad)
+        ok("נשמר מקרה חדש", B.proof.count(CHAT) == before + 1,
+           f"{before} → {B.proof.count(CHAT)}")
+        it = B.proof.recent(CHAT, 1)[0]
+        ok("עם ההודעה שגרמה לו", "SCANDAL" in it.text, it.text[:40])
+        ok("ועם הקובץ עצמו", it.media_id == "BIGFILE" and it.has_media,
+           it.media_id)
+        ok("הסיבה נשמרה", "adult_ad" in it.reason or "spam" in it.reason,
+           it.reason)
+        ok("והפעולה", it.action == "ban" and banned == ["ban"], str(banned))
+
+        when = "עכשיו"
+        sc = panel.proof_item(CHAT, it, when,
+                              B.proof.count_user(CHAT, BAD), "he")
+        ok("מסך המקרה מציג את הטקסט", "SCANDAL" in sc.text, sc.text[:60])
+        ok("ויש כפתור לקובץ",
+           any("pfm" in c for c in sc.all_callbacks()),
+           str(sc.all_callbacks()))
+        ok("ויש כפתור ביטול",
+           any("pfu:" in c for c in sc.all_callbacks()),
+           str(sc.all_callbacks()))
+        lst = panel.proof_list(CHAT, B.proof.recent(CHAT, 10),
+                               lambda t: "x", "he")
+        ok("הרשימה נבנית", bool(lst.rows))
+        ok("ומזהי הכפתורים בטווח",
+           all(len(c.encode()) <= panel.CB_MAX for c in lst.all_callbacks()))
+
+        # ביטול: שחרור החסימה
+        unbanned = []
+
+        async def fake_unban(chat_id, user_id, only_if_banned=False):
+            unbanned.append(user_id)
+
+        real_unban = B.bot.unban_chat_member if hasattr(
+            B.bot, "unban_chat_member") else None
+        B.bot.unban_chat_member = fake_unban
+        try:
+            okay = await B._undo_action(CHAT, it, ADM)
+            ok("הביטול שחרר את המשתמש", okay and unbanned == [BAD],
+               str(unbanned))
+        finally:
+            if real_unban is not None:
+                B.bot.unban_chat_member = real_unban
+
+        # מתג כבוי = לא נשמרות ראיות
+        B.db.set(CHAT, "keepproof", "0")
+        n = B.proof.count(CHAT)
+        await B.on_group_message(Message(
+            message_id=9991, date=dt.datetime.now(),
+            chat=Chat(id=CHAT, type="supergroup", title="ק"),
+            from_user=User(id=BAD, is_bot=False, first_name="ספאמר"),
+            text="💋 RAW SCANDAL FULLY UNLOCKED GRAB THIS LINK https://x.tv"))
+        ok("מתג כבוי — לא נשמר", B.proof.count(CHAT) == n)
+    finally:
+        B.apply_action = real_apply
+        B.db.set(CHAT, "keepproof", "1")
+
+
+async def test_filter_file():
+    """פילטר שמשיב בקובץ: נשמר file_id, ונשלח כמו שהוא."""
+    section("פילטר עם קובץ")
+    B.perms.set_role(CHAT, ADM, "owner")
+    src = Message(message_id=9995, date=dt.datetime.now(),
+                  chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                  from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                  document=Document(file_id="HUGE4GB", file_unique_id="D1",
+                                    file_name="app.apk",
+                                    file_size=4_000_000_000))
+    cmd = Message(message_id=9996, date=dt.datetime.now(),
+                  chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                  from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                  text="/filter youtube הנה האפליקציה", reply_to_message=src)
+    await _out(B.cmd_filter, cmd)
+    fh = B.filters.check(CHAT, "youtube")
+    ok("הפילטר נשמר עם הקובץ",
+       fh is not None and fh.media_id == "HUGE4GB"
+       and fh.media_kind == "document", str(fh))
+
+    B.perms.set_role(CHAT, USER, "member")
+    before = len(SENT)
+    await B.on_group_message(msg("איפה youtube?", uid=USER, mid=9997))
+    out = " ".join(t for _c, t, _m in SENT[before:])
+    ok("והתשובה כוללת את הקובץ", "HUGE4GB" in out, out[:80])
+    B.filters.remove(CHAT, "youtube")
+
+
+
+async def test_ephemeral():
+    """הודעות שרק הנמען רואה: ברכה, ואזהרה."""
+    section("הודעות אישיות")
+    B.db.set(CHAT, "ephemeral", "1")
+    B.db.set(CHAT, "welcome", "ברוך הבא {first}")
+    B.db.set(CHAT, "welcome_on", "1")
+    newbie = User(id=4242, is_bot=False, first_name="חדש")
+    TO_USER.clear()
+    await B._greet(CHAT, newbie, B.WELCOME_KEY, True)
+    ok("הברכה נשלחה רק לנכנס", TO_USER and TO_USER[-1] == 4242,
+       str(TO_USER[-3:]))
+
+    TO_USER.clear()
+    await B._greet(CHAT, newbie, B.GOODBYE_KEY, False)
+    ok("הודעת פרידה נשארת גלויה",
+       not TO_USER or TO_USER[-1] is None, str(TO_USER[-3:]))
+
+    # מתג כבוי — הכול גלוי
+    B.db.set(CHAT, "ephemeral", "0")
+    TO_USER.clear()
+    await B._greet(CHAT, newbie, B.WELCOME_KEY, True)
+    ok("כשהמתג כבוי הברכה גלויה לכולם",
+       TO_USER and TO_USER[-1] is None, str(TO_USER[-3:]))
+
+    B.db.set(CHAT, "ephemeral", "1")
+    B.db.set(CHAT, "welcome", "")
+    B.db.set(CHAT, "silent", "0")
+    B.perms.set_role(CHAT, BAD, "member")
+    B.locks.set(CHAT, "url", "warn")
+    TO_USER.clear()
+    try:
+        await B.on_group_message(msg("בואו ל-t.me/spam", uid=BAD, mid=9998))
+        ok("הודעת האזהרה נשלחה רק למי שהוזהר",
+           BAD in TO_USER, str(TO_USER))
+    finally:
+        B.locks.set(CHAT, "url", "off")
+        B.db.set(CHAT, "silent", "1")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -1780,6 +1936,9 @@ async def main() -> int:
     await test_aggressive_paths()
     await test_forum_topics()
     await test_hours_picker()
+    await test_evidence_flow()
+    await test_filter_file()
+    await test_ephemeral()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
