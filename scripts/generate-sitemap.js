@@ -9,7 +9,12 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const MOVIES_PATH = path.join(ROOT, "public", "movies.json");
-const SITEMAP_PATH = path.join(ROOT, "public", "sitemap.xml");
+// SITEMAP_PATH נשלט מהסביבה, מאותה סיבה כמו DIST_DIR ב-prerender-routes.js:
+// הסייטמאפ נגזר מהקטלוג בלבד, ולכן אפשר לייצר אותו מחדש ישירות לתוך
+// תיקיית האתר החיה בלי בנייה ובלי פריסה. בלי זה הוא נכתב לתיקיית הקוד,
+// ונפרס רק כתוצר לוואי של בנייה מלאה — וכך הוא נשאר מאחור: 2,394 כתובות
+// במפה מול 3,374 דפים שנוצרו בפועל.
+const SITEMAP_PATH = process.env.SITEMAP_PATH || path.join(ROOT, "public", "sitemap.xml");
 
 // build:vps כבר מייצא SITE_URL, אבל איש לא קרא אותו — הערך היה
 // מקודד קשיח, והדפים שנוצרו הצביעו על אתר ה-GitHub Pages שנסגר.
