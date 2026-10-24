@@ -1555,7 +1555,7 @@ async def test_button_editing():
     # כל שדה מופיע במסך כלשהו, אחרת הוא נגיש רק בפקודה
     shown = set()
     B.db.set(CHAT, "shabbat", "1")
-    for name in ("texts", "nums", "aim"):
+    for name in ("texts", "nums", "aim", "reps"):
         for c in B._screen_for(CHAT, name, "").all_callbacks():
             parts = c.split(":")
             if len(parts) > 3 and parts[2] in ("ask", "clr"):
@@ -2148,6 +2148,77 @@ async def test_cmd_reply_stays():
     B.cmds.delete(CHAT, "films")
 
 
+
+async def test_replies_panel():
+    """הזרימה של Manybot, רק בפרטי ועם כמה הודעות: שם → שליחה → סיום."""
+    section("תגובות ופקודות בפאנל")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.filters.remove(CHAT, "fifa")
+
+    def pm(text="", mid=9500, **kw) -> Message:
+        return Message(message_id=mid, date=dt.datetime.now(),
+                       chat=Chat(id=ADM, type="private"),
+                       from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                       text=text or None, **kw)
+
+    # "➕ מילה" → שולחים שם → נפתח איסוף
+    B.waiting.start(ADM, CHAT, "newword")
+    out = await _out(B.on_private_text, pm("fifa", mid=9501))
+    ok("ההדק נוצר", "fifa" in B.filters.triggers(CHAT), out[:60])
+    ok("והאיסוף נפתח", B._pm_bulk(ADM) is not None)
+    ok("המסך מסביר מה לעשות", "fifa" in out, out[:80])
+
+    # שולחים שלוש הודעות — בלי שום פקודה
+    await _out(B.on_private_text, pm("ההסבר", mid=9502))
+    await _out(B.on_private_text, pm(mid=9503, photo=[
+        PhotoSize(file_id="SHOT", file_unique_id="S2", width=90, height=90)]))
+    out = await _out(B.on_private_text, pm(mid=9504, document=Document(
+        file_id="APK2", file_unique_id="D2", file_name="f.apk")))
+    ok("שלוש נאספו", B.filters.item_count(CHAT, "fifa") == 3,
+       str(B.filters.item_count(CHAT, "fifa")))
+    ok("והמונה מוצג", "3" in out, out[:80])
+
+    # הרשימה והפריט
+    words, commands = B._reps_lists(CHAT)
+    ok("ההדק ברשימה", any(w[0] == "fifa" and w[1] == 3 for w in words),
+       str(words))
+    sc = panel.replies_screen(CHAT, words, commands, "he")
+    ok("מסך הרשימה נבנה",
+       any("rep:f|fifa" in c for c in sc.all_callbacks()), str(sc.rows[:2]))
+    ok("ומזהי הכפתורים בטווח",
+       all(len(c.encode()) <= panel.CB_MAX for c in sc.all_callbacks()))
+    item = panel.reply_item(CHAT, "f", "fifa", 3, "he")
+    ok("מסך הפריט מציג כמה הודעות", "3" in item.text, item.text[:60])
+
+    # והחבר בקבוצה מקבל את הכול
+    B.perms.set_role(CHAT, USER, "member")
+    before = len(SENT)
+    await B.on_group_message(msg("fifa", uid=USER, mid=9505))
+    ok("שלוש הודעות בקבוצה", len(SENT) - before == 3,
+       str(len(SENT) - before))
+
+    # פקודה בעברית נדחית בהסבר, לא בשקט. לחיצה על "➕" סוגרת איסוף
+    # פעיל, וכאן זה נעשה במפורש כי אין לחיצה.
+    B._bulk_pm.clear()
+    B.waiting.start(ADM, CHAT, "newcmd")
+    out = await _out(B.on_private_text, pm("סרטים", mid=9506))
+    ok("שם פקודה לא חוקי מוסבר", bool(out) and B._pm_bulk(ADM) is None,
+       out[:60])
+
+    B._bulk_pm.clear()
+    B.waiting.start(ADM, CHAT, "newcmd")
+    await _out(B.on_private_text, pm("movies2", mid=9507))
+    ok("פקודה לטינית נוצרת", B.cmds.get(CHAT, "movies2") is not None)
+    await _out(B.on_private_text, pm("הנה הסרט", mid=9508))
+    ok("ונאספת לה הודעה",
+       B.filters.item_count(CHAT, "movies2", "cmd") == 1)
+
+    B.filters.remove(CHAT, "fifa")
+    B.cmds.delete(CHAT, "movies2")
+    B.filters.clear_items(CHAT, "movies2", "cmd")
+    B._bulk_pm.clear()
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2192,6 +2263,7 @@ async def main() -> int:
     await test_cmd_multi()
     await test_bulk_collect()
     await test_cmd_reply_stays()
+    await test_replies_panel()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

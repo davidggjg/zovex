@@ -102,7 +102,7 @@ class CustomCmds:
     def set(self, chat_id: int, name: str, content: str,
             by: Optional[int] = None, buttons: Optional[str] = None,
             admin_only: bool = False, media_id: Optional[str] = None,
-            media_kind: Optional[str] = None,
+            media_kind: Optional[str] = None, allow_empty: bool = False,
             now: Optional[float] = None) -> tuple[Optional[Cmd], Optional[str]]:
         """מוסיף או מעדכן. מחזיר ‎(פקודה, שגיאה)‎ — אחד מהם ‎None‎."""
         n = normalize(name)
@@ -112,7 +112,10 @@ class CustomCmds:
         content = (content or "").strip()
         # תמונה בלי כיתוב היא פקודה שלמה. הדרישה לתוכן היא דרישה
         # ל**משהו** שיישלח, ולא דווקא לטקסט.
-        if not content and not media_id:
+        #
+        # ‎allow_empty‎ הוא המקרה של פקודה שנוצרת כשלד: הפאנל שואל
+        # קודם לשם, ורק אחר כך אוסף את ההודעות שהיא תחזיר.
+        if not content and not media_id and not allow_empty:
             return None, "cc.empty"
         if len(content) > CONTENT_MAX:
             return None, "cc.too_long"

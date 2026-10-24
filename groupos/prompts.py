@@ -87,6 +87,10 @@ FIELDS: dict[str, Field] = {
     "captime": Field("captime", "captcha_time", NUMBER, lo=20, hi=900),
     "captries": Field("captries", "captcha_tries", NUMBER, lo=1, hi=10),
     "dupcount": Field("dupcount", "dup_count", NUMBER, lo=2, hi=20),
+    # שם של הדק חדש. הערך אינו נשמר כהגדרה — הוא **יוצר** משהו,
+    # ולכן ‎key‎ ריק והמטפל עושה את העבודה.
+    "newword": Field("newword", "", TEXT, maxlen=40, perm="filters.write"),
+    "newcmd": Field("newcmd", "", TEXT, maxlen=32, perm="customcmd.write"),
     # לוח השעות: הערך הוא טווח ליום אחד, והיום עובר ב-‎arg‎.
     "hrange": Field("hrange", "hours", SPEC, maxlen=20,
                     label="hours.typed", hint="hours.typed_hint"),

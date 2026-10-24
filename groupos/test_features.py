@@ -281,8 +281,11 @@ def test_spamguard() -> None:
 
 def test_prompts() -> None:
     section("עריכה בכפתורים")
+    # ‎newword‎ ו-‎newcmd‎ אינם שומרים הגדרה אלא **יוצרים** הדק,
+    # ולכן אין להם מפתח במסד.
     ok("כל שדה מצהיר על מפתח",
-       all(f.key for f in pr.FIELDS.values()))
+       all(f.key for n, f in pr.FIELDS.items()
+           if n not in ("newword", "newcmd")))
     ok("שמות השדות קצרים למזהה כפתור",
        all(len(n) <= 10 for n in pr.FIELDS), str(list(pr.FIELDS)))
     ok("כל שדה ברשימות קיים",

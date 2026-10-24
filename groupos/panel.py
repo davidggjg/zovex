@@ -114,8 +114,9 @@ def main_menu(chat_id: int, title: str, stats: dict,
         # נעילת שבת מוצעת בכפתור רק למי שבחר עברית. היא אינה חסומה
         # לאחרים — ‎/shabbat on‎ עובדת בכל שפה — אבל כפתור שמרבית
         # הקבוצות בעולם לא ישתמשו בו הוא רעש בתפריט.
-        [(i18n.t("menu.proofs", lang), cb(chat_id, "proofs")),
-         (i18n.t("menu.texts", lang), cb(chat_id, "texts"))],
+        [(i18n.t("menu.replies", lang), cb(chat_id, "reps")),
+         (i18n.t("menu.proofs", lang), cb(chat_id, "proofs"))],
+        [(i18n.t("menu.texts", lang), cb(chat_id, "texts"))],
         [(i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
         [(i18n.t("menu.ai", lang), cb(chat_id, "aim"))],
         ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
@@ -1054,3 +1055,57 @@ def proof_item(chat_id: int, it, when: str, others: int,
                   cb(chat_id, "pfuser", str(it.user_id)))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "proofs"))])
     return Screen("\n".join(body), rows)
+
+
+# ── תגובות ופקודות: המסך שמחליף את כל הפקודות ─────────────────────────────
+# ההשראה היא Manybot — "צור פקודה, שלח את מה שהיא תחזיר, סיים" — ומה
+# שחסר שם: אותו זרימה עובדת גם על **מילה** ולא רק על פקודה, היא
+# מחזירה כמה הודעות ולא אחת, והיא כולה בצ'אט הפרטי בלי לגעת בקבוצה.
+def replies_screen(chat_id: int, words: list[tuple[str, int]],
+                   commands: list[tuple[str, int]],
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """כל מה שהקבוצה עונה עליו: מילים ופקודות, עם מספר ההודעות."""
+    rows = []
+    for name, n in words[:20]:
+        rows.append([(f"💬 {name[:22]} · {n}", cb(chat_id, "rep", "f|" + name))])
+    for name, n in commands[:20]:
+        rows.append([(f"⌨️ /{name[:21]} · {n}", cb(chat_id, "rep", "c|" + name))])
+    rows.append([("➕ " + i18n.t("rep.new_word", lang),
+                  cb(chat_id, "ask", "newword")),
+                 ("➕ " + i18n.t("rep.new_cmd", lang),
+                  cb(chat_id, "ask", "newcmd"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    body = head("rep.title", lang) + "\n\n" + i18n.t("rep.hint", lang)
+    if not words and not commands:
+        body += "\n\n" + i18n.t("rep.empty", lang)
+    return Screen(body, rows)
+
+
+def reply_item(chat_id: int, kind: str, name: str, count: int,
+               lang: str = i18n.DEFAULT) -> Screen:
+    label = ("/" + name) if kind == "c" else name
+    body = (f"<b>{label}</b>\n\n"
+            + i18n.t("rep.count", lang, n=count) + "\n"
+            + i18n.t("rep.how", lang,
+                     what=i18n.t("rep.cmd_word" if kind == "c"
+                                 else "rep.word_word", lang), name=label))
+    rows = [
+        [("➕ " + i18n.t("rep.add_more", lang),
+          cb(chat_id, "repadd", f"{kind}|{name}"))],
+        [("👁 " + i18n.t("rep.preview", lang),
+          cb(chat_id, "repprev", f"{kind}|{name}")),
+         ("🗑 " + i18n.t("rep.delete", lang),
+          cb(chat_id, "repdel", f"{kind}|{name}"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "reps"))],
+    ]
+    return Screen(body, rows)
+
+
+def collecting_screen(chat_id: int, label: str, count: int,
+                      lang: str = i18n.DEFAULT) -> Screen:
+    """"שלח עכשיו". המסך שמחליף את ‎/filterbulk‎ ואת ‎/done‎."""
+    body = (i18n.t("rep.collecting", lang, name=label) + "\n\n"
+            + i18n.t("rep.collect_hint", lang) + "\n\n"
+            + i18n.t("rep.count", lang, n=count))
+    return Screen(body, [[("✅ " + i18n.t("rep.finish", lang),
+                           cb(chat_id, "repdone"))]])

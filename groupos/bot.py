@@ -1875,7 +1875,8 @@ async def cmd_cmdbulk(msg: Message):
         return
     name = customcmd.normalize(parts[1])
     if cmds.get(msg.chat.id, name) is None:
-        c, err = cmds.set(msg.chat.id, name, " ", by=msg.from_user.id)
+        c, err = cmds.set(msg.chat.id, name, "", by=msg.from_user.id,
+                          allow_empty=True)
         if err:
             await reply(msg, T(msg, err, name=tpl.esc(name),
                                max=customcmd.MAX_PER_CHAT))
@@ -4859,6 +4860,9 @@ async def on_private_text(msg: Message):
     if msg.from_user is None:
         return
     lg = lang_of(msg)
+    # איסוף פעיל קודם לכל: המנהל שולח עכשיו את ההודעות שההדק יחזיר.
+    if _bulk_pm and await _pm_take(msg):
+        return
     w = waiting.get(msg.from_user.id)
     if w is None:
         if (msg.text or "").startswith("/"):
@@ -4873,6 +4877,9 @@ async def on_private_text(msg: Message):
         await send(msg.chat.id, i18n.t("err.need_admin", lg), is_group=False)
         return
     raw = msg.text or msg.caption or ""
+    if w.field in ("newword", "newcmd"):
+        await _create_reply(msg, w.chat_id, w.field, raw)
+        return
     if w.field == "hrange":
         okay = _save_day_range(w.chat_id, w.arg, raw, msg.from_user.id)
         await send(msg.chat.id,
@@ -4938,6 +4945,120 @@ async def _undo_action(chat_id: int, it, by: int) -> bool:
                   before=it.action, after="undone", source="button",
                   severity="medium")
     return done
+
+
+# ── איסוף בצ'אט הפרטי ─────────────────────────────────────────────────────
+# ‎_bulk‎ ממופתח ב-‎(צ'אט, משתמש)‎ ועובד בתוך הקבוצה. בפרטי אין את
+# הקבוצה בהודעה עצמה, ולכן יש מיפוי נפרד: משתמש → מה הוא בונה ולאיזו
+# קבוצה. זה גם מה שמאפשר לבנות תגובה לקבוצה בלי לשלוח אליה ולו הודעה
+# אחת — וזה בדיוק מה שהפאנל הזה נועד לעשות.
+_bulk_pm: dict[int, tuple[int, str, str, float]] = {}
+
+
+def _pm_bulk(user_id: int) -> Optional[tuple[int, str, str]]:
+    got = _bulk_pm.get(user_id)
+    if got is None:
+        return None
+    chat_id, kind, trigger, since = got
+    if time.time() - since > BULK_TTL:
+        _bulk_pm.pop(user_id, None)
+        return None
+    return chat_id, kind, trigger
+
+
+def _rep_label(kind: str, name: str) -> str:
+    return ("/" + name) if kind == "c" else name
+
+
+def _rep_count(chat_id: int, kind: str, name: str) -> int:
+    """כמה הודעות ההדק מחזיר בפועל — כולל ההודעה שלו עצמו, אם יש."""
+    k = "cmd" if kind == "c" else "filter"
+    n = filters.item_count(chat_id, name, k)
+    if kind == "c":
+        c = cmds.get(chat_id, name)
+        own = bool(c and ((c.content or "").strip() or c.media_id))
+    else:
+        fh = filters.check(chat_id, name)
+        own = bool(fh and ((fh.content or "").strip() or fh.media_id))
+    return n + int(own)
+
+
+def _reps_lists(chat_id: int) -> tuple[list, list]:
+    words = [(t, _rep_count(chat_id, "f", t))
+             for t in filters.triggers(chat_id)]
+    commands = [(c.name, _rep_count(chat_id, "c", c.name))
+                for c in cmds.list(chat_id)]
+    return words, commands
+
+
+async def _pm_take(msg: Message) -> bool:
+    """הודעה בפרטי שנאספת להדק. ‎True‎ = נבלעה."""
+    got = _pm_bulk(msg.from_user.id)
+    if got is None:
+        return False
+    chat_id, kind, trigger = got
+    lg = lang_of(msg)
+    if not perms.check(chat_id, msg.from_user.id,
+                       "filters.write" if kind == "filter"
+                       else "customcmd.write"):
+        _bulk_pm.pop(msg.from_user.id, None)
+        await send(msg.chat.id, i18n.t("err.need_admin", lg), is_group=False)
+        return True
+    if filters.item_count(chat_id, trigger, kind) >= FILTER_ITEMS_MAX:
+        _bulk_pm.pop(msg.from_user.id, None)
+        await send(msg.chat.id,
+                   i18n.t("filter.too_many", lg, n=FILTER_ITEMS_MAX),
+                   is_group=False)
+        return True
+    text, mid, mkind = _collect_media(msg)
+    if not filters.add_item(chat_id, trigger, text, media_id=mid or "",
+                            media_kind=mkind or "", kind=kind):
+        return True
+    n = _rep_count(chat_id, "c" if kind == "cmd" else "f", trigger)
+    sc = panel.collecting_screen(
+        chat_id, _rep_label("c" if kind == "cmd" else "f", trigger), n, lg)
+    await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+    return True
+
+
+async def _create_reply(msg: Message, chat_id: int, field: str,
+                        raw: str) -> None:
+    """יצירת הדק חדש מהפאנל, ומיד אחריה מצב איסוף.
+
+    זו הזרימה של Manybot — "תן שם, ואז שלח מה שזה יחזיר" — בלי
+    לשלוח ולו הודעה אחת לקבוצה."""
+    lg = lang_of(msg)
+    name = (raw or "").strip().lower().lstrip("/")
+    if not name or len(name) > 40:
+        await send(msg.chat.id, i18n.t("field.too_long", lg), is_group=False)
+        return
+    if field == "newcmd":
+        err = customcmd.check_name(name)
+        if err:
+            await send(msg.chat.id, i18n.t(err, lg, name=tpl.esc(name),
+                                           max=customcmd.MAX_PER_CHAT),
+                       is_group=False)
+            return
+        name = customcmd.normalize(name)
+        if cmds.get(chat_id, name) is None:
+            _c, err = cmds.set(chat_id, name, "", by=msg.from_user.id,
+                               allow_empty=True)
+            if err:
+                await send(msg.chat.id,
+                           i18n.t(err, lg, name=tpl.esc(name),
+                                  max=customcmd.MAX_PER_CHAT), is_group=False)
+                return
+        store, kind = "cmd", "c"
+    else:
+        if name not in filters.triggers(chat_id):
+            filters.add(chat_id, name, "", allow_empty=True)
+        store, kind = "filter", "f"
+    audit.log(chat_id, "filter.add", actor_id=msg.from_user.id, after=name,
+              source="button", severity="info")
+    _bulk_pm[msg.from_user.id] = (chat_id, store, name, time.time())
+    sc = panel.collecting_screen(chat_id, _rep_label(kind, name),
+                                 _rep_count(chat_id, kind, name), lg)
+    await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
 
 
 # ── הפאנל הפרטי ────────────────────────────────────────────────────────────
@@ -5014,6 +5135,9 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
             "clean": db.get(chat_id, "greet_clean", "0"),
             "on": db.get(chat_id, "welcome_on", "1") == "1",
             "text": db.get(chat_id, WELCOME_KEY, "") or ""}, lg)
+    if name == "reps":
+        words, commands = _reps_lists(chat_id)
+        return panel.replies_screen(chat_id, words, commands, lg)
     if name == "aim":
         return panel.ai_screen(chat_id, {
             "ai": db.get(chat_id, "ai", "1") == "1",
@@ -5459,6 +5583,10 @@ async def on_callback(q: CallbackQuery):
             await q.answer(i18n.t("field.cleared", lg))
             return
         # ההמתנה היא בצ'אט הפרטי של הלוחץ, על הקבוצה שהוא מנהל.
+        #
+        # ואיסוף פעיל נסגר כאן: מי שלוחץ "ערוך" באמצע בנייה של הדק
+        # התכוון לערוך, וההודעה הבאה שלו הייתה נבלעת לתוך ההדק.
+        _bulk_pm.pop(q.from_user.id, None)
         waiting.start(q.from_user.id, chat_id, arg)
         sc = panel.waiting_screen(chat_id, arg,
                                   db.get(chat_id, f.key, "") or "", lg)
@@ -5524,6 +5652,80 @@ async def on_callback(q: CallbackQuery):
         await _edit(q, panel.proof_item(
             chat_id, it, when(it.ts),
             proof.count_user(chat_id, it.user_id), lg))
+        await q.answer()
+        return
+
+    # ── תגובות ופקודות ────────────────────────────────────────────────
+    if name in ("reps", "rep", "repadd", "repdel", "repprev", "repdone"):
+        if not perms.check(chat_id, q.from_user.id, "filters.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if name == "repdone":
+            _bulk_pm.pop(q.from_user.id, None)
+            name = "reps"
+        if name == "reps":
+            words, commands = _reps_lists(chat_id)
+            await _edit(q, panel.replies_screen(chat_id, words, commands, lg))
+            await q.answer()
+            return
+        kind, _, trg = arg.partition("|")
+        if kind not in ("f", "c") or not trg:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        store = "cmd" if kind == "c" else "filter"
+        exists = (cmds.get(chat_id, trg) is not None) if kind == "c" \
+            else (trg in filters.triggers(chat_id))
+        if not exists:
+            await q.answer(i18n.t("rep.gone", lg), show_alert=True)
+            return
+
+        if name == "repdel":
+            if kind == "c":
+                cmds.delete(chat_id, trg)
+                filters.clear_items(chat_id, trg, "cmd")
+            else:
+                filters.remove(chat_id, trg)
+            audit.log(chat_id, "filter.remove", actor_id=q.from_user.id,
+                      after=trg, source="button", severity="low")
+            words, commands = _reps_lists(chat_id)
+            await _edit(q, panel.replies_screen(chat_id, words, commands, lg))
+            await q.answer(i18n.t("rep.deleted", lg))
+            return
+
+        if name == "repadd":
+            waiting.clear(q.from_user.id)
+            _bulk_pm[q.from_user.id] = (chat_id, store, trg, time.time())
+            sc = panel.collecting_screen(
+                chat_id, _rep_label(kind, trg),
+                _rep_count(chat_id, kind, trg), lg)
+            await _edit(q, sc)
+            await q.answer()
+            return
+
+        if name == "repprev":
+            # התצוגה המקדימה היא מה שהקבוצה תקבל, בפרטי שלך.
+            if kind == "c":
+                c = cmds.get(chat_id, trg)
+                if c and ((c.content or "").strip() or c.media_id):
+                    await send_content(q.from_user.id, c.content or "",
+                                       c.media_id, c.media_kind,
+                                       c.buttons or "")
+            else:
+                fh = filters.check(chat_id, trg)
+                if fh and (fh.content.strip() or fh.media_id):
+                    await send_content(q.from_user.id, fh.content,
+                                       fh.media_id or None,
+                                       fh.media_kind or None, fh.buttons or "")
+            for extra in filters.items(chat_id, trg, store)[:FILTER_ITEMS_MAX]:
+                await send_content(q.from_user.id, extra["content"],
+                                   extra["media_id"] or None,
+                                   extra["media_kind"] or None,
+                                   extra["buttons"] or "")
+            await q.answer(i18n.t("rep.preview", lg))
+            return
+
+        await _edit(q, panel.reply_item(chat_id, kind, trg,
+                                        _rep_count(chat_id, kind, trg), lg))
         await q.answer()
         return
 
