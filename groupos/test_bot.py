@@ -1900,6 +1900,106 @@ async def test_ephemeral():
         B.db.set(CHAT, "silent", "1")
 
 
+
+async def test_welcome_visibility():
+    """מי רואה את ברכת הכניסה, וכמה זמן היא נשארת."""
+    section("ברכת כניסה")
+    B.db.set(CHAT, "welcome", "ברוך הבא {first}")
+    B.db.set(CHAT, "welcome_on", "1")
+    B.db.set(CHAT, "ephemeral", "1")
+    guy = User(id=4343, is_bot=False, first_name="חדש")
+
+    B.db.set(CHAT, "welcome_private", "1")
+    TO_USER.clear()
+    await B._greet(CHAT, guy, B.WELCOME_KEY, True)
+    ok("ברירת המחדל — רק הנכנס", TO_USER and TO_USER[-1] == 4343,
+       str(TO_USER[-2:]))
+
+    B.db.set(CHAT, "welcome_private", "0")
+    TO_USER.clear()
+    await B._greet(CHAT, guy, B.WELCOME_KEY, True)
+    ok("ומי שבוחר — כל הקבוצה רואה",
+       TO_USER and TO_USER[-1] is None, str(TO_USER[-2:]))
+
+    sc = B._screen_for(CHAT, "greet", "")
+    ok("מסך הברכה נבנה", sc is not None and bool(sc.rows))
+    ok("ויש בו את שתי האפשרויות",
+       any("gwho:1" in c for c in sc.all_callbacks())
+       and any("gwho:0" in c for c in sc.all_callbacks()),
+       str(sc.all_callbacks()))
+    ok("ובורר זמן מחיקה",
+       any("gclean" in c for c in sc.all_callbacks()))
+    ok("המסך אומר מי רואה",
+       "כל הקבוצה" in sc.text or "whole group" in sc.text, sc.text[:80])
+
+    # מחזור זמני המחיקה
+    cur = "0"
+    seen = []
+    for _ in range(len(panel.GREET_CLEAN_CYCLE)):
+        cur = panel.next_in_cycle(panel.GREET_CLEAN_CYCLE, cur)
+        seen.append(cur)
+    ok("מחזור המחיקה חוזר להתחלה", seen[-1] == "0", str(seen))
+    ok("ויש בו דקות ושעות", "120" in seen and "3600" in seen, str(seen))
+    B.db.set(CHAT, "welcome_private", "1")
+    B.db.set(CHAT, "welcome", "")
+
+
+async def test_filter_multi():
+    """פילטר שמחזיר כמה הודעות — בדיוק כמו שהמנהל שמר."""
+    section("פילטר בכמה הודעות")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.filters.remove(CHAT, "youtube")
+
+    doc = Message(message_id=9900, date=dt.datetime.now(),
+                  chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                  from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                  document=Document(file_id="APK", file_unique_id="D9",
+                                    file_name="a.apk"))
+    await _out(B.cmd_filter, Message(
+        message_id=9901, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        text="/filter youtube הנה הקובץ", reply_to_message=doc))
+
+    pic = Message(message_id=9902, date=dt.datetime.now(),
+                  chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                  from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                  photo=[PhotoSize(file_id="PIC", file_unique_id="P9",
+                                   width=90, height=90)])
+    out = await _out(B.cmd_filteradd, Message(
+        message_id=9903, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        text="/filteradd youtube", reply_to_message=pic))
+    ok("פריט שני נוסף", B.filters.item_count(CHAT, "youtube") == 1, out[:60])
+
+    await _out(B.cmd_filteradd, Message(
+        message_id=9904, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+        text="/filteradd youtube וזה ההסבר"))
+    ok("ושלישי", B.filters.item_count(CHAT, "youtube") == 2)
+
+    out = await _out(B.cmd_filteradd, msg("/filteradd nosuch משהו", mid=9905))
+    ok("הדק שלא קיים נדחה", "nosuch" in out, out[:60])
+
+    B.perms.set_role(CHAT, USER, "member")
+    before = len(SENT)
+    await B.on_group_message(msg("youtube", uid=USER, mid=9906))
+    sent = [t for _c, t, _m in SENT[before:]]
+    ok("שלוש הודעות חזרו", len(sent) == 3, str(sent))
+    ok("בסדר שנשמר",
+       "APK" in sent[0] and "PIC" in sent[1] and "ההסבר" in sent[2],
+       str(sent))
+
+    n = B.filters.clear_items(CHAT, "youtube")
+    ok("אפשר לאפס את הנוספות",
+       n == 2 and B.filters.item_count(CHAT, "youtube") == 0)
+    B.filters.remove(CHAT, "youtube")
+    ok("ומחיקת הפילטר מנקה גם אותן",
+       B.filters.item_count(CHAT, "youtube") == 0)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -1939,6 +2039,8 @@ async def main() -> int:
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
+    await test_welcome_visibility()
+    await test_filter_multi()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

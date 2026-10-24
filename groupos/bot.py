@@ -134,6 +134,8 @@ AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 8, 10, 4, 8
 # תקרת מחיקה בפעולה אחת. כל מחיקה היא קריאת API, ומחיקה של 5000
 # הודעות תתקע את הבוט לכל הקבוצות האחרות לדקות.
 PURGE_MAX = 200
+# תקרת הודעות בתשובה אחת של פילטר. מעבר לזה זו הצפה ולא תשובה.
+FILTER_ITEMS_MAX = 9
 ADMIN_TTL = 300
 
 
@@ -1196,10 +1198,19 @@ async def _run_filter(msg: Message, fh) -> None:
         with contextlib.suppress(TelegramAPIError):
             await bot.delete_message(msg.chat.id, msg.message_id)
     if fh.action in ("reply", "delete_reply") and (fh.content or fh.media_id):
+        # ההודעה הראשונה, ואז כל מה שהמנהל צירף — לפי הסדר שבו שמר.
+        # שלוש הודעות נשארות שלוש הודעות.
         await send_content(msg.chat.id,
                            tpl.render_pick(fh.content, _ctx(msg)),
                            fh.media_id or None, fh.media_kind or None,
                            fh.buttons or "", thread_id=_thread_of(msg))
+        for extra in filters.items(msg.chat.id, fh.trigger)[:FILTER_ITEMS_MAX]:
+            await send_content(msg.chat.id,
+                               tpl.render_pick(extra["content"], _ctx(msg)),
+                               extra["media_id"] or None,
+                               extra["media_kind"] or None,
+                               extra["buttons"] or "",
+                               thread_id=_thread_of(msg))
         return
     if fh.action in ("warn", "mute", "kick", "ban"):
         await _enforce(msg, fh.action, None, fh.trigger, "filter.triggered")
@@ -1264,10 +1275,16 @@ async def _greet(chat_id: int, user, key: str, joined: bool) -> None:
     secs = _int(db.get(chat_id, "greet_clean", "0"), 0)
     # ברכה היא הודעה לאדם אחד. הודעת פרידה — לא: מי שעזב כבר אינו
     # שם כדי לראות אותה, ולכן היא נשארת גלויה.
+    # ‎welcome_private‎ ולא המתג הגלובלי: יש מנהלים שרוצים דווקא
+    # שכל הקבוצה תראה מי נכנס, וזו בחירה ולא תופעת לוואי של הגדרה
+    # אחרת. כשהברכה גלויה לכולם, ‎greet_clean‎ קובע כמה זמן היא
+    # נשארת — הכרזה על כל נכנס בקבוצה פעילה היא בדיוק הרעש שהבוט
+    # הזה נועד למנוע.
+    private = joined and db.get(chat_id, "welcome_private", "1") == "1"
     await send_content(chat_id, tpl.render_pick(raw, ctx), None, None,
                        db.get(chat_id, key + "_buttons", "") or "",
                        clean_after=secs or None,
-                       to_user=user.id if joined else None)
+                       to_user=user.id if private else None)
 
 
 # הצטרפות מגיעה משני מקומות, ולא מאחד. עד כה טופל רק הראשון:
@@ -1750,6 +1767,58 @@ async def cmd_filter(msg: Message):
     audit.log(msg.chat.id, "filter.add", actor_id=msg.from_user.id,
               after=trigger, severity="info")
     await reply(msg, T(msg, "filter.saved", trigger=trigger))
+
+
+@dp.message(Command("filteradd"))
+@needs("filters.write")
+async def cmd_filteradd(msg: Message):
+    """‎/filteradd יוטיוב‎ בתשובה להודעה — מצרף אותה לתשובה של ההדק.
+
+    כך "יוטיוב" יכול להחזיר קובץ, הסבר ותמונה — שלוש הודעות, בסדר
+    שבו המנהל שמר אותן."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "filter.add_usage"))
+        return
+    trigger = parts[1].lower()
+    if trigger not in filters.triggers(msg.chat.id):
+        await reply(msg, T(msg, "filter.missing", trigger=trigger))
+        return
+    content, media_id, media_kind = _content_of(
+        msg, parts[2] if len(parts) > 2 else "")
+    if content.strip() and await _bad_html(msg, content):
+        return
+    if filters.item_count(msg.chat.id, trigger) >= FILTER_ITEMS_MAX:
+        await reply(msg, T(msg, "filter.too_many", n=FILTER_ITEMS_MAX))
+        return
+    if not filters.add_item(msg.chat.id, trigger, content,
+                            media_id=media_id or "",
+                            media_kind=media_kind or ""):
+        await reply(msg, T(msg, "filter.add_usage"))
+        return
+    audit.log(msg.chat.id, "filter.add", actor_id=msg.from_user.id,
+              after=f"{trigger}+", severity="info")
+    await reply(msg, T(msg, "filter.added_item", trigger=trigger,
+                       n=filters.item_count(msg.chat.id, trigger) + 1))
+
+
+@dp.message(Command("filteritems"))
+@needs("filters.write")
+async def cmd_filteritems(msg: Message):
+    """כמה הודעות ההדק מחזיר, ואיך לאפס את הנוספות."""
+    touch(msg)
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await reply(msg, T(msg, "filter.items_usage"))
+        return
+    trigger = parts[1].lower()
+    if len(parts) > 2 and parts[2].strip().lower() in ("clear", "נקה"):
+        n = filters.clear_items(msg.chat.id, trigger)
+        await reply(msg, T(msg, "filter.items_cleared", n=n))
+        return
+    await reply(msg, T(msg, "filter.items", trigger=trigger,
+                       n=filters.item_count(msg.chat.id, trigger) + 1))
 
 
 @dp.message(Command("stop"))
@@ -4723,6 +4792,12 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
                 (db.get(chat_id, prompts.FIELDS[n].key, "") or "")
                 for n in prompts.NUMBER_FIELDS}
         return panel.numbers_screen(chat_id, vals, lg)
+    if name == "greet":
+        return panel.welcome_screen(chat_id, {
+            "private": db.get(chat_id, "welcome_private", "1") == "1",
+            "clean": db.get(chat_id, "greet_clean", "0"),
+            "on": db.get(chat_id, "welcome_on", "1") == "1",
+            "text": db.get(chat_id, WELCOME_KEY, "") or ""}, lg)
     if name == "aim":
         return panel.ai_screen(chat_id, {
             "ai": db.get(chat_id, "ai", "1") == "1",
@@ -5131,6 +5206,22 @@ async def on_callback(q: CallbackQuery):
         return
 
     # ── עריכה בלחיצה: ‎ask‎ פותח המתנה, ‎clr‎ מוחק, ‎cancel‎ מבטל ──────
+    if name in ("gwho", "gclean"):
+        if not perms.check(chat_id, q.from_user.id, "welcome.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if name == "gwho":
+            db.set(chat_id, "welcome_private", "1" if arg == "1" else "0",
+                   q.from_user.id)
+        else:
+            db.set(chat_id, "greet_clean",
+                   panel.next_in_cycle(panel.GREET_CLEAN_CYCLE,
+                                       db.get(chat_id, "greet_clean", "0")),
+                   q.from_user.id)
+        await _edit(q, _screen_for(chat_id, "greet", ""))
+        await q.answer(i18n.t("saved", lg))
+        return
+
     if name in ("ask", "clr", "cancel"):
         if name == "cancel":
             waiting.clear(q.from_user.id)

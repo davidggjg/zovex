@@ -349,6 +349,29 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE filters ADD COLUMN media_kind TEXT;
     ALTER TABLE filters ADD COLUMN buttons TEXT;
     """),
+    (6, """
+    -- פילטר שמשיב ב**כמה** הודעות ולא באחת.
+    --
+    -- "אם המנהל הגדיר שזה יחזיר שלוש הודעות — שיחזיר שלוש." קובץ,
+    -- הסבר ותמונה הם שלוש הודעות נפרדות בטלגרם, ולדחוס אותן לאחת
+    -- פירושו לאבד בדיוק את מה שהמנהל בנה.
+    --
+    -- טבלה נפרדת ולא עמודות נוספות ב-filters: מספר הפריטים אינו
+    -- ידוע מראש, והשורה ב-filters נשארת מה שהיא — הגדרת ההדק.
+    -- ‎seq‎ שומר את הסדר שבו נשלחו, כי סדר הוא חלק מהתשובה.
+    CREATE TABLE filter_items (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id      INTEGER NOT NULL,
+        trigger      TEXT    NOT NULL,
+        seq          INTEGER NOT NULL DEFAULT 0,
+        content      TEXT    NOT NULL DEFAULT '',
+        media_id     TEXT    NOT NULL DEFAULT '',
+        media_kind   TEXT    NOT NULL DEFAULT '',
+        buttons      TEXT    NOT NULL DEFAULT '',
+        created_at   REAL    NOT NULL
+    );
+    CREATE INDEX idx_fitems ON filter_items (chat_id, trigger, seq);
+    """),
 ]
 
 

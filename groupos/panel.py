@@ -284,6 +284,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("strict",       "1", "sw.strict"),
     ("keepproof",    "1", "sw.keepproof"),
     ("ephemeral",    "1", "sw.ephemeral"),
+    ("welcome_private", "1", "greet.private_sw"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )
@@ -413,6 +414,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("clear",    "notes.write"),
     ("filter",   "filters.write"),
     ("stop",     "filters.write"),
+    ("filteradd", "filters.write"),
+    ("filteritems", "filters.write"),
     ("filters",  "settings.read"),
     ("addblock", "blocklist.write"),
     ("rmblock",  "blocklist.write"),
@@ -605,7 +608,8 @@ HELP_CATS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
                      "warnings", "warnlimit", "resetwarns", "setwarnmode")),
     ("locks", "🔒", ("lock", "unlock", "locks", "locktypes", "lockdown",
                      "silent")),
-    ("filters", "🧹", ("filter", "stop", "stopall", "filters", "addblock",
+    ("filters", "🧹", ("filter", "filteradd", "filteritems", "stop",
+                       "stopall", "filters", "addblock",
                        "rmblock", "blocklist", "rmblockall", "blockmode",
                        "linkcheck")),
     ("notes", "📝", ("save", "get", "notes", "clear", "addcmd", "delcmd",
@@ -854,6 +858,8 @@ def texts_screen(chat_id: int, values: dict, lang: str = i18n.DEFAULT,
              cb(chat_id, "ask", name)),
             (i18n.t("btn.clear", lang), cb(chat_id, "clr", name)),
         ])
+    rows.append([("👋 " + i18n.t("greet.title", lang),
+                  cb(chat_id, "greet"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(head("texts.title", lang) + "\n\n"
                   + i18n.t("texts.hint", lang), rows)
@@ -876,6 +882,54 @@ def numbers_screen(chat_id: int, values: dict,
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(head("nums.title", lang) + "\n\n"
                   + i18n.t("nums.hint", lang), rows)
+
+
+GREET_CLEAN_CYCLE = ("0", "30", "120", "600", "3600")
+
+
+def welcome_screen(chat_id: int, state: dict,
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """ברכת הכניסה: הנוסח, מי רואה אותה, וכמה זמן היא נשארת.
+
+    "יש מנהלים שרוצים שכל הקבוצה תראה" — ולכן זו בחירה ולא התנהגות.
+    וכשבוחרים שכולם יראו, השאלה הבאה היא כמה זמן היא נשארת: הכרזה
+    על כל נכנס בקבוצה פעילה היא בדיוק הרעש שהבוט הזה נועד למנוע."""
+    secs = state.get("clean", "0")
+    who = "shown.me" if state.get("private") else "shown.all"
+    body = [head("greet.title", lang), "",
+            i18n.t("greet.who", lang, who=i18n.t(who, lang))]
+    if secs != "0":
+        body.append(i18n.t("greet.clean_on", lang,
+                           what=_secs_label(secs, lang)))
+    else:
+        body.append(i18n.t("greet.clean_off", lang))
+    text = (state.get("text") or "").strip()
+    body += ["", (f"<blockquote>{_tpl.esc(text[:300])}</blockquote>"
+                  if text else i18n.t("greet.no_text", lang))]
+    rows = [
+        [(("● " if state.get("private") else "") + i18n.t("shown.me", lang),
+          cb(chat_id, "gwho", "1")),
+         (("● " if not state.get("private") else "") + i18n.t("shown.all", lang),
+          cb(chat_id, "gwho", "0"))],
+        [(i18n.t("greet.clean_btn", lang,
+                 what=_secs_label(secs, lang)), cb(chat_id, "gclean"))],
+        [("✏️ " + i18n.t("field.welcome", lang), cb(chat_id, "ask", "welcome")),
+         (("🟢 " if state.get("on") else "⚪ ") + i18n.t("sw.welcome", lang),
+          cb(chat_id, "sw", "welcome_on"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "texts"))],
+    ]
+    return Screen("\n".join(body), rows)
+
+
+def _secs_label(secs: str, lang: str = i18n.DEFAULT) -> str:
+    n = int(secs or 0)
+    if n <= 0:
+        return i18n.t("greet.forever", lang)
+    if n % 3600 == 0:
+        return i18n.t("time.hours", lang, n=n // 3600)
+    if n % 60 == 0:
+        return i18n.t("time.minutes", lang, n=n // 60)
+    return i18n.t("time.seconds", lang, n=n)
 
 
 def ai_screen(chat_id: int, state: dict, lang: str = i18n.DEFAULT) -> Screen:
