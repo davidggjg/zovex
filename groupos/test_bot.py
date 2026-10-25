@@ -2659,8 +2659,59 @@ async def test_fresh_user_start():
     ok("והבורר מסמן את הנוכחית",
        any("●" in t for row in picker.rows for t, _ in row), str(picker.rows))
     ok("ויש בו חזרה", any("g:0:home" in c for c in picker.all_callbacks()))
+
+    # ‎/lang‎ בפרטי פותחת את הבורר במקום להידחות
+    pm2 = Message(message_id=9101, date=dt.datetime.now(),
+                  chat=Chat(id=fresh, type="private"),
+                  from_user=User(id=fresh, is_bot=False, first_name="New"),
+                  text="/lang")
+    out2 = await _out(B.cmd_lang, pm2)
+    ok("/lang בפרטי פותחת בורר", "language" in out2.lower(), out2[:60])
     B.db.change("DELETE FROM settings WHERE chat_id=? AND key='lang'",
                 (fresh,))
+
+
+
+async def test_access_revoked():
+    """מי שהוסר מניהול מאבד גישה מיד — גם אם המסד עוד זוכר אותו."""
+    section("גישה אחרי הסרה מניהול")
+    gone = 717171
+    B.perms.set_role(CHAT, gone, "admin")
+    ok("במסד הוא מנהל", B.perms.rank_of(CHAT, gone) >= B.RANK["admin"])
+    ok("והקבוצה מופיעה לו ברשימה",
+       any(c == CHAT for c, _t in B.my_groups(gone)))
+
+    # טלגרם אומרת שהוא כבר לא מנהל. ‎sync_admins‎ עצמה מוחלפת
+    # בהרצת הבדיקות, ולכן נבדקת כאן הפונקציה שהיא קוראת לה.
+    B._admin_cache.clear()
+    try:
+        B.revoke_missing_admins(CHAT, {ADM: "owner"})
+        ok("הסנכרון מוריד אותו לחבר",
+           B.perms.role_of(CHAT, gone) == "member",
+           B.perms.role_of(CHAT, gone))
+        ok("ונרשם ביומן",
+           any(r["action"] == "admin.revoked" for r in B.audit.recent(CHAT, 5)),
+           str([r["action"] for r in B.audit.recent(CHAT, 5)][:4]))
+        ok("אין לו גישה", not await B._has_access(CHAT, gone))
+        ok("והבדיקה מחזירה כמה הורדו",
+           B.revoke_missing_admins(CHAT, {ADM: "owner"}) == 0)
+        ok("והקבוצה נעלמה מהרשימה שלו",
+           not await B.my_groups_live(gone),
+           str(await B.my_groups_live(gone)))
+        ok("ולבעלים כן יש", await B._has_access(CHAT, ADM))
+        ok("והקבוצה אצלו ברשימה",
+           any(c == CHAT for c, _t in await B.my_groups_live(ADM)))
+
+        # ותפקיד ידני נמוך אינו נמחק
+        helper = 818181
+        B.perms.set_role(CHAT, helper, "helper")
+        B.revoke_missing_admins(CHAT, {ADM: "owner"})
+        ok("עוזר שהוגדר ידנית נשאר",
+           B.perms.role_of(CHAT, helper) == "helper",
+           B.perms.role_of(CHAT, helper))
+    finally:
+        B._admin_cache.clear()
+        B.perms.set_role(CHAT, ADM, "owner")
 
 
 async def main() -> int:
@@ -2702,6 +2753,7 @@ async def main() -> int:
     await test_hours_timezone()
     await test_service_cleaning()
     await test_fresh_user_start()
+    await test_access_revoked()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

@@ -405,8 +405,51 @@ async def sync_admins(chat_id: int, force: bool = False) -> dict[int, str]:
         cur = perms.role_of(chat_id, uid)
         if RANK.get(cur, 0) < RANK[role]:
             perms.set_role(chat_id, uid, role)
+    revoke_missing_admins(chat_id, out)
     _admin_cache[chat_id] = (time.time(), out)
     return out
+
+
+def revoke_missing_admins(chat_id: int, current: dict[int, str]) -> int:
+    """מוריד מניהול כל מי שאינו ברשימת המנהלים של טלגרם. מחזיר כמה.
+
+    זה היה חור אמיתי: הסנכרון רק **העלה** תפקידים, ולכן מנהל שהוסר
+    בטלגרם — או שעזב את הקבוצה — נשאר מנהל אצלנו לנצח והמשיך לנהל
+    אותה מהפאנל הפרטי. טלגרם היא מקור האמת לניהול, ומקור אמת שלא
+    מוריד אינו מקור אמת.
+
+    ‎helper‎ ו-‎moderator‎ שהוענקו ידנית נשארים: הם נמוכים מ-‎admin‎
+    ואינם נגזרים מרשימת המנהלים של טלגרם."""
+    gone = 0
+    for row in db.q("""SELECT user_id, role FROM members
+                       WHERE chat_id=? AND role IN
+                         ('owner','super_admin','admin')""", (chat_id,)):
+        uid = row["user_id"]
+        if uid in current or uid == _me_id:
+            continue
+        perms.set_role(chat_id, uid, "member")
+        audit.log(chat_id, "admin.revoked", target_id=uid, actor_kind="bot",
+                  before=row["role"], after="member", source="sync",
+                  severity="medium")
+        log.info("הוסרה הרשאת ניהול של %s ב-%s (אינו מנהל בטלגרם)",
+                 uid, chat_id)
+        gone += 1
+    return gone
+
+
+async def _has_access(chat_id: int, user_id: int) -> bool:
+    """האם האדם הזה רשאי **עכשיו** לנהל את הקבוצה הזאת.
+
+    נבדק מול טלגרם ולא רק מול המסד, כי זו בדיוק השאלה שתשובה
+    ישנה עליה היא פרצה: מנהל שהוסר אמור לאבד גישה באותו רגע, ולא
+    כשמישהו במקרה יכתוב בקבוצה.
+
+    התשובה ממוטמעת לחמש דקות (‎ADMIN_TTL‎), ולכן לחיצה על תפריט
+    אינה קריאת רשת בכל פעם."""
+    if chat_id == 0:
+        return True
+    await sync_admins(chat_id)
+    return perms.rank_of(chat_id, user_id) >= RANK["helper"]
 
 
 # ההרשאות שהבוט צריך בקבוצה כדי לאכוף משהו. בלעדיהן הוא יזהה הפרה
@@ -451,6 +494,19 @@ async def group_status(chat_id: int, lg: str) -> str:
         return i18n.t("status.missing", lg,
                       list="\n".join("• " + i18n.t(k, lg) for k in missing))
     return i18n.t("status.ready", lg, n=len(admins))
+
+
+async def my_groups_live(user_id: int) -> list[tuple[int, str]]:
+    """הקבוצות שהאדם מנהל **באמת**, אחרי אימות מול טלגרם.
+
+    הרשימה במסד היא נקודת מוצא בלבד: היא מתעדכנת כשמישהו כותב
+    בקבוצה, ובקבוצה שקטה היא יכולה להיות בת חודש. מי שהוסר מניהול
+    ראה את הקבוצה ברשימה שלו והמשיך לנהל אותה."""
+    out = []
+    for chat_id, title in my_groups(user_id):
+        if await _has_access(chat_id, user_id):
+            out.append((chat_id, title))
+    return out
 
 
 def my_groups(user_id: int) -> list[tuple[int, str]]:
@@ -1642,8 +1698,8 @@ async def cmd_start(msg: Message):
         if lang.chosen(msg.chat.id) is None:
             sc = panel.welcome_screen()
         else:
-            sc = panel.home(my_groups(msg.from_user.id), lang_of(msg),
-                           _bot_username)
+            sc = panel.home(await my_groups_live(msg.from_user.id),
+                           lang_of(msg), _bot_username)
         # ‎/start help‎ — כך מגיע מי שלחץ על הכפתור בקבוצה. הוא ביקש
         # עזרה, ולכן הוא יקבל עזרה ולא את מסך הבית.
         payload = ((msg.text or "").split(maxsplit=1) + [""])[1].strip()
@@ -4643,10 +4699,15 @@ async def cmd_unpin(msg: Message):
 
 @dp.message(Command("lang"))
 async def cmd_lang(msg: Message):
-    """בורר השפה. בקבוצה — למנהלים בלבד, כי זה משנה לכולם."""
+    """בורר השפה. בקבוצה — למנהלים בלבד, כי זה משנה לכולם.
+
+    בפרטי היא משנה את השפה **של האדם** ולא של קבוצה, ולכן היא
+    עובדת שם ולא נדחית: עד כה מי שבחר שפה פעם אחת לא יכול היה
+    לשנות אותה בשום דרך, לא בכפתור ולא בפקודה."""
     touch(msg)
     if msg.chat.type == ChatType.PRIVATE:
-        await reply(msg, T(msg, "err.group_only"))
+        sc = panel.welcome_screen(lang.for_chat(msg.chat.id))
+        await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         return
     await sync_admins(msg.chat.id)
     if not perms.check(msg.chat.id, msg.from_user.id, "settings.write"):
@@ -5053,7 +5114,8 @@ async def on_private_text(msg: Message):
     if w is None:
         if (msg.text or "").startswith("/"):
             return
-        sc = panel.home(my_groups(msg.from_user.id), lg, _bot_username)
+        sc = panel.home(await my_groups_live(msg.from_user.id), lg,
+                       _bot_username)
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         return
 
@@ -5425,6 +5487,20 @@ async def on_callback(q: CallbackQuery):
     lg = (lang.for_chat(chat_id) if chat_id
           else i18n.normalize(q.from_user.language_code))
 
+    # שער אחד לכל פעולה על קבוצה. קודם כל בדיקת הרשאה ישבה בתוך
+    # הענפים עצמם, מול המסד — וכשהמסד מיושן, מנהל שהוסר המשיך
+    # לנהל. כאן זה נבדק מול טלגרם, פעם אחת, לפני הכול.
+    #
+    # ההודעה שמוחזרת היא "אין לך גישה" ולא "אין לך הרשאה": מי שהוסר
+    # מניהול צריך להבין שהוא כבר לא שם, לא שהוא חסר הרשאה מסוימת.
+    if chat_id and not await _has_access(chat_id, q.from_user.id):
+        await q.answer(i18n.t("err.no_access", lg), show_alert=True)
+        with contextlib.suppress(TelegramAPIError):
+            sc = panel.home(await my_groups_live(q.from_user.id), lg,
+                            _bot_username)
+            await _edit(q, sc)
+        return
+
     if name == "mylang":
         # בורר השפה האישי, גם אחרי הבחירה הראשונה.
         here = q.message.chat.id if q.message else q.from_user.id
@@ -5436,12 +5512,14 @@ async def on_callback(q: CallbackQuery):
         # בחירת שפה אישית בצ'אט הפרטי. chat_id=0 כי עוד אין קבוצה.
         lang.set_chat(q.message.chat.id, arg)
         lg = i18n.normalize(arg)
-        await _edit(q, panel.home(my_groups(q.from_user.id), lg, _bot_username))
+        await _edit(q, panel.home(await my_groups_live(q.from_user.id), lg,
+                               _bot_username))
         await q.answer(i18n.t("lang.set", lg))
         return
 
     if name == "home":
-        await _edit(q, panel.home(my_groups(q.from_user.id), lg, _bot_username))
+        await _edit(q, panel.home(await my_groups_live(q.from_user.id), lg,
+                               _bot_username))
         return
 
     # העזרה יושבת לפני בדיקת ההרשאה לקבוצה: היא נפתחת בשיחה פרטית,
@@ -5906,7 +5984,8 @@ async def on_callback(q: CallbackQuery):
         if name == "cancel":
             waiting.clear(q.from_user.id)
             await _edit(q, _screen_for(chat_id, "main", "")
-                        or panel.home(my_groups(q.from_user.id), lg, _bot_username))
+                        or panel.home(await my_groups_live(q.from_user.id), lg,
+                               _bot_username))
             await q.answer(i18n.t("btn.canceled", lg))
             return
         f = prompts.FIELDS.get(arg)
