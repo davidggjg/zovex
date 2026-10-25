@@ -433,8 +433,11 @@ async def test_help_ux():
 
         EDITED.clear()
         await B.on_callback(FakeQ2(B.panel.cb(0, "help"), ADM))
+        # מסך אישי נכתב בשפה **שנבחרה** בצ'אט הפרטי, ולא בשפת
+        # הטלגרם של הלוחץ. כאן לא נבחרה שפה, ולכן אנגלית.
         ok("חזרה מציגה את התפריט",
-           EDITED and ("במה" in EDITED[-1] or "נושא" in EDITED[-1]),
+           EDITED and ("topic" in EDITED[-1].lower()
+                       or "במה" in EDITED[-1] or "נושא" in EDITED[-1]),
            (EDITED or ["—"])[-1][:90])
 
         # /start help — מה שקורה כשלוחצים על הכפתור מהקבוצה
@@ -2246,6 +2249,7 @@ async def test_every_menu_button():
 
     # מסכים סינכרוניים נבנים כאן; האסינכרוניים (שבת) נבדקים לחוד
     async_only = {"shab", "hours", "ldown", "reps", "proofs"}
+    skip = {"home"}
     dead = []
     for name, arg in targets:
         if name in async_only:
@@ -2766,6 +2770,70 @@ async def test_stars_flow():
         B.bot.__dict__.pop("send_invoice", None)
 
 
+
+async def test_personal_language_sticks():
+    """לחיצה על מסך אישי אינה מחזירה לשפת הטלגרם."""
+    section("שפה אישית נשמרת")
+    uid = 929292
+    B.lang.set_chat(uid, "en")        # בחר אנגלית במפורש
+
+    class _Msg:
+        def __init__(self, chat_id):
+            self.chat = Chat(id=chat_id, type="private")
+            self.message_id = 1
+
+    class _Q:
+        def __init__(self, data, uid_):
+            self.data = data
+            self.from_user = User(id=uid_, is_bot=False, first_name="x",
+                                  language_code="he")   # הטלגרם שלו בעברית
+            self.message = _Msg(uid_)
+            self.answered = []
+            self.edited = []
+
+        async def answer(self, text="", show_alert=False):
+            self.answered.append(text)
+
+    edits = []
+    real_edit = B._edit
+
+    async def fake_edit(q, sc):
+        edits.append(sc)
+
+    B._edit = fake_edit
+    try:
+        q = _Q("g:0:donate", uid)
+        await B.on_callback(q)
+        ok("מסך הכוכבים נפתח", bool(edits), str(edits))
+        ok("והוא באנגלית, לא בעברית של הטלגרם",
+           "Stars" in edits[-1].text and "כוכבים" not in edits[-1].text,
+           edits[-1].text[:60])
+
+        edits.clear()
+        q2 = _Q("g:0:mylang", uid)
+        await B.on_callback(q2)
+        ok("וגם בורר השפה מסמן את אנגלית",
+           any("● English" in t for row in edits[-1].rows for t, _ in row),
+           str(edits[-1].rows[0]))
+
+        # ובעברית — עברית
+        B.lang.set_chat(uid, "he")
+        edits.clear()
+        await B.on_callback(_Q("g:0:donate", uid))
+        ok("מי שבחר עברית מקבל עברית", "כוכבים" in edits[-1].text,
+           edits[-1].text[:60])
+    finally:
+        B._edit = real_edit
+        B.db.change("DELETE FROM settings WHERE chat_id=? AND key='lang'",
+                    (uid,))
+
+    # והכפתורים קיימים גם בתוך תפריט הקבוצה
+    main = panel.main_menu(CHAT, "ק", B._stats(CHAT), "en")
+    cbs = main.all_callbacks()
+    ok("תמיכה בתפריט הקבוצה", any("t.me/" in c for c in cbs), str(cbs[-4:]))
+    ok("וכוכבים בתפריט הקבוצה", any("g:0:donate" in c for c in cbs))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2807,6 +2875,7 @@ async def main() -> int:
     await test_fresh_user_start()
     await test_access_revoked()
     await test_stars_flow()
+    await test_personal_language_sticks()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

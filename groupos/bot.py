@@ -5416,6 +5416,8 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
             "clean": db.get(chat_id, "greet_clean", "0"),
             "on": db.get(chat_id, "welcome_on", "1") == "1",
             "text": db.get(chat_id, WELCOME_KEY, "") or ""}, lg)
+    if name == "donate":
+        return panel.donate_screen(lg)
     if name == "reps":
         words, commands = _reps_lists(chat_id)
         return panel.replies_screen(chat_id, words, commands, lg)
@@ -5485,8 +5487,15 @@ async def on_callback(q: CallbackQuery):
             q.from_user.language_code)))
         return
     chat_id, name, arg = parsed
+    # שפת המסך. ‎chat_id=0‎ הוא מסך אישי (בית, שפה, כוכבים, תמיכה),
+    # ושם השפה היא **של האדם** — זו שבחר בצ'אט הפרטי.
+    #
+    # קודם לכן נפלנו שם לשפת הטלגרם שלו, ולכן לחיצה על הכוכבים
+    # החזירה ישראלי לעברית גם אחרי שבחר אנגלית במפורש. שפת הטלגרם
+    # אינה בחירה, היא מה שהמכשיר שלו מוגדר אליו.
     lg = (lang.for_chat(chat_id) if chat_id
-          else i18n.normalize(q.from_user.language_code))
+          else lang.for_chat(q.message.chat.id if q.message
+                             else q.from_user.id))
 
     # שער אחד לכל פעולה על קבוצה. קודם כל בדיקת הרשאה ישבה בתוך
     # הענפים עצמם, מול המסד — וכשהמסד מיושן, מנהל שהוסר המשיך

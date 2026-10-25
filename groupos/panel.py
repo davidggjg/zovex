@@ -185,6 +185,10 @@ def main_menu(chat_id: int, title: str, stats: dict,
         ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
          + ([(i18n.t("menu.shabbat", lang), cb(chat_id, "shab"))]
             if lang == "he" else [])),
+        # תמיכה וכוכבים גם כאן, ולא רק במסך בחירת הקבוצה: מי שנכנס
+        # לנהל קבוצה לא חוזר אחורה כדי לחפש אותם.
+        [(i18n.t("home.support", lang), support_link(lang)),
+         (i18n.t("home.donate", lang), "g:0:donate")],
         [(i18n.t("menu.groups", lang), "g:0:home")],
     ]
     return Screen(txt, rows)
