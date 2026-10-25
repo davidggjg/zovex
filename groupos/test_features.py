@@ -592,6 +592,30 @@ def test_support_and_stars() -> None:
        all(isinstance(n, int) and 1 <= n <= 100000 for n in _p.STAR_AMOUNTS))
 
 
+
+def test_content_requests() -> None:
+    section("בקשות תוכן אינן ספאם")
+    # ההודעה שנמחקה בפועל בקבוצת סרטים.
+    asks = [
+        "אשמח לפרק 39 ורדים וחטאים",
+        "מישהו יכול להעלות את העונה האחרונה?",
+        "מחפש את הסרט הזה עם כתוביות",
+        "יש למישהו את פרק 12?",
+        "אפשר לקבל את הסדרה באיכות טובה?",
+    ]
+    for t in asks:
+        ok(f"בקשה: {t[:26]}", sg.talks_not_sells(t),
+           f"ctx={sg.media_context(t)} cta={sg.solicits(t)}")
+        ok(f"ואינה פסק מקומי: {t[:20]}", sg.classify(t) is None,
+           str(sg.classify(t)))
+
+    # ומה שכן מודעה נשאר מודעה, גם בניסוח של בקשה
+    ads = ["אשמח לקבל גישה לפורנו, שלחו לי בפרטי",
+           "מחפש שותפים להימורים, הצטרפו t.me/bet"]
+    for t in ads:
+        ok(f"מודעה בניסוח בקשה: {t[:26]}", not sg.talks_not_sells(t))
+
+
 def main() -> int:
     test_zmanim()
     test_city_rows()
@@ -603,6 +627,7 @@ def main() -> int:
     test_prompts()
     test_evidence()
     test_media_talk()
+    test_content_requests()
     test_aggressive()
     test_url_noise()
     test_buttons_blob()

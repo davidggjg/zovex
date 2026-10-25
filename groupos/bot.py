@@ -1017,6 +1017,12 @@ def _ai_context(chat_id: int) -> str:
     return (db.get(chat_id, "ai_context", "") or "").strip()[:200]
 
 
+# קטגוריות שבקבוצת תוכן הן מקור הטעות: בקשה לפרק, שם של סדרה או
+# שאלה "איפה אפשר לראות" נראות למודל כמו קידום. הונאה, נשק, איומים
+# והטרדה אינן כאן — הן חמורות באותה מידה בכל קבוצה.
+AI_SOFT = ("spam", "advertising", "adult", "gambling")
+
+
 def _ai_may_act(chat_id: int, v, text: str) -> bool:
     """בלם מקומי מול הפסק של המודל, לפני שהוא הופך לאות.
 
@@ -1027,7 +1033,7 @@ def _ai_may_act(chat_id: int, v, text: str) -> bool:
 
     זה לא מרכך פסק על הונאה, נשק או תוכן של קטינים — רק על שתי
     הקטגוריות שבהן "מילה" ו"מודעה" נראות אותו דבר."""
-    if getattr(v, "category", "") not in ("adult", "gambling"):
+    if getattr(v, "category", "") not in AI_SOFT:
         return True
     if db.get(chat_id, "ai_titles_ok", "1") != "1":
         return True
@@ -1035,8 +1041,8 @@ def _ai_may_act(chat_id: int, v, text: str) -> bool:
         return True
     if getattr(v, "confidence", 0.0) >= 0.9:
         return True
-    log.info("AI %s בקבוצה %s נדחה: שיחה על יצירה ולא מודעה",
-             v.category, chat_id)
+    log.info("AI %s בקבוצה %s נדחה: שיחה על תוכן ולא מודעה (%r)",
+             v.category, chat_id, (text or "")[:60])
     return False
 
 

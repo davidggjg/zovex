@@ -2834,6 +2834,35 @@ async def test_personal_language_sticks():
     ok("וכוכבים בתפריט הקבוצה", any("g:0:donate" in c for c in cbs))
 
 
+
+async def test_ai_soft_damper():
+    """פסק AI מסוג ספאם/פרסום אינו מוחק בקשת תוכן."""
+    section("בלם AI על בקשות תוכן")
+    B.db.set(CHAT, "ai_titles_ok", "1")
+
+    class _V:
+        def __init__(self, cat, conf):
+            self.category, self.confidence = cat, conf
+
+    ask = "אשמח לפרק 39 ורדים וחטאים"
+    for cat in ("spam", "advertising", "adult", "gambling"):
+        ok(f"{cat} בביטחון בינוני נחסם",
+           not B._ai_may_act(CHAT, _V(cat, 0.7), ask))
+        ok(f"{cat} בביטחון כמעט מלא עובר",
+           B._ai_may_act(CHAT, _V(cat, 0.95), ask))
+    for cat in ("scam", "phishing", "threat", "malware", "harassment"):
+        ok(f"{cat} אינו מרוכך גם בקבוצת תוכן",
+           B._ai_may_act(CHAT, _V(cat, 0.6), ask))
+
+    ok("מודעה אמיתית אינה מרוככת",
+       B._ai_may_act(CHAT, _V("spam", 0.7),
+                     "קזינו אונליין הצטרפו עכשיו https://x.example"))
+    B.db.set(CHAT, "ai_titles_ok", "0")
+    ok("ומי שכיבה את הבלם מקבל אכיפה מלאה",
+       B._ai_may_act(CHAT, _V("spam", 0.7), ask))
+    B.db.set(CHAT, "ai_titles_ok", "1")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2876,6 +2905,7 @@ async def main() -> int:
     await test_access_revoked()
     await test_stars_flow()
     await test_personal_language_sticks()
+    await test_ai_soft_damper()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
