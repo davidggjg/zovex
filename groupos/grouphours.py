@@ -41,6 +41,42 @@ from dataclasses import dataclass
 from typing import Optional
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")   # 0=שני, כמו tm_wday
+
+# אזורי הזמן שמוצעים בבורר. שם IANA ולא היסט קבוע, כי היסט קבוע
+# שובר שעון קיץ פעמיים בשנה — והשבירה מתגלה בשתיים בלילה.
+ZONES: tuple[tuple[str, str], ...] = (
+    ("Asia/Jerusalem", "ישראל"),
+    ("Europe/London", "לונדון"),
+    ("Europe/Paris", "פריז · ברלין"),
+    ("Europe/Moscow", "מוסקבה"),
+    ("America/New_York", "ניו יורק"),
+    ("America/Chicago", "שיקגו"),
+    ("America/Los_Angeles", "לוס אנג׳לס"),
+    ("America/Sao_Paulo", "סאו פאולו"),
+    ("Asia/Dubai", "דובאי"),
+    ("Asia/Kolkata", "הודו"),
+    ("Asia/Bangkok", "בנגקוק"),
+    ("Australia/Melbourne", "מלבורן"),
+    ("UTC", "UTC"),
+)
+
+
+def zone_offset(name: str, now: Optional[float] = None) -> Optional[int]:
+    """ההיסט **בדקות** של אזור הזמן ברגע הזה, או ‎None‎ אם אינו מוכר.
+
+    מחושב בכל קריאה ולא נשמר: שעון קיץ מזיז אותו פעמיים בשנה, וכל
+    ערך שמור הופך לשגוי בלילה שבו השעון זז."""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        import datetime as _dt
+        t = _dt.datetime.fromtimestamp(
+            now if now is not None else time.time(), ZoneInfo(name))
+        off = t.utcoffset()
+        return int(off.total_seconds() // 60) if off else 0
+    except Exception:
+        return None
 DAY_KEY = {d: f"day.{d}" for d in DAYS}
 
 _RX = re.compile(r"^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$")

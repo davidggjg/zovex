@@ -783,13 +783,38 @@ def cities_pick(chat_id: int, chosen: list[str],
                   + i18n.t("shab.cities_hint", lang), rows)
 
 
-def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT) -> Screen:
+def zones_screen(chat_id: int, current: str,
+                 lang: str = i18n.DEFAULT) -> Screen:
+    """בורר אזור זמן. בלעדיו כל לוח שעות הוא ניחוש.
+
+    שם IANA ולא היסט במספר: ישראל היא ‎+2‎ בחורף ו-‎+3‎ בקיץ, ומי
+    שבחר מספר גילה את זה בלילה שבו השעון זז."""
+    import grouphours as _gh
+    rows, line = [], []
+    for name, label in _gh.ZONES:
+        mark = "● " if name == current else ""
+        line.append((f"{mark}{label}", cb(chat_id, "setz", name)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hours"))])
+    return Screen(head("tz.title", lang) + "\n\n" + i18n.t("tz.hint", lang),
+                  rows)
+
+
+def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT,
+                 zone: str = "", now: str = "") -> Screen:
     """לוח שבועי: יום אחד בשורה, לחיצה פותחת את היום.
 
     לוח ריק אינו שגיאה — הוא המצב הרגיל של רוב הקבוצות, ולכן הוא
     נאמר במילים ולא נשאר מסך ריק."""
     txt = (head("hours.title", lang) + "\n\n" + i18n.t("hours.hint", lang)
            + "\n\n" + (table or i18n.t("hours.none", lang)))
+    if now:
+        # השעה שהבוט רואה, בראש המסך. תקלת אזור זמן מתגלה כאן
+        # בשנייה אחת במקום בלילה שבו הקבוצה לא נסגרה.
+        txt += "\n\n" + i18n.t("tz.now", lang, time=now)
     rows, line = [], []
     for d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun"):
         line.append((i18n.t(f"day.{d}", lang), cb(chat_id, "hrday", d)))
@@ -797,6 +822,9 @@ def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT) -> Screen:
             rows.append(line); line = []
     if line:
         rows.append(line)
+    rows.append([("🌍 " + i18n.t("tz.button", lang,
+                                 zone=zone or i18n.t("tz.unset", lang)),
+                  cb(chat_id, "zones"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(txt, rows)
 

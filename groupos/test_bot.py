@@ -2445,6 +2445,72 @@ async def test_buttons_spam_and_help():
        any("swhelp" in c for c in sws.all_callbacks()))
 
 
+
+async def test_hours_timezone():
+    """לוח השעות סוגר לפי שעון הקבוצה, לא לפי UTC."""
+    section("לוח שעות ואזור זמן")
+    import calendar as _cal
+    import grouphours as _gh
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "hours", "sun=!01:00-07:00")
+    B.db.set(CHAT, "tz", "Asia/Jerusalem")
+    B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+    B.db.set(CHAT, "lockdown", "0")
+
+    acted = []
+
+    async def fake_lock(chat_id, on, by):
+        acted.append(on)
+        B.db.set(chat_id, "lockdown", "1" if on else "0", by)
+        return True
+
+    real = B.set_lockdown
+    B.set_lockdown = fake_lock
+    try:
+        # ראשון 01:30 בשעון ישראל (חורף, UTC+2) = 23:30 שבת ב-UTC
+        israel_0130 = float(_cal.timegm((2026, 1, 17, 23, 30, 0)))
+        await B._tick_hours(CHAT, israel_0130, False)
+        ok("נסגר בשעון הקבוצה", acted == [True], str(acted))
+        ok("והבעלות נרשמה", B.db.get(CHAT, B.AUTOLOCK_KEY, "") == "hours")
+
+        acted.clear()
+        # ראשון 08:00 בשעון ישראל = 06:00 UTC
+        israel_0800 = float(_cal.timegm((2026, 1, 18, 6, 0, 0)))
+        await B._tick_hours(CHAT, israel_0800, False)
+        ok("ונפתח בבוקר", acted == [False], str(acted))
+
+        # בלי אזור זמן — אותה נקודה בזמן אינה סוגרת. גם ההיסט המספרי
+        # הישן מתאפס, אחרת הוא שנשאר מבדיקה קודמת הוא שקובע.
+        B.db.set(CHAT, "tz", "")
+        B.db.set(CHAT, "tz_offset", "0")
+        B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+        acted.clear()
+        await B._tick_hours(CHAT, israel_0130, False)
+        ok("בלי אזור זמן הבוט עובד ב-UTC ולא סוגר", acted == [],
+           str(acted))
+
+        # המסך מראה את השעה ואת הבורר
+        B.db.set(CHAT, "tz", "Asia/Jerusalem")
+        sc = B._screen_for(CHAT, "hours", "")
+        ok("המסך מציג את השעה של הקבוצה",
+           "UTC+" in sc.text or "UTC−" in sc.text, sc.text[-80:])
+        ok("ויש כפתור אזור זמן",
+           any("zones" in c for c in sc.all_callbacks()), str(sc.rows[-2:]))
+        zs = B._screen_for(CHAT, "zones", "")
+        ok("בורר האזורים נבנה",
+           zs is not None and any("setz:Asia/Jerusalem" in c
+                                  for c in zs.all_callbacks()))
+        ok("ומזהי הכפתורים בטווח",
+           all(len(c.encode()) <= panel.CB_MAX for c in zs.all_callbacks()))
+        ok("והאזור הנוכחי מסומן", "●" in str(zs.rows), str(zs.rows[:1]))
+    finally:
+        B.set_lockdown = real
+        B.db.set(CHAT, "hours", "")
+        B.db.set(CHAT, "tz", "")
+        B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+        B.db.set(CHAT, "lockdown", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2481,6 +2547,7 @@ async def main() -> int:
     await test_aggressive_paths()
     await test_forum_topics()
     await test_hours_picker()
+    await test_hours_timezone()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

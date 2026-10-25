@@ -492,10 +492,46 @@ def test_buttons_blob() -> None:
        sg.talks_not_sells("הסרט הזה מדורג 18+ בגלל אלימות"))
 
 
+
+def test_timezone() -> None:
+    section("אזור זמן")
+    ok("אזור מוכר מחזיר היסט",
+       gh.zone_offset("Asia/Jerusalem") in (120, 180),
+       str(gh.zone_offset("Asia/Jerusalem")))
+    ok("UTC הוא אפס", gh.zone_offset("UTC") == 0)
+    ok("אזור לא מוכר מחזיר None", gh.zone_offset("Mars/Olympus") is None)
+    ok("ריק מחזיר None", gh.zone_offset("") is None)
+
+    # שעון קיץ: אותו אזור, שני היסטים שונים בשתי נקודות בשנה
+    import calendar as _cal
+    winter = float(_cal.timegm((2026, 1, 15, 12, 0, 0)))
+    summer = float(_cal.timegm((2026, 7, 15, 12, 0, 0)))
+    ok("שעון קיץ משנה את ההיסט",
+       gh.zone_offset("Asia/Jerusalem", winter)
+       != gh.zone_offset("Asia/Jerusalem", summer),
+       f"{gh.zone_offset('Asia/Jerusalem', winter)} / "
+       f"{gh.zone_offset('Asia/Jerusalem', summer)}")
+
+    # וזה הבאג שהתגלה: אותה שעה, שני היסטים, שתי תוצאות
+    raw = "sun=!01:00-07:00"
+    # ראשון ב-01:30 בשעון ישראל, בחורף (UTC+2) = 23:30 שבת ב-UTC
+    israel_0130 = float(_cal.timegm((2026, 1, 17, 23, 30, 0)))
+    ok("ב-UTC זה עדיין שבת ולכן פתוח",
+       gh.is_open(raw, now=israel_0130, tz_offset=0))
+    ok("ובשעון ישראל זה ראשון אחרי אחת — סגור",
+       not gh.is_open(raw, now=israel_0130,
+                      tz_offset=gh.zone_offset("Asia/Jerusalem",
+                                               israel_0130)))
+    ok("לכל אזור בבורר יש היסט",
+       all(gh.zone_offset(z) is not None for z, _label in gh.ZONES),
+       str([z for z, _ in gh.ZONES if gh.zone_offset(z) is None]))
+
+
 def main() -> int:
     test_zmanim()
     test_city_rows()
     test_hours()
+    test_timezone()
     test_spamguard()
     test_prompts()
     test_evidence()

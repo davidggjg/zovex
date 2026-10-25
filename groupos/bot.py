@@ -3361,8 +3361,29 @@ async def cmd_unschedule(msg: Message):
 AUTOLOCK_KEY = "autolock_by"        # מי נעל: ‎shab‎ · ‎hours‎ · ריק
 
 
-def _tz_of(chat_id: int) -> int:
+def _tz_of(chat_id: int, now: Optional[float] = None) -> int:
+    """ההיסט של הקבוצה בדקות, לפי אזור הזמן שלה.
+
+    זה היה באג שקט ומכוער: ברירת המחדל הייתה ‎tz_offset=0‎, כלומר
+    UTC, ואיש מעולם לא מילא אותה. קבוצה בישראל שקבעה סגירה באחת
+    בלילה נסגרה בשלוש — ובדיקה בשעה אחת פשוט "לא עשתה כלום".
+
+    ‎tz‎ הוא שם IANA ולא מספר, כי מספר שובר שעון קיץ פעמיים בשנה."""
+    name = (db.get(chat_id, "tz", "") or "").strip()
+    off = grouphours.zone_offset(name, now) if name else None
+    if off is not None:
+        return off
     return _int(db.get(chat_id, "tz_offset", "0"), 0)
+
+
+def _local_now(chat_id: int) -> str:
+    """השעה אצל הקבוצה, כפי שהבוט רואה אותה. זה מה שהופך תקלת אזור
+    זמן מ"לא עובד" ל"רגע, השעון שלו מראה משהו אחר"."""
+    off = _tz_of(chat_id)
+    lt = time.gmtime(time.time() + off * 60)
+    sign = "+" if off >= 0 else "−"
+    return (f"{lt.tm_hour:02d}:{lt.tm_min:02d} (UTC{sign}"
+            f"{abs(off) // 60}{':%02d' % (abs(off) % 60) if off % 60 else ''})")
 
 
 # הערים שמופיעות בלוח שבהודעה. ברירת מחדל: ארבע הגדולות, כי זה מה
@@ -3646,7 +3667,7 @@ async def cmd_hours(msg: Message):
                   before=f"hours={raw}", after=f"hours={new}",
                   source="command", severity="medium")
         raw = new
-    sc = panel.hours_screen(msg.chat.id, _hours_table(msg.chat.id, raw, lg), lg)
+    sc = _screen_for(msg.chat.id, "hours", "")
     await reply(msg, sc.text + "\n\n" + i18n.t("hours.usage", lg),
                 markup=kb(sc))
 
@@ -4595,6 +4616,15 @@ async def cmd_diag(msg: Message):
     if getattr(msg.chat, "is_forum", False):
         line("ok", i18n.t("diag.forum", lg),
              i18n.t("diag.forum_here", lg, topic=_thread_of(msg) or 1))
+    # השעה שהבוט רואה, ולפיה כל לוח השעות. ההפרש בין מה שכתוב כאן
+    # לבין השעון של המנהל הוא ההסבר המלא ל"קבעתי אחת בלילה ולא קרה
+    # כלום".
+    raw_hours = db.get(chat_id, "hours", "") or ""
+    zone = (db.get(chat_id, "tz", "") or "").strip()
+    if raw_hours or zone:
+        line("ok" if zone else "warn", i18n.t("tz.title", lg),
+             _local_now(chat_id) + (f" · {zone}" if zone
+                                    else " · " + i18n.t("tz.unset", lg)))
     if not _can_read_all:
         line("ok" if is_admin else "bad", i18n.t("diag.privacy", lg),
              i18n.t("diag.privacy_admin" if is_admin
@@ -4952,10 +4982,7 @@ async def on_private_text(msg: Message):
                    i18n.t("field.saved" if okay else "hours.usage", lg),
                    is_group=False)
         if okay:
-            sc = panel.hours_screen(
-                w.chat_id,
-                _hours_table(w.chat_id,
-                             db.get(w.chat_id, "hours", "") or "", lg), lg)
+            sc = _screen_for(w.chat_id, "hours", "")
             await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         return
     if f.kind == prompts.CONTENT:
@@ -5225,6 +5252,16 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
     if name == "reps":
         words, commands = _reps_lists(chat_id)
         return panel.replies_screen(chat_id, words, commands, lg)
+    if name == "hours":
+        zone = (db.get(chat_id, "tz", "") or "").strip()
+        label = dict(grouphours.ZONES).get(zone, zone)
+        return panel.hours_screen(
+            chat_id, _hours_table(chat_id, db.get(chat_id, "hours", "") or "",
+                                  lg),
+            lg, zone=label, now=_local_now(chat_id))
+    if name == "zones":
+        return panel.zones_screen(chat_id,
+                                  (db.get(chat_id, "tz", "") or "").strip(), lg)
     if name == "stmsgs":
         return panel.state_msgs_screen(chat_id, {
             f: db.get(chat_id, prompts.FIELDS[f].key, "") or ""
@@ -5477,7 +5514,7 @@ async def on_callback(q: CallbackQuery):
     if name in ("shab", "shabsw", "shabcity", "setcity", "shabofs",
                 "shabprev", "shabcities", "shabc2",
                 "hours", "hrday", "hrset", "hrm", "hrs", "hre",
-                "hrh", "hrh2", "hrtype"):
+                "hrh", "hrh2", "hrtype", "zones", "setz"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
@@ -5520,11 +5557,22 @@ async def on_callback(q: CallbackQuery):
                       source="button", severity="medium")
 
         if name in ("hours", "hrset"):
-            await _edit(q, panel.hours_screen(
-                chat_id, _hours_table(chat_id, db.get(chat_id, "hours", "") or "",
-                                      lg), lg))
+            await _edit(q, _screen_for(chat_id, "hours", ""))
             await q.answer(i18n.t("saved", lg) if name == "hrset" else "")
             return
+        if name in ("zones", "setz"):
+            if name == "setz":
+                if arg not in dict(grouphours.ZONES):
+                    await q.answer(i18n.t("btn.unknown", lg))
+                    return
+                db.set(chat_id, "tz", arg, q.from_user.id)
+                await _edit(q, _screen_for(chat_id, "hours", ""))
+                await q.answer(i18n.t("tz.set", lg))
+                return
+            await _edit(q, _screen_for(chat_id, "zones", ""))
+            await q.answer()
+            return
+
         if name in ("hrm", "hrs", "hre", "hrh", "hrh2"):
             bits = arg.split(".")
             day = bits[0] if bits else ""
@@ -5567,10 +5615,7 @@ async def on_callback(q: CallbackQuery):
             audit.log(chat_id, "settings.write", actor_id=q.from_user.id,
                       before=f"hours={raw}", after=f"hours={day}={val}",
                       source="button", severity="medium")
-            await _edit(q, panel.hours_screen(
-                chat_id, _hours_table(chat_id,
-                                      db.get(chat_id, "hours", "") or "", lg),
-                lg))
+            await _edit(q, _screen_for(chat_id, "hours", ""))
             await q.answer(i18n.t("saved", lg))
             return
 
