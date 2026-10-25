@@ -974,6 +974,25 @@ def _ai_may_act(chat_id: int, v, text: str) -> bool:
     return False
 
 
+def _button_text(msg: Message) -> str:
+    """הטקסט שבכפתורים של ההודעה, והקישורים שמאחוריהם.
+
+    זה היה החור שדרכו עברה מודעת הפורנו שהגיעה מהשטח: בגוף ההודעה
+    היה משפט תמים, וכל התוכן ישב בעשרים כפתורים — "Great videos for
+    18+", "Try watching" — שאף מנגנון לא קרא. כפתור הוא טקסט לכל
+    דבר, והוא גם זה שמוביל ללחיצה."""
+    markup = getattr(msg, "reply_markup", None)
+    rows = getattr(markup, "inline_keyboard", None) if markup else None
+    if not rows:
+        return ""
+    bits = []
+    for row in rows:
+        for btn in row:
+            bits.append(getattr(btn, "text", "") or "")
+            bits.append(getattr(btn, "url", "") or "")
+    return " ".join(b for b in bits if b)[:1000]
+
+
 def _media_uid(msg: Message) -> str:
     """‎file_unique_id‎ של המדיה בהודעה, או ריק.
 
@@ -1065,7 +1084,10 @@ async def _spam_check(msg: Message, text: str, lg: str, *,
     כמו טקסט, והחזרתיות נמדדת על **התוכן** (כולל המדיה) ולא על
     המחרוזת. בלי השני, אותה תמונה עם כיתוב מתחלף הייתה נראית למערכת
     כעשר הודעות שונות."""
-    verdict = spamguard.classify(text)
+    # הכפתורים הם חלק מההודעה: שם הכפתור והקישור שמאחוריו נבדקים
+    # כמו טקסט, ולא נשארים אזור מת.
+    btns = _button_text(msg)
+    verdict = spamguard.classify((text + " " + btns).strip() if btns else text)
     # ‎illegal‎ אינו מרוכך בשום מקרה. ‎adult‎ ו-‎bait‎ כן: בקבוצת סרטים
     # הם בדיוק מה שנראה כמו שם של סרט.
     if verdict is not None and verdict.kind in ("adult", "bait") \
@@ -1105,6 +1127,13 @@ async def _spam_check(msg: Message, text: str, lg: str, *,
     # מתפשט: אף אחד לא מקליד אותה מחדש, מעבירים אותה הלאה.
     if msg.forward_origin is not None and (verdict or dup):
         sigs.append(policy.Signal("behavior", "forwarded", 0.3))
+    # עשרים כפתורים שמובילים החוצה אינם ממשק, הם מודעה.
+    rows = getattr(getattr(msg, "reply_markup", None), "inline_keyboard", None)
+    links = sum(1 for row in (rows or []) for b in row
+                if getattr(b, "url", None))
+    if links >= 4:
+        sigs.append(policy.Signal("content", "link_buttons",
+                                  min(0.3 + 0.05 * links, 0.7), f"x{links}"))
     d = policy.decide(sigs, policy.rules_for(db, msg.chat.id))
     if not d:
         return False
@@ -1150,8 +1179,12 @@ def _keep_proof(msg: Message, action: str, reason: str,
             if got is not None:
                 kind, fid = attr, getattr(got, "file_id", "") or ""
                 break
+    body = (msg.text or msg.caption or "")
+    btns = _button_text(msg)
+    if btns:
+        body = (body + "\n\n[כפתורים] " + btns).strip()
     proof.add(msg.chat.id, msg.from_user.id, action=action, reason=reason,
-              risk=risk, text=(msg.text or msg.caption or ""),
+              risk=risk, text=body,
               media_kind=kind, media_id=fid, name=_name(msg),
               message_id=msg.message_id)
 
@@ -3426,7 +3459,7 @@ async def _auto_lock(chat_id: int, close: bool, owner: str, text: str,
               severity="medium")
     if field:
         await _state_message(chat_id, field,
-                             "hours.msg_close" if close else "hours.msg_open",
+                             dict(panel.STATE_DEFAULTS).get(field, ""),
                              lang.for_chat(chat_id))
     elif text:
         await send(chat_id, text)
@@ -4352,8 +4385,9 @@ async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     # ההשבתה היא גם הודעה לקבוצה, לא רק שינוי הרשאות: החברים רואים
     # שהכתיבה הפסיקה לעבוד ולא יודעים למה, ושקט הוא התשובה הגרועה
     # ביותר באותו רגע.
-    await _state_message(chat_id, "lockmsg" if on else "openmsg",
-                         "state.msg_lock" if on else "state.msg_open",
+    field = "lockmsg" if on else "openmsg"
+    await _state_message(chat_id, field,
+                         dict(panel.STATE_DEFAULTS)[field],
                          lang.for_chat(chat_id))
     return True
 
@@ -5170,6 +5204,8 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
                                      _sec_numbers(chat_id), lg)
     if name == "sws":
         return panel.switches_screen(chat_id, _switch_values(chat_id), lg)
+    if name == "swhelp":
+        return panel.switches_help(chat_id, lg)
     if name == "texts":
         vals = {f.key: (db.get(chat_id, f.key, "") or "")
                 for f in prompts.FIELDS.values()}
@@ -5608,13 +5644,49 @@ async def on_callback(q: CallbackQuery):
         return
 
     # ── עריכה בלחיצה: ‎ask‎ פותח המתנה, ‎clr‎ מוחק, ‎cancel‎ מבטל ──────
-    if name in ("stmsg", "stdef", "stoff"):
+    if name == "gprev":
+        if not perms.check(chat_id, q.from_user.id, "welcome.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        raw = (db.get(chat_id, WELCOME_KEY, "") or "").strip()
+        if not raw:
+            await q.answer(i18n.t("greet.no_text", lg)
+                           .replace("<i>", "").replace("</i>", ""),
+                           show_alert=True)
+            return
+        row = db.one("SELECT title FROM chats WHERE chat_id=?", (chat_id,))
+        await send_content(q.from_user.id, tpl.render_pick(raw, tpl.context(
+            user_id=q.from_user.id, first=q.from_user.first_name or "",
+            username=q.from_user.username or "",
+            chat_title=(row["title"] if row else "") or "",
+            chat_id=chat_id, language=lg,
+            rules=db.get(chat_id, RULES_KEY, "") or "")), None, None,
+            db.get(chat_id, WELCOME_KEY + "_buttons", "") or "")
+        await q.answer(i18n.t("state.sent", lg), show_alert=True)
+        return
+
+    if name in ("stmsg", "stdef", "stoff", "stprev"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
         f = prompts.FIELDS.get(arg)
         if f is None or arg not in dict(panel.STATE_MSGS):
             await q.answer(i18n.t("btn.unknown", lg))
+            return
+        if name == "stprev":
+            # מה שהקבוצה תראה, אצלך בפרטי. כולל התמונה עצמה.
+            raw = (db.get(chat_id, f.key, "") or "").strip()
+            media = db.get(chat_id, f.key + "_media", "") or ""
+            kind = db.get(chat_id, f.key + "_kind", "") or ""
+            if raw == panel.SILENT:
+                await q.answer(i18n.t("state.nothing", lg), show_alert=True)
+                return
+            if not raw and not media:
+                raw = i18n.t(dict(panel.STATE_DEFAULTS).get(arg, ""), lg)
+            await send_content(q.from_user.id, tpl.render_pick(
+                raw, tpl.context(chat_id=chat_id, language=lg)),
+                media or None, kind or None, "")
+            await q.answer(i18n.t("state.sent", lg), show_alert=True)
             return
         if name in ("stdef", "stoff"):
             db.set(chat_id, f.key, panel.SILENT if name == "stoff" else "",

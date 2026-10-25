@@ -308,9 +308,26 @@ def switches_screen(chat_id: int, values: dict,
             rows.append(line); line = []
     if line:
         rows.append(line)
+    # "אנשים לא מבינים מה כל דבר עושה." מתג שאי אפשר להבין הוא מתג
+    # שלא ייגעו בו, או גרוע מזה — שידליקו בלי לדעת מה הוא משנה.
+    rows.append([("❓ " + i18n.t("sw.what", lang), cb(chat_id, "swhelp"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(head("sw.title", lang) + "\n\n" + i18n.t("sw.hint", lang),
                   rows)
+
+
+def switches_help(chat_id: int, lang: str = i18n.DEFAULT) -> Screen:
+    """שורה אחת לכל מתג: מה הוא עושה, בשפה של אדם."""
+    lines = []
+    for key, _default, label in SWITCHES:
+        why = i18n.t(f"why.{key}", lang)
+        if why == f"why.{key}":
+            continue
+        lines.append(i18n.t("sw.explain", lang,
+                            name=f"<b>{i18n.t(label, lang)}</b>", why=why))
+    return Screen(head("sw.what_title", lang) + "\n\n"
+                  + "\n\n".join(lines),
+                  [[(i18n.t("menu.back", lang), cb(chat_id, "sws"))]])
 
 
 def switch_label(key: str, lang: str = i18n.DEFAULT) -> str:
@@ -333,9 +350,12 @@ def switch_label(key: str, lang: str = i18n.DEFAULT) -> str:
 def switch_screen(chat_id: int, key: str, on: bool,
                   lang: str = i18n.DEFAULT) -> Screen:
     """מתג בודד, לתשובה על פקודה. שני כפתורים מפורשים ולא החלפה."""
+    why = i18n.t(f"why.{key}", lang)
     txt = (f"<b>{switch_label(key, lang)}</b>\n"
            + i18n.t("sw.now", lang,
                     state=i18n.t("on" if on else "off", lang)))
+    if why != f"why.{key}":
+        txt += "\n\n<i>" + why + "</i>"
     rows = [[("✅ " + i18n.t("sw.enable", lang), cb(chat_id, "sw1", key)),
              ("⛔ " + i18n.t("sw.disable", lang), cb(chat_id, "sw0", key))]]
     return Screen(txt, rows)
@@ -925,7 +945,8 @@ def welcome_screen(chat_id: int, state: dict,
         [(i18n.t("greet.clean_btn", lang,
                  what=_secs_label(secs, lang)), cb(chat_id, "gclean"))],
         [("✏️ " + i18n.t("field.welcome", lang), cb(chat_id, "ask", "welcome")),
-         (("🟢 " if state.get("on") else "⚪ ") + i18n.t("sw.welcome", lang),
+         ("👁 " + i18n.t("state.preview", lang), cb(chat_id, "gprev"))],
+        [(("🟢 " if state.get("on") else "⚪ ") + i18n.t("sw.welcome", lang),
           cb(chat_id, "sw", "welcome_on"))],
         [(i18n.t("menu.back", lang), cb(chat_id, "texts"))],
     ]
@@ -1127,6 +1148,15 @@ STATE_MSGS = (
 
 SILENT = "off"          # הערך שאומר "אל תשלח כלום"
 
+# מפתח ברירת המחדל לכל הודעת מצב. כאן ולא בשני מקומות, כדי
+# שהתצוגה המקדימה תציג בדיוק את מה שיישלח.
+STATE_DEFAULTS = (
+    ("lockmsg", "state.msg_lock"),
+    ("openmsg", "state.msg_open"),
+    ("hclose", "hours.msg_close"),
+    ("hopen", "hours.msg_open"),
+)
+
 
 def state_msgs_screen(chat_id: int, values: dict,
                       lang: str = i18n.DEFAULT) -> Screen:
@@ -1154,8 +1184,13 @@ def state_msg_screen(chat_id: int, field: str, value: str, media: str,
             now += ("\n" if val else "") + i18n.t("state.has_media", lang)
     else:
         now = i18n.t("state.default", lang)
+    # "שאוכל לראות מה מוגדר, לערוך את זה, לצפות, ולמחוק." ארבע
+    # הפעולות במסך אחד, והצפייה שולחת את ההודעה **כמו שהיא** —
+    # תמונה נראית כתמונה, ולא כשורה שכתוב בה "כולל מדיה".
     rows = [
-        [("✏️ " + i18n.t("state.edit", lang), cb(chat_id, "ask", field))],
+        [("✏️ " + i18n.t("state.edit", lang), cb(chat_id, "ask", field)),
+         ("👁 " + i18n.t("state.preview", lang),
+          cb(chat_id, "stprev", field))],
         [("↩︎ " + i18n.t("state.use_default", lang),
           cb(chat_id, "stdef", field)),
          ("🔇 " + i18n.t("state.no_msg", lang), cb(chat_id, "stoff", field))],

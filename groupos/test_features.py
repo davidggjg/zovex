@@ -347,8 +347,7 @@ def test_aggressive() -> None:
     ok("גם תיוג נחשב הזמנה",
        v2 is not None and v2.escalate, str(v2))
     v3 = sg.classify("מישהו ראה את The Deuce? סדרה על תעשיית הפורנו")
-    ok("שיחה על יצירה אינה מסלימה",
-       v3 is not None and not v3.escalate, str(v3))
+    ok("שיחה על יצירה אינה מסלימה", v3 is None or not v3.escalate, str(v3))
 
     tr = sg.RepeatTracker(window=60)
     tr.note("fp", -100, 7, now=1.0)
@@ -461,6 +460,38 @@ def test_evidence() -> None:
     ok("תקרה לכל קבוצה נאכפת", e.count(CHAT) == 5, str(e.count(CHAT)))
 
 
+def test_url_noise() -> None:
+    section("רעש מכתובות וגבולות מילה")
+    # ‎https://example.org‎ מנורמל ל-‎httpsexampleorg‎, ובתוכו ‎sex‎.
+    # הודעה תמימה עם קישור נחסמה בגלל זה.
+    ok("קישור אינו מייצר מונח",
+       sg.classify("הנה הקישור לאתר https://example.org") is None,
+       str(sg.classify("הנה הקישור לאתר https://example.org")))
+    ok("sex בתוך מילה אינו אות",
+       sg.classify("Welcome to Sussex United, join us") is None,
+       str(sg.classify("Welcome to Sussex United, join us")))
+    ok("אבל כמילה שלמה כן",
+       sg.classify("free sex videos join now https://x.example") is not None)
+    ok("והכתובת עדיין נחשבת הזמנה",
+       sg.solicits("בוא לכאן https://x.example"))
+    ok("פיזור רווחים עדיין נתפס",
+       sg.classify("💦Ch1ld 💜 L a dybo y 💝 Te ens 14-16") is not None)
+
+
+def test_buttons_blob() -> None:
+    section("תוכן שיושב בכפתורים")
+    blob = ("Hurry up. Choose the style that sets every nerve on fire "
+            "🍑 Great videos for 18+ 👅 https://x.example/1 "
+            "💕 Try watching 🍒 https://x.example/2")
+    v = sg.classify(blob)
+    ok("מודעה שכל תוכנה בכפתורים נתפסת",
+       v is not None and v.escalate, str(v))
+    ok("שער גיל נספר כמונח מיני",
+       v is not None and "18+" in v.detail, str(v))
+    ok("אבל דירוג גיל בשיחה אינו מודעה",
+       sg.talks_not_sells("הסרט הזה מדורג 18+ בגלל אלימות"))
+
+
 def main() -> int:
     test_zmanim()
     test_city_rows()
@@ -470,6 +501,8 @@ def main() -> int:
     test_evidence()
     test_media_talk()
     test_aggressive()
+    test_url_noise()
+    test_buttons_blob()
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
     if FAILURES:

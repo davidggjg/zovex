@@ -119,6 +119,8 @@ SEXUAL = (
     "פורנו", "עירום", "עירומה", "סקס", "סרטון מיני", "תמונות עירום",
 )
 BAIT = (
+    "greatvideos", "trywatching", "watchnow", "fullvideos", "hotvideos",
+    "choosethestyle", "setsevery", "hurryup",
     "clickhere", "grabthislink", "getinright", "fullyunlocked", "unlocked",
     "joinnow", "linkinbio", "freeaccess", "limitedtime", "lastchance",
     "vipgroup", "privategroup", "dmme", "telegramlink", "fullvideo",
@@ -126,6 +128,9 @@ BAIT = (
     "לחץכאן", "לינקבפרופיל", "הצטרפועכשיו", "קישורבתגובה",
 )
 AGE_RANGE = re.compile(r"\b(?:0?[5-9]|1[0-7])\s*[-–]\s*1[0-7]\b")
+# ‎18+‎ · ‎21+‎ — שער גיל. הוא לא מונח מיני בפני עצמו, אבל אף אחד לא
+# מסמן אותו על תוכן רגיל: הוא קיים כדי להבטיח מה שמעבר לכפתור.
+ADULT_GATE = re.compile(r"\b(?:18|21)\s*\+")
 
 ILLEGAL = 0.98
 ADULT = 0.55
@@ -151,8 +156,37 @@ class Verdict:
         return self.weight > 0
 
 
-def _hits(blob: str, words: tuple[str, ...]) -> list[str]:
-    return [w for w in words if w.replace(" ", "") in blob]
+_RX_URL_ANY = re.compile(r"(?:https?://|www\.|t\.me/)\S+", re.I)
+
+
+def strip_urls(text: str) -> str:
+    """מסיר כתובות לפני השוואת מילים.
+
+    ‎https://example.org‎ מנורמל ל-‎httpsexampleorg‎, ובתוכו יושבת
+    המחרוזת ‎sex‎. הודעה תמימה עם קישור נחסמה בגלל זה. כתובת אינה
+    מילים — היא נבדקת ב-‎solicits‎, לא בדפוסים."""
+    return _RX_URL_ANY.sub(" ", text or "")
+
+
+def _hits(blob: str, words: tuple[str, ...], spaced: str = "") -> list[str]:
+    """איזה מונחים מופיעים. ‎blob‎ דחוס, ‎spaced‎ מנורמל עם רווחים.
+
+    מונח קצר נבדק **עם גבולות מילה** על הצורה עם הרווחים: ‎sex‎
+    כמחרוזת בתוך מילה אחרת הוא רעש, וכמילה שלמה הוא אות. מונח ארוך
+    נבדק גם על הצורה הדחוסה, כי שם נמצא הערפול בפיזור רווחים
+    (‎T e e n s‎) — ושם הסיכוי לפגיעה מקרית זניח."""
+    out = []
+    for w in words:
+        flat = w.replace(" ", "")
+        if len(flat) >= 6:
+            if flat in blob:
+                out.append(w)
+            continue
+        if spaced and re.search(
+                r"(?<![a-z\u0590-\u05ff])" + re.escape(flat)
+                + r"(?![a-z\u0590-\u05ff])", spaced):
+            out.append(w)
+    return out
 
 
 def obfuscated(text: str) -> bool:
@@ -174,14 +208,22 @@ def classify(text: str) -> Optional[Verdict]:
     יחד עם מונח מיני ועם קריאה לפעולה היא מודעה."""
     if not text or not text.strip():
         return None
-    blob = squeeze(text)
+    bare = strip_urls(text)
+    blob = squeeze(bare)
+    spaced = normalize(bare)
     if not blob:
         return None
-    minor = _hits(blob, MINOR)
-    sexual = _hits(blob, SEXUAL)
-    bait = _hits(blob, BAIT)
-    age = bool(AGE_RANGE.search(normalize(text)))
+    minor = _hits(blob, MINOR, spaced)
+    sexual = _hits(blob, SEXUAL, spaced)
+    bait = _hits(blob, BAIT, spaced)
+    norm = normalize(text)
+    age = bool(AGE_RANGE.search(norm))
     obf = obfuscated(text)
+    # שער גיל נספר כמונח מיני. ההודעה שהגיעה מהשטח לא הכילה אף מילה
+    # מפורשת — כל התוכן ישב ב**כפתורים**: "Great videos for 18+",
+    # "Try watching". בלי זה שום דפוס לא נגע בה.
+    if ADULT_GATE.search(text or "") or ADULT_GATE.search(norm):
+        sexual = sexual + ["18+"]
 
     if sexual and (minor or age):
         # זה המסלול הנפרד. לא צובר, לא ממתין, לא תלוי בסף של הקבוצה.
@@ -348,4 +390,5 @@ def talks_not_sells(text: str) -> bool:
     פורנו; מודעה — כן."""
     if not media_context(text) or solicits(text):
         return False
-    return not _hits(squeeze(text), SEXUAL)
+    bare = strip_urls(text)
+    return not _hits(squeeze(bare), SEXUAL, normalize(bare))

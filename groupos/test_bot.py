@@ -55,6 +55,7 @@ from aiogram.types import (Chat, ChatMemberLeft, Document,  # noqa: E402
                            ChatMemberMember, ChatMemberUpdated,
                            Message, PhotoSize, User, Voice)
 import panel                                               # noqa: E402
+import i18n                                                # noqa: E402
 import templates as _tpl                                   # noqa: E402
 import permissions                                         # noqa: E402
 
@@ -2357,6 +2358,93 @@ async def test_state_messages():
         B.db.set(CHAT, "lockdown", "0")
 
 
+
+async def test_buttons_spam_and_help():
+    """ספאם שכל תוכנו בכפתורים, והסבר לכל מתג."""
+    section("כפתורים והסברים")
+
+    # ‎Message‎ של aiogram קפוא, ולכן המקלדת עוברת בבנייה ולא בהשמה.
+    from aiogram.types import InlineKeyboardButton as _B
+    from aiogram.types import InlineKeyboardMarkup as _M
+
+    ad = Message(
+        message_id=9300, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=BAD, is_bot=False, first_name="ס"),
+        text="Hurry up. Choose the style that sets every nerve on fire",
+        reply_markup=_M(inline_keyboard=[
+            [_B(text="🍑 Great videos for 18+ 👅", url="https://x.example/1")],
+            [_B(text="💕 Try watching 🍒", url="https://x.example/2")],
+            [_B(text="🍑 Great videos for 18+ 👅", url="https://x.example/3")],
+            [_B(text="💕 Try watching 🍒", url="https://x.example/4")],
+        ]))
+    ok("טקסט הכפתורים נקרא",
+       "Great videos" in B._button_text(ad), B._button_text(ad)[:50])
+
+    B.perms.set_role(CHAT, BAD, "member")
+    DELETED.clear()
+    banned = []
+    real_apply = B.apply_action
+
+    async def fake_apply(chat_id, user_id, kind, duration, reason, by,
+                         source="policy"):
+        banned.append(kind)
+        return True
+
+    B.apply_action = fake_apply
+    try:
+        await B.on_group_message(ad)
+        ok("המודעה שכל תוכנה בכפתורים נמחקה", 9300 in DELETED, str(DELETED))
+        ok("והשולח נחסם", banned == ["ban"], str(banned))
+        it = B.proof.recent(CHAT, 1)[0]
+        ok("והראיה שמרה גם את הכפתורים",
+           "Great videos" in it.text, it.text[:70])
+    finally:
+        B.apply_action = real_apply
+
+    # הודעה רגילה עם כפתור אחד אינה נפגעת
+    # משתמש נקי: למי שצבר אזהרות ועונשים בבדיקות הקודמות יש מוניטין
+    # שמצטרף לכל אות, וזו התנהגות נכונה — אבל לא מה שנבדק כאן.
+    clean = 5151
+    B.perms.set_role(CHAT, clean, "member")
+    fine = Message(
+        message_id=9301, date=dt.datetime.now(),
+        chat=Chat(id=CHAT, type="supergroup", title="ק"),
+        from_user=User(id=clean, is_bot=False, first_name="דנה"),
+        text="הנה הקישור לאתר של הקבוצה",
+        reply_markup=_M(inline_keyboard=[
+            [_B(text="האתר", url="https://example.org")]]))
+    DELETED.clear()
+    await B.on_group_message(fine)
+    why = [f"{r['action']}:{(r['reason'] or '')[:40]}"
+           for r in B.audit.recent(CHAT, 3)]
+    ok("הודעה עם כפתור אחד עוברת", 9301 not in DELETED, str(why))
+
+    # והתצוגה המקדימה: מה שהקבוצה תראה, אצל המנהל
+    one = panel.state_msg_screen(CHAT, "lockmsg", "סגור ללילה", "BANNER", "he")
+    ok("יש כפתור צפייה",
+       any("stprev" in c for c in one.all_callbacks()), str(one.rows))
+    gsc = B._screen_for(CHAT, "greet", "")
+    ok("וגם בברכה", any("gprev" in c for c in gsc.all_callbacks()),
+       str(gsc.rows))
+
+    # ההסברים
+    sc = B._screen_for(CHAT, "swhelp", "")
+    ok("מסך ההסברים נבנה", sc is not None and len(sc.text) > 400)
+    missing = [k for k, _d, _l in panel.SWITCHES
+               if i18n.t(f"why.{k}", "he") == f"why.{k}"]
+    ok("לכל מתג יש הסבר בעברית", not missing, str(missing))
+    missing_en = [k for k, _d, _l in panel.SWITCHES
+                  if i18n.t(f"why.{k}", "en") == f"why.{k}"]
+    ok("וגם באנגלית", not missing_en, str(missing_en))
+    one = panel.switch_screen(CHAT, "strict", True, "he")
+    ok("ומסך מתג בודד מסביר את עצמו",
+       "מחמיר" in one.text, one.text[:80])
+    sws = B._screen_for(CHAT, "sws", "")
+    ok("ויש כפתור להסברים",
+       any("swhelp" in c for c in sws.all_callbacks()))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2404,6 +2492,7 @@ async def main() -> int:
     await test_replies_panel()
     await test_every_menu_button()
     await test_state_messages()
+    await test_buttons_spam_and_help()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
