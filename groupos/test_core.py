@@ -753,8 +753,11 @@ def test_i18n():
     ok("אנגלית LTR", not i18n.is_rtl("en"))
     ok("רוסית LTR", not i18n.is_rtl("ru"))
 
-    ok("תרגום קיים", i18n.t("menu.locks", "he") == "🔒 נעילות")
-    ok("תרגום באנגלית", i18n.t("menu.locks", "en") == "🔒 Locks")
+    # הכפתור נקרא "מה אסור לשלוח" ולא "נעילות": מנהל שראה "נעילות"
+    # שאל מה זה בכלל, והשם של תכונה אמור להסביר אותה.
+    ok("תרגום קיים", i18n.t("menu.locks", "he") == "🔒 מה אסור לשלוח")
+    ok("תרגום באנגלית",
+       i18n.t("menu.locks", "en") == "🔒 What is not allowed")
     ok("תרגום בערבית", "الأقفال" in i18n.t("menu.locks", "ar"))
     ok("חסר בערבית נופל לאנגלית",
        i18n.t("help.hint", "ar") == i18n.t("help.hint", "en")

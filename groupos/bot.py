@@ -5089,7 +5089,11 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
         return panel.main_menu(chat_id, _title(chat_id), _stats(chat_id), lg)
     if name == "locks":
         by = locks.by_group(chat_id)
-        counts = {g: sum(1 for _, _, a in items if a != "off")
+        # ‎by_group‎ מחזיר זוגות ‎(מפתח, פעולה)‎ ולא שלשות. הפריקה
+        # לשלושה ערכים זרקה ‎ValueError‎ בתוך הקולבק, וטלגרם אינה
+        # מציגה שגיאה של בוט — הכפתור פשוט "לא הגיב". זה המצב
+        # הגרוע מכול: תקלה שנראית כמו ממשק מת.
+        counts = {g: sum(1 for _key, action in items if action != "off")
                   for g, items in by.items()}
         return panel.locks_groups(chat_id, counts, lg)
     if name == "lockg":
@@ -5138,6 +5142,13 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
     if name == "reps":
         words, commands = _reps_lists(chat_id)
         return panel.replies_screen(chat_id, words, commands, lg)
+    if name == "proofs":
+        page = max(0, _int(arg, 0))
+        items = proof.recent(chat_id, 11, page * 10)
+        return panel.proof_list(
+            chat_id, items[:10],
+            lambda t: time.strftime("%d/%m %H:%M", time.localtime(t)),
+            lg, page, len(items) > 10)
     if name == "aim":
         return panel.ai_screen(chat_id, {
             "ai": db.get(chat_id, "ai", "1") == "1",

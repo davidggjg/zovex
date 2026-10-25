@@ -2219,6 +2219,59 @@ async def test_replies_panel():
     B._bulk_pm.clear()
 
 
+
+async def test_every_menu_button():
+    """כל כפתור בתפריט פותח מסך — ולא נופל בשקט.
+
+    ‎🔒 נעילות‎ "לא הגיב": ‎_screen_for‎ פרק שלושה ערכים מזוג, זרק
+    ‎ValueError‎ בתוך הקולבק, וטלגרם אינה מציגה שגיאה של בוט — הכפתור
+    פשוט מת. זו הבדיקה שתופסת את זה בפעם הבאה."""
+    section("כל כפתור בתפריט")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "shabbat", "1")      # שהכפתור יופיע
+    B.lang.set_chat(CHAT, "he")
+    main = panel.main_menu(CHAT, "ק", B._stats(CHAT), "he")
+    targets = []
+    for row in main.rows:
+        for _label, data in row:
+            parsed = panel.parse_cb(data)
+            if parsed and parsed[1] not in ("home",):
+                targets.append((parsed[1], parsed[2]))
+    ok("בתפריט יש כפתורים", len(targets) >= 8, str(len(targets)))
+
+    # מסכים סינכרוניים נבנים כאן; האסינכרוניים (שבת) נבדקים לחוד
+    async_only = {"shab", "hours", "ldown", "reps", "proofs"}
+    dead = []
+    for name, arg in targets:
+        if name in async_only:
+            continue
+        try:
+            sc = B._screen_for(CHAT, name, arg)
+        except Exception as e:                           # noqa: BLE001
+            dead.append(f"{name}: {type(e).__name__}: {e}")
+            continue
+        if sc is None:
+            dead.append(f"{name}: אין מסך")
+    ok("כל מסך בתפריט נבנה", not dead, " · ".join(dead))
+
+    # והמסכים שמאחורי הכפתורים הפנימיים של הנעילות
+    try:
+        groups = list(B.locks.by_group(CHAT))
+        inner = [B._screen_for(CHAT, "lockg", g) for g in groups]
+        ok("מסכי קבוצות הנעילה נבנים",
+           all(x is not None for x in inner), str(groups))
+    except Exception as e:                               # noqa: BLE001
+        ok("מסכי קבוצות הנעילה נבנים", False, f"{type(e).__name__}: {e}")
+
+    # ושני המסכים האסינכרוניים
+    for name in ("reps", "proofs"):
+        try:
+            ok(f"מסך {name} נבנה", B._screen_for(CHAT, name, "") is not None)
+        except Exception as e:                           # noqa: BLE001
+            ok(f"מסך {name} נבנה", False, f"{type(e).__name__}: {e}")
+    B.db.set(CHAT, "shabbat", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2264,6 +2317,7 @@ async def main() -> int:
     await test_bulk_collect()
     await test_cmd_reply_stays()
     await test_replies_panel()
+    await test_every_menu_button()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")
