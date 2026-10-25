@@ -43,7 +43,8 @@ from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, BotCommand,
-                           EphemeralMessageParameters,
+                           EphemeralMessageParameters, LabeledPrice,
+                           PreCheckoutQuery,
                            BotCommandScopeAllChatAdministrators,
                            BotCommandScopeAllGroupChats, BotCommandScopeChat,
                            CallbackQuery, ChatMemberUpdated,
@@ -5501,6 +5502,20 @@ async def on_callback(q: CallbackQuery):
             await _edit(q, sc)
         return
 
+    if name == "donate":
+        await _edit(q, panel.donate_screen(lg))
+        await q.answer()
+        return
+
+    if name == "star":
+        n = _int(arg, 0)
+        if n not in panel.STAR_AMOUNTS:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        await q.answer()
+        await _send_invoice(q.from_user.id, n, lg)
+        return
+
     if name == "mylang":
         # בורר השפה האישי, גם אחרי הבחירה הראשונה.
         here = q.message.chat.id if q.message else q.from_user.id
@@ -6159,6 +6174,50 @@ async def on_callback(q: CallbackQuery):
 async def _edit(q: CallbackQuery, sc: panel.Screen) -> None:
     with contextlib.suppress(TelegramAPIError):
         await q.message.edit_text(sc.text, reply_markup=kb(sc))
+
+
+# ── תרומה בכוכבים ─────────────────────────────────────────────────────────
+# ‎XTR‎ הוא המטבע של טלגרם עצמה: אין ספק סליקה, אין ‎provider_token‎,
+# ואין שום פרט תשלום שעובר דרכנו או נשמר אצלנו. מה שמגיע בחזרה הוא
+# אישור שהתשלום בוצע — וזה כל מה שצריך כדי לומר תודה.
+async def _send_invoice(user_id: int, stars: int, lg: str) -> bool:
+    try:
+        await bot.send_invoice(
+            chat_id=user_id,
+            title=i18n.t("star.invoice_title", lg)[:32],
+            description=i18n.t("star.invoice_desc", lg, n=stars)[:255],
+            payload=f"donate:{stars}",
+            currency="XTR",
+            provider_token="",
+            prices=[LabeledPrice(label=f"{stars} ⭐", amount=stars)])
+        return True
+    except TelegramAPIError as e:
+        log.warning("חשבונית כוכבים ל-%s נכשלה: %s", user_id, e)
+        await send(user_id, i18n.t("star.failed", lg), is_group=False)
+        return False
+
+
+@dp.pre_checkout_query()
+async def on_pre_checkout(q: PreCheckoutQuery):
+    """טלגרם שואלת לפני החיוב. חייבים לענות תוך עשר שניות, אחרת
+    התשלום נכשל אצל המשלם בלי הסבר."""
+    with contextlib.suppress(TelegramAPIError):
+        await q.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_paid(msg: Message):
+    """התשלום עבר. תודה, ושורה ביומן — תרומה היא אירוע שראוי לתעד."""
+    pay = msg.successful_payment
+    stars = getattr(pay, "total_amount", 0) or 0
+    lg = lang_of(msg)
+    audit.log(msg.chat.id, "donation", actor_id=msg.from_user.id
+              if msg.from_user else None, actor_kind="user",
+              after=f"{stars} XTR", source="payment", severity="info")
+    log.info("תרומה: %s כוכבים מ-%s", stars,
+             msg.from_user.id if msg.from_user else "?")
+    await send(msg.chat.id, i18n.t("star.thanks", lg, n=stars),
+               is_group=False)
 
 
 # ── תפריט הפקודות של טלגרם ─────────────────────────────────────────────────

@@ -474,8 +474,12 @@ def test_panel():
     }
     for name, sc in screens.items():
         ok(f"מסך {name}: יש טקסט", bool(sc.text.strip()))
+        # כפתור קישור (קבוצת תמיכה, "הוסף אותי לקבוצה") אינו מזהה
+        # קולבק אלא כתובת, וטלגרם בונה אותו אחרת.
         bad = [c for c in sc.all_callbacks()
-               if panel.parse_cb(c) is None or len(c.encode()) > panel.CB_MAX]
+               if not c.startswith("http")
+               and (panel.parse_cb(c) is None
+                    or len(c.encode()) > panel.CB_MAX)]
         ok(f"מסך {name}: כל הכפתורים תקפים", not bad, str(bad))
 
     # "דרך חזרה" נמדדת לפי היעד ולא לפי מילה, כי הטקסט תלוי שפה
@@ -617,7 +621,9 @@ def test_panel():
         empty = [n for n, sc in built.items() if not sc.text.strip()]
         ok(f"כל המסכים נבנים ב-{lg}", not empty, str(empty))
         bad = [c for sc in built.values() for c in sc.all_callbacks()
-               if panel.parse_cb(c) is None or len(c.encode()) > panel.CB_MAX]
+               if not c.startswith("http")
+               and (panel.parse_cb(c) is None
+                    or len(c.encode()) > panel.CB_MAX)]
         ok(f"כל הכפתורים תקפים ב-{lg}", not bad, str(bad))
 
     ok("בורר השפה מסמן את הנוכחית",

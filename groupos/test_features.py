@@ -559,12 +559,46 @@ def test_zone_catalog() -> None:
     ok("ואנגלית בכוונה אינה מנחשת", "en" not in gh.LANG_TZ)
 
 
+
+def test_support_and_stars() -> None:
+    section("תמיכה וכוכבים")
+    import panel as _p
+    ok("עברית מקבלת את הקבוצה הישראלית",
+       _p.support_link("he") == "https://t.me/Rocky1t3")
+    ok("כל שאר השפות — העולמית",
+       all(_p.support_link(c) == "https://t.me/Rocky1g"
+           for c in ("en", "ru", "ar", "es", "pt", "fr", "de", "tr", "id")))
+
+    # **הדרישה המפורשת**: במסך שאינו עברית אין זכר לקבוצה הישראלית.
+    leaks = []
+    for c in ("en", "ru", "ar", "es", "pt", "fr", "de", "tr", "id", "hi", "fa"):
+        sc = _p.home([(1, "ק")], c, "Bot")
+        blob = sc.text + " " + str(sc.rows)
+        if "Rocky1t3" in blob or "ישראל" in blob:
+            leaks.append(c)
+    ok("אין רמז לקבוצה הישראלית במסך הלא-עברי", not leaks, str(leaks))
+
+    he = _p.home([(1, "ק")], "he", "Bot")
+    ok("ובעברית הקישור הוא הישראלי",
+       "Rocky1t3" in str(he.rows) and "Rocky1g" not in str(he.rows))
+
+    d = _p.donate_screen("he")
+    ok("מסך התרומה נבנה", bool(d.rows) and bool(d.text))
+    ok("יש סכום לכל ערך",
+       all(any(f"star:{n}" in c for c in d.all_callbacks())
+           for n in _p.STAR_AMOUNTS), str(d.all_callbacks()))
+    ok("הסכומים עולים", list(_p.STAR_AMOUNTS) == sorted(_p.STAR_AMOUNTS))
+    ok("ואין סכום לא חוקי",
+       all(isinstance(n, int) and 1 <= n <= 100000 for n in _p.STAR_AMOUNTS))
+
+
 def main() -> int:
     test_zmanim()
     test_city_rows()
     test_hours()
     test_timezone()
     test_zone_catalog()
+    test_support_and_stars()
     test_spamguard()
     test_prompts()
     test_evidence()

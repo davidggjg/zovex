@@ -80,6 +80,44 @@ def head(key: str, lang: str, extra: str = "") -> str:
     return f"<b>{i18n.t(key, lang)}{extra}</b>"
 
 
+# קבוצות התמיכה. ‎he‎ לדוברי עברית, וכל השאר — העולמית.
+#
+# **ובמסך העולמי אין שום רמז שקיימת קבוצה ישראלית.** זו לא רק
+# העדפה: קבוצת תמיכה בשפה שאינך קורא היא מבוי סתום, ואזכור שלה
+# במסך האנגלי שולח אנשים למקום שבו לא יענו להם.
+SUPPORT_LINKS = {
+    "he": "https://t.me/Rocky1t3",
+    "*": "https://t.me/Rocky1g",
+}
+
+
+def support_link(lang: str = i18n.DEFAULT) -> str:
+    return SUPPORT_LINKS.get(lang, SUPPORT_LINKS["*"])
+
+
+def support_button(lang: str = i18n.DEFAULT) -> list:
+    return [(i18n.t("home.support", lang), support_link(lang))]
+
+
+# סכומי הכוכבים שמוצעים. ‎XTR‎ הוא המטבע של טלגרם, והתשלום עובר
+# דרכה בלבד — אין כאן ספק סליקה, אין פרטי אשראי, ואין מה לאחסן.
+STAR_AMOUNTS = (10, 25, 50, 100, 250, 500)
+
+
+def donate_screen(lang: str = i18n.DEFAULT) -> Screen:
+    """תרומה בכוכבים. כפתור לכל סכום, ואז החשבונית של טלגרם."""
+    rows, line = [], []
+    for n in STAR_AMOUNTS:
+        line.append((f"⭐ {n}", cb(0, "star", str(n))))
+        if len(line) == 3:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), "g:0:home")])
+    return Screen(head("star.title", lang) + "\n\n"
+                  + i18n.t("star.hint", lang), rows)
+
+
 def add_button(bot_username: str, lang: str = i18n.DEFAULT) -> list:
     """"הוסף אותי לקבוצה" — הכפתור שפותח את הבחירה של טלגרם עצמה.
 
@@ -99,14 +137,17 @@ def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT,
     add = add_button(bot_username, lang)
     if not groups:
         # מי שעוד לא הוסיף את הבוט לשום מקום צריך כפתור, לא הוראות.
-        return Screen(f"{title}\n\n" + i18n.t("home.empty", lang),
-                      [add] if add else [])
+        rows = [add] if add else []
+        rows.append(support_button(lang))
+        return Screen(f"{title}\n\n" + i18n.t("home.empty", lang), rows)
     rows = [[(f"👥 {name[:28]}", cb(cid, "main"))] for cid, name in groups]
     if add:
         rows.append(add)
     # בחירת השפה האישית הייתה חד-פעמית: מי שבחר פעם אחת לא יכול היה
     # לשנות לעולם, כי הבורר מוצג רק למי שטרם בחר.
     rows.append([(i18n.t("menu.language", lang), "g:0:mylang")])
+    rows.append(support_button(lang))
+    rows.append([(i18n.t("home.donate", lang), "g:0:donate")])
     return Screen(
         f"{title}\n\n" + i18n.t("home.groups", lang, n=len(groups)) + "\n"
         + i18n.t("home.hint", lang), rows)

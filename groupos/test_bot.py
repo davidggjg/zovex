@@ -50,6 +50,7 @@ import bot as B                                      # noqa: E402
 import aiclient                                      # noqa: E402
 import aikeys                                        # noqa: E402
 from aiogram.enums import ChatMemberStatus                # noqa: E402
+from aiogram.exceptions import TelegramAPIError           # noqa: E402
 from aiogram.filters import Command, CommandStart          # noqa: E402
 from aiogram.types import (Chat, ChatMemberLeft, Document,  # noqa: E402
                            ChatMemberMember, ChatMemberUpdated,
@@ -2714,6 +2715,57 @@ async def test_access_revoked():
         B.perms.set_role(CHAT, ADM, "owner")
 
 
+
+async def test_stars_flow():
+    """חשבונית כוכבים, אישור התשלום, והתודה."""
+    section("תרומה בכוכבים")
+    sent = []
+
+    async def fake_invoice(**kw):
+        sent.append(kw)
+        return True
+
+    B.bot.send_invoice = fake_invoice
+    try:
+        ok("החשבונית נשלחת", await B._send_invoice(ADM, 50, "he"))
+        inv = sent[-1]
+        ok("במטבע כוכבים", inv["currency"] == "XTR", str(inv.get("currency")))
+        ok("בלי ספק סליקה", inv["provider_token"] == "")
+        ok("הסכום נכון",
+           inv["prices"][0].amount == 50, str(inv["prices"][0]))
+        ok("והמטען מזהה תרומה", inv["payload"] == "donate:50", inv["payload"])
+
+        # תשלום שהצליח → תודה ושורה ביומן
+        from aiogram.types import SuccessfulPayment as _SP
+        paid = Message(
+            message_id=9050, date=dt.datetime.now(),
+            chat=Chat(id=ADM, type="private"),
+            from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+            successful_payment=_SP(currency="XTR", total_amount=50,
+                                   invoice_payload="donate:50",
+                                   telegram_payment_charge_id="c1",
+                                   provider_payment_charge_id="p1"))
+        before = len(SENT)
+        await B.on_paid(paid)
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("נשלחה תודה", "50" in out and ("תודה" in out or "Thank" in out),
+           out[:60])
+        ok("ונרשם ביומן",
+           any(r["action"] == "donation" for r in B.audit.recent(ADM, 5)),
+           str([r["action"] for r in B.audit.recent(ADM, 5)][:3]))
+
+        # כישלון ברשת אינו קורס אלא מסביר
+        async def boom(**kw):
+            raise TelegramAPIError(method=None, message="nope")
+
+        B.bot.send_invoice = boom
+        before = len(SENT)
+        ok("כישלון מוסבר ולא קורס",
+           not await B._send_invoice(ADM, 10, "he") and len(SENT) > before)
+    finally:
+        B.bot.__dict__.pop("send_invoice", None)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2754,6 +2806,7 @@ async def main() -> int:
     await test_service_cleaning()
     await test_fresh_user_start()
     await test_access_revoked()
+    await test_stars_flow()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
