@@ -116,7 +116,8 @@ def main_menu(chat_id: int, title: str, stats: dict,
         # הקבוצות בעולם לא ישתמשו בו הוא רעש בתפריט.
         [(i18n.t("menu.replies", lang), cb(chat_id, "reps")),
          (i18n.t("menu.proofs", lang), cb(chat_id, "proofs"))],
-        [(i18n.t("menu.texts", lang), cb(chat_id, "texts"))],
+        [(i18n.t("menu.texts", lang), cb(chat_id, "texts")),
+         (i18n.t("menu.state", lang), cb(chat_id, "stmsgs"))],
         [(i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
         [(i18n.t("menu.ai", lang), cb(chat_id, "aim"))],
         ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
@@ -1109,3 +1110,55 @@ def collecting_screen(chat_id: int, label: str, count: int,
             + i18n.t("rep.count", lang, n=count))
     return Screen(body, [[("✅ " + i18n.t("rep.finish", lang),
                            cb(chat_id, "repdone"))]])
+
+
+# ── הודעות המצב: סגירה ופתיחה ─────────────────────────────────────────────
+# "כשאני משבית את הקבוצה — שתישלח ההודעה שאני הגדרתי, וכשהיא נפתחת
+# הודעה אחרת. לא משנה אם זה טקסט או תמונה."
+#
+# שלוש אפשרויות לכל הודעה ולא שתיים: נוסח משלי · ברירת המחדל · בלי
+# הודעה בכלל. בלי השלישית, מי שרצה שקט היה צריך לכתוב רווח.
+STATE_MSGS = (
+    ("lockmsg", "state.lock_close"),
+    ("openmsg", "state.lock_open"),
+    ("hclose", "state.hours_close"),
+    ("hopen", "state.hours_open"),
+)
+
+SILENT = "off"          # הערך שאומר "אל תשלח כלום"
+
+
+def state_msgs_screen(chat_id: int, values: dict,
+                      lang: str = i18n.DEFAULT) -> Screen:
+    rows = []
+    for field, label in STATE_MSGS:
+        val = (values.get(field) or "").strip()
+        mark = "🔇" if val == SILENT else ("✅" if val else "↩︎")
+        rows.append([(f"{mark} {i18n.t(label, lang)}",
+                      cb(chat_id, "stmsg", field))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    return Screen(head("state.title", lang) + "\n\n"
+                  + i18n.t("state.hint", lang) + "\n\n"
+                  + i18n.t("state.legend", lang), rows)
+
+
+def state_msg_screen(chat_id: int, field: str, value: str, media: str,
+                     lang: str = i18n.DEFAULT) -> Screen:
+    label = dict(STATE_MSGS).get(field, field)
+    val = (value or "").strip()
+    if val == SILENT:
+        now = i18n.t("state.silent", lang)
+    elif val or media:
+        now = (f"<blockquote>{_tpl.esc(val[:300])}</blockquote>" if val else "")
+        if media:
+            now += ("\n" if val else "") + i18n.t("state.has_media", lang)
+    else:
+        now = i18n.t("state.default", lang)
+    rows = [
+        [("✏️ " + i18n.t("state.edit", lang), cb(chat_id, "ask", field))],
+        [("↩︎ " + i18n.t("state.use_default", lang),
+          cb(chat_id, "stdef", field)),
+         ("🔇 " + i18n.t("state.no_msg", lang), cb(chat_id, "stoff", field))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "stmsgs"))],
+    ]
+    return Screen(f"<b>{i18n.t(label, lang)}</b>\n\n" + now, rows)

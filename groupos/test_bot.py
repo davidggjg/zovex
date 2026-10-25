@@ -1555,10 +1555,10 @@ async def test_button_editing():
     # כל שדה מופיע במסך כלשהו, אחרת הוא נגיש רק בפקודה
     shown = set()
     B.db.set(CHAT, "shabbat", "1")
-    for name in ("texts", "nums", "aim", "reps"):
+    for name in ("texts", "nums", "aim", "reps", "stmsgs"):
         for c in B._screen_for(CHAT, name, "").all_callbacks():
             parts = c.split(":")
-            if len(parts) > 3 and parts[2] in ("ask", "clr"):
+            if len(parts) > 3 and parts[2] in ("ask", "clr", "stmsg"):
                 shown.add(parts[3])
     B.db.set(CHAT, "shabbat", "0")
     # ‎hrange‎ נגיש מכפתור "שעות עם דקות" בתוך מסך היום, לא מהמסכים
@@ -2272,6 +2272,91 @@ async def test_every_menu_button():
     B.db.set(CHAT, "shabbat", "0")
 
 
+
+async def test_state_messages():
+    """הודעות סגירה ופתיחה: נוסח משלך, ברירת מחדל, או שקט."""
+    section("הודעות סגירה ופתיחה")
+    B.perms.set_role(CHAT, ADM, "owner")
+    for f in ("lock_msg_close", "lock_msg_open"):
+        B.db.set(CHAT, f, "")
+        B.db.set(CHAT, f + "_media", "")
+
+    locked = []
+
+    async def fake_perms(chat_id, perms_obj):
+        locked.append(perms_obj)
+
+    # ‎FakeBot.__getattr__‎ עונה רק על ‎send_*‎, ולכן הפונקציה הזאת
+    # מוזרקת ולא מוחלפת.
+    real = getattr(B.bot, "set_chat_permissions", None)
+    B.bot.set_chat_permissions = fake_perms
+    try:
+        # ברירת מחדל
+        before = len(SENT)
+        await B.set_lockdown(CHAT, True, ADM)
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("סגירה שולחת הודעה", "נסגרה" in out, out[:60])
+
+        before = len(SENT)
+        await B.set_lockdown(CHAT, False, ADM)
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("ופתיחה שולחת הודעה אחרת", "נפתחה" in out, out[:60])
+
+        # נוסח של המנהל, עם תמונה
+        def pm(text="", mid=9400, **kw):
+            return Message(message_id=mid, date=dt.datetime.now(),
+                           chat=Chat(id=ADM, type="private"),
+                           from_user=User(id=ADM, is_bot=False,
+                                          first_name="דוד"),
+                           text=text or None, **kw)
+
+        B.waiting.start(ADM, CHAT, "lockmsg")
+        await _out(B.on_private_text, pm(mid=9401, caption="סגור ללילה", photo=[
+            PhotoSize(file_id="BANNER", file_unique_id="B1", width=90,
+                      height=90)]))
+        ok("נשמר נוסח עם תמונה",
+           B.db.get(CHAT, "lock_msg_close", "") == "סגור ללילה"
+           and B.db.get(CHAT, "lock_msg_close_media", "") == "BANNER",
+           B.db.get(CHAT, "lock_msg_close", "?"))
+
+        before = len(SENT)
+        await B.set_lockdown(CHAT, True, ADM)
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("והוא נשלח עם המדיה",
+           "סגור ללילה" in out and "BANNER" in out, out[:80])
+
+        # שקט מוחלט
+        B.db.set(CHAT, "lock_msg_open", panel.SILENT)
+        before = len(SENT)
+        await B.set_lockdown(CHAT, False, ADM)
+        ok("בלי הודעה — שקט", len(SENT) == before,
+           str([t for _c, t, _m in SENT[before:]])[:60])
+
+        # המסכים
+        sc = B._screen_for(CHAT, "stmsgs", "")
+        ok("מסך ההודעות נבנה", sc is not None and len(sc.rows) >= 5)
+        ok("ומסמן מה מוגדר",
+           "✅" in sc.text + str(sc.rows) and "🔇" in str(sc.rows),
+           str(sc.rows))
+        one = panel.state_msg_screen(CHAT, "lockmsg",
+                                     B.db.get(CHAT, "lock_msg_close", ""),
+                                     "BANNER", "he")
+        ok("מסך ההודעה מציג את הנוסח", "סגור ללילה" in one.text, one.text[:60])
+        ok("ויש בו שלוש אפשרויות",
+           any("ask:lockmsg" in c for c in one.all_callbacks())
+           and any("stdef" in c for c in one.all_callbacks())
+           and any("stoff" in c for c in one.all_callbacks()))
+    finally:
+        if real is not None:
+            B.bot.set_chat_permissions = real
+        else:
+            B.bot.__dict__.pop("set_chat_permissions", None)
+        for f in ("lock_msg_close", "lock_msg_open"):
+            B.db.set(CHAT, f, "")
+            B.db.set(CHAT, f + "_media", "")
+        B.db.set(CHAT, "lockdown", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2318,6 +2403,7 @@ async def main() -> int:
     await test_cmd_reply_stays()
     await test_replies_panel()
     await test_every_menu_button()
+    await test_state_messages()
 
     print(f"\n{'─' * 46}")
     print(f"עברו {PASS} · נכשלו {FAIL}")

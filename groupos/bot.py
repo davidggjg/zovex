@@ -3411,7 +3411,8 @@ async def _shab_panel(chat_id: int, *, force: bool = False) -> dict:
     return cfg
 
 
-async def _auto_lock(chat_id: int, close: bool, owner: str, text: str) -> None:
+async def _auto_lock(chat_id: int, close: bool, owner: str, text: str,
+                     field: str = "") -> None:
     """נועל או פותח — ורושם מי עשה זאת.
 
     הבעלות היא העיקר: קבוצה שמנהל השבית ידנית לא תיפתח ביום ראשון
@@ -3423,7 +3424,11 @@ async def _auto_lock(chat_id: int, close: bool, owner: str, text: str) -> None:
     audit.log(chat_id, "autolock." + ("on" if close else "off"),
               actor_kind="bot", after=owner, source="automation",
               severity="medium")
-    if text:
+    if field:
+        await _state_message(chat_id, field,
+                             "hours.msg_close" if close else "hours.msg_open",
+                             lang.for_chat(chat_id))
+    elif text:
         await send(chat_id, text)
 
 
@@ -3471,10 +3476,10 @@ async def _tick_hours(chat_id: int, now: float, shabbat_holds: bool) -> None:
     should_open = grouphours.is_open(raw, now=now, tz_offset=_tz_of(chat_id))
     if not should_open:
         if owner == "":
-            await _auto_lock(chat_id, True, "hours", i18n.t("hours.msg_close", lg))
+            await _auto_lock(chat_id, True, "hours", "", field="hclose")
         return
     if owner == "hours" and not shabbat_holds:
-        await _auto_lock(chat_id, False, "", i18n.t("hours.msg_open", lg))
+        await _auto_lock(chat_id, False, "", "", field="hopen")
 
 
 async def autolock_loop():
@@ -4309,6 +4314,27 @@ async def cmd_linkcheck(msg: Message):
                        action=res["action"], dur="", signals=lines))
 
 
+async def _state_message(chat_id: int, field: str, default_key: str,
+                         lg: str) -> None:
+    """ההודעה שנשלחת כשמצב הקבוצה משתנה.
+
+    שלושה מצבים ולא שניים: נוסח של המנהל, ברירת המחדל של הבוט, או
+    שקט מוחלט (‎off‎). בלי השלישי, מי שרצה שקט היה צריך לשמור רווח
+    ולקוות — וזה בדיוק סוג ההגדרה שאי אפשר לנחש אם עבדה."""
+    f = prompts.FIELDS.get(field)
+    if f is None:
+        return
+    raw = (db.get(chat_id, f.key, "") or "").strip()
+    media = db.get(chat_id, f.key + "_media", "") or ""
+    kind = db.get(chat_id, f.key + "_kind", "") or ""
+    if raw == panel.SILENT:
+        return
+    if not raw and not media:
+        raw = i18n.t(default_key, lg)
+    await send_content(chat_id, tpl.render_pick(raw, tpl.context(
+        chat_id=chat_id, language=lg)), media or None, kind or None, "")
+
+
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     """משתיק את כל הקבוצה בבת אחת, או מחזיר אותה.
 
@@ -4323,6 +4349,12 @@ async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
     db.set(chat_id, "lockdown", "1" if on else "0", by)
     audit.log(chat_id, "chat.lockdown", actor_id=by, after="on" if on else "off",
               severity="high")
+    # ההשבתה היא גם הודעה לקבוצה, לא רק שינוי הרשאות: החברים רואים
+    # שהכתיבה הפסיקה לעבוד ולא יודעים למה, ושקט הוא התשובה הגרועה
+    # ביותר באותו רגע.
+    await _state_message(chat_id, "lockmsg" if on else "openmsg",
+                         "state.msg_lock" if on else "state.msg_open",
+                         lang.for_chat(chat_id))
     return True
 
 
@@ -4892,6 +4924,21 @@ async def on_private_text(msg: Message):
                              db.get(w.chat_id, "hours", "") or "", lg), lg)
             await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         return
+    if f.kind == prompts.CONTENT:
+        # טקסט או מדיה — מה שהמנהל שלח הוא מה שהקבוצה תקבל.
+        text, mid, mkind = _collect_media(msg)
+        if text.strip() and tpl.check_html(text):
+            await send(msg.chat.id, i18n.t("err.bad_html", lg,
+                                           why=tpl.check_html(text)),
+                       is_group=False)
+            return
+        db.set(w.chat_id, f.key, text[:f.maxlen], msg.from_user.id)
+        db.set(w.chat_id, f.key + "_media", mid or "", msg.from_user.id)
+        db.set(w.chat_id, f.key + "_kind", mkind or "", msg.from_user.id)
+        await send(msg.chat.id, i18n.t("state.saved", lg), is_group=False)
+        sc = panel.state_msg_screen(w.chat_id, w.field, text, mid or "", lg)
+        await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+        return
     value, err = prompts.validate(w.field, raw)
     if value is None:
         await send(msg.chat.id, i18n.t(err, lg), is_group=False)
@@ -5142,6 +5189,10 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
     if name == "reps":
         words, commands = _reps_lists(chat_id)
         return panel.replies_screen(chat_id, words, commands, lg)
+    if name == "stmsgs":
+        return panel.state_msgs_screen(chat_id, {
+            f: db.get(chat_id, prompts.FIELDS[f].key, "") or ""
+            for f, _label in panel.STATE_MSGS}, lg)
     if name == "proofs":
         page = max(0, _int(arg, 0))
         items = proof.recent(chat_id, 11, page * 10)
@@ -5557,6 +5608,25 @@ async def on_callback(q: CallbackQuery):
         return
 
     # ── עריכה בלחיצה: ‎ask‎ פותח המתנה, ‎clr‎ מוחק, ‎cancel‎ מבטל ──────
+    if name in ("stmsg", "stdef", "stoff"):
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        f = prompts.FIELDS.get(arg)
+        if f is None or arg not in dict(panel.STATE_MSGS):
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        if name in ("stdef", "stoff"):
+            db.set(chat_id, f.key, panel.SILENT if name == "stoff" else "",
+                   q.from_user.id)
+            db.set(chat_id, f.key + "_media", "", q.from_user.id)
+            db.set(chat_id, f.key + "_kind", "", q.from_user.id)
+        await _edit(q, panel.state_msg_screen(
+            chat_id, arg, db.get(chat_id, f.key, "") or "",
+            db.get(chat_id, f.key + "_media", "") or "", lg))
+        await q.answer(i18n.t("state.saved", lg) if name != "stmsg" else "")
+        return
+
     if name in ("gwho", "gclean"):
         if not perms.check(chat_id, q.from_user.id, "welcome.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)

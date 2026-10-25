@@ -41,6 +41,9 @@ from typing import Optional
 TTL = 300.0          # חמש דקות להקליד תשובה. אחר כך זו הודעה רגילה
 
 TEXT, NUMBER, SPEC = "text", "number", "spec"
+# ‎content‎ הוא טקסט **או מדיה**: מנהל שרוצה שהקבוצה תראה באנר סגירה
+# שולח תמונה, לא מחרוזת. מה שנשמר הוא ‎file_id‎, כרגיל.
+CONTENT = "content"
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,11 @@ FIELDS: dict[str, Field] = {
     "captime": Field("captime", "captcha_time", NUMBER, lo=20, hi=900),
     "captries": Field("captries", "captcha_tries", NUMBER, lo=1, hi=10),
     "dupcount": Field("dupcount", "dup_count", NUMBER, lo=2, hi=20),
+    # הודעות המצב: נעילה ידנית, ולוח השעות. כל אחת טקסט או מדיה.
+    "lockmsg": Field("lockmsg", "lock_msg_close", CONTENT, maxlen=1000),
+    "openmsg": Field("openmsg", "lock_msg_open", CONTENT, maxlen=1000),
+    "hclose": Field("hclose", "hours_msg_close", CONTENT, maxlen=1000),
+    "hopen": Field("hopen", "hours_msg_open", CONTENT, maxlen=1000),
     # שם של הדק חדש. הערך אינו נשמר כהגדרה — הוא **יוצר** משהו,
     # ולכן ‎key‎ ריק והמטפל עושה את העבודה.
     "newword": Field("newword", "", TEXT, maxlen=40, perm="filters.write"),
@@ -99,6 +107,8 @@ FIELDS: dict[str, Field] = {
 # השדות שמוצגים במסך "הודעות", לפי הסדר
 TEXT_FIELDS = ("welcome", "goodbye", "rules", "aictx")
 SHAB_FIELDS = ("shabnote", "shablock", "shabopen")
+# ההודעות שנשלחות כשמצב הקבוצה משתנה
+STATE_FIELDS = ("lockmsg", "openmsg", "hclose", "hopen")
 NUMBER_FIELDS = ("floodrate", "floodwin", "floodrep", "floodment",
                  "floodtime", "captime", "captries", "dupcount")
 
@@ -167,6 +177,10 @@ def validate(field: str, raw: str) -> tuple[Optional[str], str]:
     val = (raw or "").strip()
     if val.lower() in ("-", "off", "none", "ריק", "מחק"):
         return "", ""
+    if f.kind == CONTENT:
+        # ריק אינו שגיאה: ההודעה יכולה להיות מדיה בלבד.
+        return (val[:f.maxlen] if len(val) <= f.maxlen else None,
+                "" if len(val) <= f.maxlen else "field.too_long")
     if f.kind == NUMBER:
         digits = val.replace(",", "").strip()
         if not digits.lstrip("-").isdigit():
