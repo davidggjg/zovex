@@ -210,6 +210,7 @@ def settings_screen(chat_id: int, current: dict,
           cb(chat_id, "clean"))],
         [(f"{i18n.t('settings.silent', lang)}: {on if silent else off}",
           cb(chat_id, "silent"))],
+        [(i18n.t("menu.service", lang), cb(chat_id, "svcs"))],
         [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
     ]
     return Screen(txt, rows)
@@ -1247,3 +1248,34 @@ def state_msg_screen(chat_id: int, field: str, value: str, media: str,
         [(i18n.t("menu.back", lang), cb(chat_id, "stmsgs"))],
     ]
     return Screen(f"<b>{i18n.t(label, lang)}</b>\n\n" + now, rows)
+
+
+# ── ניקוי הודעות השירות ───────────────────────────────────────────────────
+# "X הצטרף", "Y שינה את תמונת הקבוצה", "הודעה נעוצה" — בקבוצה פעילה
+# אלה עשרות שורות ביום שאיש לא קורא. מתג ראשי, ואז מה בדיוק.
+SERVICE_CATS = (
+    ("join", "svc.join"),
+    ("about", "svc.about"),
+    ("pin", "svc.pin"),
+    ("call", "svc.call"),
+    ("topic", "svc.topic"),
+    ("other", "svc.other"),
+)
+
+
+def service_screen(chat_id: int, on: bool, values: dict,
+                   lang: str = i18n.DEFAULT) -> Screen:
+    txt = (head("svc.title", lang) + "\n\n" + i18n.t("svc.hint", lang)
+           + "\n\n" + i18n.t("svc.note", lang))
+    rows = [[(("🟢 " if on else "⚪ ") + i18n.t("svc.master", lang),
+              cb(chat_id, "sw", "cleanservice"))]]
+    line = []
+    for key, label in SERVICE_CATS:
+        mark = "☑️ " if (on and values.get(key, "1") == "1") else "▫️ "
+        line.append((mark + i18n.t(label, lang), cb(chat_id, "svc", key)))
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "settings"))])
+    return Screen(txt, rows)

@@ -2531,6 +2531,85 @@ async def test_hours_timezone():
         B.db.set(CHAT, "lockdown", "0")
 
 
+
+async def test_service_cleaning():
+    """ניקוי הודעות המערכת: לפי קטגוריה, ורק כשמדליקים."""
+    section("ניקוי הודעות מערכת")
+    B.perms.set_role(CHAT, ADM, "owner")
+
+    def svc(mid: int, **kw) -> Message:
+        return Message(message_id=mid, date=dt.datetime.now(),
+                       chat=Chat(id=CHAT, type="supergroup", title="ק"),
+                       from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                       **kw)
+
+    title_msg = svc(9200, new_chat_title="שם חדש")
+    pin_msg = svc(9201, pinned_message=svc(9199, text="נעוץ"))
+    ok("זיהוי קטגוריה: שם", B._service_kind(title_msg) == "about")
+    ok("זיהוי קטגוריה: נעיצה", B._service_kind(pin_msg) == "pin")
+    ok("הודעה רגילה אינה שירות",
+       B._service_kind(msg("סתם", mid=9202)) == "")
+
+    # מתג ראשי כבוי — לא נוגעים
+    B.db.set(CHAT, "cleanservice", "0")
+    DELETED.clear()
+    await B.on_service_message(title_msg)
+    await asyncio.sleep(0.05)
+    ok("כשהניקוי כבוי לא נמחק כלום", not DELETED, str(DELETED))
+
+    # דלוק — נמחק (אחרי ההשהיה)
+    B.db.set(CHAT, "cleanservice", "1")
+    B.db.set(CHAT, "clean_about", "1")
+    real_sleep = asyncio.sleep
+
+    async def no_wait(_secs):
+        await real_sleep(0)
+
+    asyncio.sleep = no_wait
+    try:
+        DELETED.clear()
+        await B.on_service_message(title_msg)
+        await real_sleep(0.05)
+        ok("שינוי שם נמחק", 9200 in DELETED, str(DELETED))
+
+        # קטגוריה שכובתה בנפרד — נשארת
+        B.db.set(CHAT, "clean_pin", "0")
+        DELETED.clear()
+        await B.on_service_message(pin_msg)
+        await real_sleep(0.05)
+        ok("נעיצה שכובתה נשארת", 9201 not in DELETED, str(DELETED))
+
+        B.db.set(CHAT, "clean_pin", "1")
+        DELETED.clear()
+        await B.on_service_message(pin_msg)
+        await real_sleep(0.05)
+        ok("וכשמדליקים אותה — נמחקת", 9201 in DELETED, str(DELETED))
+
+        # הצטרפות עוברת במסלול שלה ולא כאן
+        join = svc(9203, new_chat_members=[User(id=7, is_bot=False,
+                                                first_name="חדש")])
+        DELETED.clear()
+        await B.on_service_message(join)
+        await real_sleep(0.05)
+        ok("הצטרפות אינה מטופלת פעמיים", 9203 not in DELETED, str(DELETED))
+        B._clean_service(join)
+        await real_sleep(0.05)
+        ok("אלא במסלול שלה", 9203 in DELETED, str(DELETED))
+    finally:
+        asyncio.sleep = real_sleep
+        B.db.set(CHAT, "cleanservice", "0")
+
+    sc = B._screen_for(CHAT, "svcs", "")
+    ok("מסך הניקוי נבנה", sc is not None and len(sc.rows) >= 4)
+    ok("ויש בו קטגוריה לכל סוג",
+       all(any(f"svc:{k}" in c for c in sc.all_callbacks())
+           for k, _l in panel.SERVICE_CATS), str(sc.all_callbacks()))
+    ok("וכל קטגוריה מוכרת לקוד",
+       {k for k, _l in panel.SERVICE_CATS} == set(B.SERVICE_CATEGORIES))
+    ok("וכל שדה שירות שייך לקטגוריה מוכרת",
+       all(kind in B.SERVICE_CATEGORIES for _f, kind in B.SERVICE_FIELDS))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2568,6 +2647,7 @@ async def main() -> int:
     await test_forum_topics()
     await test_hours_picker()
     await test_hours_timezone()
+    await test_service_cleaning()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

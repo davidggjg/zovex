@@ -1422,11 +1422,76 @@ async def on_leave(msg: Message):
     _clean_service(msg)
 
 
+# הודעות השירות של טלגרם, לפי קטגוריה. השם משמאל הוא השדה שטלגרם
+# מאכלסת, והקטגוריה מימין היא מה שהמנהל מדליק או מכבה.
+#
+# "הצטרפת לקבוצה זו" שמופיע בתחתית המסך **אינו** הודעה — זה סימון
+# של האפליקציה אצל מי שהצטרף, ואין לבוט מה למחוק שם. כל השאר כן.
+SERVICE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("new_chat_members", "join"),
+    ("left_chat_member", "join"),
+    ("new_chat_title", "about"),
+    ("new_chat_photo", "about"),
+    ("delete_chat_photo", "about"),
+    ("pinned_message", "pin"),
+    ("video_chat_started", "call"),
+    ("video_chat_ended", "call"),
+    ("video_chat_scheduled", "call"),
+    ("video_chat_participants_invited", "call"),
+    ("message_auto_delete_timer_changed", "other"),
+    ("group_chat_created", "other"),
+    ("supergroup_chat_created", "other"),
+    ("channel_chat_created", "other"),
+    ("migrate_to_chat_id", "other"),
+    ("migrate_from_chat_id", "other"),
+    ("boost_added", "other"),
+    ("forum_topic_created", "topic"),
+    ("forum_topic_edited", "topic"),
+    ("forum_topic_closed", "topic"),
+    ("forum_topic_reopened", "topic"),
+    ("general_forum_topic_hidden", "topic"),
+    ("general_forum_topic_unhidden", "topic"),
+    ("write_access_allowed", "other"),
+    ("users_shared", "other"),
+    ("chat_shared", "other"),
+    ("proximity_alert_triggered", "other"),
+    ("giveaway_created", "other"),
+    ("giveaway_completed", "other"),
+)
+
+SERVICE_CATEGORIES = ("join", "about", "pin", "call", "topic", "other")
+
+
+def _service_kind(msg: Message) -> str:
+    """לאיזו קטגוריית שירות ההודעה שייכת, או ריק אם היא אינה כזאת."""
+    for field, kind in SERVICE_FIELDS:
+        if getattr(msg, field, None):
+            return kind
+    return ""
+
+
+def _service_on(chat_id: int, kind: str) -> bool:
+    """האם מנקים את הקטגוריה הזאת. המתג הראשי קודם לכול.
+
+    כבוי כברירת מחדל: יש קבוצות שרוצות לראות מי נכנס, ומחיקה שקטה
+    של זה הייתה מפתיעה. מי שהדליק את המתג הראשי מקבל את כל
+    הקטגוריות, ויכול לכבות בנפרד את מה שהוא רוצה לראות."""
+    if db.get(chat_id, "cleanservice", "0") != "1":
+        return False
+    return db.get(chat_id, f"clean_{kind}", "1") == "1"
+
+
 def _clean_service(msg: Message) -> None:
-    """הודעות "הצטרף" ו"עזב". כבוי כברירת מחדל — יש קבוצות שרוצות לראות
-    מי נכנס, ומחיקה שקטה של זה הייתה מפתיעה."""
-    if db.get(msg.chat.id, "cleanservice", "0") == "1":
+    """מוחק הודעת שירות, אם הקטגוריה שלה מופעלת.
+
+    ‎3‎ שניות ולא מיד: מחיקה מיידית של הודעת הצטרפות עלולה להקדים את
+    הברכה שנשלחת בעקבותיה, והקבוצה רואה ברכה בלי שאיש הצטרף."""
+    kind = _service_kind(msg) or "join"
+    if _service_on(msg.chat.id, kind):
         _schedule_delete(msg.chat.id, msg.message_id, 3)
+
+
+
 
 
 async def _start_captcha(chat_id: int, user) -> bool:
@@ -5184,6 +5249,20 @@ async def _create_reply(msg: Message, chat_id: int, field: str,
     await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
 
 
+@dp.message(F.chat.type.in_(GROUP_TYPES))
+async def on_service_message(msg: Message):
+    """כל שאר הודעות השירות: שם, תמונה, נעיצה, שיחות, נושאים.
+
+    רשום **אחרי** כל המטפלים האחרים, ומטפל רק במה שאיש לא טיפל בו:
+    הודעה עם טקסט או מדיה כבר נבלעה קודם, ולכן מה שמגיע לכאן הוא
+    הודעת שירות או כלום."""
+    kind = _service_kind(msg)
+    if not kind or kind == "join":
+        return                       # הצטרפות ועזיבה מטופלות במקומן
+    if _service_on(msg.chat.id, kind):
+        _schedule_delete(msg.chat.id, msg.message_id, 3)
+
+
 # ── הפאנל הפרטי ────────────────────────────────────────────────────────────
 def _stats(chat_id: int) -> dict:
     day = time.time() - 86400
@@ -5276,6 +5355,11 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
             chat_id, _hours_table(chat_id, db.get(chat_id, "hours", "") or "",
                                   lg),
             lg, zone=label, now=_local_now(chat_id))
+    if name == "svcs":
+        return panel.service_screen(
+            chat_id, db.get(chat_id, "cleanservice", "0") == "1",
+            {k: db.get(chat_id, f"clean_{k}", "1")
+             for k, _label in panel.SERVICE_CATS}, lg)
     if name == "zones":
         return panel.zones_screen(
             chat_id, (db.get(chat_id, "tz", "") or "").strip(),
@@ -5411,8 +5495,9 @@ async def on_callback(q: CallbackQuery):
         if name == "sw":
             # הכפתור הזה יושב בשני מסכים. מי שלחץ עליו במסך ה-AI
             # צריך לראות את מסך ה-AI מתעדכן, לא לקפוץ לרשימת המתגים.
-            back = "aim" if arg in ("ai", "aivision", "aivoice",
-                                    "ai_titles_ok") else "sws"
+            back = ("aim" if arg in ("ai", "aivision", "aivoice",
+                                     "ai_titles_ok")
+                    else "svcs" if arg == "cleanservice" else "sws")
             await _edit(q, _screen_for(chat_id, back, ""))
         else:
             await _edit(q, panel.switch_screen(chat_id, arg, want, lg))
@@ -5734,6 +5819,20 @@ async def on_callback(q: CallbackQuery):
             rules=db.get(chat_id, RULES_KEY, "") or "")), None, None,
             db.get(chat_id, WELCOME_KEY + "_buttons", "") or "")
         await q.answer(i18n.t("state.sent", lg), show_alert=True)
+        return
+
+    if name == "svc":
+        if not perms.check(chat_id, q.from_user.id, "settings.write"):
+            await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
+            return
+        if arg not in SERVICE_CATEGORIES:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        key = f"clean_{arg}"
+        db.set(chat_id, key, "0" if db.get(chat_id, key, "1") == "1" else "1",
+               q.from_user.id)
+        await _edit(q, _screen_for(chat_id, "svcs", ""))
+        await q.answer(i18n.t("saved", lg))
         return
 
     if name in ("stmsg", "stdef", "stoff", "stprev"):
