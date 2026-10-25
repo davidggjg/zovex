@@ -80,12 +80,33 @@ def head(key: str, lang: str, extra: str = "") -> str:
     return f"<b>{i18n.t(key, lang)}{extra}</b>"
 
 
-def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT) -> Screen:
+def add_button(bot_username: str, lang: str = i18n.DEFAULT) -> list:
+    """"הוסף אותי לקבוצה" — הכפתור שפותח את הבחירה של טלגרם עצמה.
+
+    בלעדיו ההוראה היא "לך לפרופיל של הבוט, לחץ על שלוש הנקודות,
+    בחר הוספה לקבוצה" — שלושה צעדים שמאבדים חצי מהאנשים בצעד
+    הראשון. ‎?startgroup=true‎ עושה את זה בלחיצה."""
+    if not bot_username:
+        return []
+    return [(i18n.t("home.add_me", lang),
+             f"https://t.me/{bot_username}?startgroup=true")]
+
+
+def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT,
+         bot_username: str = "") -> Screen:
     """רשימת הקבוצות שהמשתמש מנהל."""
     title = head("home.title", lang)
+    add = add_button(bot_username, lang)
     if not groups:
-        return Screen(f"{title}\n\n" + i18n.t("home.empty", lang))
+        # מי שעוד לא הוסיף את הבוט לשום מקום צריך כפתור, לא הוראות.
+        return Screen(f"{title}\n\n" + i18n.t("home.empty", lang),
+                      [add] if add else [])
     rows = [[(f"👥 {name[:28]}", cb(cid, "main"))] for cid, name in groups]
+    if add:
+        rows.append(add)
+    # בחירת השפה האישית הייתה חד-פעמית: מי שבחר פעם אחת לא יכול היה
+    # לשנות לעולם, כי הבורר מוצג רק למי שטרם בחר.
+    rows.append([(i18n.t("menu.language", lang), "g:0:mylang")])
     return Screen(
         f"{title}\n\n" + i18n.t("home.groups", lang, n=len(groups)) + "\n"
         + i18n.t("home.hint", lang), rows)
@@ -245,19 +266,22 @@ def language_screen(chat_id: int, current: str) -> Screen:
     return Screen(txt, rows)
 
 
-def welcome_screen() -> Screen:
-    """המסך הראשון שמשתמש חדש רואה — בחירת שפה.
+def welcome_screen(current: str = "") -> Screen:
+    """המסך הראשון שמשתמש חדש רואה — בחירת שפה, וגם שינוי שלה אחר כך.
 
     הוא מוצג לפני כל טקסט אחר, ולכן אי אפשר לכתוב אותו בשפה אחת:
     השורה העליונה היא שם השפה בשפה עצמה. מי שלא קרא עברית מימיו
     עדיין מזהה את "English" או "العربية" ברשימה."""
     rows, line = [], []
     for code, name in i18n.available():
-        line.append((name, cb(0, "pick", code)))
+        mark = "● " if code == current else ""
+        line.append((f"{mark}{name}", cb(0, "pick", code)))
         if len(line) == 3:
             rows.append(line); line = []
     if line:
         rows.append(line)
+    if current:
+        rows.append([(i18n.t("menu.back", current), "g:0:home")])
     return Screen("<b>GroupOS</b>\n\n🌐 Choose your language", rows)
 
 
@@ -969,9 +993,14 @@ def numbers_screen(chat_id: int, values: dict,
 GREET_CLEAN_CYCLE = ("0", "30", "120", "600", "3600")
 
 
-def welcome_screen(chat_id: int, state: dict,
-                   lang: str = i18n.DEFAULT) -> Screen:
+def greet_screen(chat_id: int, state: dict,
+                 lang: str = i18n.DEFAULT) -> Screen:
     """ברכת הכניסה: הנוסח, מי רואה אותה, וכמה זמן היא נשארת.
+
+    **השם הזה חשוב.** הפונקציה נקראה פעם ‎welcome_screen‎ — בדיוק כמו
+    בורר השפה שמוצג למשתמש חדש — והשנייה דרסה את הראשונה. התוצאה:
+    ‎/start‎ של משתמש שמעולם לא בחר שפה קרס בשקט, והוא לא קיבל שום
+    תשובה. יש בדיקה שמוודאת שאין שני מסכים באותו שם.
 
     "יש מנהלים שרוצים שכל הקבוצה תראה" — ולכן זו בחירה ולא התנהגות.
     וכשבוחרים שכולם יראו, השאלה הבאה היא כמה זמן היא נשארת: הכרזה

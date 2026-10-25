@@ -811,6 +811,17 @@ def test_i18n():
     # שמי שפנה אליו קורא עברית
     ok("ברירת המחדל היא אנגלית", i18n.DEFAULT == "en")
     ok("שפה לא נתמכת נופלת לאנגלית", i18n.normalize("th") == "en")
+
+    # שני מסכים באותו שם: השני דורס את הראשון, ו-/start של משתמש
+    # חדש קרס בשקט בלי שאיש ידע. בדיקה אחת, ולא יקרה שוב.
+    import ast as _ast2
+    import inspect as _insp
+    tree = _ast2.parse(_insp.getsource(panel))
+    names = [n.name for n in tree.body if isinstance(n, _ast2.FunctionDef)]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    ok("אין שתי פונקציות באותו שם ב-panel", not dupes, str(dupes))
+    ok("בורר השפה מקבל קריאה בלי ארגומנטים",
+       bool(panel.welcome_screen().rows))
     ok("טרם נבחרה שפה", L.chosen(CHAT) is None)
     # שפה אינה יורשת מברירת המחדל הגלובלית. שורה אחת שנכתבה ב-
     # ‎chat_id=0‎ בגרסה ישנה גרמה לכל צ'אט חדש לקבל עברית, כולל

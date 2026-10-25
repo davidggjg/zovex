@@ -365,12 +365,21 @@ def _private_button(chat_id: int,
         url=f"https://t.me/{_bot_username}?start=g{chat_id}")]])
 
 
+def _button(text: str, data: str) -> InlineKeyboardButton:
+    """כפתור רגיל, או כפתור קישור כשהיעד הוא כתובת.
+
+    כך מסך יכול להחזיק גם "הוסף אותי לקבוצה" — פעולה של טלגרם
+    עצמה — בלי שהמסכים יצטרכו להכיר את aiogram."""
+    if data.startswith("http://") or data.startswith("https://"):
+        return InlineKeyboardButton(text=text, url=data)
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
 def kb(screen: panel.Screen) -> Optional[InlineKeyboardMarkup]:
     if not screen.rows:
         return None
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t, callback_data=c) for t, c in row]
-        for row in screen.rows])
+        [_button(t, c) for t, c in row] for row in screen.rows])
 
 
 # ── סנכרון מנהלים ──────────────────────────────────────────────────────────
@@ -1633,7 +1642,8 @@ async def cmd_start(msg: Message):
         if lang.chosen(msg.chat.id) is None:
             sc = panel.welcome_screen()
         else:
-            sc = panel.home(my_groups(msg.from_user.id), lang_of(msg))
+            sc = panel.home(my_groups(msg.from_user.id), lang_of(msg),
+                           _bot_username)
         # ‎/start help‎ — כך מגיע מי שלחץ על הכפתור בקבוצה. הוא ביקש
         # עזרה, ולכן הוא יקבל עזרה ולא את מסך הבית.
         payload = ((msg.text or "").split(maxsplit=1) + [""])[1].strip()
@@ -5043,7 +5053,7 @@ async def on_private_text(msg: Message):
     if w is None:
         if (msg.text or "").startswith("/"):
             return
-        sc = panel.home(my_groups(msg.from_user.id), lg)
+        sc = panel.home(my_groups(msg.from_user.id), lg, _bot_username)
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         return
 
@@ -5338,7 +5348,7 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
                 for n in prompts.NUMBER_FIELDS}
         return panel.numbers_screen(chat_id, vals, lg)
     if name == "greet":
-        return panel.welcome_screen(chat_id, {
+        return panel.greet_screen(chat_id, {
             "private": db.get(chat_id, "welcome_private", "1") == "1",
             "clean": db.get(chat_id, "greet_clean", "0"),
             "on": db.get(chat_id, "welcome_on", "1") == "1",
@@ -5415,16 +5425,23 @@ async def on_callback(q: CallbackQuery):
     lg = (lang.for_chat(chat_id) if chat_id
           else i18n.normalize(q.from_user.language_code))
 
+    if name == "mylang":
+        # בורר השפה האישי, גם אחרי הבחירה הראשונה.
+        here = q.message.chat.id if q.message else q.from_user.id
+        await _edit(q, panel.welcome_screen(lang.for_chat(here)))
+        await q.answer()
+        return
+
     if name == "pick":
         # בחירת שפה אישית בצ'אט הפרטי. chat_id=0 כי עוד אין קבוצה.
         lang.set_chat(q.message.chat.id, arg)
         lg = i18n.normalize(arg)
-        await _edit(q, panel.home(my_groups(q.from_user.id), lg))
+        await _edit(q, panel.home(my_groups(q.from_user.id), lg, _bot_username))
         await q.answer(i18n.t("lang.set", lg))
         return
 
     if name == "home":
-        await _edit(q, panel.home(my_groups(q.from_user.id), lg))
+        await _edit(q, panel.home(my_groups(q.from_user.id), lg, _bot_username))
         return
 
     # העזרה יושבת לפני בדיקת ההרשאה לקבוצה: היא נפתחת בשיחה פרטית,
@@ -5889,7 +5906,7 @@ async def on_callback(q: CallbackQuery):
         if name == "cancel":
             waiting.clear(q.from_user.id)
             await _edit(q, _screen_for(chat_id, "main", "")
-                        or panel.home(my_groups(q.from_user.id), lg))
+                        or panel.home(my_groups(q.from_user.id), lg, _bot_username))
             await q.answer(i18n.t("btn.canceled", lg))
             return
         f = prompts.FIELDS.get(arg)
@@ -6112,9 +6129,13 @@ async def publish_personal_commands(user_id: int, lg: str) -> None:
         allowed |= _allowed_cmds(chat_id, user_id)
     items = [BotCommand(command=n, description=d[:256])
              for n, d in panel.command_list(lg) if n in allowed]
-    with contextlib.suppress(TelegramAPIError):
+    # ‎Exception‎ ולא ‎TelegramAPIError‎ בלבד: פרסום תפריט הוא נוחות,
+    # ו-‎/start‎ שנכשל בגללו הוא משתמש חדש שלא קיבל שום תשובה.
+    try:
         await bot.set_my_commands(
             items, scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception as e:                                   # noqa: BLE001
+        log.info("פרסום תפריט אישי ל-%s נכשל: %s", user_id, e)
 
 
 # ── רקע ────────────────────────────────────────────────────────────────────

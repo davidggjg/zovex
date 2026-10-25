@@ -125,6 +125,9 @@ class FakeBot:
     async def get_chat_administrators(self, chat_id):
         return []
 
+    async def set_my_commands(self, commands, scope=None, **kw):
+        return True
+
     async def delete_message(self, chat_id, message_id):
         DELETED.append(message_id)
         return True
@@ -2610,6 +2613,56 @@ async def test_service_cleaning():
        all(kind in B.SERVICE_CATEGORIES for _f, kind in B.SERVICE_FIELDS))
 
 
+
+async def test_fresh_user_start():
+    """משתמש חדש לגמרי: /start מציג בורר שפה באנגלית, ולא קורס."""
+    section("משתמש חדש")
+    fresh = 606060
+    B.db.change("DELETE FROM settings WHERE chat_id=? AND key='lang'",
+                (fresh,))
+    B.db.change("DELETE FROM settings WHERE chat_id=0 AND key='lang'", ())
+    pm = Message(message_id=9100, date=dt.datetime.now(),
+                 chat=Chat(id=fresh, type="private"),
+                 from_user=User(id=fresh, is_bot=False, first_name="New",
+                                language_code="he"),
+                 text="/start")
+    out = await _out(B.cmd_start, pm)
+    ok("יש תשובה בכלל", bool(out) and not out.startswith("!!"), out[:80])
+    ok("והיא בורר השפה", "language" in out.lower(), out[:80])
+    ok("באנגלית, למרות שהטלגרם שלו בעברית",
+       "Choose" in out, out[:80])
+
+    # ואחרי שבוחר — אפשר לשנות שוב
+    B.lang.set_chat(fresh, "he")
+    sc = panel.home([(CHAT, "ק")], "he")
+    ok("במסך הבית יש כפתור שפה",
+       any("mylang" in c for c in sc.all_callbacks()), str(sc.rows))
+
+    # ומי שעוד לא הוסיף את הבוט לשום מקום מקבל כפתור, לא הוראות
+    empty = panel.home([], "en", "Rocky81bot")
+    ok("כפתור הוספה לקבוצה למי שאין לו קבוצות",
+       any("startgroup=true" in c for c in empty.all_callbacks()),
+       str(empty.rows))
+    ok("והוא כתוב באנגלית",
+       any("Add me" in t for row in empty.rows for t, _ in row),
+       str(empty.rows))
+    ok("וגם למי שכבר יש",
+       any("startgroup=true" in c
+           for c in panel.home([(CHAT, "ק")], "he",
+                               "Rocky81bot").all_callbacks()))
+    ok("בלי שם בוט אין כפתור שבור",
+       not any("startgroup" in c for c in panel.home([], "en").all_callbacks()))
+    ok("וכפתור קישור נבנה כ-url",
+       B._button("x", "https://t.me/a").url == "https://t.me/a"
+       and B._button("y", "g:0:home").callback_data == "g:0:home")
+    picker = panel.welcome_screen("he")
+    ok("והבורר מסמן את הנוכחית",
+       any("●" in t for row in picker.rows for t, _ in row), str(picker.rows))
+    ok("ויש בו חזרה", any("g:0:home" in c for c in picker.all_callbacks()))
+    B.db.change("DELETE FROM settings WHERE chat_id=? AND key='lang'",
+                (fresh,))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2648,6 +2701,7 @@ async def main() -> int:
     await test_hours_picker()
     await test_hours_timezone()
     await test_service_cleaning()
+    await test_fresh_user_start()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
