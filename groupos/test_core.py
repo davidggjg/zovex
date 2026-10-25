@@ -787,7 +787,13 @@ def test_i18n():
                 dups[k] = keys.count(k)
     ok("אין מפתח כפול במילוני השפה", not dups, str(dups))
 
-    he, en = set(i18n.STRINGS["he"]), set(i18n.STRINGS["en"])
+    # ‎zone.*‎ מוחרגים: שם של אזור זמן נופל לשם העיר שבמזהה
+    # (‎Asia/Tokyo‎ → ‎Tokyo‎), ולכן תרגום שלו הוא נוחות ולא דרישה —
+    # אחרת כל שפה חדשה הייתה חייבת לתרגם 55 שמות ערים.
+    def _core_keys(code: str) -> set:
+        return {k for k in i18n.STRINGS[code] if not k.startswith("zone.")}
+
+    he, en = _core_keys("he"), _core_keys("en")
     ok("עברית ואנגלית מכסות את אותם מפתחות", he == en,
        f"רק בעברית: {he-en} · רק באנגלית: {en-he}")
 

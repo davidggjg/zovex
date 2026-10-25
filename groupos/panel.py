@@ -783,21 +783,43 @@ def cities_pick(chat_id: int, chosen: list[str],
                   + i18n.t("shab.cities_hint", lang), rows)
 
 
-def zones_screen(chat_id: int, current: str,
-                 lang: str = i18n.DEFAULT) -> Screen:
-    """בורר אזור זמן. בלעדיו כל לוח שעות הוא ניחוש.
+def zone_label(name: str, lang: str = i18n.DEFAULT) -> str:
+    """השם שמוצג לאזור: תרגום אם יש, אחרת שם העיר שבמזהה.
 
-    שם IANA ולא היסט במספר: ישראל היא ‎+2‎ בחורף ו-‎+3‎ בקיץ, ומי
-    שבחר מספר גילה את זה בלילה שבו השעון זז."""
+    הבוט מיועד לעולם, ולכן אין כאן רשימת תוויות בשפה אחת: ‎Asia/Tokyo‎
+    מוצג כ-‎Tokyo‎ בכל שפה שלא תרגמה אותו, וזה ממילא מה שאנשים
+    מחפשים ברשימה."""
     import grouphours as _gh
+    key = f"zone.{name}"
+    shown = i18n.t(key, lang)
+    return shown if shown != key else _gh.zone_city(name)
+
+
+def zones_screen(chat_id: int, current: str, page: int = 0,
+                 lang: str = i18n.DEFAULT) -> Screen:
+    """בורר אזור זמן, מחולק לעמודים. בלעדיו כל לוח שעות הוא ניחוש.
+
+    כל אזור מוצג עם ההיסט שלו **ברגע הזה** — ‎Tokyo · UTC+9‎ — כי זה
+    מה שמאפשר לאדם לזהות את האזור שלו גם כשהוא לא בטוח בשם העיר."""
+    import grouphours as _gh
+    pages = _gh.zone_pages()
+    page = max(0, min(page, pages - 1))
     rows, line = [], []
-    for name, label in _gh.ZONES:
+    for name in _gh.zone_page(page):
         mark = "● " if name == current else ""
-        line.append((f"{mark}{label}", cb(chat_id, "setz", name)))
+        label = f"{mark}{zone_label(name, lang)} · {_gh.offset_label(_gh.zone_offset(name))}"
+        line.append((label[:40], cb(chat_id, "setz", name)))
         if len(line) == 2:
             rows.append(line); line = []
     if line:
         rows.append(line)
+    nav = []
+    if page > 0:
+        nav.append(("◀︎", cb(chat_id, "zones", str(page - 1))))
+    nav.append((f"{page + 1}/{pages}", cb(chat_id, "zones", str(page))))
+    if page < pages - 1:
+        nav.append(("▶︎", cb(chat_id, "zones", str(page + 1))))
+    rows.append(nav)
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "hours"))])
     return Screen(head("tz.title", lang) + "\n\n" + i18n.t("tz.hint", lang),
                   rows)

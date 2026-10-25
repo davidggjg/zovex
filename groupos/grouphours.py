@@ -42,23 +42,83 @@ from typing import Optional
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")   # 0=שני, כמו tm_wday
 
-# אזורי הזמן שמוצעים בבורר. שם IANA ולא היסט קבוע, כי היסט קבוע
-# שובר שעון קיץ פעמיים בשנה — והשבירה מתגלה בשתיים בלילה.
-ZONES: tuple[tuple[str, str], ...] = (
-    ("Asia/Jerusalem", "ישראל"),
-    ("Europe/London", "לונדון"),
-    ("Europe/Paris", "פריז · ברלין"),
-    ("Europe/Moscow", "מוסקבה"),
-    ("America/New_York", "ניו יורק"),
-    ("America/Chicago", "שיקגו"),
-    ("America/Los_Angeles", "לוס אנג׳לס"),
-    ("America/Sao_Paulo", "סאו פאולו"),
-    ("Asia/Dubai", "דובאי"),
-    ("Asia/Kolkata", "הודו"),
-    ("Asia/Bangkok", "בנגקוק"),
-    ("Australia/Melbourne", "מלבורן"),
-    ("UTC", "UTC"),
+# אזורי הזמן שמוצעים בבורר.
+#
+# שם IANA ולא היסט קבוע, כי היסט קבוע שובר שעון קיץ פעמיים בשנה —
+# והשבירה מתגלה בשתיים בלילה. **אין כאן תוויות בעברית**: הבוט הזה
+# מיועד לעולם, והשם שמוצג נגזר מהמזהה עצמו (‎Asia/Tokyo‎ → ‎Tokyo‎)
+# ומההיסט הנוכחי. מי שרוצה שם מתורגם מוסיף מפתח ‎zone.<מזהה>‎
+# ב-i18n, ושפה בלעדיו מקבלת את שם העיר — שהוא ממילא מה שרוב
+# האנשים מחפשים ברשימה.
+ZONES: tuple[str, ...] = (
+    # אמריקה
+    "America/Los_Angeles", "America/Denver", "America/Chicago",
+    "America/New_York", "America/Toronto", "America/Mexico_City",
+    "America/Bogota", "America/Lima", "America/Santiago",
+    "America/Sao_Paulo", "America/Argentina/Buenos_Aires",
+    # אירופה
+    "Europe/London", "Europe/Dublin", "Europe/Lisbon", "Europe/Madrid",
+    "Europe/Paris", "Europe/Berlin", "Europe/Rome", "Europe/Amsterdam",
+    "Europe/Warsaw", "Europe/Stockholm", "Europe/Athens", "Europe/Bucharest",
+    "Europe/Kyiv", "Europe/Moscow", "Europe/Istanbul",
+    # אפריקה והמזרח התיכון
+    "Africa/Casablanca", "Africa/Lagos", "Africa/Cairo",
+    "Africa/Johannesburg", "Africa/Nairobi",
+    "Asia/Jerusalem", "Asia/Amman", "Asia/Beirut", "Asia/Baghdad",
+    "Asia/Riyadh", "Asia/Dubai", "Asia/Tehran",
+    # אסיה
+    "Asia/Karachi", "Asia/Kolkata", "Asia/Dhaka", "Asia/Bangkok",
+    "Asia/Jakarta", "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Singapore",
+    "Asia/Manila", "Asia/Seoul", "Asia/Tokyo",
+    # אוקיאניה
+    "Australia/Perth", "Australia/Brisbane", "Australia/Sydney",
+    "Australia/Melbourne", "Pacific/Auckland",
+    "UTC",
 )
+
+ZONES_PER_PAGE = 12
+
+# ניחוש ראשוני לפי השפה שנבחרה. **ניחוש בלבד** — הוא נקבע רק
+# כשאזור הזמן עוד לא נקבע, ואפשר לשנות אותו בכפתור אחד. בלי זה כל
+# קבוצה מתחילה ב-UTC, וזה המקום שבו לוח השעות נכשל בשקט.
+#
+# אנגלית אינה כאן בכוונה: היא מדוברת בעשרים אזורי זמן, וניחוש שם
+# גרוע מאין ניחוש.
+LANG_TZ: dict[str, str] = {
+    "he": "Asia/Jerusalem",
+    "ru": "Europe/Moscow",
+    "tr": "Europe/Istanbul",
+    "fa": "Asia/Tehran",
+    "hi": "Asia/Kolkata",
+    "id": "Asia/Jakarta",
+    "fr": "Europe/Paris",
+    "de": "Europe/Berlin",
+    "es": "Europe/Madrid",
+    "pt": "America/Sao_Paulo",
+}
+
+
+def zone_city(name: str) -> str:
+    """‎'America/Argentina/Buenos_Aires'‎ → ‎'Buenos Aires'‎."""
+    return (name or "").split("/")[-1].replace("_", " ")
+
+
+def zone_pages() -> int:
+    return max(1, (len(ZONES) + ZONES_PER_PAGE - 1) // ZONES_PER_PAGE)
+
+
+def zone_page(page: int) -> tuple[str, ...]:
+    p = max(0, min(page, zone_pages() - 1))
+    return ZONES[p * ZONES_PER_PAGE:(p + 1) * ZONES_PER_PAGE]
+
+
+def offset_label(minutes: Optional[int]) -> str:
+    """‎120‎ → ‎'UTC+2'‎ · ‎-210‎ → ‎'UTC-3:30'‎."""
+    if minutes is None:
+        return "UTC"
+    sign = "+" if minutes >= 0 else "-"
+    h, m = divmod(abs(int(minutes)), 60)
+    return f"UTC{sign}{h}" + (f":{m:02d}" if m else "")
 
 
 def zone_offset(name: str, now: Optional[float] = None) -> Optional[int]:

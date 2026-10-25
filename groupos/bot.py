@@ -3376,6 +3376,21 @@ def _tz_of(chat_id: int, now: Optional[float] = None) -> int:
     return _int(db.get(chat_id, "tz_offset", "0"), 0)
 
 
+def _guess_zone(chat_id: int, lang_code: str, by: Optional[int]) -> str:
+    """ניחוש אזור זמן לפי השפה שנבחרה, אם עוד לא נקבע אחד.
+
+    קבוצה שלא קבעה אזור זמן עובדת ב-UTC, וזה נכשל בשקט: הלוח
+    פשוט לא סוגר בשעה שנבחרה. ניחוש לפי השפה נכון ברוב המקרים,
+    הוא לא דורס בחירה קיימת, ואפשר להחליף אותו בכפתור."""
+    if (db.get(chat_id, "tz", "") or "").strip():
+        return ""
+    zone = grouphours.LANG_TZ.get(i18n.normalize(lang_code), "")
+    if not zone:
+        return ""
+    db.set(chat_id, "tz", zone, by)
+    return zone
+
+
 def _local_now(chat_id: int) -> str:
     """השעה אצל הקבוצה, כפי שהבוט רואה אותה. זה מה שהופך תקלת אזור
     זמן מ"לא עובד" ל"רגע, השעון שלו מראה משהו אחר"."""
@@ -5254,14 +5269,17 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
         return panel.replies_screen(chat_id, words, commands, lg)
     if name == "hours":
         zone = (db.get(chat_id, "tz", "") or "").strip()
-        label = dict(grouphours.ZONES).get(zone, zone)
+        label = (f"{panel.zone_label(zone, lg)} · "
+                 f"{grouphours.offset_label(grouphours.zone_offset(zone))}"
+                 if zone else "")
         return panel.hours_screen(
             chat_id, _hours_table(chat_id, db.get(chat_id, "hours", "") or "",
                                   lg),
             lg, zone=label, now=_local_now(chat_id))
     if name == "zones":
-        return panel.zones_screen(chat_id,
-                                  (db.get(chat_id, "tz", "") or "").strip(), lg)
+        return panel.zones_screen(
+            chat_id, (db.get(chat_id, "tz", "") or "").strip(),
+            max(0, _int(arg, 0)), lg)
     if name == "stmsgs":
         return panel.state_msgs_screen(chat_id, {
             f: db.get(chat_id, prompts.FIELDS[f].key, "") or ""
@@ -5485,11 +5503,19 @@ async def on_callback(q: CallbackQuery):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
         lang.set_chat(chat_id, arg)
+        guessed = _guess_zone(chat_id, arg, q.from_user.id)
         audit.log(chat_id, "lang.change", actor_id=q.from_user.id,
                   before=lg, after=i18n.normalize(arg),
                   source="button", severity="info")
         await _edit(q, _screen_for(chat_id, "lang", ""))
-        await q.answer(i18n.t("lang.set", arg))
+        if guessed:
+            # אומרים מה נקבע, ואיפה משנים. הגדרה ששונתה בלי שאיש
+            # יודע היא הגדרה שתפתיע מישהו בלילה.
+            await q.answer(i18n.t("tz.guessed", arg,
+                                  zone=panel.zone_label(guessed, arg)),
+                           show_alert=True)
+        else:
+            await q.answer(i18n.t("lang.set", arg))
         return
 
     if name in ("clean", "silent"):
@@ -5562,14 +5588,14 @@ async def on_callback(q: CallbackQuery):
             return
         if name in ("zones", "setz"):
             if name == "setz":
-                if arg not in dict(grouphours.ZONES):
+                if arg not in grouphours.ZONES:
                     await q.answer(i18n.t("btn.unknown", lg))
                     return
                 db.set(chat_id, "tz", arg, q.from_user.id)
                 await _edit(q, _screen_for(chat_id, "hours", ""))
                 await q.answer(i18n.t("tz.set", lg))
                 return
-            await _edit(q, _screen_for(chat_id, "zones", ""))
+            await _edit(q, _screen_for(chat_id, "zones", arg))
             await q.answer()
             return
 

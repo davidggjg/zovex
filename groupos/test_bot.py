@@ -2497,12 +2497,32 @@ async def test_hours_timezone():
         ok("ויש כפתור אזור זמן",
            any("zones" in c for c in sc.all_callbacks()), str(sc.rows[-2:]))
         zs = B._screen_for(CHAT, "zones", "")
-        ok("בורר האזורים נבנה",
-           zs is not None and any("setz:Asia/Jerusalem" in c
-                                  for c in zs.all_callbacks()))
+        pages = [B._screen_for(CHAT, "zones", str(p))
+                 for p in range(_gh.zone_pages())]
+        every = {c.split(":")[-1] for sc2 in pages
+                 for c in sc2.all_callbacks() if ":setz:" in c}
+        ok("בורר האזורים נבנה", zs is not None and bool(every))
+        ok("וכל אזור נגיש באיזה עמוד",
+           set(_gh.ZONES) <= every, str(set(_gh.ZONES) - every))
+        ok("וההיסט מוצג לצד השם",
+           any("UTC+" in t or "UTC-" in t
+               for sc2 in pages for row in sc2.rows for t, _ in row))
         ok("ומזהי הכפתורים בטווח",
            all(len(c.encode()) <= panel.CB_MAX for c in zs.all_callbacks()))
-        ok("והאזור הנוכחי מסומן", "●" in str(zs.rows), str(zs.rows[:1]))
+        marked = any("●" in t for sc2 in pages for row in sc2.rows
+                     for t, _ in row)
+        ok("והאזור הנוכחי מסומן", marked, str(zs.rows[:1]))
+
+        # ניחוש לפי שפה: נקבע רק כשאין אזור, ולא דורס בחירה
+        B.db.set(CHAT, "tz", "")
+        ok("שפה עברית מנחשת ירושלים",
+           B._guess_zone(CHAT, "he", ADM) == "Asia/Jerusalem"
+           and B.db.get(CHAT, "tz", "") == "Asia/Jerusalem")
+        ok("ובחירה קיימת אינה נדרסת", B._guess_zone(CHAT, "ru", ADM) == ""
+           and B.db.get(CHAT, "tz", "") == "Asia/Jerusalem")
+        B.db.set(CHAT, "tz", "")
+        ok("אנגלית אינה מנחשת", B._guess_zone(CHAT, "en", ADM) == "")
+        B.db.set(CHAT, "tz", "Asia/Jerusalem")
     finally:
         B.set_lockdown = real
         B.db.set(CHAT, "hours", "")

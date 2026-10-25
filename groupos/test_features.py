@@ -523,8 +523,40 @@ def test_timezone() -> None:
                       tz_offset=gh.zone_offset("Asia/Jerusalem",
                                                israel_0130)))
     ok("לכל אזור בבורר יש היסט",
-       all(gh.zone_offset(z) is not None for z, _label in gh.ZONES),
-       str([z for z, _ in gh.ZONES if gh.zone_offset(z) is None]))
+       all(gh.zone_offset(z) is not None for z in gh.ZONES),
+       str([z for z in gh.ZONES if gh.zone_offset(z) is None]))
+
+
+
+def test_zone_catalog() -> None:
+    section("קטלוג אזורי הזמן")
+    ok("הרשימה עולמית", len(gh.ZONES) >= 40, str(len(gh.ZONES)))
+    ok("ובלי כפילויות", len(set(gh.ZONES)) == len(gh.ZONES))
+    ok("כל אזור מוכר למערכת",
+       all(gh.zone_offset(z) is not None for z in gh.ZONES),
+       str([z for z in gh.ZONES if gh.zone_offset(z) is None]))
+    ok("יש אזורים בכל יבשת",
+       all(any(z.startswith(p) for z in gh.ZONES)
+           for p in ("America/", "Europe/", "Africa/", "Asia/",
+                     "Australia/", "Pacific/")))
+    ok("שם העיר נגזר מהמזהה",
+       gh.zone_city("America/Argentina/Buenos_Aires") == "Buenos Aires")
+    ok("היסט חצי־שעתי מוצג נכון",
+       gh.offset_label(330) == "UTC+5:30" and gh.offset_label(-210) == "UTC-3:30",
+       gh.offset_label(330))
+    ok("אפס הוא UTC", gh.offset_label(0) == "UTC+0")
+
+    pages = gh.zone_pages()
+    seen = [z for p in range(pages) for z in gh.zone_page(p)]
+    ok("העמודים מכסים את כל הרשימה", seen == list(gh.ZONES), str(len(seen)))
+    ok("עמוד מחוץ לטווח אינו קורס",
+       gh.zone_page(999) and gh.zone_page(-5))
+
+    ok("ניחוש לפי שפה קיים לשפות הנפוצות",
+       all(gh.LANG_TZ.get(c) in gh.ZONES
+           for c in ("he", "ru", "tr", "fr", "de", "es", "pt")),
+       str(gh.LANG_TZ))
+    ok("ואנגלית בכוונה אינה מנחשת", "en" not in gh.LANG_TZ)
 
 
 def main() -> int:
@@ -532,6 +564,7 @@ def main() -> int:
     test_city_rows()
     test_hours()
     test_timezone()
+    test_zone_catalog()
     test_spamguard()
     test_prompts()
     test_evidence()
