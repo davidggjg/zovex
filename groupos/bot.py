@@ -6234,6 +6234,14 @@ async def main() -> int:
                  p["budget"] or "לא ידוע")
     if not ai.pools:
         log.info("AI: לא הוגדרו מפתחות (GROUPOS_GEMINI_KEYS / GROUPOS_GROQ_KEYS)")
+    # ניקוי חד-פעמי: שורת שפה גלובלית שנכתבה בגרסה ישנה. היא גרמה
+    # לכל צ'אט חדש לרשת אותה, כלומר לבוט לדבר עברית עם מי שמעולם
+    # לא ביקש. הקוד כבר אינו כותב אותה, והשורה הזאת מנקה את מה
+    # שנכתב בעבר.
+    with contextlib.suppress(Exception):
+        if db.change("DELETE FROM settings WHERE chat_id=0 AND key='lang'",
+                     ()):
+            log.info("נוקתה הגדרת שפה גלובלית ישנה")
     await publish_commands()
     for loop_fn in (expire_loop, schedule_loop, upkeep_loop, autolock_loop):
         _bg.add(asyncio.create_task(loop_fn()))

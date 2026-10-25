@@ -489,6 +489,17 @@ class Db:
             r = self.one("SELECT value FROM settings WHERE chat_id=0 AND key=?", (key,))
         return r["value"] if r else default
 
+    def get_own(self, chat_id: int, key: str, default: Any = None) -> Any:
+        """כמו ‎get‎, **בלי** הנפילה לברירת המחדל הגלובלית.
+
+        הנפילה ל-‎chat_id=0‎ נכונה להגדרות התנהגות, והרסנית לשפה:
+        שורה גלובלית אחת שנכתבה בטעות גרמה לכל צ'אט חדש בעולם לקבל
+        עברית — כולל משתמש שמעולם לא בחר דבר. "לא נבחרה שפה" חייב
+        להיות שאלה על הצ'אט הזה בלבד."""
+        r = self.one("SELECT value FROM settings WHERE chat_id=? AND key=?",
+                     (chat_id, key))
+        return r["value"] if r else default
+
     def set(self, chat_id: int, key: str, value: Any, by: Optional[int] = None) -> None:
         # UPSERT סטנדרטי — נתמך גם ב-SQLite וגם ב-Postgres
         self.run("""INSERT INTO settings (chat_id,key,value,updated_at,updated_by)

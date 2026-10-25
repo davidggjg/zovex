@@ -1883,9 +1883,16 @@ class Lang:
         self.db = db
 
     def chosen(self, chat_id: int) -> str | None:
-        """מה שנקבע במפורש, או ‎None‎. ההבחנה חשובה: משתמש שטרם בחר
-        הוא משתמש שצריך לראות את בורר השפה."""
-        raw = self.db.get(chat_id, "lang", None)
+        """מה שנקבע **לצ'אט הזה**, או ‎None‎. ההבחנה חשובה: משתמש
+        שטרם בחר הוא משתמש שצריך לראות את בורר השפה.
+
+        ‎get_own‎ ולא ‎get‎: ההגדרות נופלות לברירת מחדל גלובלית
+        (‎chat_id=0‎), ושורת שפה אחת שנכתבה שם גרמה לכל צ'אט חדש
+        לקבל אותה שפה — כולל משתמש שמעולם לא בחר. שפה אינה הגדרה
+        שיורשים; היא בחירה."""
+        get_own = getattr(self.db, "get_own", None)
+        raw = get_own(chat_id, "lang", None) if get_own \
+            else self.db.get(chat_id, "lang", None)
         return normalize(raw) if raw else None
 
     def for_chat(self, chat_id: int) -> str:
