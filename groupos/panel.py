@@ -377,6 +377,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("cleancmds",    "0", "sw.cleancmds"),
     ("tellwhy",      "1", "sw.tellwhy"),
     ("replies",      "1", "sw.replies"),
+    ("onlyme",       "0", "sw.onlyme"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )

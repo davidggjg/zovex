@@ -289,6 +289,41 @@ async def _bad_html(msg: Message, text: str) -> bool:
     return True
 
 
+# ── שתי בוטים באותה קבוצה ─────────────────────────────────────────────────
+# קבוצה אחת מריצה את רוקי ואת Rose יחד. לשניהם יש ‎/filter‎, ‎/filters‎,
+# ‎/stop‎, ‎/ban‎ — ולטלגרם אין מושג למי המנהל התכוון. התוצאה: המנהל
+# כתב ‎/stop‎ כדי לבטל פילטר ב-Rose, ורוקי ענה, **ומחק לו את ההודעה**.
+# מבחינת המנהל הבוט השני הפסיק לעבוד.
+#
+# טלגרם כן נתנה פתרון: ‎/stop@שם_הבוט‎ פונה לבוט אחד בלבד. המתג הזה
+# אומר "תתייחס רק לפקודות שפונות אליי בשם", ואז פקודה חשופה שייכת
+# לבוט השני ורוקי לא נוגע בה — לא עונה ולא מוחק.
+def _addressed_to_me(msg: Message) -> bool:
+    """האם הפקודה נכתבה עם ‎@שם_הבוט‎ שלנו."""
+    t = (msg.text or "")
+    head = t.split()[0] if t.split() else ""
+    _, _, at = head.partition("@")
+    return bool(at) and at.lower() == (_bot_username or "").lower()
+
+
+def _skip_foreign_command(msg: Message) -> bool:
+    """‎True‎ = הפקודה אינה שלנו, ואסור לגעת בה בכלל."""
+    if msg.chat.type not in GROUP_TYPES or not _cmd_of(msg):
+        return False
+    if db.get(msg.chat.id, "onlyme", "0") != "1":
+        return False
+    return not _addressed_to_me(msg)
+
+
+@dp.message.outer_middleware()
+async def only_my_commands(handler, event, data):
+    """שומר אחד לכל 141 הפקודות. גדר בכל פקודה בנפרד הייתה נשכחת
+    באחת מהן, וזו בדיוק זו שתתנגש."""
+    if isinstance(event, Message) and _skip_foreign_command(event):
+        return None
+    return await handler(event, data)
+
+
 def _cmd_of(msg: Message) -> str:
     t = msg.text or ""
     if not t.startswith("/"):
@@ -752,6 +787,23 @@ async def apply_action(chat_id: int, user_id: int, kind: str,
 # הכניסה לעולם לא הייתה נורית: ההודעה נבלעה כאן.
 @dp.message(F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"),
             ~F.new_chat_members, ~F.left_chat_member)
+async def _warn_other_bot(msg: Message) -> None:
+    """פעם אחת לכל קבוצה, ורק למנהלים, ורק בפרטי."""
+    if _me_id is None or msg.from_user.id == _me_id:
+        return
+    if db.get(msg.chat.id, "otherbot_told", "0") == "1":
+        return
+    if db.get(msg.chat.id, "onlyme", "0") == "1":
+        return          # כבר פתרו את זה — אין על מה להתריע
+    db.set(msg.chat.id, "otherbot_told", "1")
+    name = msg.from_user.username or msg.from_user.first_name or "bot"
+    await _notify_admins(msg.chat.id,
+                         i18n.t("otherbot.found", db.get(msg.chat.id, "lang",
+                                                         i18n.DEFAULT),
+                                name=tpl.esc("@" + name if
+                                             msg.from_user.username else name)))
+
+
 async def on_group_message(msg: Message):
     """הנתיב החם. כל הודעה בכל קבוצה עוברת כאן, ולכן הסדר הוא לפי מחיר.
 
@@ -760,6 +812,13 @@ async def on_group_message(msg: Message):
     touch(msg)
     if msg.from_user is None:
         return
+    # בוט אחר דיבר כאן. מספרים למנהלים פעם אחת שיש התנגשות אפשרית
+    # ואיך עוצרים אותה — אחרת הם מגלים את זה רק כשהבוט השני "מפסיק
+    # לעבוד", ואין שום דרך לקשר את זה אלינו.
+    if msg.from_user.is_bot:
+        # מתריעים וממשיכים. בוט **הוא** גם וקטור ספאם, והודעה שלו
+        # חייבת לעבור את אותן בדיקות כמו כל אחת אחרת.
+        await _warn_other_bot(msg)
     await sync_admins(msg.chat.id)
     _anon_admin(msg)
     # מצב איסוף: המנהל בונה עכשיו תשובה להדק, וכל מה שהוא שולח

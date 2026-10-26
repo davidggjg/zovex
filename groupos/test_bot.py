@@ -3035,6 +3035,33 @@ async def test_filter_stop():
         B.filters.remove(CHAT, "חדשות")
 
 
+async def test_two_bots():
+    """שני בוטי ניהול באותה קבוצה: אסור לחטוף פקודה של השני."""
+    section("בוט נוסף בקבוצה")
+    B._bot_username = "TestBot"
+    try:
+        # כבוי: פקודה חשופה שלנו, כרגיל
+        B.db.set(CHAT, "onlyme", "0")
+        m = msg("/filters", uid=ADM, mid=9200)
+        ok("כברירת מחדל פקודה חשופה שלנו",
+           not B._skip_foreign_command(m))
+
+        # דלוק: פקודה חשופה שייכת לבוט השני — לא נוגעים
+        B.db.set(CHAT, "onlyme", "1")
+        ok("פקודה חשופה נעזבת לבוט השני",
+           B._skip_foreign_command(msg("/filters", uid=ADM, mid=9201)))
+        ok("וגם כשהיא פונה לבוט אחר במפורש",
+           B._skip_foreign_command(msg("/stop@MissRose_bot רק בן 17",
+                                       uid=ADM, mid=9202)))
+        ok("אבל פקודה שפונה אליי בשם כן שלנו",
+           not B._skip_foreign_command(msg("/filters@TestBot", uid=ADM,
+                                           mid=9203)))
+        ok("וגם לא נוגעים בהודעה רגילה",
+           not B._skip_foreign_command(msg("סתם טקסט", uid=ADM, mid=9204)))
+    finally:
+        B.db.set(CHAT, "onlyme", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3082,6 +3109,7 @@ async def main() -> int:
     await test_triggers_answer_admins()
     await test_tell_why()
     await test_filter_stop()
+    await test_two_bots()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
