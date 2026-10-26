@@ -991,6 +991,19 @@ def test_content():
     ok("substring יורה על חלק ממילה", F.check(CHAT, "תקנה עכשיו") is not None)
     ok("פעולה לא מוכרת נדחית", not F.add(CHAT, "x", "y", action="לרסק"))
     ok("regex שבור נדחה", not F.add(CHAT, "([", "y", match_kind="regex"))
+    # חבר שלח רשימת קישורים ובאחד מהם השם "חדשות" — וההדק מחק הכול
+    F.add(CHAT, "חדשות", "התשובה")
+    ok("מילה בתוך קישור לא יורה",
+       F.check(CHAT, "הקבוצות שלי:\nhttps://t.me/my_חדשות\nhttps://t.me/x")
+       is None)
+    ok("מישהו שכתב את המילה כן יורה",
+       F.check(CHAT, "יש חדשות?") is not None)
+    F.add(CHAT, "חדשות2", "x", match_kind="substring")
+    ok("substring כן יורה גם בתוך קישור",
+       F.check(CHAT, "https://t.me/my_חדשות2") is not None)
+    F.remove(CHAT, "חדשות")
+    F.remove(CHAT, "חדשות2")
+
     F.remove(CHAT, "שלום")
     ok("הסרה", F.check(CHAT, "שלום לכולם") is None)
 

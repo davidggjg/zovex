@@ -375,6 +375,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("ephemeral",    "1", "sw.ephemeral"),
     ("welcome_private", "1", "greet.private_sw"),
     ("cleancmds",    "0", "sw.cleancmds"),
+    ("tellwhy",      "1", "sw.tellwhy"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )

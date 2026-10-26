@@ -1274,6 +1274,7 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
     _keep_proof(msg, action, f"{log_action} · {label}", _risk_of(label))
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
+    await _tell_why(msg, action, label, log_action)
     audit.log(msg.chat.id, log_action, target_id=msg.from_user.id,
               actor_kind="bot", reason=label, after=action,
               source="policy", severity=severity)
@@ -1304,6 +1305,52 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
                        clean_after=clean_delay(msg.chat.id) or None,
                        thread_id=_thread_of(msg),
                        to_user=msg.from_user.id)
+
+
+# הסיבה במילים של אדם. המפתח הוא מה שנרשם ביומן, והערך הוא מה
+# שמסבירים לאדם שההודעה שלו נעלמה.
+WHY_KEYS = {
+    "lock.triggered": "del.lock",
+    "blocklist.hit": "del.blocked",
+    "blocklist.evaded": "del.blocked",
+    "filter.triggered": "del.filter",
+    "flood.rate": "del.flood",
+    "flood.repeat": "del.repeat",
+    "flood.mention": "del.mentions",
+    "ai.action": "del.ai",
+    "vision.action": "del.ai",
+    "voice.action": "del.ai",
+    "spam.dup": "del.repeat",
+    "spam.adult": "del.ai",
+    "spam.adult_ad": "del.ai",
+    "spam.bait": "del.ai",
+}
+
+
+async def _tell_why(msg: Message, action: str, label: str,
+                    log_action: str) -> None:
+    """אומר לשולח למה ההודעה שלו נמחקה — ורק לו.
+
+    הודעה שנעלמת בלי מילה היא הדבר שגורם לאנשים לחשוב שהבוט שבור,
+    ולמנהל לקבל שאלות. ההסבר נשלח כהודעה אישית בתוך הקבוצה (רק
+    הוא רואה) ונמחק מעצמו, ולכן הוא אינו מוסיף רעש לאיש אחר.
+
+    זה אינו "המתג השקט": ‎silent‎ קובע אם מכריזים לקבוצה על הענישה,
+    וכאן מדובר במי שההודעה שלו נגעה — והוא היחיד שצריך לדעת."""
+    if db.get(msg.chat.id, "tellwhy", "1") != "1" or msg.from_user is None:
+        return
+    lg = lang_of(msg)
+    key = WHY_KEYS.get(log_action, "del.general")
+    # שם הנעילה מגיע כבר מתורגם מ-‎_enforce‎; פסק של מודל מגיע כמחרוזת
+    # הסבר ארוכה, ואותה לא מציגים לאדם.
+    what = label if log_action.startswith(("lock.", "blocklist.",
+                                           "filter.")) else ""
+    text = i18n.t(key, lg, what=what)
+    extra = i18n.t(f"del.act.{action}", lg)
+    if extra != f"del.act.{action}":
+        text += "\n" + extra
+    await send(msg.chat.id, text, thread_id=_thread_of(msg),
+               to_user=msg.from_user.id, clean_after=60)
 
 
 async def _content_reply(msg: Message, text: str,

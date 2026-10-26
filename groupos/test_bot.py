@@ -2963,6 +2963,40 @@ async def test_triggers_answer_admins():
     B.notes.delete(CHAT, "כללים")
 
 
+
+async def test_tell_why():
+    """מי שההודעה שלו נמחקה מקבל הסבר — ורק הוא."""
+    section("הסבר למחיקה")
+    B.perms.set_role(CHAT, USER, "member")
+    B.db.set(CHAT, "tellwhy", "1")
+    B.db.set(CHAT, "silent", "1")
+    B.locks.set(CHAT, "url", "delete")
+    TO_USER.clear()
+    DELETED.clear()
+    try:
+        before = len(SENT)
+        await B.on_group_message(msg("בואו ל-https://t.me/spamgroup",
+                                     uid=USER, mid=9020))
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("ההודעה נמחקה", 9020 in DELETED, str(DELETED))
+        ok("ונשלח הסבר", "נמחקה" in out, out[:70])
+        ok("ההסבר אומר מה חסום", "קישור" in out, out[:70])
+        ok("והוא אישי — רק השולח רואה",
+           USER in TO_USER, str(TO_USER[-3:]))
+
+        # מתג כבוי — שקט מוחלט
+        B.db.set(CHAT, "tellwhy", "0")
+        DELETED.clear()
+        before = len(SENT)
+        await B.on_group_message(msg("שוב https://t.me/x", uid=USER,
+                                     mid=9021))
+        ok("כשהמתג כבוי אין הסבר", len(SENT) == before,
+           str([t for _c, t, _m in SENT[before:]])[:60])
+    finally:
+        B.locks.set(CHAT, "url", "off")
+        B.db.set(CHAT, "tellwhy", "1")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3008,6 +3042,7 @@ async def main() -> int:
     await test_ai_soft_damper()
     await test_ui_clarity()
     await test_triggers_answer_admins()
+    await test_tell_why()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

@@ -249,12 +249,28 @@ class Filters:
         return match_filters(text, self.all(chat_id))
 
 
+_RX_URL = re.compile(
+    r"(?:https?://|t\.me/|www\.)\S+|\b[\w.-]+\.(?:com|net|org|co|il|me|io|"
+    r"info|biz|ru|tv|xyz|link|site|app|online|club)\b/?\S*",
+    re.I)
+
+
+def _strip_urls(text: str) -> str:
+    """מוציא כתובות מהטקסט לפני השוואת מילים שלמות."""
+    return _RX_URL.sub(" ", text or "")
+
+
 def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
     """הפילטר הראשון שמתאים. טהור, כדי שאפשר לבדוק בלי מסד."""
     if not text or not rules:
         return None
     low = text.lower()
-    norm = _bl.normalize(text)
+    # מילה שלמה נבדקת **בלי הכתובות**. חבר שלח רשימה של כל קישורי
+    # הקבוצות שלו, ובאחד מהם הופיע השם "חדשות" — וההדק על המילה
+    # הזאת מחק לו את כל הרשימה. כתובת אינה מישהו שאמר את המילה.
+    # ‎substring‎ ו-‎regex‎ נשארים על הטקסט המלא: מי שביקש אותם
+    # במפורש כן רוצה להיתפס גם בתוך קישור.
+    norm = _bl.normalize(_strip_urls(text))
     for r in rules:
         trg, kind = r["trigger"], r.get("match_kind", "word")
         hit = False
