@@ -61,6 +61,10 @@ class Field:
     hi: int = 0
     maxlen: int = 3000
     perm: str = "settings.write"
+    # הפקודה שעושה את אותו דבר בקבוצה. מוצגת לצד ההגדרה, כי מנהל
+    # שרוצה לעשות את זה מהר פעם הבאה צריך לדעת מה לכתוב — ולא
+    # לחפש בעזרה.
+    cmd: str = ""
 
     @property
     def label_key(self) -> str:
@@ -74,21 +78,30 @@ class Field:
 # כל מה שהיה פקודה עם טקסט. שם השדה הוא מה שעובר במזהה הכפתור,
 # ולכן הוא קצר: ‎g:<chat>:ask:<שם>‎ מוגבל ל-64 בייט.
 FIELDS: dict[str, Field] = {
-    "welcome": Field("welcome", "welcome", TEXT, perm="welcome.write"),
-    "goodbye": Field("goodbye", "goodbye", TEXT, perm="welcome.write"),
-    "rules": Field("rules", "rules", TEXT, perm="settings.write"),
+    "welcome": Field("welcome", "welcome", TEXT, perm="welcome.write",
+                     cmd="/welcome"),
+    "goodbye": Field("goodbye", "goodbye", TEXT, perm="welcome.write",
+                     cmd="/goodbye"),
     "shablock": Field("shablock", "shabbat_msg_lock", TEXT),
     "shabopen": Field("shabopen", "shabbat_msg_open", TEXT),
     "shabnote": Field("shabnote", "shabbat_msg_notice", TEXT),
     "aictx": Field("aictx", "ai_context", TEXT, maxlen=200),
-    "warnpol": Field("warnpol", "warn_policy", SPEC, maxlen=60),
-    "floodrate": Field("floodrate", "flood_rate", NUMBER, lo=2, hi=60),
-    "floodwin": Field("floodwin", "flood_window", NUMBER, lo=3, hi=300),
-    "floodrep": Field("floodrep", "flood_repeat", NUMBER, lo=2, hi=20),
-    "floodment": Field("floodment", "flood_mentions", NUMBER, lo=2, hi=50),
-    "floodtime": Field("floodtime", "flood_time", NUMBER, lo=60, hi=86400),
-    "captime": Field("captime", "captcha_time", NUMBER, lo=20, hi=900),
-    "captries": Field("captries", "captcha_tries", NUMBER, lo=1, hi=10),
+    "warnpol": Field("warnpol", "warn_policy", SPEC, maxlen=60,
+                     cmd="/warnlimit"),
+    "floodrate": Field("floodrate", "flood_rate", NUMBER, lo=2, hi=60,
+                       cmd="/setflood"),
+    "floodwin": Field("floodwin", "flood_window", NUMBER, lo=3, hi=300,
+                      cmd="/setflood"),
+    "floodrep": Field("floodrep", "flood_repeat", NUMBER, lo=2, hi=20,
+                      cmd="/setflood"),
+    "floodment": Field("floodment", "flood_mentions", NUMBER, lo=2, hi=50,
+                       cmd="/setflood"),
+    "floodtime": Field("floodtime", "flood_time", NUMBER, lo=60, hi=86400,
+                       cmd="/floodaction"),
+    "captime": Field("captime", "captcha_time", NUMBER, lo=20, hi=900,
+                     cmd="/captchatime"),
+    "captries": Field("captries", "captcha_tries", NUMBER, lo=1, hi=10,
+                      cmd="/captchatries"),
     "dupcount": Field("dupcount", "dup_count", NUMBER, lo=2, hi=20),
     # הודעות המצב: נעילה ידנית, ולוח השעות. כל אחת טקסט או מדיה.
     "lockmsg": Field("lockmsg", "lock_msg_close", CONTENT, maxlen=1000),
@@ -105,7 +118,12 @@ FIELDS: dict[str, Field] = {
 }
 
 # השדות שמוצגים במסך "הודעות", לפי הסדר
-TEXT_FIELDS = ("welcome", "goodbye", "rules", "aictx")
+# מה שמוצג במסך ההודעות. "כללים" ירד מכאן: אף אחד לא הבין מתי הם
+# נשלחים ומי מפעיל אותם, ומי שרוצה כללים מגדיר להם פקודה משלו
+# במסך התגובות — שם ברור בדיוק מי מקבל אותם ומתי.
+# הקשר הקבוצה ירד מכאן: הוא שייך למסך הסינון החכם, ושם הוא גם
+# מוצג. אותו דבר בשני מקומות הוא בדיוק מה שמבלבל.
+TEXT_FIELDS = ("welcome", "goodbye")
 SHAB_FIELDS = ("shabnote", "shablock", "shabopen")
 # ההודעות שנשלחות כשמצב הקבוצה משתנה
 STATE_FIELDS = ("lockmsg", "openmsg", "hclose", "hopen")

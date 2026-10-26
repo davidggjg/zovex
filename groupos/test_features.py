@@ -299,10 +299,10 @@ def test_prompts() -> None:
     ok("ולמשתמש אחר אין", p.get(6, 101.0) is None)
     ok("היא פגה", p.get(5, 200.0) is None)
     p.start(5, -100, "welcome", now=100.0)
-    p.start(5, -100, "rules", now=101.0)
+    p.start(5, -100, "goodbye", now=101.0)
     got = p.get(5, 102.0)
     ok("לחיצה שנייה מחליפה ולא מוסיפה",
-       got is not None and got.field == "rules" and p.count() == 1)
+       got is not None and got.field == "goodbye" and p.count() == 1)
     p.clear(5)
     ok("ביטול מנקה", p.get(5, 102.0) is None and p.count() == 0)
 

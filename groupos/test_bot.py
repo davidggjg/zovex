@@ -2863,6 +2863,68 @@ async def test_ai_soft_damper():
     B.db.set(CHAT, "ai_titles_ok", "1")
 
 
+
+async def test_ui_clarity():
+    """מסכים שאפשר להבין: שורה לפריט, הסבר לכל דבר, וקיצור מהשבתה."""
+    section("בהירות הממשק")
+    nums = B._screen_for(CHAT, "nums", "")
+    ok("ספים: שורה אחת לכל פריט",
+       all(len(row) == 1 for row in nums.rows), str(nums.rows[:2]))
+    import prompts as _pr
+    ok("ולכל סף יש הסבר בגוף המסך",
+       all(i18n.t(_pr.FIELDS[n].hint_key, "he") in nums.text
+           for n in _pr.NUMBER_FIELDS),
+       nums.text[:120])
+    ok("ההסברים אינם מפתחות גולמיים",
+       all(not i18n.t(_pr.FIELDS[n].hint_key, "he").startswith("field.")
+           for n in _pr.NUMBER_FIELDS))
+
+    texts = B._screen_for(CHAT, "texts", "")
+    ok("ובמסך ההודעות יש הסבר לכל שורה",
+       i18n.t("field.welcome.hint", "he") in texts.text, texts.text[:120])
+    ok("ו\"כללים\" ירד מהמסך",
+       "rules" not in _pr.FIELDS and "כללים" not in texts.text)
+    ok("והקשר הקבוצה יושב רק במסך הסינון",
+       "aictx" not in _pr.TEXT_FIELDS
+       and any("ask:aictx" in c
+               for c in B._screen_for(CHAT, "aim", "").all_callbacks()))
+
+    reps = B._screen_for(CHAT, "reps", "")
+    ok("מסך התגובות מסביר מה ההבדל בין מילה לפקודה",
+       "⌨️" in reps.text and "💬" in reps.text, reps.text[:160])
+
+    st = B._screen_for(CHAT, "stmsgs", "")
+    ok("ומסך ההודעות מסביר איך משנים",
+       "איך משנים" in st.text or "To change" in st.text, st.text[:140])
+
+    one = panel.state_msg_screen(CHAT, "lockmsg", "", "", "he")
+    ok("ובמסך ההודעה יש גם צפייה וגם עריכה",
+       any("stprev" in c for c in one.all_callbacks())
+       and any("ask:lockmsg" in c for c in one.all_callbacks()))
+
+    # התפריט מסודר: כל נושא בשורה שלו, ושני מסכי מתגים אינם יושבים
+    # זה לצד זה בתפריט הראשי.
+    menu = panel.main_menu(CHAT, "ק", {}, "he")
+    cbs = [c for row in menu.rows for _t, c in row]
+    ok("מתגים אינם בתפריט הראשי",
+       not any(c.endswith(":sws") for c in cbs), str(cbs))
+    ok("אלא בתוך ההגדרות",
+       any("sws" in c for c in
+           panel.settings_screen(CHAT, {"autoclean": "30"},
+                                 "he").all_callbacks()))
+    ok("וההשבתה אחרונה, לבדה",
+       any(row == [r for r in row if "ldown" in r[1]]
+           and len(row) == 1 for row in menu.rows
+           if any("ldown" in c for _t, c in row)), str(menu.rows))
+    ok("אין שורה עם יותר משני כפתורים",
+       all(len(row) <= 2 for row in menu.rows), str(menu.rows))
+
+    w = panel.waiting_screen(CHAT, "floodrate", "8", "he")
+    ok("ומסך ההמתנה אומר גם את הפקודה המקבילה",
+       "/setflood" in w.text, w.text[:120])
+    ok("ומסביר מה שולחים", "📩" in w.text or "שלח" in w.text)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2906,6 +2968,7 @@ async def main() -> int:
     await test_stars_flow()
     await test_personal_language_sticks()
     await test_ai_soft_damper()
+    await test_ui_clarity()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

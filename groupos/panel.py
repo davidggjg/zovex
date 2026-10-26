@@ -155,6 +155,15 @@ def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT,
 
 def main_menu(chat_id: int, title: str, stats: dict,
               lang: str = i18n.DEFAULT) -> Screen:
+    """תפריט הקבוצה, מסודר לפי נושא.
+
+    סדר ולא ערימה: עד כה הכפתורים נערמו לפי סדר הוספתם, ושני מסכים
+    של מתגים ישבו זה לצד זה בלי שאיש הבין למה יש שניים. כאן כל שורה
+    היא נושא אחד — מה אסור · תוכן · זמנים · הגנה · מעקב · הגדרות —
+    ובסוף הפעולה היחידה שמשנה את הקבוצה מיד.
+
+    ‎🎛 מתגים‎ ירד לתוך ‎⚙️ הגדרות‎: שני מסכים שבשניהם מכבים ומדליקים
+    דברים הם בדיוק מה שגרם לשאלה "למה יש פה שתיים"."""
     txt = f"<b>{title}</b>\n\n" + "\n".join(
         f"{i18n.t(key, lang)}: {stats.get(field, 0)}"
         for key, field in (("stat.members", "members"),
@@ -162,31 +171,30 @@ def main_menu(chat_id: int, title: str, stats: dict,
                            ("stat.warns", "warns"),
                            ("stat.today", "actions_today")))
     rows = [
+        # מה מותר ומה לא
         [(i18n.t("menu.locks", lang), cb(chat_id, "locks")),
          (i18n.t("menu.warns", lang), cb(chat_id, "warns"))],
-        [(i18n.t("menu.audit", lang), cb(chat_id, "audit")),
-         (i18n.t("menu.settings", lang), cb(chat_id, "settings"))],
-        # הכפתור אומר מה הלחיצה **תעשה**, לא מה המצב. כפתור שכתוב בו
-        # "השבתה" בקבוצה שכבר מושבתת נראה כמו כפתור שלא עבד.
-        [(i18n.t("menu.lockdown_on" if stats.get("lockdown")
-                 else "menu.lockdown", lang), cb(chat_id, "ldown")),
-         (i18n.t("sw.title", lang), cb(chat_id, "sws"))],
-        [(i18n.t("menu.security", lang), cb(chat_id, "sec")),
-         (i18n.t("menu.language", lang), cb(chat_id, "lang"))],
-        # נעילת שבת מוצעת בכפתור רק למי שבחר עברית. היא אינה חסומה
-        # לאחרים — ‎/shabbat on‎ עובדת בכל שפה — אבל כפתור שמרבית
-        # הקבוצות בעולם לא ישתמשו בו הוא רעש בתפריט.
-        [(i18n.t("menu.replies", lang), cb(chat_id, "reps")),
-         (i18n.t("menu.proofs", lang), cb(chat_id, "proofs"))],
+        # מה הבוט אומר
+        [(i18n.t("menu.replies", lang), cb(chat_id, "reps"))],
         [(i18n.t("menu.texts", lang), cb(chat_id, "texts")),
          (i18n.t("menu.state", lang), cb(chat_id, "stmsgs"))],
-        [(i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
-        [(i18n.t("menu.ai", lang), cb(chat_id, "aim"))],
+        # מתי
         ([(i18n.t("menu.hours", lang), cb(chat_id, "hours"))]
          + ([(i18n.t("menu.shabbat", lang), cb(chat_id, "shab"))]
             if lang == "he" else [])),
-        # תמיכה וכוכבים גם כאן, ולא רק במסך בחירת הקבוצה: מי שנכנס
-        # לנהל קבוצה לא חוזר אחורה כדי לחפש אותם.
+        # הגנה
+        [(i18n.t("menu.security", lang), cb(chat_id, "sec")),
+         (i18n.t("menu.ai", lang), cb(chat_id, "aim"))],
+        [(i18n.t("menu.numbers", lang), cb(chat_id, "nums"))],
+        # מעקב
+        [(i18n.t("menu.proofs", lang), cb(chat_id, "proofs")),
+         (i18n.t("menu.audit", lang), cb(chat_id, "audit"))],
+        # הגדרות
+        [(i18n.t("menu.settings", lang), cb(chat_id, "settings")),
+         (i18n.t("menu.language", lang), cb(chat_id, "lang"))],
+        # הפעולה שמשנה את הקבוצה מיד — אחרונה, ולבדה
+        [(i18n.t("menu.lockdown_on" if stats.get("lockdown")
+                 else "menu.lockdown", lang), cb(chat_id, "ldown"))],
         [(i18n.t("home.support", lang), support_link(lang)),
          (i18n.t("home.donate", lang), "g:0:donate")],
         [(i18n.t("menu.groups", lang), "g:0:home")],
@@ -277,6 +285,7 @@ def settings_screen(chat_id: int, current: dict,
         [(f"{i18n.t('settings.silent', lang)}: {on if silent else off}",
           cb(chat_id, "silent"))],
         [(i18n.t("menu.service", lang), cb(chat_id, "svcs"))],
+        [(i18n.t("sw.title", lang), cb(chat_id, "sws"))],
         [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
     ]
     return Screen(txt, rows)
@@ -381,7 +390,7 @@ def switches_screen(chat_id: int, values: dict,
     # "אנשים לא מבינים מה כל דבר עושה." מתג שאי אפשר להבין הוא מתג
     # שלא ייגעו בו, או גרוע מזה — שידליקו בלי לדעת מה הוא משנה.
     rows.append([("❓ " + i18n.t("sw.what", lang), cb(chat_id, "swhelp"))])
-    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "settings"))])
     return Screen(head("sw.title", lang) + "\n\n" + i18n.t("sw.hint", lang),
                   rows)
 
@@ -1012,27 +1021,33 @@ def texts_screen(chat_id: int, values: dict, lang: str = i18n.DEFAULT,
     rows.append([("👋 " + i18n.t("greet.title", lang),
                   cb(chat_id, "greet"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
+    lines = [f"<b>{i18n.t(prompts.FIELDS[n].label_key, lang)}</b> — "
+             + i18n.t(prompts.FIELDS[n].hint_key, lang) for n in names]
     return Screen(head("texts.title", lang) + "\n\n"
-                  + i18n.t("texts.hint", lang), rows)
+                  + i18n.t("texts.hint", lang) + "\n\n" + "\n".join(lines),
+                  rows)
 
 
 def numbers_screen(chat_id: int, values: dict,
                    lang: str = i18n.DEFAULT) -> Screen:
-    """הספים, כל אחד עם ערכו. לחיצה שואלת מספר — בלי לזכור שם הגדרה."""
+    """הספים, כל אחד עם ערכו ועם הסבר מה הוא עושה.
+
+    שורה אחת לכל פריט ולא שתיים: שני כפתורים בשורה חותכים את השם
+    באמצע, ו"הודעות בחל…" אינו הגדרה שאפשר להבין. רוחב המסך הוא
+    מה שיש, ולכן הוא מוקדש לפריט אחד."""
     import prompts
-    rows, line = [], []
+    rows, lines = [], []
     for name in prompts.NUMBER_FIELDS:
         f = prompts.FIELDS[name]
         cur = values.get(f.key, "") or i18n.t("nums.default", lang)
-        line.append((f"{i18n.t(f.label_key, lang)}: {cur}",
-                     cb(chat_id, "ask", name)))
-        if len(line) == 2:
-            rows.append(line); line = []
-    if line:
-        rows.append(line)
+        rows.append([(f"{i18n.t(f.label_key, lang)}: {cur}",
+                      cb(chat_id, "ask", name))])
+        lines.append(f"<b>{i18n.t(f.label_key, lang)}</b> — "
+                     + i18n.t(f.hint_key, lang))
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(head("nums.title", lang) + "\n\n"
-                  + i18n.t("nums.hint", lang), rows)
+                  + i18n.t("nums.hint", lang) + "\n\n" + "\n".join(lines),
+                  rows)
 
 
 GREET_CLEAN_CYCLE = ("0", "30", "120", "600", "3600")
@@ -1124,6 +1139,10 @@ def waiting_screen(chat_id: int, field: str, current: str,
     txt = (f"<b>{i18n.t(f.label_key, lang)}</b>\n\n"
            + i18n.t(f.hint_key, lang) + "\n\n"
            + i18n.t("field.ask", lang))
+    if f.cmd:
+        # אותה פעולה בפקודה. מנהל שעושה את זה כל יום לא צריך לעבור
+        # ארבעה מסכים, והוא גם לא צריך לחפש את הפקודה בעזרה.
+        txt += "\n" + i18n.t("field.same_cmd", lang, cmd=f.cmd)
     if (current or "").strip():
         txt += "\n\n" + i18n.t("field.current", lang,
                                value=(current or "")[:300])
@@ -1222,7 +1241,8 @@ def replies_screen(chat_id: int, words: list[tuple[str, int]],
                  ("➕ " + i18n.t("rep.new_cmd", lang),
                   cb(chat_id, "ask", "newcmd"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
-    body = head("rep.title", lang) + "\n\n" + i18n.t("rep.hint", lang)
+    body = (head("rep.title", lang) + "\n\n" + i18n.t("rep.hint", lang)
+            + "\n\n" + i18n.t("rep.kinds", lang))
     if not words and not commands:
         body += "\n\n" + i18n.t("rep.empty", lang)
     return Screen(body, rows)
