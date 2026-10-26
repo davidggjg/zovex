@@ -240,6 +240,38 @@ class Filters:
                WHERE chat_id=? AND trigger=? AND kind=?""",
             (chat_id, (trigger or "").strip().lower(), kind))
 
+    # ── השהיה ────────────────────────────────────────────────────────
+    # "תעצור את הפילטר שלו" — מנהל שהדק מפריע לו רוצה לכבות אותו
+    # עכשיו, לא למחוק אותו. מחיקה מאבדת את כל ההודעות שצורפו אליו,
+    # ואז הדרך היחידה חזרה היא לבנות אותו מחדש. ‎enabled=0‎ משאיר
+    # הכול במקום ורק מפסיק לירות.
+    def set_enabled(self, chat_id: int, trigger: str, on: bool) -> int:
+        return self.db.change(
+            "UPDATE filters SET enabled=? WHERE chat_id=? AND trigger=?",
+            (1 if on else 0, chat_id, (trigger or "").strip().lower()))
+
+    def is_enabled(self, chat_id: int, trigger: str) -> bool:
+        r = self.db.one(
+            "SELECT enabled FROM filters WHERE chat_id=? AND trigger=?",
+            (chat_id, (trigger or "").strip().lower()))
+        return bool(r["enabled"]) if r else False
+
+    def listing(self, chat_id: int) -> list[tuple[str, bool]]:
+        """כל ההדקים, **כולל המושהים**. המסך צריך להראות גם אותם:
+        הדק שנעלם מהרשימה כשמשהים אותו נראה כמו הדק שנמחק."""
+        return [(r["trigger"], bool(r["enabled"])) for r in self.db.q(
+            "SELECT trigger,enabled FROM filters WHERE chat_id=? ORDER BY id",
+            (chat_id,))]
+
+    def row(self, chat_id: int, trigger: str) -> Optional[dict]:
+        """הדק אחד, גם אם הוא מושהה — לתצוגה מקדימה ולעריכה."""
+        r = self.db.one(
+            """SELECT id,trigger,match_kind,action,content,media_id,
+                      media_kind,buttons,enabled
+               FROM filters WHERE chat_id=? AND trigger=?""",
+            (chat_id, (trigger or "").strip().lower()))
+        return dict(r) if r else None
+
     def triggers(self, chat_id: int) -> list[str]:
         return [r["trigger"] for r in self.db.q(
             "SELECT trigger FROM filters WHERE chat_id=? ORDER BY trigger",

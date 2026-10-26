@@ -2997,6 +2997,44 @@ async def test_tell_why():
         B.db.set(CHAT, "tellwhy", "1")
 
 
+async def test_filter_stop():
+    """הדק שמפריע: נרשם ביומן, מסביר את עצמו, ונעצר בלי למחוק אותו."""
+    section("עצירת הדק")
+    B.perms.set_role(CHAT, USER, "member")
+    B.db.set(CHAT, "tellwhy", "1")
+    B.db.set(CHAT, "replies", "1")
+    B.filters.add(CHAT, "חדשות", "התשובה", action="delete_reply")
+    TO_USER.clear()
+    DELETED.clear()
+    try:
+        before = len(SENT)
+        n0 = B.proof.count(CHAT)
+        await B.on_group_message(msg("רשמו סדרות חדשות", uid=USER, mid=9120))
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("ההודעה נמחקה", 9120 in DELETED, str(DELETED))
+        ok("ההסבר נוקב במילה שתפסה", "חדשות" in out, out[:90])
+        ok("ההסבר אישי", USER in TO_USER, str(TO_USER[-3:]))
+        ok("ומחיקת הדק נשמרת ביומן האכיפה",
+           B.proof.count(CHAT) == n0 + 1)
+
+        # השהיה: לא יורה, ולא נמחק
+        B.filters.set_enabled(CHAT, "חדשות", False)
+        DELETED.clear()
+        await B.on_group_message(msg("עוד סדרות חדשות", uid=USER, mid=9121))
+        ok("מושהה לא מוחק", 9121 not in DELETED, str(DELETED))
+        ok("והוא עדיין קיים", B.filters.row(CHAT, "חדשות") is not None)
+        B.filters.set_enabled(CHAT, "חדשות", True)
+
+        # מתג ראשי: כיבוי מיידי של כל התגובות
+        B.db.set(CHAT, "replies", "0")
+        DELETED.clear()
+        await B.on_group_message(msg("ושוב סדרות חדשות", uid=USER, mid=9122))
+        ok("מתג ראשי כבוי עוצר הכול", 9122 not in DELETED, str(DELETED))
+    finally:
+        B.db.set(CHAT, "replies", "1")
+        B.filters.remove(CHAT, "חדשות")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3043,6 +3081,7 @@ async def main() -> int:
     await test_ui_clarity()
     await test_triggers_answer_admins()
     await test_tell_why()
+    await test_filter_stop()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

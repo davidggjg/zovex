@@ -376,6 +376,7 @@ SWITCHES: tuple[tuple[str, str, str], ...] = (
     ("welcome_private", "1", "greet.private_sw"),
     ("cleancmds",    "0", "sw.cleancmds"),
     ("tellwhy",      "1", "sw.tellwhy"),
+    ("replies",      "1", "sw.replies"),
     ("welcome_on",   "1", "sw.welcome"),
     ("goodbye_on",   "1", "sw.goodbye"),
 )
@@ -1244,8 +1245,14 @@ def replies_screen(chat_id: int, words: list[tuple[str, int]],
                    lang: str = i18n.DEFAULT) -> Screen:
     """כל מה שהקבוצה עונה עליו: מילים ופקודות, עם מספר ההודעות."""
     rows = []
-    for name, n in words[:20]:
-        rows.append([(f"💬 {name[:22]} · {n}", cb(chat_id, "rep", "f|" + name))])
+    for item in words[:20]:
+        name, n = item[0], item[1]
+        # הדק מושהה נשאר ברשימה ומסומן. אחרת מנהל שהשהה אותו מחפש
+        # אותו, לא מוצא, ובונה אותו מחדש.
+        on = item[2] if len(item) > 2 else True
+        mark = "💬" if on else "⏸"
+        rows.append([(f"{mark} {name[:22]} · {n}",
+                      cb(chat_id, "rep", "f|" + name))])
     for name, n in commands[:20]:
         rows.append([(f"⌨️ /{name[:21]} · {n}", cb(chat_id, "rep", "c|" + name))])
     rows.append([("➕ " + i18n.t("rep.new_word", lang),
@@ -1261,7 +1268,7 @@ def replies_screen(chat_id: int, words: list[tuple[str, int]],
 
 
 def reply_item(chat_id: int, kind: str, name: str, count: int,
-               lang: str = i18n.DEFAULT) -> Screen:
+               lang: str = i18n.DEFAULT, *, on: bool = True) -> Screen:
     label = ("/" + name) if kind == "c" else name
     body = (f"<b>{label}</b>\n\n"
             + i18n.t("rep.count", lang, n=count) + "\n"
@@ -1271,12 +1278,21 @@ def reply_item(chat_id: int, kind: str, name: str, count: int,
     rows = [
         [("➕ " + i18n.t("rep.add_more", lang),
           cb(chat_id, "repadd", f"{kind}|{name}"))],
-        [("👁 " + i18n.t("rep.preview", lang),
-          cb(chat_id, "repprev", f"{kind}|{name}")),
-         ("🗑 " + i18n.t("rep.delete", lang),
-          cb(chat_id, "repdel", f"{kind}|{name}"))],
-        [(i18n.t("menu.back", lang), cb(chat_id, "reps"))],
     ]
+    # השהיה קודמת למחיקה, ובשורה נפרדת לפניה: "תעצור את הפילטר"
+    # כמעט תמיד אומר "שיפסיק לירות", ולא "תאבד לי את כל ההודעות
+    # שצירפתי אליו". מחיקה נשארת, פשוט לא ראשונה.
+    if kind == "f":
+        body += "\n\n" + i18n.t("rep.state_on" if on else "rep.state_off",
+                                 lang)
+        rows.append([(("⏸ " + i18n.t("rep.pause", lang)) if on
+                      else ("▶️ " + i18n.t("rep.resume", lang)),
+                      cb(chat_id, "reppause", f"{kind}|{name}"))])
+    rows.append([("👁 " + i18n.t("rep.preview", lang),
+                  cb(chat_id, "repprev", f"{kind}|{name}")),
+                 ("🗑 " + i18n.t("rep.delete", lang),
+                  cb(chat_id, "repdel", f"{kind}|{name}"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "reps"))])
     return Screen(body, rows)
 
 

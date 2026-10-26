@@ -1371,6 +1371,11 @@ async def _content_reply(msg: Message, text: str,
                                n.media_id, n.media_kind, n.buttons,
                                thread_id=_thread_of(msg))
             return True
+    # מתג ראשי אחד לכל התגובות. "תעצור את הפילטר שלו" בשעה שהקבוצה
+    # מוצפת הוא בקשה לכיבוי מיידי, לא למסע בין הדקים — ואחר כך
+    # מדליקים בחזרה בלי שאבד כלום.
+    if db.get(msg.chat.id, "replies", "1") != "1":
+        return False
     fh = filters.check(msg.chat.id, text)
     if fh is None:
         return False
@@ -1382,8 +1387,17 @@ async def _content_reply(msg: Message, text: str,
 
 async def _run_filter(msg: Message, fh, staff: bool = False) -> None:
     if fh.action in ("delete", "delete_reply") and not staff:
+        # מחיקה של הדק נרשמת ביומן כמו כל מחיקה אחרת, ונשמרת ראיה.
+        # עד כאן היא הייתה המחיקה היחידה שלא הותירה שום עקבות: מנהל
+        # שראה הודעה נעלמת לא מצא אותה ביומן, ולכן חשב שהבוט שבור —
+        # ולא שמילת הדק שהוא עצמו הגדיר תפסה אותה.
+        _keep_proof(msg, "delete", f"filter:{fh.trigger}")
+        audit.log(msg.chat.id, "filter.deleted", target_id=msg.from_user.id
+                  if msg.from_user else None, after=fh.trigger,
+                  severity="low")
         with contextlib.suppress(TelegramAPIError):
             await bot.delete_message(msg.chat.id, msg.message_id)
+        await _tell_why(msg, "delete", fh.trigger, "filter.triggered")
     if fh.action in ("reply", "delete_reply"):
         # ההודעה הראשונה, ואז כל מה שהמנהל צירף — לפי הסדר שבו שמר.
         # שלוש הודעות נשארות שלוש הודעות.
@@ -5110,6 +5124,11 @@ async def on_custom_command(msg: Message):
     touch(msg)
     if msg.from_user is None:
         return
+    # אותו מתג ראשי שעוצר את מילות המפתח עוצר גם את הפקודות: התווית
+    # שהמנהל רואה אומרת "תגובות למילים ולפקודות", ומתג שעוצר חצי
+    # מהדברים שכתוב בו גרוע ממתג שלא קיים.
+    if db.get(msg.chat.id, "replies", "1") != "1":
+        return
     c = cmds.resolve(msg.chat.id, msg.text or "")
     if c is None:
         return
@@ -5322,8 +5341,8 @@ def _rep_count(chat_id: int, kind: str, name: str) -> int:
 
 
 def _reps_lists(chat_id: int) -> tuple[list, list]:
-    words = [(t, _rep_count(chat_id, "f", t))
-             for t in filters.triggers(chat_id)]
+    words = [(t, _rep_count(chat_id, "f", t), on)
+             for t, on in filters.listing(chat_id)]
     commands = [(c.name, _rep_count(chat_id, "c", c.name))
                 for c in cmds.list(chat_id)]
     return words, commands
@@ -6184,7 +6203,8 @@ async def on_callback(q: CallbackQuery):
         return
 
     # ── תגובות ופקודות ────────────────────────────────────────────────
-    if name in ("reps", "rep", "repadd", "repdel", "repprev", "repdone"):
+    if name in ("reps", "rep", "repadd", "repdel", "repprev", "repdone",
+                "reppause"):
         if not perms.check(chat_id, q.from_user.id, "filters.write"):
             await q.answer(i18n.t("err.need_admin", lg), show_alert=True)
             return
@@ -6239,11 +6259,14 @@ async def on_callback(q: CallbackQuery):
                                        c.media_id, c.media_kind,
                                        c.buttons or "")
             else:
-                fh = filters.check(chat_id, trg)
-                if fh and (fh.content.strip() or fh.media_id):
-                    await send_content(q.from_user.id, fh.content,
-                                       fh.media_id or None,
-                                       fh.media_kind or None, fh.buttons or "")
+                # ‎row‎ ולא ‎check‎: הדק מושהה צריך להיות ניתן לצפייה,
+                # אחרת אין איך להחליט אם להפעיל אותו בחזרה.
+                r = filters.row(chat_id, trg)
+                if r and ((r["content"] or "").strip() or r["media_id"]):
+                    await send_content(q.from_user.id, r["content"] or "",
+                                       r["media_id"] or None,
+                                       r["media_kind"] or None,
+                                       r["buttons"] or "")
             for extra in filters.items(chat_id, trg, store)[:FILTER_ITEMS_MAX]:
                 await send_content(q.from_user.id, extra["content"],
                                    extra["media_id"] or None,
@@ -6252,8 +6275,22 @@ async def on_callback(q: CallbackQuery):
             await q.answer(i18n.t("rep.preview", lg))
             return
 
-        await _edit(q, panel.reply_item(chat_id, kind, trg,
-                                        _rep_count(chat_id, kind, trg), lg))
+        if name == "reppause" and kind == "f":
+            now_on = filters.is_enabled(chat_id, trg)
+            filters.set_enabled(chat_id, trg, not now_on)
+            audit.log(chat_id, "filter.resume" if not now_on
+                      else "filter.pause", actor_id=q.from_user.id,
+                      after=trg, source="button", severity="low")
+            await _edit(q, panel.reply_item(
+                chat_id, kind, trg, _rep_count(chat_id, kind, trg), lg,
+                on=not now_on))
+            await q.answer(i18n.t("rep.resumed" if not now_on
+                                  else "rep.paused", lg))
+            return
+
+        await _edit(q, panel.reply_item(
+            chat_id, kind, trg, _rep_count(chat_id, kind, trg), lg,
+            on=filters.is_enabled(chat_id, trg) if kind == "f" else True))
         await q.answer()
         return
 
