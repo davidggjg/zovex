@@ -590,6 +590,13 @@ def test_support_and_stars() -> None:
     ok("הסכומים עולים", list(_p.STAR_AMOUNTS) == sorted(_p.STAR_AMOUNTS))
     ok("ואין סכום לא חוקי",
        all(isinstance(n, int) and 1 <= n <= 100000 for n in _p.STAR_AMOUNTS))
+    # החבילה הקטנה ביותר שטלגרם מוכרת היא 100 כוכבים, ולכן רוב
+    # הסכומים חייבים להיות ברי-רכישה למי שאין לו יתרה.
+    ok("רוב הסכומים ניתנים לרכישה ישירה",
+       sum(1 for n in _p.STAR_AMOUNTS if n >= 100) >= 4,
+       str(_p.STAR_AMOUNTS))
+    ok("ויש גם סכום קטן למי שיש לו יתרה",
+       any(n < 100 for n in _p.STAR_AMOUNTS))
 
 
 
