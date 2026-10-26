@@ -2300,16 +2300,19 @@ async def test_state_messages():
     real = getattr(B.bot, "set_chat_permissions", None)
     B.bot.set_chat_permissions = fake_perms
     try:
-        # ברירת מחדל
+        # ברירת המחדל היא **שקט**: הודעה שאיש לא כתב לא נשלחת.
         before = len(SENT)
         await B.set_lockdown(CHAT, True, ADM)
-        out = " ".join(t for _c, t, _m in SENT[before:])
-        ok("סגירה שולחת הודעה", "נסגרה" in out, out[:60])
+        ok("בלי נוסח — לא נשלחת הודעה", len(SENT) == before,
+           str([t for _c, t, _m in SENT[before:]])[:60])
 
+        # "הצע לי נוסח" כותב את הנוסח המוכן לתוך ההגדרה
+        B.db.set(CHAT, "lock_msg_open",
+                 i18n.t("state.msg_open", "he"), ADM)
         before = len(SENT)
         await B.set_lockdown(CHAT, False, ADM)
         out = " ".join(t for _c, t, _m in SENT[before:])
-        ok("ופתיחה שולחת הודעה אחרת", "נפתחה" in out, out[:60])
+        ok("ועם נוסח — נשלח", "נפתחה" in out, out[:60])
 
         # נוסח של המנהל, עם תמונה
         def pm(text="", mid=9400, **kw):
@@ -2334,7 +2337,7 @@ async def test_state_messages():
         ok("והוא נשלח עם המדיה",
            "סגור ללילה" in out and "BANNER" in out, out[:80])
 
-        # שקט מוחלט
+        # שקט מפורש
         B.db.set(CHAT, "lock_msg_open", panel.SILENT)
         before = len(SENT)
         await B.set_lockdown(CHAT, False, ADM)
@@ -2345,8 +2348,7 @@ async def test_state_messages():
         sc = B._screen_for(CHAT, "stmsgs", "")
         ok("מסך ההודעות נבנה", sc is not None and len(sc.rows) >= 5)
         ok("ומסמן מה מוגדר",
-           "✅" in sc.text + str(sc.rows) and "🔇" in str(sc.rows),
-           str(sc.rows))
+           "✅" in str(sc.rows) and "🔇" in str(sc.rows), str(sc.rows))
         one = panel.state_msg_screen(CHAT, "lockmsg",
                                      B.db.get(CHAT, "lock_msg_close", ""),
                                      "BANNER", "he")
@@ -2925,6 +2927,42 @@ async def test_ui_clarity():
     ok("ומסביר מה שולחים", "📩" in w.text or "שלח" in w.text)
 
 
+
+async def test_triggers_answer_admins():
+    """הדק עונה גם למנהל — זה הדבר הראשון שכל מנהל בודק."""
+    section("הדקים עונים למנהל")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.filters.remove(CHAT, "פיפא")
+    B.filters.add(CHAT, "פיפא", "הנה המשחק", match_kind="substring")
+
+    before = len(SENT)
+    await B.on_group_message(msg("פיפא", uid=ADM, mid=9010))
+    out = " ".join(t for _c, t, _m in SENT[before:])
+    ok("מנהל מקבל תשובה", "הנה המשחק" in out, out[:60])
+
+    B.perms.set_role(CHAT, USER, "member")
+    before = len(SENT)
+    await B.on_group_message(msg("פיפא", uid=USER, mid=9011))
+    out = " ".join(t for _c, t, _m in SENT[before:])
+    ok("וגם חבר רגיל", "הנה המשחק" in out, out[:60])
+
+    # הערה שמורה — אותו דבר
+    B.notes.save(CHAT, "כללים", "אלה הכללים", by=ADM)
+    before = len(SENT)
+    await B.on_group_message(msg("#כללים", uid=ADM, mid=9012))
+    out = " ".join(t for _c, t, _m in SENT[before:])
+    ok("והערה שמורה עונה למנהל", "אלה הכללים" in out, out[:60])
+
+    # אבל אכיפה עדיין לא חלה על מנהל
+    B.filters.remove(CHAT, "פיפא")
+    B.filters.add(CHAT, "אסור", "", match_kind="substring", action="warn")
+    DELETED.clear()
+    await B.on_group_message(msg("מילה אסור פה", uid=ADM, mid=9013))
+    ok("מנהל אינו נענש על הדק", 9013 not in DELETED, str(DELETED))
+    B.filters.remove(CHAT, "אסור")
+    B.notes.delete(CHAT, "כללים")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -2969,6 +3007,7 @@ async def main() -> int:
     await test_personal_language_sticks()
     await test_ai_soft_damper()
     await test_ui_clarity()
+    await test_triggers_answer_admins()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

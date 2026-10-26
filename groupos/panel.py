@@ -934,6 +934,9 @@ def hours_screen(chat_id: int, table: str, lang: str = i18n.DEFAULT,
     rows.append([("🌍 " + i18n.t("tz.button", lang,
                                  zone=zone or i18n.t("tz.unset", lang)),
                   cb(chat_id, "zones"))])
+    # ההודעה שתישלח כשהלוח סוגר ופותח יושבת במסך משלה, ומי שמגדיר
+    # לוח שעות הוא בדיוק מי שרוצה לכתוב אותה עכשיו.
+    rows.append([(i18n.t("menu.state", lang), cb(chat_id, "stmsgs"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(txt, rows)
 
@@ -1316,7 +1319,7 @@ def state_msgs_screen(chat_id: int, values: dict,
     rows = []
     for field, label in STATE_MSGS:
         val = (values.get(field) or "").strip()
-        mark = "🔇" if val == SILENT else ("✅" if val else "↩︎")
+        mark = "✅" if (val and val != SILENT) else "🔇"
         rows.append([(f"{mark} {i18n.t(label, lang)}",
                       cb(chat_id, "stmsg", field))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
@@ -1329,14 +1332,16 @@ def state_msg_screen(chat_id: int, field: str, value: str, media: str,
                      lang: str = i18n.DEFAULT) -> Screen:
     label = dict(STATE_MSGS).get(field, field)
     val = (value or "").strip()
-    if val == SILENT:
-        now = i18n.t("state.silent", lang)
-    elif val or media:
-        now = (f"<blockquote>{_tpl.esc(val[:300])}</blockquote>" if val else "")
+    if (val and val != SILENT) or media:
+        now = (f"<blockquote>{_tpl.esc(val[:300])}</blockquote>"
+               if val and val != SILENT else "")
         if media:
-            now += ("\n" if val else "") + i18n.t("state.has_media", lang)
+            now += ("\n" if now else "") + i18n.t("state.has_media", lang)
     else:
-        now = i18n.t("state.default", lang)
+        # ריק פירושו שקט, ולא "נוסח ברירת מחדל": הודעה שאיש לא כתב
+        # לא אמורה להופיע בשם הקבוצה, וזו הייתה השאלה "מי כתב את
+        # 'נסגרה על ידי ההנהלה' ואיפה משנים".
+        now = i18n.t("state.silent", lang)
     # "שאוכל לראות מה מוגדר, לערוך את זה, לצפות, ולמחוק." ארבע
     # הפעולות במסך אחד, והצפייה שולחת את ההודעה **כמו שהיא** —
     # תמונה נראית כתמונה, ולא כשורה שכתוב בה "כולל מדיה".
@@ -1344,7 +1349,7 @@ def state_msg_screen(chat_id: int, field: str, value: str, media: str,
         [("✏️ " + i18n.t("state.edit", lang), cb(chat_id, "ask", field)),
          ("👁 " + i18n.t("state.preview", lang),
           cb(chat_id, "stprev", field))],
-        [("↩︎ " + i18n.t("state.use_default", lang),
+        [("💡 " + i18n.t("state.suggest", lang),
           cb(chat_id, "stdef", field)),
          ("🔇 " + i18n.t("state.no_msg", lang), cb(chat_id, "stoff", field))],
         [(i18n.t("menu.back", lang), cb(chat_id, "stmsgs"))],

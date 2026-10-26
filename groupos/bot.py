@@ -778,7 +778,12 @@ async def on_group_message(msg: Message):
     if perms.rank_of(msg.chat.id, msg.from_user.id) >= RANK["moderator"]:
         if db.get(msg.chat.id, "strict", "1") == "1" \
                 and db.get(msg.chat.id, "spamguard", "1") == "1":
-            await _spam_check(msg, text_early, lang_of(msg), staff=True)
+            if await _spam_check(msg, text_early, lang_of(msg), staff=True):
+                return
+        # **אבל תגובות כן.** פטור מאכיפה אינו פטור משיחה: מנהל
+        # שכתב "פיפא" בקבוצה שלו ולא קיבל כלום חשב שההדק לא עובד,
+        # והוא הדבר הראשון שכל מנהל בודק אחרי שהוא מגדיר אותו.
+        await _content_reply(msg, text_early, staff=True)
         return
 
     text = (msg.text or msg.caption or "")
@@ -880,20 +885,8 @@ async def on_group_message(msg: Message):
                                 collect_signals(msg, text)))):
         return
 
-    # 6. קיצור ‎#שם‎ להערה. לפני הפילטרים, כי הוא מפורש יותר.
-    if text.startswith("#") and len(text) > 1:
-        n = notes.get(msg.chat.id, text[1:].split()[0])
-        if n is not None and n.visibility == "public":
-            await send_content(msg.chat.id,
-                               tpl.render_pick(n.content, _ctx(msg)),
-                               n.media_id, n.media_kind, n.buttons,
-                               thread_id=_thread_of(msg))
-            return
-
-    # 7. פילטרים — אחרונים, כי הם היחידים שיכולים גם *להשיב*
-    fh = filters.check(msg.chat.id, text) if text else None
-    if fh:
-        await _run_filter(msg, fh)
+    # 6. הערות והדקים — אחרונים, כי הם היחידים שגם *משיבים*.
+    await _content_reply(msg, text)
 
 
 def _image_of(msg: Message) -> tuple[str, str, str, str, int]:
@@ -1313,8 +1306,35 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
                        to_user=msg.from_user.id)
 
 
-async def _run_filter(msg: Message, fh) -> None:
-    if fh.action in ("delete", "delete_reply"):
+async def _content_reply(msg: Message, text: str,
+                         staff: bool = False) -> bool:
+    """הערה שמורה או תגובת הדק. ‎True‎ = נענה.
+
+    מופרד מהנתיב החם כדי שאפשר יהיה להריץ אותו גם למנהל: אלה
+    **תשובות**, לא אכיפה. למנהל רצות רק תגובות, ולא פעולות
+    (אזהרה, השתקה) — אותן ממילא לא מפעילים עליו."""
+    if not text:
+        return False
+    # ‎#שם‎ — קיצור להערה שמורה
+    if text.startswith("#") and len(text) > 1:
+        n = notes.get(msg.chat.id, text[1:].split()[0])
+        if n is not None and n.visibility == "public":
+            await send_content(msg.chat.id,
+                               tpl.render_pick(n.content, _ctx(msg)),
+                               n.media_id, n.media_kind, n.buttons,
+                               thread_id=_thread_of(msg))
+            return True
+    fh = filters.check(msg.chat.id, text)
+    if fh is None:
+        return False
+    if staff and fh.action not in ("reply", "delete_reply"):
+        return False
+    await _run_filter(msg, fh, staff=staff)
+    return True
+
+
+async def _run_filter(msg: Message, fh, staff: bool = False) -> None:
+    if fh.action in ("delete", "delete_reply") and not staff:
         with contextlib.suppress(TelegramAPIError):
             await bot.delete_message(msg.chat.id, msg.message_id)
     if fh.action in ("reply", "delete_reply"):
@@ -4537,7 +4557,11 @@ async def _state_message(chat_id: int, field: str, default_key: str,
     if raw == panel.SILENT:
         return
     if not raw and not media:
-        raw = i18n.t(default_key, lg)
+        # **אין נוסח — אין הודעה.** קודם נשלח נוסח ברירת מחדל
+        # ("הקבוצה נסגרה על ידי ההנהלה"), ומנהל שראה אותו שאל בצדק
+        # מי כתב את זה ואיפה משנים. הודעה שאיש לא כתב לא אמורה
+        # להופיע בשם הקבוצה; מי שרוצה אחת, כותב אותה בלחיצה.
+        return
     await send_content(chat_id, tpl.render_pick(raw, tpl.context(
         chat_id=chat_id, language=lg)), media or None, kind or None, "")
 
@@ -5984,8 +6008,16 @@ async def on_callback(q: CallbackQuery):
             await q.answer(i18n.t("state.sent", lg), show_alert=True)
             return
         if name in ("stdef", "stoff"):
-            db.set(chat_id, f.key, panel.SILENT if name == "stoff" else "",
-                   q.from_user.id)
+            # ‎stdef‎ כבר אינו "חזור לברירת מחדל" אלא **כתוב לי נוסח
+            # מוצע**: הוא מעתיק את הנוסח המוכן לתוך ההגדרה של
+            # הקבוצה, כך שרואים אותו, אפשר לערוך אותו, והוא אינו
+            # הודעה שצצה בלי שאיש כתב אותה.
+            if name == "stdef":
+                db.set(chat_id, f.key,
+                       i18n.t(dict(panel.STATE_DEFAULTS).get(arg, ""), lg),
+                       q.from_user.id)
+            else:
+                db.set(chat_id, f.key, panel.SILENT, q.from_user.id)
             db.set(chat_id, f.key + "_media", "", q.from_user.id)
             db.set(chat_id, f.key + "_kind", "", q.from_user.id)
         await _edit(q, panel.state_msg_screen(
