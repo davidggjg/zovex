@@ -79,6 +79,7 @@ async function enrichStatus(){
                    (d.eta?` · נותרו ${_hms(d.eta)}`:"")
                  : (d.done? `<b>הסתיים</b> · ${d.done}/${d.total}` : "לא רץ")) +
       `<div style="margin-top:4px;font-size:12px">`+
+      `התאמות TMDB: <b>${d.matched_tmdb||0}</b> · `+
       `תיאורים: <b>${d.filled_desc||0}</b> (מתורגמים ${d.translated||0}) · `+
       `פוסטרים: <b>${d.filled_poster||0}</b> · `+
       `הצעות קטגוריה: <b>${d.suggestions||0}</b> · `+

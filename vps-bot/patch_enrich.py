@@ -46,12 +46,12 @@ args = [a for a in sys.argv[1:] if not a.startswith("--")]
 if args:
     P = args[0]
 REVERT = "--revert" in sys.argv
-MARK = "enrich_scan"
+MARK = "enrich_scan_v2"
 
 ANCHOR = '''@api.get("/content/trailer/{item_id}")'''
 
 BLOCK = r'''# ═══════════════════════════════════════════════════════════════════════════
-# [enrich_scan] סורק העשרה — תיאורים, פוסטרים, והצעות קטגוריה
+# [enrich_scan_v2] סורק העשרה — תיאורים, פוסטרים, והצעות קטגוריה
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # רץ רק כשמפעילים אותו. ממלא **רק שדות ריקים**, ואת הקטגוריות הוא רק
@@ -67,6 +67,7 @@ ENRICH_SAVE_EVERY = int(os.environ.get("ENRICH_SAVE_EVERY", "25"))
 RECAT_FILE = DATA_DIR / "recat_suggestions.json"
 ENRICH_STATE = {"running": False, "done": 0, "total": 0, "filled_desc": 0,
                 "filled_poster": 0, "translated": 0, "suggestions": 0,
+                "matched_tmdb": 0,
                 "skipped_no_tmdb": 0, "errors": 0, "stop": False,
                 "started": 0.0, "last": ""}
 
@@ -125,6 +126,53 @@ async def _tmdb_details(tid, kind: str) -> dict:
     except Exception as e:
         log.warning("enrich: tmdb details %s/%s נכשל: %s", kind, tid, e)
     return out
+
+
+def _norm_title(x) -> str:
+    """שם מנורמל להשוואה: בלי ניקוד, סוגריים, פיסוק ורווחים כפולים.
+
+    השמות בקטלוג נושאים זנבות כמו "(מדובב)" או "[HD]", ו-TMDB אינו מכיר
+    אותם. בלי נרמול כל השוואה נכשלת, ואיתו היא נשארת קפדנית.
+    """
+    t = str(x or "").lower()
+    t = re.sub(r"[\u0591-\u05C7]", "", t)              # ניקוד עברי
+    t = re.sub(r"\(.*?\)|\[.*?\]", " ", t)             # סוגריים
+    t = re.sub(r"[^0-9a-z\u0590-\u05FF]+", " ", t)      # פיסוק
+    return " ".join(t.split())
+
+
+async def _tmdb_match(name: str, year, is_series: bool):
+    """מאתר ‎tmdb_id‎ לפריט שאין לו — בהתאמה קפדנית בלבד.
+
+    נמדד על הקטלוג: 435 מתוך 451 יחידות בסריקה הראשונה היו בלי מזהה.
+    בלי השלב הזה אין מאיפה למשוך תיאור או פוסטר, וכל ההעשרה חסרת משמעות.
+
+    הקפדנות אינה הידור: התאמה שגויה תכניס לפריט תיאור ופוסטר **של סרט
+    אחר**, וזה גרוע בהרבה משדה ריק. לכן נדרשת זהות שם מלאה אחרי נרמול,
+    סוג תואם (סרט/סדרה), ושנה בטווח ±1. מה שלא עובר — נשאר כפי שהוא.
+    """
+    try:
+        res = await tmdb_search(name, str(year or ""))
+    except Exception as e:
+        log.warning("enrich: tmdb_search נכשל ל-%s: %s", name, e)
+        return None
+    want = _norm_title(name)
+    if not want:
+        return None
+    for r in res or []:
+        if is_series != (r.get("type") == "tv"):
+            continue
+        if want not in (_norm_title(r.get("title")),
+                        _norm_title(r.get("en_title"))):
+            continue
+        ry, y = r.get("year"), year
+        try:
+            if y and ry and abs(int(ry) - int(y)) > 1:
+                continue
+        except (TypeError, ValueError):
+            pass
+        return r
+    return None
 
 
 async def _groq_translate(text: str) -> str:
@@ -277,9 +325,24 @@ async def _enrich_loop():
             cur0 = str(rep.get("category") or "").strip()
             tid = rep.get("tmdb_id")
             if not tid:
-                # בלי מזהה אין מאיפה למשוך תיאור או פוסטר, אבל **אפשר עדיין
-                # לסווג**: תוכן ישראלי רב אינו ב-TMDB בכלל, והוא בדיוק מה
-                # שיושב בקטגוריה הלא נכונה.
+                # קודם מנסים למצוא מזהה. נמדד ש-96% מהקטלוג בלי מזהה, ובלעדיו
+                # אין מאיפה למשוך כלום — זה השלב שהופך את ההעשרה למשמעותית.
+                hit = await _tmdb_match(st["last"], rep.get("year"), is_series)
+                if hit and hit.get("tmdb_id"):
+                    tid = hit["tmdb_id"]
+                    for m in content:
+                        if is_series:
+                            if str(m.get("series_name") or "").strip() != key[1]:
+                                continue
+                        elif m.get("id") != key[1]:
+                            continue
+                        m["tmdb_id"] = tid
+                        changed += 1
+                    st["matched_tmdb"] += 1
+            if not tid:
+                # לא נמצאה התאמה בטוחה. אי אפשר להעשיר, אבל **אפשר לסווג**:
+                # תוכן ישראלי רב אינו ב-TMDB כלל, והוא בדיוק מה שיושב
+                # בקטגוריה הלא נכונה.
                 st["skipped_no_tmdb"] += 1
                 if cur0 not in PROTECTED_CATS:
                     cand = await _groq_category(
@@ -353,7 +416,7 @@ async def panel_enrich_start(req: PoolPwReq, request: Request):
     if ENRICH_STATE["running"]:
         return JSONResponse({"ok": False, "reason": "כבר רץ"})
     for k in ("done", "total", "filled_desc", "filled_poster", "translated",
-              "suggestions", "skipped_no_tmdb", "errors"):
+              "suggestions", "matched_tmdb", "skipped_no_tmdb", "errors"):
         ENRICH_STATE[k] = 0
     ENRICH_STATE.update(running=True, stop=False, started=time.time(), last="")
     asyncio.create_task(_enrich_loop())
@@ -455,6 +518,7 @@ def main():
         print("✓ כבר מתוקן — מדלג")
         return
     for need in ("def _auto_category", "TMDB_IMG", "def save_json",
+                 "async def tmdb_search",
                  "def load_json", "import httpx", "class PoolPwReq"):
         if need not in s:
             sys.exit(f"❌ לא נמצא '{need}' ב-main.py — לא נגעתי בכלום")

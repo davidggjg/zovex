@@ -57,15 +57,23 @@ grep -q '^TMDB_API_KEY=' "$DIR/.env" && echo "   ✓ TMDB" \
 grep -q '^GROQ_API_KEY=' "$DIR/.env" && echo "   ✓ Groq" \
   || echo "   ⚠️  אין GROQ_API_KEY — תקצירים באנגלית לא יתורגמו"
 
-echo "② מחיל"
+# הטלאי מדלג על קובץ שכבר הוחל (בדיקת סימון), ולכן הרצה חוזרת לא
+# שדרגה גרסה קיימת — זה בדיוק מה שהשאיר בשרת גרסה ישנה בלי
+# שאיש הבחין. הסרה לפני החלה פותרת את זה: הגיבוי קיים, והשחזור
+# מחזיר בדיוק את הקובץ שלפני הטלאי.
+echo "② מסיר גרסה קודמת אם קיימת"
+"$PY" /tmp/patch_enrich.py "$LIVE" --revert >/dev/null 2>&1 \
+  && echo "   הוסרה" || echo "   אין קודמת — ממשיך"
+
+echo "③ מחיל"
 "$PY" /tmp/patch_enrich.py "$LIVE" || die "לא הוחל"
 
-echo "③ מפעיל מחדש (הבוטים עולים בהדרגה — דקות)"
+echo "④ מפעיל מחדש (הבוטים עולים בהדרגה — דקות)"
 systemctl restart "$SVC" || die "restart נכשל"
 wait_up || die "/ping לא ענה.  לשחזור: sudo bash $0 --rollback"
 
 echo
-echo "④ מאמת"
+echo "⑤ מאמת"
 read -r -s -p "   סיסמת הפאנל (לא מוצגת): " PASS; echo
 curl -fsS -m 15 -X POST "$API/panel/enrich/status" \
   -H 'Content-Type: application/json' -d "{\"password\":\"$PASS\"}" \
