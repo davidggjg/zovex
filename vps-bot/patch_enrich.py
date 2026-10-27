@@ -70,12 +70,16 @@ ENRICH_STATE = {"running": False, "done": 0, "total": 0, "filled_desc": 0,
                 "skipped_no_tmdb": 0, "errors": 0, "stop": False,
                 "started": 0.0, "last": ""}
 
-# קטגוריות שאינן ז'אנר. סיווג לפי ז'אנר היה מרוקן אותן לתוך "סרטים".
-PROTECTED_CATS = {"מארוול", "שידורים חיים", "סדרות טורקיות",
-                  "סרטים ישראלים", "סדרות ישראליות"}
-# רק מכאן מותר להזיז. פריט בקטגוריה אחרת לא ייגע בו.
-GENERIC_CATS = {"סרטים", "סדרות", "סרטים לילדים (מתאים גם למשפחה)",
-                "סרטים לילדים", "סדרות לילדים", "אנימה", "אימה", ""}
+# רק זה מוגן. שידורים חיים אינם תוכן TMDB בכלל, ואין שום סיגנל שיסווג
+# אותם נכון — כל נגיעה בהם היא נזק ודאי.
+#
+# כל השאר פתוח לשני הכיוונים, כולל *לתוך* מארוול: יש סרטי מארוול שיושבים
+# ב"סרטים" וצריכים לעבור, ולא רק להפך.
+PROTECTED_CATS = {"שידורים חיים"}
+
+# שמות החברות שמזהים זיכיון. TMDB אינו מחזיר "מארוול" כז'אנר, אבל
+# "Marvel Studios" מופיע ב-production_companies — זיהוי ודאי ולא ניחוש.
+MARVEL_MARKS = ("marvel",)
 
 
 async def _tmdb_details(tid, kind: str) -> dict:
@@ -99,6 +103,16 @@ async def _tmdb_details(tid, kind: str) -> dict:
             out["origin"] = d.get("origin_country") or (
                 [d.get("original_language", "").upper()] if kind == "movie" else [])
             out["lang"] = d.get("original_language") or ""
+            # חברות ההפקה הן הדרך לזהות זיכיון. TMDB אינו מחזיר "מארוול"
+            # כז'אנר, אבל "Marvel Studios" מופיע כאן במפורש — מדויק הרבה
+            # יותר מניחוש לפי שם הסרט.
+            out["companies"] = [str(c.get("name") or "").lower()
+                                for c in (d.get("production_companies") or [])]
+            out["companies"] += [str(c.get("name") or "").lower()
+                                 for c in (d.get("networks") or [])]
+            coll = d.get("belongs_to_collection") or {}
+            out["collection"] = str(coll.get("name") or "").lower()
+            out["title_en"] = str(d.get("title") or d.get("name") or "")
             out["poster"] = d.get("poster_path") or ""
             out["backdrop"] = d.get("backdrop_path") or ""
             out["type"] = kind
@@ -144,20 +158,93 @@ async def _groq_translate(text: str) -> str:
 def _suggest_category(det: dict, is_series: bool, existing: set) -> str:
     """קטגוריה מוצעת — רק אחת שכבר קיימת בקטלוג.
 
-    ‎_auto_category‎ מכירה IL רק לסדרות ואינה מכירה TR. כאן מורחב לפי
-    הקטגוריות שנמדדו בפועל בקטלוג.
+    הסדר אינו שרירותי: סיגנל ודאי גובר על סיגנל סביר.
+
+      1. **זיכיון** (חברת הפקה) — "Marvel Studios" הוא עובדה, לא ניחוש,
+         ולכן הוא גובר על הז'אנר. סרט מארוול הוא גם אקשן וגם מדע בדיוני,
+         וסיווג לפי ז'אנר היה שולח אותו ל"סרטים".
+      2. **מוצא** — טורקי/ישראלי. גם זה עובדה, והקטגוריות האלה קיימות
+         אצלנו בדיוק בשביל זה.
+      3. **ז'אנר** — אנימה, אימה, ילדים. כאן כבר מדובר בשיפוט.
+
+    ‎_auto_category‎ הקיימת מכירה IL רק לסדרות ואינה מכירה TR כלל, ולכן
+    שלב 2 נכתב כאן ולא נשען עליה.
     """
     origin = {str(x).upper() for x in (det.get("origin") or [])}
     lang = (det.get("lang") or "").lower()
-    if is_series and ("TR" in origin or lang == "tr"):
-        cand = "סדרות טורקיות"
-    elif not is_series and ("IL" in origin or lang == "he"):
-        cand = "סרטים ישראלים"
-    else:
-        cand = _auto_category({"genre_ids": det.get("genre_ids") or [],
-                               "origin": list(origin), "lang": lang,
-                               "type": "tv" if is_series else "movie"})
-    return cand if cand in existing else ""
+    comp = " ".join(det.get("companies") or []) + " " + (det.get("collection") or "")
+
+    # 1. זיכיון
+    if any(k in comp for k in MARVEL_MARKS) and "מארוול" in existing:
+        return "מארוול"
+
+    # 2. מוצא
+    is_tr = ("TR" in origin) or (lang == "tr")
+    is_il = ("IL" in origin) or (lang == "he")
+    if is_series and is_tr and "סדרות טורקיות" in existing:
+        return "סדרות טורקיות"
+    if is_il:
+        cand = "סדרות ישראליות" if is_series else "סרטים ישראלים"
+        if cand in existing:
+            return cand
+
+    # 3. ז'אנר — דרך הפונקציה הקיימת, כדי שתוכן ישן יסווג כמו תוכן חדש
+    cand = _auto_category({"genre_ids": det.get("genre_ids") or [],
+                           "origin": list(origin), "lang": lang,
+                           "type": "tv" if is_series else "movie"})
+    if cand in existing:
+        return cand
+    # "סרטים לילדים (מתאים גם למשפחה)" מול "סרטים לילדים" — התאמה חלקית
+    for e in existing:
+        if cand and (cand.startswith(e) or e.startswith(cand)):
+            return e
+    return ""
+
+
+async def _groq_category(name: str, year, is_series: bool,
+                         overview: str, existing: set) -> str:
+    """סיווג לפריט שאין לו ‎tmdb_id‎ — בעיקר תוכן ישראלי שאינו מופיע שם.
+
+    המודל מקבל את רשימת הקטגוריות **הקיימות** ואת המשמעות של כל אחת, ומוחזר
+    לבחור אחת מהן בלבד. תשובה שאינה ברשימה נזרקת: עדיף להשאיר את הפריט
+    במקומו מאשר להמציא קטגוריה.
+    """
+    if not GROQ_API_KEY or not name:
+        return ""
+    cats = sorted(c for c in existing if c and c not in PROTECTED_CATS)
+    if not cats:
+        return ""
+    guide = ("מארוול = סרטי וסדרות מארוול בלבד. "
+             "סדרות טורקיות = סדרות שהופקו בטורקיה. "
+             "סרטים ישראלים / סדרות ישראליות = הפקה ישראלית. "
+             "אנימה = אנימציה יפנית. "
+             "אימה = סרטי אימה. "
+             "סרטים לילדים / סדרות לילדים = תוכן לילדים ולמשפחה. "
+             "סרטים / סדרות = ברירת מחדל כשאף אחת מהאחרות לא מתאימה.")
+    kind = "סדרה" if is_series else "סרט"
+    try:
+        async with httpx.AsyncClient(timeout=40) as cx:
+            r = await cx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                json={"model": GROQ_MODEL, "temperature": 0.0,
+                      "messages": [
+                          {"role": "system",
+                           "content": "אתה מסווג תוכן לקטגוריות. " + guide +
+                                      " החזר אך ורק את שם הקטגוריה המדויק "
+                                      "מתוך הרשימה שתינתן, בלי שום מילה נוספת. "
+                                      "אם אינך בטוח — החזר: לא יודע"},
+                          {"role": "user",
+                           "content": f"{kind}: {name}\nשנה: {year or 'לא ידוע'}\n"
+                                      f"תקציר: {(overview or '')[:600]}\n\n"
+                                      f"קטגוריות אפשריות: {' | '.join(cats)}"}]})
+            if r.status_code != 200:
+                return ""
+            ans = (r.json()["choices"][0]["message"]["content"] or "").strip()
+            return ans if ans in existing else ""
+    except Exception as e:
+        log.warning("enrich: groq סיווג נכשל: %s", e)
+        return ""
 
 
 async def _enrich_loop():
@@ -186,12 +273,25 @@ async def _enrich_loop():
                 break
             st["done"] = idx + 1
             st["last"] = str(rep.get("series_name") or rep.get("title") or "")
+            is_series = key[0] == "s"
+            cur0 = str(rep.get("category") or "").strip()
             tid = rep.get("tmdb_id")
             if not tid:
+                # בלי מזהה אין מאיפה למשוך תיאור או פוסטר, אבל **אפשר עדיין
+                # לסווג**: תוכן ישראלי רב אינו ב-TMDB בכלל, והוא בדיוק מה
+                # שיושב בקטגוריה הלא נכונה.
                 st["skipped_no_tmdb"] += 1
-                await asyncio.sleep(0)
+                if cur0 not in PROTECTED_CATS:
+                    cand = await _groq_category(
+                        st["last"], rep.get("year"), is_series,
+                        rep.get("description") or "", existing)
+                    if cand and cand != cur0:
+                        sugg[f"{key[0]}:{key[1]}"] = {
+                            "kind": key[0], "name": st["last"], "from": cur0,
+                            "to": cand, "tmdb_id": None, "by": "groq"}
+                        st["suggestions"] = len(sugg)
+                    await asyncio.sleep(ENRICH_DELAY)
                 continue
-            is_series = key[0] == "s"
             det = await _tmdb_details(tid, "tv" if is_series else "movie")
             if not det:
                 st["errors"] += 1
@@ -221,13 +321,12 @@ async def _enrich_loop():
                     st["filled_poster"] += 1
                     changed += 1
 
-            cur = str(rep.get("category") or "").strip()
-            if cur in GENERIC_CATS and cur not in PROTECTED_CATS:
+            if cur0 not in PROTECTED_CATS:
                 cand = _suggest_category(det, is_series, existing)
-                if cand and cand != cur:
+                if cand and cand != cur0:
                     sugg[f"{key[0]}:{key[1]}"] = {
-                        "kind": key[0], "name": st["last"], "from": cur,
-                        "to": cand, "tmdb_id": tid}
+                        "kind": key[0], "name": st["last"], "from": cur0,
+                        "to": cand, "tmdb_id": tid, "by": "tmdb"}
                     st["suggestions"] = len(sugg)
 
             if changed >= ENRICH_SAVE_EVERY:
