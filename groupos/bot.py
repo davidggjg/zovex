@@ -5585,6 +5585,16 @@ async def _reply_wizard(msg: Message, chat_id: int, field: str,
                 waiting.start(msg.from_user.id, chat_id, "repcmd")
                 return
             cmd_name = customcmd.normalize(val)
+            # תפוסה? אומרים **מי** מחזיק אותה, ונשארים באותו שלב.
+            # "אי אפשר" בלי לומר על ידי מי הוא מבוי סתום.
+            holder = filters.alias_taken(chat_id, cmd_name)
+            if holder:
+                await send(msg.chat.id,
+                           i18n.t("rep.cmd_taken", lg,
+                                  cmd=tpl.esc("/" + cmd_name),
+                                  who=tpl.esc(holder)), is_group=False)
+                waiting.start(msg.from_user.id, chat_id, "repcmd")
+                return
         waiting.start(msg.from_user.id, chat_id, "repword", arg=cmd_name)
         await send(msg.chat.id,
                    i18n.t("rep.got_cmd" if cmd_name else "rep.no_cmd", lg,
@@ -5598,8 +5608,16 @@ async def _reply_wizard(msg: Message, chat_id: int, field: str,
         await send(msg.chat.id, i18n.t("rep.need_word", lg), is_group=False)
         waiting.start(msg.from_user.id, chat_id, "repword", arg=arg)
         return
-    if word not in filters.triggers(chat_id):
-        filters.add(chat_id, word, "", allow_empty=True)
+    # מילה שכבר קיימת **אינה נדרסת**. ‎add‎ מוחק ומכניס מחדש, ולכן
+    # הדק קיים היה מאבד בשקט את כל ההודעות שנבנו בו — ומנהל שחשב
+    # שהוא מוסיף גילה שהוא מחק.
+    if word in filters.triggers(chat_id):
+        await send(msg.chat.id,
+                   i18n.t("rep.word_taken", lg, word=tpl.esc(word)),
+                   is_group=False)
+        waiting.start(msg.from_user.id, chat_id, "repword", arg=arg)
+        return
+    filters.add(chat_id, word, "", allow_empty=True)
     if arg:
         filters.set_alias(chat_id, word, arg)
     audit.log(chat_id, "filter.add", actor_id=msg.from_user.id, after=word,

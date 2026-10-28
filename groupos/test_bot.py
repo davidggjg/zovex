@@ -3366,6 +3366,61 @@ async def test_long_names_dont_kill_the_screen():
             B.filters.remove(CHAT, n)
 
 
+async def test_no_duplicate_names():
+    """אי אפשר לתפוס פקודה או מילה שכבר תפוסה — וכל קבוצה לחוד."""
+    section("שמות כפולים")
+    OTHER = -1009999
+    B.db.run("""INSERT OR IGNORE INTO chats (chat_id,title,type,added_at)
+                VALUES (?,?,?,?)""", (OTHER, "אחרת", "supergroup", 0))
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.perms.set_role(OTHER, ADM, "owner")
+    B.filters.add(CHAT, "ראשון", "תוכן")
+    B.filters.set_alias(CHAT, "ראשון", "gg")
+
+    def pm(text, mid=9700):
+        return Message(message_id=mid, date=dt.datetime.now(),
+                       chat=Chat(id=ADM, type="private"),
+                       from_user=User(id=ADM, is_bot=False,
+                                      first_name="דוד"),
+                       text=text)
+    try:
+        # פקודה תפוסה: נדחית, ואומרת מי מחזיק
+        B._bulk_pm.clear()
+        B.waiting.start(ADM, CHAT, "repcmd")
+        out = await _out(B.on_private_text, pm("gg", mid=9701))
+        ok("פקודה תפוסה נדחית", "ראשון" in out, out[:80])
+        ok("ונשארים באותו שלב", B.waiting.get(ADM) is not None
+           and B.waiting.get(ADM).field == "repcmd")
+
+        # מילה תפוסה: נדחית, ולא דורסת
+        B.filters.add_item(CHAT, "ראשון", "הודעה שנבנתה")
+        B._bulk_pm.clear()
+        B.waiting.start(ADM, CHAT, "repword", arg="")
+        out = await _out(B.on_private_text, pm("ראשון", mid=9702))
+        ok("מילה תפוסה נדחית", "ראשון" in out, out[:80])
+        ok("וההודעות שנבנו לא אבדו",
+           B.filters.item_count(CHAT, "ראשון") == 1)
+
+        # אותה פקודה בקבוצה אחרת — מותרת לגמרי
+        ok("בקבוצה אחרת הפקודה פנויה",
+           B.filters.alias_taken(OTHER, "gg") == "")
+        B._bulk_pm.clear()
+        B.waiting.start(ADM, OTHER, "repcmd")
+        await _out(B.on_private_text, pm("gg", mid=9703))
+        await _out(B.on_private_text, pm("מילה אחרת", mid=9704))
+        ok("ונקשרת שם בלי להתנגש",
+           B.filters.alias_of(OTHER, "מילה אחרת") == "gg")
+        ok("והקבוצה הראשונה לא השתנתה",
+           B.filters.alias_of(CHAT, "ראשון") == "gg")
+        ok("וכל קבוצה רואה רק את שלה",
+           B.filters.by_alias(OTHER, "gg").trigger == "מילה אחרת"
+           and B.filters.by_alias(CHAT, "gg").trigger == "ראשון")
+    finally:
+        B._bulk_pm.clear()
+        B.filters.remove(CHAT, "ראשון")
+        B.filters.remove(OTHER, "מילה אחרת")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3421,6 +3476,7 @@ async def main() -> int:
     await test_dead_groups_drop_out()
     await test_every_button_answers()
     await test_long_names_dont_kill_the_screen()
+    await test_no_duplicate_names()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

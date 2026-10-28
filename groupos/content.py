@@ -256,6 +256,29 @@ class Filters:
             (chat_id, (trigger or "").strip().lower()))
         return bool(r["enabled"]) if r else False
 
+    def alias_taken(self, chat_id: int, alias: str,
+                    *, except_trigger: str = "") -> str:
+        """מי כבר מחזיק את הפקודה הזאת **בקבוצה הזאת**. ריק = פנויה.
+
+        בלי זה שני הדקים שונים יכלו להחזיק ‎/gg‎, והבוט בחר ביניהם
+        לפי סדר השורות במסד — כלומר התנהגות שאי אפשר להסביר למנהל
+        ואי אפשר לנחש. הבדיקה היא לכל קבוצה בנפרד, כי פקודה היא
+        של הקבוצה: ‎/gg‎ בקבוצה אחת אינו ‎/gg‎ בקבוצה אחרת."""
+        a = (alias or "").strip().lstrip("/").split("@")[0].lower()
+        if not a:
+            return ""
+        r = self.db.one(
+            """SELECT trigger FROM filters
+               WHERE chat_id=? AND alias=? AND trigger<>?""",
+            (chat_id, a, (except_trigger or "").strip().lower()))
+        if r:
+            return r["trigger"]
+        # וגם מול פקודה מותאמת ישנה, שהיא אותו מרחב שמות בדיוק
+        r = self.db.one(
+            "SELECT name FROM custom_cmds WHERE chat_id=? AND name=?",
+            (chat_id, a))
+        return r["name"] if r else ""
+
     def id_of(self, chat_id: int, trigger: str) -> int:
         r = self.db.one(
             "SELECT id FROM filters WHERE chat_id=? AND trigger=?",
