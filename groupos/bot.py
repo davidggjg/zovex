@@ -5499,9 +5499,10 @@ def _rep_count(chat_id: int, kind: str, name: str) -> int:
 
 
 def _reps_lists(chat_id: int) -> tuple[list, list]:
-    words = [(t, _rep_count(chat_id, "f", t), on, alias)
-             for t, on, alias in filters.listing(chat_id)]
-    commands = [(c.name, _rep_count(chat_id, "c", c.name))
+    words = [(t, _rep_count(chat_id, "f", t), on, alias, fid)
+             for t, on, alias, fid in filters.listing(chat_id)]
+    commands = [(c.name, _rep_count(chat_id, "c", c.name),
+                 cmds.id_of(chat_id, c.name))
                 for c in cmds.list(chat_id)]
     return words, commands
 
@@ -5838,7 +5839,10 @@ async def on_callback(q: CallbackQuery):
 
     if name == "home":
         await _edit(q, panel.home(await my_groups_live(q.from_user.id), lg,
-                               _bot_username))
+                                  _bot_username))
+        # בלי ‎answer‎ טלגרם משאירה גלגל מסתובב על הכפתור עד שייגמר
+        # הזמן, גם כשהמסך כבר התחלף. זה נראה בדיוק כמו כפתור תקוע.
+        await q.answer()
         return
 
     # העזרה יושבת לפני בדיקת ההרשאה לקבוצה: היא נפתחת בשיחה פרטית,
@@ -5875,7 +5879,11 @@ async def on_callback(q: CallbackQuery):
         audit.log(chat_id, "lock.change", actor_id=q.from_user.id,
                   before=f"{arg}={cur}", after=f"{arg}={nxt}",
                   source="button", severity="info")
-        await _edit(q, _screen_for(chat_id, "lockg", LOCK_TYPES[arg][1]))
+        # ‎LOCK_TYPES[arg]‎ הוא **שם הקבוצה עצמו**, מחרוזת. ‎[1]‎ חתך
+        # ממנה אות אחת — ‎"media"[1]‎ = ‎"e"‎ — ואז ‎_screen_for‎ לא מצא
+        # קבוצה כזאת והחזיר ‎None‎, ו-‎_edit‎ קרס על ‎None.text‎. בלי
+        # עקבות בצ'אט: הכפתור פשוט לא הגיב.
+        await _edit(q, _screen_for(chat_id, "lockg", LOCK_TYPES[arg]))
         await q.answer(panel.action_label(nxt, lg))
         return
 
@@ -6415,14 +6423,17 @@ async def on_callback(q: CallbackQuery):
             await _edit(q, panel.replies_screen(chat_id, words, commands, lg))
             await q.answer()
             return
-        kind, _, trg = arg.partition("|")
-        if kind not in ("f", "c") or not trg:
+        kind, _, token = arg.partition("|")
+        if kind not in ("f", "c") or not token:
             await q.answer(i18n.t("btn.unknown", lg))
             return
+        # המזהה הוא מה שעובר בכפתור. שם עבר שם קודם, והוא חרג
+        # מ-64 הבתים של טלגרם ברגע שהיה בקבוצה שם ארוך אחד.
+        rid = _int(token, 0)
+        trg = (cmds.name_by_id(chat_id, rid) if kind == "c"
+               else filters.name_by_id(chat_id, rid))
         store = "cmd" if kind == "c" else "filter"
-        exists = (cmds.get(chat_id, trg) is not None) if kind == "c" \
-            else (trg in filters.triggers(chat_id))
-        if not exists:
+        if not trg:
             await q.answer(i18n.t("rep.gone", lg), show_alert=True)
             return
 
@@ -6485,14 +6496,15 @@ async def on_callback(q: CallbackQuery):
                       after=trg, source="button", severity="low")
             await _edit(q, panel.reply_item(
                 chat_id, kind, trg, _rep_count(chat_id, kind, trg), lg,
-                on=not now_on))
+                on=not now_on, rid=rid))
             await q.answer(i18n.t("rep.resumed" if not now_on
                                   else "rep.paused", lg))
             return
 
         await _edit(q, panel.reply_item(
             chat_id, kind, trg, _rep_count(chat_id, kind, trg), lg,
-            on=filters.is_enabled(chat_id, trg) if kind == "f" else True))
+            on=filters.is_enabled(chat_id, trg) if kind == "f" else True,
+            rid=rid))
         await q.answer()
         return
 
@@ -6504,7 +6516,20 @@ async def on_callback(q: CallbackQuery):
     await q.answer()
 
 
-async def _edit(q: CallbackQuery, sc: panel.Screen) -> None:
+async def _edit(q: CallbackQuery, sc: Optional[panel.Screen]) -> None:
+    """מצייר מסך. ‎None‎ נענה בהודעה ולא בקריסה.
+
+    כפתור מת הוא התקלה הגרועה ביותר כאן: אין הודעת שגיאה, אין רמז,
+    והמשתמש מסיק שהבוט שבור. זה קרה כשמסך לא נמצא והוחזר ‎None‎ —
+    ואז ‎None.text‎ זרק חריגה, aiogram בלעה אותה, וטלגרם נשארה עם
+    גלגל מסתובב. מי שמחזיר ‎None‎ טועה, אבל הטעות חייבת להישמע."""
+    if sc is None:
+        log.warning("מסך חסר ללחיצה %r", getattr(q, "data", ""))
+        with contextlib.suppress(TelegramAPIError):
+            await q.answer(i18n.t("screen.unknown",
+                                  lang.for_chat(q.from_user.id)),
+                           show_alert=True)
+        return
     with contextlib.suppress(TelegramAPIError):
         await q.message.edit_text(sc.text, reply_markup=kb(sc))
 

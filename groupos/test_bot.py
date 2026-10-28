@@ -132,6 +132,20 @@ class FakeBot:
     async def set_my_commands(self, commands, scope=None, **kw):
         return True
 
+    async def set_chat_permissions(self, chat_id, permissions, **kw):
+        return True
+
+    async def get_chat_member(self, chat_id, user_id):
+        class M:
+            status = "administrator"
+        return M()
+
+    async def send_invoice(self, chat_id, **kw):
+        SENT.append((chat_id, "[invoice]", False))
+        THREADS.append(None)
+        TO_USER.append(None)
+        return True
+
     async def delete_message(self, chat_id, message_id):
         DELETED.append(message_id)
         return True
@@ -411,6 +425,8 @@ class FakeQ2:
 
 class _EditMsg:
     def __init__(self, private: bool, uid: int):
+        self.message_id = 4242
+        self.markup = None
         self.chat = Chat(id=uid if private else CHAT,
                          type="private" if private else "supergroup")
         self.from_user = User(id=uid, is_bot=False, first_name="דוד",
@@ -419,6 +435,8 @@ class _EditMsg:
 
     async def edit_text(self, text, reply_markup=None):
         EDITED.append(text)
+        self.text = text
+        self.markup = reply_markup
 
 
 async def test_help_ux():
@@ -2228,8 +2246,9 @@ async def test_replies_panel():
     ok("ההדק ברשימה", any(w[0] == "fifa" and w[1] == 3 for w in words),
        str(words))
     sc = panel.replies_screen(CHAT, words, commands, "he")
+    fid = B.filters.id_of(CHAT, "fifa")
     ok("מסך הרשימה נבנה",
-       any("rep:f|fifa" in c for c in sc.all_callbacks()), str(sc.rows[:2]))
+       any(f"rep:f|{fid}" in c for c in sc.all_callbacks()), str(sc.rows[:2]))
     ok("ומזהי הכפתורים בטווח",
        all(len(c.encode()) <= panel.CB_MAX for c in sc.all_callbacks()))
     item = panel.reply_item(CHAT, "f", "fifa", 3, "he")
@@ -3269,6 +3288,84 @@ async def test_dead_groups_drop_out():
         B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
 
 
+async def test_every_button_answers():
+    """לוחץ על **כל** כפתור בפאנל דרך המטפל האמיתי.
+
+    "מלא כפתורים לא מגיבים." כפתור מת הוא התקלה הגרועה ביותר כאן:
+    אין שגיאה, אין רמז, רק גלגל שמסתובב — והמסקנה היא שהבוט שבור.
+    היו שני מקורות, ושניהם נתפסים כאן: חריגה שנבלעת בתוך המטפל
+    (‎LOCK_TYPES[arg][1]‎ חתך אות אחת משם קבוצה והמסך יצא ‎None‎),
+    ומטפל שמצייר מסך ושוכח ‎answer‎.
+
+    בדיקות שקוראות לפונקציה ישירות לא רואות את זה. רק לחיצה רואה."""
+    section("כל הכפתורים מגיבים")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, "lang", "he")
+    seen, dead, broke = set(), [], []
+
+    async def press(data, depth=0):
+        if data in seen or depth > 4 or data.startswith("http"):
+            return
+        seen.add(data)
+        q = FakeQ2(data, ADM)
+        q.message.markup = None
+        try:
+            await B.on_callback(q)
+        except Exception as e:
+            broke.append(f"{data} → {type(e).__name__}: {e}")
+            return
+        if not q.answers:
+            dead.append(data)
+        mk = getattr(q.message, "markup", None)
+        for row in (getattr(mk, "inline_keyboard", None) or []):
+            for b in row:
+                if getattr(b, "callback_data", None):
+                    await press(b.callback_data, depth + 1)
+
+    await press(panel.cb(CHAT, "main"))
+    ok("נלחצו הרבה כפתורים", len(seen) > 60, str(len(seen)))
+    ok("אף כפתור לא נפל בחריגה", not broke, "; ".join(broke[:3]))
+    ok("וכל כפתור ענה משהו", not dead, "; ".join(dead[:5]))
+
+
+async def test_long_names_dont_kill_the_screen():
+    """שם סדרה ארוך הרג את כפתור "תגובות אוטומטיות".
+
+    מזהה כפתור בטלגרם מוגבל ל-64 בתים, ואות בעברית היא שני בתים.
+    השם עבר בכפתור עצמו, ולכן "צאלח א דין כובש ירושלים" הגיע ל-65,
+    ‎panel.cb‎ זרקה ‎ValueError‎, ובניית המסך כולו נפלה — הכפתור לא
+    הגיב כלל. בקבוצה אחת זה עבד ובאחרת לא, תלוי אם היה שם ארוך
+    אחד, ולכן זה נראה אקראי לגמרי."""
+    section("שמות ארוכים")
+    REAL = ["צאלח א דין כובש ירושלים", "מהמט סולטאן הכיבושים",
+            "אהבה ללא גבולות", "ורדים וחטאים עונה 2"]
+    for n in REAL:
+        B.filters.add(CHAT, n, "תוכן")
+    try:
+        words, commands = B._reps_lists(CHAT)
+        sc = panel.replies_screen(CHAT, words, commands, "he")
+        cbs = [c for c in sc.all_callbacks() if not c.startswith("http")]
+        ok("המסך נבנה למרות שמות ארוכים", bool(cbs))
+        ok("וכל מזהי הכפתורים בטווח של טלגרם",
+           all(len(c.encode()) <= panel.CB_MAX for c in cbs),
+           str(max(len(c.encode()) for c in cbs)))
+
+        # והלחיצה באמת מגיעה להדק הנכון
+        q = FakeQ2(panel.cb(CHAT, "reps"), ADM)
+        await B.on_callback(q)
+        ok("והכפתור מגיב", bool(q.answers))
+        inner = [b.callback_data
+                 for r in (q.message.markup.inline_keyboard or [])
+                 for b in r if (b.callback_data or "").find(":rep:") > 0]
+        q2 = FakeQ2(inner[0], ADM)
+        await B.on_callback(q2)
+        ok("ולחיצה פותחת את ההדק בשמו המלא",
+           REAL[0] in (q2.message.text or ""), (q2.message.text or "")[:50])
+    finally:
+        for n in REAL:
+            B.filters.remove(CHAT, n)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3322,6 +3419,8 @@ async def main() -> int:
     await test_one_finish_button()
     await test_handlers_registered()
     await test_dead_groups_drop_out()
+    await test_every_button_answers()
+    await test_long_names_dont_kill_the_screen()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

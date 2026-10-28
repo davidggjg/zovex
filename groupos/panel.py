@@ -1246,20 +1246,29 @@ def replies_screen(chat_id: int, words: list[tuple[str, int]],
                    lang: str = i18n.DEFAULT) -> Screen:
     """כל מה שהקבוצה עונה עליו: מילים ופקודות, עם מספר ההודעות."""
     rows = []
+    # **מזהה ולא שם.** מזהה כפתור בטלגרם מוגבל ל-64 בתים, ואות בעברית
+    # היא שני בתים: "צאלח א דין כובש ירושלים" הגיע ל-65, ‎cb‎ זרקה
+    # חריגה, ובניית המסך כולו נפלה. כלומר הכפתור "תגובות אוטומטיות"
+    # היה מת — אבל רק בקבוצות שבהן היה שם ארוך אחד, ולכן זה נראה
+    # אקראי. מזהה הוא תמיד קצר, בכל שפה ובכל אורך שם.
     for item in words[:20]:
         name, n = item[0], item[1]
         # הדק מושהה נשאר ברשימה ומסומן. אחרת מנהל שהשהה אותו מחפש
         # אותו, לא מוצא, ובונה אותו מחדש.
         on = item[2] if len(item) > 2 else True
         alias = item[3] if len(item) > 3 else ""
+        fid = item[4] if len(item) > 4 else 0
         mark = "💬" if on else "⏸"
         # הפקודה מוצגת לצד המילה: זו אותה תגובה, ומנהל שרואה רק את
         # המילה לא יודע שאפשר לקרוא לה גם כך.
         tail = f" · /{alias}" if alias else ""
         rows.append([(f"{mark} {name[:18]}{tail[:14]} · {n}",
-                      cb(chat_id, "rep", "f|" + name))])
-    for name, n in commands[:20]:
-        rows.append([(f"⌨️ /{name[:21]} · {n}", cb(chat_id, "rep", "c|" + name))])
+                      cb(chat_id, "rep", f"f|{fid}"))])
+    for item in commands[:20]:
+        name, n = item[0], item[1]
+        cid = item[2] if len(item) > 2 else 0
+        rows.append([(f"⌨️ /{name[:21]} · {n}",
+                      cb(chat_id, "rep", f"c|{cid}"))])
     # כפתור אחד ולא שניים. שתי רשימות שעושות אותו דבר הן בדיוק מה
     # שאיש לא הבין — ותגובה אחת ממילא עונה גם למילה וגם לפקודה.
     rows.append([("➕ " + i18n.t("rep.new", lang),
@@ -1273,8 +1282,11 @@ def replies_screen(chat_id: int, words: list[tuple[str, int]],
 
 
 def reply_item(chat_id: int, kind: str, name: str, count: int,
-               lang: str = i18n.DEFAULT, *, on: bool = True) -> Screen:
+               lang: str = i18n.DEFAULT, *, on: bool = True,
+               rid: int = 0) -> Screen:
+    """‎rid‎ ולא השם עובר בכפתורים — ראו ההערה ב-‎replies_screen‎."""
     label = ("/" + name) if kind == "c" else name
+    tok = f"{kind}|{rid}"
     body = (f"<b>{label}</b>\n\n"
             + i18n.t("rep.count", lang, n=count) + "\n"
             + i18n.t("rep.how", lang,
@@ -1282,7 +1294,7 @@ def reply_item(chat_id: int, kind: str, name: str, count: int,
                                  else "rep.word_word", lang), name=label))
     rows = [
         [("➕ " + i18n.t("rep.add_more", lang),
-          cb(chat_id, "repadd", f"{kind}|{name}"))],
+          cb(chat_id, "repadd", tok))],
     ]
     # השהיה קודמת למחיקה, ובשורה נפרדת לפניה: "תעצור את הפילטר"
     # כמעט תמיד אומר "שיפסיק לירות", ולא "תאבד לי את כל ההודעות
@@ -1292,11 +1304,11 @@ def reply_item(chat_id: int, kind: str, name: str, count: int,
                                  lang)
         rows.append([(("⏸ " + i18n.t("rep.pause", lang)) if on
                       else ("▶️ " + i18n.t("rep.resume", lang)),
-                      cb(chat_id, "reppause", f"{kind}|{name}"))])
+                      cb(chat_id, "reppause", tok))])
     rows.append([("👁 " + i18n.t("rep.preview", lang),
-                  cb(chat_id, "repprev", f"{kind}|{name}")),
+                  cb(chat_id, "repprev", tok)),
                  ("🗑 " + i18n.t("rep.delete", lang),
-                  cb(chat_id, "repdel", f"{kind}|{name}"))])
+                  cb(chat_id, "repdel", tok))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "reps"))])
     return Screen(body, rows)
 

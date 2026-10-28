@@ -1011,7 +1011,7 @@ def test_content():
     F.set_enabled(CHAT, "עצור_אותי", False)
     ok("מושהה לא יורה", F.check(CHAT, "עצור_אותי עכשיו") is None)
     ok("מושהה מסומן ולא נעלם",
-       any(t == "עצור_אותי" and not on for t, on, _a in F.listing(CHAT)),
+       any(t == "עצור_אותי" and not on for t, on, _a, _i in F.listing(CHAT)),
        str(F.listing(CHAT)))
     ok("מושהה עדיין נשלף לצפייה",
        (F.row(CHAT, "עצור_אותי") or {}).get("content") == "תשובה")

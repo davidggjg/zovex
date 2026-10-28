@@ -256,12 +256,31 @@ class Filters:
             (chat_id, (trigger or "").strip().lower()))
         return bool(r["enabled"]) if r else False
 
-    def listing(self, chat_id: int) -> list[tuple[str, bool, str]]:
+    def id_of(self, chat_id: int, trigger: str) -> int:
+        r = self.db.one(
+            "SELECT id FROM filters WHERE chat_id=? AND trigger=?",
+            (chat_id, (trigger or "").strip().lower()))
+        return r["id"] if r else 0
+
+    def name_by_id(self, chat_id: int, fid: int) -> str:
+        """שם ההדק לפי מזהה. זה מה שעובר בכפתור.
+
+        הכפתור נשא קודם את **השם עצמו**, ומזהה כפתור בטלגרם מוגבל
+        ל-64 בתים. שם סדרה בעברית הוא שני בתים לאות, ולכן
+        "צאלח א דין כובש ירושלים" הגיע ל-65 — ובניית המסך זרקה
+        חריגה, כלומר הכפתור "תגובות אוטומטיות" מת לגמרי. בקבוצה עם
+        שמות קצרים הוא עבד, ובקבוצה אחת עם שם ארוך לא; זה היה
+        ההבדל. מזהה הוא תמיד קצר, ובכל שפה."""
+        r = self.db.one("SELECT trigger FROM filters WHERE chat_id=? AND id=?",
+                        (chat_id, fid))
+        return r["trigger"] if r else ""
+
+    def listing(self, chat_id: int) -> list[tuple[str, bool, str, int]]:
         """כל ההדקים, **כולל המושהים**. המסך צריך להראות גם אותם:
         הדק שנעלם מהרשימה כשמשהים אותו נראה כמו הדק שנמחק."""
-        return [(r["trigger"], bool(r["enabled"]), r["alias"] or "")
+        return [(r["trigger"], bool(r["enabled"]), r["alias"] or "", r["id"])
                 for r in self.db.q(
-                    """SELECT trigger,enabled,alias FROM filters
+                    """SELECT id,trigger,enabled,alias FROM filters
                        WHERE chat_id=? ORDER BY id""", (chat_id,))]
 
     # ── שם שני: הפקודה ───────────────────────────────────────────────

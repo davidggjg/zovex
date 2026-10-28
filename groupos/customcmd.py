@@ -158,6 +158,22 @@ class CustomCmds:
             "SELECT * FROM custom_cmds WHERE chat_id=? ORDER BY name",
             (chat_id,))]
 
+    def id_of(self, chat_id: int, name: str) -> int:
+        r = self.db.one(
+            "SELECT rowid FROM custom_cmds WHERE chat_id=? AND name=?",
+            (chat_id, normalize(name)))
+        return r["rowid"] if r else 0
+
+    def name_by_id(self, chat_id: int, cid: int) -> str:
+        """שם הפקודה לפי מזהה — זה מה שעובר בכפתור, ולא השם.
+
+        מזהה כפתור בטלגרם מוגבל ל-64 בתים, ושם בעברית הוא שני בתים
+        לאות. שם ארוך הפיל את בניית המסך כולו."""
+        r = self.db.one(
+            "SELECT name FROM custom_cmds WHERE chat_id=? AND rowid=?",
+            (chat_id, cid))
+        return r["name"] if r else ""
+
     def names(self, chat_id: int) -> list[str]:
         return [r["name"] for r in self.db.q(
             "SELECT name FROM custom_cmds WHERE chat_id=? ORDER BY name",
