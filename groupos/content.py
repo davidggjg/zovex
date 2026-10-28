@@ -256,12 +256,39 @@ class Filters:
             (chat_id, (trigger or "").strip().lower()))
         return bool(r["enabled"]) if r else False
 
-    def listing(self, chat_id: int) -> list[tuple[str, bool]]:
+    def listing(self, chat_id: int) -> list[tuple[str, bool, str]]:
         """כל ההדקים, **כולל המושהים**. המסך צריך להראות גם אותם:
         הדק שנעלם מהרשימה כשמשהים אותו נראה כמו הדק שנמחק."""
-        return [(r["trigger"], bool(r["enabled"])) for r in self.db.q(
-            "SELECT trigger,enabled FROM filters WHERE chat_id=? ORDER BY id",
-            (chat_id,))]
+        return [(r["trigger"], bool(r["enabled"]), r["alias"] or "")
+                for r in self.db.q(
+                    """SELECT trigger,enabled,alias FROM filters
+                       WHERE chat_id=? ORDER BY id""", (chat_id,))]
+
+    # ── שם שני: הפקודה ───────────────────────────────────────────────
+    # אותה תגובה בדיוק, שני אופנים לקרוא לה. ‎/יאנקי‎ ו-"יאנקי" מחזירים
+    # את אותן הודעות, כי זו רשומה אחת — לא שתיים שצריך לסנכרן.
+    def set_alias(self, chat_id: int, trigger: str, alias: str) -> int:
+        a = (alias or "").strip().lstrip("/").split("@")[0].lower()[:32]
+        return self.db.change(
+            "UPDATE filters SET alias=? WHERE chat_id=? AND trigger=?",
+            (a, chat_id, (trigger or "").strip().lower()))
+
+    def by_alias(self, chat_id: int, alias: str) -> Optional[FilterHit]:
+        """הפקודה שמצביעה על תגובה. מכבד ‎enabled‎ כמו המילה."""
+        a = (alias or "").strip().lstrip("/").split("@")[0].lower()
+        if not a:
+            return None
+        r = self.db.one(
+            """SELECT trigger,match_kind,action,content,media_id,media_kind,
+                      buttons FROM filters
+               WHERE chat_id=? AND alias=? AND enabled=1""", (chat_id, a))
+        return _as_hit(r["trigger"], dict(r)) if r else None
+
+    def alias_of(self, chat_id: int, trigger: str) -> str:
+        r = self.db.one(
+            "SELECT alias FROM filters WHERE chat_id=? AND trigger=?",
+            (chat_id, (trigger or "").strip().lower()))
+        return (r["alias"] or "") if r else ""
 
     def row(self, chat_id: int, trigger: str) -> Optional[dict]:
         """הדק אחד, גם אם הוא מושהה — לתצוגה מקדימה ולעריכה."""

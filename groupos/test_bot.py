@@ -1598,7 +1598,9 @@ async def test_button_editing():
     B.db.set(CHAT, "shabbat", "0")
     # ‎hrange‎ נגיש מכפתור "שעות עם דקות" בתוך מסך היום, לא מהמסכים
     # האלה, ו-‎warnpol‎ יושב במסך האזהרות.
-    missing = set(_pr.FIELDS) - shown - {"warnpol", "hrange"}
+    # ‎repword‎ הוא השלב השני של אשף התגובה — מגיעים אליו מהשלב
+    # הראשון, לא מכפתור משלו.
+    missing = set(_pr.FIELDS) - shown - {"warnpol", "hrange", "repword"}
     ok("כל שדה נגיש בכפתור", not missing, str(missing))
 
 
@@ -2196,12 +2198,20 @@ async def test_replies_panel():
                        from_user=User(id=ADM, is_bot=False, first_name="דוד"),
                        text=text or None, **kw)
 
-    # "➕ מילה" → שולחים שם → נפתח איסוף
-    B.waiting.start(ADM, CHAT, "newword")
+    # "➕ תגובה חדשה": שלב 1 הפקודה, שלב 2 המילה, ואז איסוף.
+    B.waiting.start(ADM, CHAT, "repcmd")
+    out = await _out(B.on_private_text, pm("fifa", mid=9500))
+    ok("שלב 1 מאשר את הפקודה", "fifa" in out, out[:80])
+    ok("ועובר לשלב 2", B.waiting.get(ADM) is not None
+       and B.waiting.get(ADM).field == "repword")
+    ok("ועדיין לא נפתח איסוף", B._pm_bulk(ADM) is None)
+
     out = await _out(B.on_private_text, pm("fifa", mid=9501))
     ok("ההדק נוצר", "fifa" in B.filters.triggers(CHAT), out[:60])
     ok("והאיסוף נפתח", B._pm_bulk(ADM) is not None)
     ok("המסך מסביר מה לעשות", "fifa" in out, out[:80])
+    ok("והפקודה נקשרה לאותה תגובה",
+       B.filters.alias_of(CHAT, "fifa") == "fifa")
 
     # שולחים שלוש הודעות — בלי שום פקודה
     await _out(B.on_private_text, pm("ההסבר", mid=9502))
@@ -2232,33 +2242,41 @@ async def test_replies_panel():
     ok("שלוש הודעות בקבוצה", len(SENT) - before == 3,
        str(len(SENT) - before))
 
-    # פקודה בעברית **מתקבלת**. מנהל ישראלי לא יכול היה להגדיר אף
-    # פקודה בשפה שלו, וזה היה "הוא לא עונה לפקודות שאני מגדיר".
-    # לחיצה על "➕" סוגרת איסוף פעיל, וכאן זה נעשה במפורש.
-    B._bulk_pm.clear()
-    B.waiting.start(ADM, CHAT, "newcmd")
-    await _out(B.on_private_text, pm("סרטים", mid=9506))
-    ok("פקודה בעברית נוצרת", B.cmds.get(CHAT, "סרטים") is not None)
-    B.cmds.delete(CHAT, "סרטים")
+    # ואותה תגובה עונה גם לפקודה שלה — זה אותו דבר, לא שניים
+    before = len(SENT)
+    await B.on_custom_command(msg("/fifa", uid=USER, mid=9512))
+    ok("גם הפקודה מחזירה את אותן שלוש", len(SENT) - before == 3,
+       str(len(SENT) - before))
 
-    # שם שבאמת פסול — רווח באמצע — עדיין נדחה בהסבר ולא בשקט
+    # פקודה בעברית מתקבלת
     B._bulk_pm.clear()
-    B.waiting.start(ADM, CHAT, "newcmd")
+    B.waiting.start(ADM, CHAT, "repcmd")
+    await _out(B.on_private_text, pm("סרטים", mid=9506))
+    await _out(B.on_private_text, pm("סרטים חדשים", mid=9517))
+    ok("פקודה בעברית נקשרת",
+       B.filters.alias_of(CHAT, "סרטים חדשים") == "סרטים")
+    B.filters.remove(CHAT, "סרטים חדשים")
+
+    # שם פקודה פסול נדחה בהסבר, והשלב נשאר פתוח לניסיון נוסף
+    B._bulk_pm.clear()
+    B.waiting.start(ADM, CHAT, "repcmd")
     out = await _out(B.on_private_text, pm("שם עם רווח", mid=9516))
     ok("שם פקודה לא חוקי מוסבר", bool(out) and B._pm_bulk(ADM) is None,
        out[:60])
+    ok("ואפשר לנסות שוב באותו שלב", B.waiting.get(ADM) is not None
+       and B.waiting.get(ADM).field == "repcmd")
 
+    # ואפשר גם בלי פקודה בכלל
     B._bulk_pm.clear()
-    B.waiting.start(ADM, CHAT, "newcmd")
-    await _out(B.on_private_text, pm("movies2", mid=9507))
-    ok("פקודה לטינית נוצרת", B.cmds.get(CHAT, "movies2") is not None)
-    await _out(B.on_private_text, pm("הנה הסרט", mid=9508))
-    ok("ונאספת לה הודעה",
-       B.filters.item_count(CHAT, "movies2", "cmd") == 1)
+    B.waiting.start(ADM, CHAT, "repcmd")
+    await _out(B.on_private_text, pm("-", mid=9518))
+    await _out(B.on_private_text, pm("בלי פקודה", mid=9519))
+    ok("תגובה בלי פקודה נוצרת",
+       "בלי פקודה" in B.filters.triggers(CHAT))
+    ok("ואין לה שם שני", B.filters.alias_of(CHAT, "בלי פקודה") == "")
+    B.filters.remove(CHAT, "בלי פקודה")
 
     B.filters.remove(CHAT, "fifa")
-    B.cmds.delete(CHAT, "movies2")
-    B.filters.clear_items(CHAT, "movies2", "cmd")
     B._bulk_pm.clear()
 
 
@@ -3173,6 +3191,28 @@ async def test_one_finish_button():
         B.filters.remove(CHAT, "אוסף")
 
 
+async def test_handlers_registered():
+    """המטפלים הקריטיים באמת רשומים ב-Dispatcher.
+
+    באג אמיתי, והיקר ביותר עד כה: פונקציה חדשה נדחפה **בין הדקורטור
+    לבין** ‎on_group_message‎. הדקורטור רשם אותה במקום המטפל, והמטפל
+    הראשי של הקבוצה נעלם — ובקבוצה הפסיק לעבוד הכול בבת אחת: הדקים,
+    נעילות, ומחיקת התוכן האסור. שום בדיקה לא נפלה, כי כולן קוראות
+    לפונקציה ישירות ואף אחת לא שאלה אם היא מחוברת.
+    """
+    section("רישום מטפלים")
+    names = set()
+    obs = B.dp.observers.get("message")
+    for h in getattr(obs, "handlers", []):
+        cb = getattr(h, "callback", None)
+        if cb is not None:
+            names.add(getattr(cb, "__name__", ""))
+    for want in ("on_group_message", "on_custom_command", "on_private_text",
+                 "on_service_message"):
+        ok(f"{want} רשום", want in names, str(sorted(names))[:160])
+    ok("ועוזר פנימי לא נרשם בטעות", "_warn_other_bot" not in names)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3224,6 +3264,7 @@ async def main() -> int:
     await test_image_not_shielded()
     await test_custom_cmd_and_board()
     await test_one_finish_button()
+    await test_handlers_registered()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

@@ -322,7 +322,8 @@ def _skip_foreign_command(msg: Message) -> bool:
     # המובנים (‎/filter‎, ‎/stop‎, ‎/ban‎), ולא להשתיק את ‎/סרטים‎ של
     # הקבוצה — וזה בדיוק מה שהוא עשה: מי שהדליק אותו גילה שכל
     # הפקודות שהוא בנה הפסיקו לענות.
-    return cmds.get(msg.chat.id, name) is None
+    return (cmds.get(msg.chat.id, name) is None
+            and filters.by_alias(msg.chat.id, name) is None)
 
 
 @dp.message.outer_middleware()
@@ -792,11 +793,6 @@ async def apply_action(chat_id: int, user_id: int, kind: str,
     return True
 
 
-# הודעות שירות (הצטרפות, עזיבה) הן הודעות בלי טקסט, ולכן ‎~F.text‎
-# תופס גם אותן — והמטפל הזה רשום ראשון. בלי ההחרגה המפורשת, ברכת
-# הכניסה לעולם לא הייתה נורית: ההודעה נבלעה כאן.
-@dp.message(F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"),
-            ~F.new_chat_members, ~F.left_chat_member)
 async def _warn_other_bot(msg: Message) -> None:
     """פעם אחת לכל קבוצה, ורק למנהלים, ורק בפרטי."""
     if _me_id is None or msg.from_user.id == _me_id:
@@ -814,6 +810,11 @@ async def _warn_other_bot(msg: Message) -> None:
                                              msg.from_user.username else name)))
 
 
+# הודעות שירות (הצטרפות, עזיבה) הן הודעות בלי טקסט, ולכן ‎~F.text‎
+# תופס גם אותן — והמטפל הזה רשום ראשון. בלי ההחרגה המפורשת, ברכת
+# הכניסה לעולם לא הייתה נורית: ההודעה נבלעה כאן.
+@dp.message(F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"),
+            ~F.new_chat_members, ~F.left_chat_member)
 async def on_group_message(msg: Message):
     """הנתיב החם. כל הודעה בכל קבוצה עוברת כאן, ולכן הסדר הוא לפי מחיר.
 
@@ -5210,6 +5211,14 @@ async def on_custom_command(msg: Message):
         return
     c = cmds.resolve(msg.chat.id, msg.text or "")
     if c is None:
+        # לא פקודה מותאמת — אולי זו **הפקודה של תגובה**. אותה תגובה
+        # בדיוק שעונה למילה, רק שקראו לה בשם השני שלה.
+        fh = filters.by_alias(msg.chat.id, _cmd_of(msg))
+        if fh is not None:
+            await _run_filter(msg, fh,
+                              staff=perms.rank_of(msg.chat.id,
+                                                  msg.from_user.id)
+                              >= RANK["moderator"])
         return
     name = c.name
     await sync_admins(msg.chat.id)
@@ -5301,8 +5310,8 @@ async def on_private_text(msg: Message):
         await send(msg.chat.id, i18n.t("err.need_admin", lg), is_group=False)
         return
     raw = msg.text or msg.caption or ""
-    if w.field in ("newword", "newcmd"):
-        await _create_reply(msg, w.chat_id, w.field, raw)
+    if w.field in ("repcmd", "repword"):
+        await _reply_wizard(msg, w.chat_id, w.field, raw, w.arg)
         return
     if w.field == "hrange":
         okay = _save_day_range(w.chat_id, w.arg, raw, msg.from_user.id)
@@ -5427,8 +5436,8 @@ def _rep_count(chat_id: int, kind: str, name: str) -> int:
 
 
 def _reps_lists(chat_id: int) -> tuple[list, list]:
-    words = [(t, _rep_count(chat_id, "f", t), on)
-             for t, on in filters.listing(chat_id)]
+    words = [(t, _rep_count(chat_id, "f", t), on, alias)
+             for t, on, alias in filters.listing(chat_id)]
     commands = [(c.name, _rep_count(chat_id, "c", c.name))
                 for c in cmds.list(chat_id)]
     return words, commands
@@ -5479,49 +5488,70 @@ async def _bulk_board(msg: Message, sc: panel.Screen) -> None:
             return
         except TelegramAPIError:
             pass
+    # אם אין לוח לערוך — שולחים אחד **ומיד זוכרים אותו**, כך שההודעה
+    # הבאה תערוך אותו ולא תוסיף עוד אחד. זה ההבדל בין מונה שמתעדכן
+    # בשקט לבין שלושים הודעות "סיימתי" שצריך לגלול.
     sent = await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
     if sent is not None and got is not None:
         _bulk_pm[msg.from_user.id] = got[:4] + (sent.message_id,)
 
 
-async def _create_reply(msg: Message, chat_id: int, field: str,
-                        raw: str) -> None:
-    """יצירת הדק חדש מהפאנל, ומיד אחריה מצב איסוף.
+async def _reply_wizard(msg: Message, chat_id: int, field: str,
+                        raw: str, arg: str) -> None:
+    """שני שלבים: שם הפקודה, ואז המילה. ואז שקט עד "סיימתי".
 
-    זו הזרימה של Manybot — "תן שם, ואז שלח מה שזה יחזיר" — בלי
-    לשלוח ולו הודעה אחת לקבוצה."""
+    הבקשה, במילים של מי שביקש: "אני שולח את הפקודה — כותב לי קיבלתי
+    את הפקודה, עכשיו את המילה. שולח את המילה — קיבלתי. אחר כך תשלח
+    כל מה שצריך, וכשתסיים תלחץ על הכפתור. וזה לא מגיב ככה לכל הודעה."
+
+    לכן בדיוק שתי תשובות כאן, ואפס בזמן האיסוף."""
     lg = lang_of(msg)
-    name = (raw or "").strip().lower().lstrip("/")
-    if not name or len(name) > 40:
-        await send(msg.chat.id, i18n.t("field.too_long", lg), is_group=False)
-        return
-    if field == "newcmd":
-        err = customcmd.check_name(name)
-        if err:
-            await send(msg.chat.id, i18n.t(err, lg, name=tpl.esc(name),
-                                           max=customcmd.MAX_PER_CHAT),
-                       is_group=False)
-            return
-        name = customcmd.normalize(name)
-        if cmds.get(chat_id, name) is None:
-            _c, err = cmds.set(chat_id, name, "", by=msg.from_user.id,
-                               allow_empty=True)
+    val = (raw or "").strip().lstrip("/").split("@")[0]
+
+    if field == "repcmd":
+        # ‎-‎ מדלג: יש מי שרוצה רק מילה, ואין סיבה להכריח אותו להמציא
+        # פקודה שלא ישתמש בה.
+        cmd_name = ""
+        if val and val not in ("-", "דלג", "skip"):
+            err = customcmd.check_name(val)
             if err:
                 await send(msg.chat.id,
-                           i18n.t(err, lg, name=tpl.esc(name),
+                           i18n.t(err, lg, name=tpl.esc(val),
                                   max=customcmd.MAX_PER_CHAT), is_group=False)
+                waiting.start(msg.from_user.id, chat_id, "repcmd")
                 return
-        store, kind = "cmd", "c"
-    else:
-        if name not in filters.triggers(chat_id):
-            filters.add(chat_id, name, "", allow_empty=True)
-        store, kind = "filter", "f"
-    audit.log(chat_id, "filter.add", actor_id=msg.from_user.id, after=name,
+            cmd_name = customcmd.normalize(val)
+        waiting.start(msg.from_user.id, chat_id, "repword", arg=cmd_name)
+        await send(msg.chat.id,
+                   i18n.t("rep.got_cmd" if cmd_name else "rep.no_cmd", lg,
+                          cmd=tpl.esc("/" + cmd_name) if cmd_name else ""),
+                   is_group=False)
+        return
+
+    # שלב שני: המילה. היא השם האמיתי של התגובה.
+    word = val.lower()
+    if not word or len(word) > 40:
+        await send(msg.chat.id, i18n.t("rep.need_word", lg), is_group=False)
+        waiting.start(msg.from_user.id, chat_id, "repword", arg=arg)
+        return
+    if word not in filters.triggers(chat_id):
+        filters.add(chat_id, word, "", allow_empty=True)
+    if arg:
+        filters.set_alias(chat_id, word, arg)
+    audit.log(chat_id, "filter.add", actor_id=msg.from_user.id, after=word,
               source="button", severity="info")
-    _bulk_pm[msg.from_user.id] = (chat_id, store, name, time.time(), 0)
-    sc = panel.collecting_screen(chat_id, _rep_label(kind, name),
-                                 _rep_count(chat_id, kind, name), lg)
-    await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+    _bulk_pm[msg.from_user.id] = (chat_id, "filter", word, time.time(), 0)
+    sc = panel.collecting_screen(chat_id, _rep_label("f", word),
+                                 _rep_count(chat_id, "f", word), lg)
+    also = ("\n" + i18n.t("rep.also_cmd", lg, cmd=tpl.esc("/" + arg))
+            if arg else "")
+    sent = await send(msg.chat.id,
+                      i18n.t("rep.got_word", lg, word=tpl.esc(word), cmd=also)
+                      + "\n\n" + sc.text,
+                      is_group=False, markup=kb(sc))
+    if sent is not None:
+        _bulk_pm[msg.from_user.id] = (chat_id, "filter", word, time.time(),
+                                      sent.message_id)
 
 
 @dp.message(F.chat.type.in_(GROUP_TYPES))

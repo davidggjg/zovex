@@ -110,8 +110,14 @@ FIELDS: dict[str, Field] = {
     "hopen": Field("hopen", "hours_msg_open", CONTENT, maxlen=1000),
     # שם של הדק חדש. הערך אינו נשמר כהגדרה — הוא **יוצר** משהו,
     # ולכן ‎key‎ ריק והמטפל עושה את העבודה.
-    "newword": Field("newword", "", TEXT, maxlen=40, perm="filters.write"),
-    "newcmd": Field("newcmd", "", TEXT, maxlen=32, perm="customcmd.write"),
+    # אשף התגובה: שם הפקודה, ואז המילה. שני שלבים ולא שדה אחד, כי
+    # זה בדיוק מה שהמנהל מצפה לו — "קודם הפקודה, ואז על הפקודה
+    # מגדירים את המילה" — ושתי שאלות קצרות ברורות מהודעה אחת שצריך
+    # לפענח. ‎arg‎ של השלב השני נושא את שם הפקודה שכבר נקלט.
+    "repcmd": Field("repcmd", "", TEXT, maxlen=32, perm="filters.write",
+                    label="rep.new", hint="rep.ask_cmd"),
+    "repword": Field("repword", "", TEXT, maxlen=40, perm="filters.write",
+                     label="rep.new", hint="rep.ask_cmd"),
     # לוח השעות: הערך הוא טווח ליום אחד, והיום עובר ב-‎arg‎.
     "hrange": Field("hrange", "hours", SPEC, maxlen=20,
                     label="hours.typed", hint="hours.typed_hint"),

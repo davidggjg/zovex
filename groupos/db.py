@@ -382,6 +382,19 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE filter_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'filter';
     CREATE INDEX idx_fitems_kind ON filter_items (chat_id, kind, trigger, seq);
     """),
+    (8, """
+    -- תגובה אחת שעונה גם למילה וגם לפקודה.
+    --
+    -- "הבוטים הגדולים אין להם בנפרד — קודם עושים את הפקודה, ואז על
+    -- הפקודה מגדירים את המילה." נכון, וזה גם פחות דברים להסביר: שתי
+    -- רשימות נפרדות שעושות אותו דבר הן בדיוק מה שאיש לא הבין.
+    --
+    -- ‎alias‎ הוא שם הפקודה של אותה תגובה. הוא יושב על הפילטר ולא
+    -- בטבלה משלו, כי זו אותה תגובה בדיוק — שם שני לאותו דבר, ולא
+    -- עותק שצריך לדאוג שיישאר מסונכרן.
+    ALTER TABLE filters ADD COLUMN alias TEXT NOT NULL DEFAULT '';
+    CREATE INDEX idx_filters_alias ON filters (chat_id, alias);
+    """),
 ]
 
 

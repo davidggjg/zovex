@@ -1251,15 +1251,19 @@ def replies_screen(chat_id: int, words: list[tuple[str, int]],
         # הדק מושהה נשאר ברשימה ומסומן. אחרת מנהל שהשהה אותו מחפש
         # אותו, לא מוצא, ובונה אותו מחדש.
         on = item[2] if len(item) > 2 else True
+        alias = item[3] if len(item) > 3 else ""
         mark = "💬" if on else "⏸"
-        rows.append([(f"{mark} {name[:22]} · {n}",
+        # הפקודה מוצגת לצד המילה: זו אותה תגובה, ומנהל שרואה רק את
+        # המילה לא יודע שאפשר לקרוא לה גם כך.
+        tail = f" · /{alias}" if alias else ""
+        rows.append([(f"{mark} {name[:18]}{tail[:14]} · {n}",
                       cb(chat_id, "rep", "f|" + name))])
     for name, n in commands[:20]:
         rows.append([(f"⌨️ /{name[:21]} · {n}", cb(chat_id, "rep", "c|" + name))])
-    rows.append([("➕ " + i18n.t("rep.new_word", lang),
-                  cb(chat_id, "ask", "newword")),
-                 ("➕ " + i18n.t("rep.new_cmd", lang),
-                  cb(chat_id, "ask", "newcmd"))])
+    # כפתור אחד ולא שניים. שתי רשימות שעושות אותו דבר הן בדיוק מה
+    # שאיש לא הבין — ותגובה אחת ממילא עונה גם למילה וגם לפקודה.
+    rows.append([("➕ " + i18n.t("rep.new", lang),
+                  cb(chat_id, "ask", "repcmd"))])
     rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     body = (head("rep.title", lang) + "\n\n" + i18n.t("rep.hint", lang)
             + "\n\n" + i18n.t("rep.kinds", lang))
