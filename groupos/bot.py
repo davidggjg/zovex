@@ -994,7 +994,8 @@ async def _check_image(msg: Message, lg: str) -> bool:
                                       unique_id=uid,
                                       context=_ai_context(msg.chat.id),
                                       probed=bool(uid))
-    sig = v.signal() if _ai_may_act(msg.chat.id, v, caption) else None
+    sig = v.signal() if _ai_may_act(msg.chat.id, v, caption,
+                                    media=True) else None
     if sig is None:
         return False
     # ‎decide‎ מחזיר החלטה **תמיד**, ו-‎action="none"‎ היא "אין מה לעשות".
@@ -1075,7 +1076,7 @@ def _ai_context(chat_id: int) -> str:
 AI_SOFT = ("spam", "advertising", "adult", "gambling")
 
 
-def _ai_may_act(chat_id: int, v, text: str) -> bool:
+def _ai_may_act(chat_id: int, v, text: str, *, media: bool = False) -> bool:
     """בלם מקומי מול הפסק של המודל, לפני שהוא הופך לאות.
 
     פורנוגרפיה והימורים הם הקטגוריות שבהן קבוצת תוכן נשרפת: שם של
@@ -1084,7 +1085,16 @@ def _ai_may_act(chat_id: int, v, text: str) -> bool:
     תיוג או קריאה לפעולה, הפסק נדחה אלא אם המודל בטוח כמעט לחלוטין.
 
     זה לא מרכך פסק על הונאה, נשק או תוכן של קטינים — רק על שתי
-    הקטגוריות שבהן "מילה" ו"מודעה" נראות אותו דבר."""
+    הקטגוריות שבהן "מילה" ו"מודעה" נראות אותו דבר.
+
+    **‎media=True‎ מבטל את הבלם לגמרי**, וזו הנקודה שבה הוא נשבר
+    בשטח: הבלם נבנה סביב הרעיון ש"שם של יצירה נשמע כמו מודעה", וזה
+    נכון על **טקסט**. פסק על תמונה אינו על שם — הוא על מה שרואים
+    בתמונה. מודעת פורנו עם הכיתוב "סרט מלא" קיבלה חסינות מלאה רק
+    מפני שבכיתוב הייתה המילה "סרט", והתמונה עצמה כלל לא נשקלה.
+    שם של סדרה לעולם אינו תמונה של פורנו."""
+    if media:
+        return True
     if getattr(v, "category", "") not in AI_SOFT:
         return True
     if db.get(chat_id, "ai_titles_ok", "1") != "1":

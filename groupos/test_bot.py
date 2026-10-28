@@ -3062,6 +3062,29 @@ async def test_two_bots():
         B.db.set(CHAT, "onlyme", "0")
 
 
+async def test_image_not_shielded():
+    """פסק על תמונה אינו פסק על שם של סדרה — הבלם לא חל עליו."""
+    section("תמונה מול בלם הכותרות")
+
+    class V:
+        def __init__(self, cat, conf):
+            self.category, self.confidence = cat, conf
+
+    B.db.set(CHAT, "ai_titles_ok", "1")
+    porn = V("adult", 0.7)
+    # כיתוב שנשמע כמו דיבור על סרט — וזה בדיוק מה שהודעות הפורנו
+    # בקבוצת סרטים כותבות
+    cap = "סרט מלא לצפייה"
+    ok("בטקסט הבלם עדיין מגן על שם של יצירה",
+       not B._ai_may_act(CHAT, porn, cap))
+    ok("אבל על תמונה הוא לא חל",
+       B._ai_may_act(CHAT, porn, cap, media=True))
+    ok("וגם כשאין כיתוב בכלל",
+       B._ai_may_act(CHAT, porn, "", media=True))
+    ok("קטגוריה חמורה לא מרוככת גם בטקסט",
+       B._ai_may_act(CHAT, V("csam", 0.5), cap))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3110,6 +3133,7 @@ async def main() -> int:
     await test_tell_why()
     await test_filter_stop()
     await test_two_bots()
+    await test_image_not_shielded()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
