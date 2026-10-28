@@ -45,7 +45,7 @@ args = [a for a in sys.argv[1:] if not a.startswith("--")]
 if args:
     P = args[0]
 REVERT = "--revert" in sys.argv
-MARK = "bot_capacity"
+MARK = "bot_capacity_v2"
 
 # ── 1. המדידה הפסיבית מפסיקה להעניש ───────────────────────────────────────
 OLD_SLOW = '''    if nbytes is None or nbytes < SLOW_MIN_BYTES:
@@ -53,7 +53,7 @@ OLD_SLOW = '''    if nbytes is None or nbytes < SLOW_MIN_BYTES:
     if mb_per_sec >= SLOW_FLOOR:
         bot["slow"] = 0
         return'''
-NEW_SLOW = '''    # [bot_capacity] המדידה הפסיבית אינה מודדת קיבולת.
+NEW_SLOW = '''    # [bot_capacity_v2] המדידה הפסיבית אינה מודדת קיבולת.
     #
     # ‎served/elapsed‎ בהזרמת וידאו הוא קצב הצריכה של **הנגן**, לא יכולת
     # הבוט: הנגן מושך בקצב הסרט והלחץ החוזר של ה-TCP עוצר את הגנרטור.
@@ -163,6 +163,12 @@ async def pick_stream_bot():
     _start_capacity_probe()'''
 
 # ── 3. הבחירה לפי קיבולת ולא לפי קצב הנגן ─────────────────────────────────
+# הפעלה גם מהמסלול המוצמד. ‎pick_stream_bot‎ נקראת רק כנפילה-חזרה כשאין
+# בוט פנוי, ולכן בשרת תקין היא כמעט לא נקראת — והלולאה לא הופעלה מעולם.
+OLD_FOR = """async def pick_stream_bot_for(chat_id, message_id, exclude=None):"""
+NEW_FOR = """async def pick_stream_bot_for(chat_id, message_id, exclude=None):
+    _start_capacity_probe()"""
+
 OLD_SCORE = '''def _bot_score(bot) -> float:
     # בוט שטרם נמדד מקבל ציון ביניים כדי שייבחר וייבדק, אבל לא יגבר על מוכח
     return bot["speed"] if bot.get("speed") is not None else 1.0'''
@@ -184,7 +190,7 @@ NEW_PING = '''        "edge_filling": len(_edge_filling),
         # [bot_capacity] קיבולת שנמדדה פעילות — זה המספר שקובע
         "bot_caps": {b["name"]: b.get("cap") for b in _stream_bots},'''
 
-PAIRS = [(OLD_SLOW, NEW_SLOW), (OLD_ANCHOR, NEW_ANCHOR),
+PAIRS = [(OLD_SLOW, NEW_SLOW), (OLD_ANCHOR, NEW_ANCHOR), (OLD_FOR, NEW_FOR),
          (OLD_SCORE, NEW_SCORE), (OLD_PING, NEW_PING)]
 
 
