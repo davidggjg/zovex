@@ -308,11 +308,21 @@ def _addressed_to_me(msg: Message) -> bool:
 
 def _skip_foreign_command(msg: Message) -> bool:
     """‎True‎ = הפקודה אינה שלנו, ואסור לגעת בה בכלל."""
-    if msg.chat.type not in GROUP_TYPES or not _cmd_of(msg):
+    if msg.chat.type not in GROUP_TYPES:
+        return False
+    name = _cmd_of(msg)
+    if not name:
         return False
     if db.get(msg.chat.id, "onlyme", "0") != "1":
         return False
-    return not _addressed_to_me(msg)
+    if _addressed_to_me(msg):
+        return False
+    # פקודה ש**המנהל הגדיר כאן** לעולם אינה של הבוט השני: הוא לא
+    # מכיר אותה, היא נוצרה בקבוצה הזאת. המתג נועד להתנגשות בשמות
+    # המובנים (‎/filter‎, ‎/stop‎, ‎/ban‎), ולא להשתיק את ‎/סרטים‎ של
+    # הקבוצה — וזה בדיוק מה שהוא עשה: מי שהדליק אותו גילה שכל
+    # הפקודות שהוא בנה הפסיקו לענות.
+    return cmds.get(msg.chat.id, name) is None
 
 
 @dp.message.outer_middleware()
@@ -5378,14 +5388,21 @@ async def _undo_action(chat_id: int, it, by: int) -> bool:
 # הקבוצה בהודעה עצמה, ולכן יש מיפוי נפרד: משתמש → מה הוא בונה ולאיזו
 # קבוצה. זה גם מה שמאפשר לבנות תגובה לקבוצה בלי לשלוח אליה ולו הודעה
 # אחת — וזה בדיוק מה שהפאנל הזה נועד לעשות.
-_bulk_pm: dict[int, tuple[int, str, str, float]] = {}
+# ‎(קבוצה, סוג, שם, מתי התחיל, מזהה ההודעה של הלוח)‎.
+#
+# מזהה ההודעה הוא מה שהופך את זה ללוח אחד. קודם כל הודעה שנאספה
+# ייצרה לוח חדש משלה עם כפתור "סיימתי", ולכן מי ששלח שלושים קבצים
+# קיבל שלושים "סיימתי" — ואת כולם צריך לגלול כדי להגיע לאחרון.
+# עכשיו הלוח נשלח פעם אחת ו**נערך במקום**: הכפתור נשאר תמיד למטה,
+# והמונה מתעדכן בתוכו.
+_bulk_pm: dict[int, tuple[int, str, str, float, int]] = {}
 
 
 def _pm_bulk(user_id: int) -> Optional[tuple[int, str, str]]:
     got = _bulk_pm.get(user_id)
     if got is None:
         return None
-    chat_id, kind, trigger, since = got
+    chat_id, kind, trigger, since, _mid = got
     if time.time() - since > BULK_TTL:
         _bulk_pm.pop(user_id, None)
         return None
@@ -5443,8 +5460,28 @@ async def _pm_take(msg: Message) -> bool:
     n = _rep_count(chat_id, "c" if kind == "cmd" else "f", trigger)
     sc = panel.collecting_screen(
         chat_id, _rep_label("c" if kind == "cmd" else "f", trigger), n, lg)
-    await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+    await _bulk_board(msg, sc)
     return True
+
+
+async def _bulk_board(msg: Message, sc: panel.Screen) -> None:
+    """לוח אחד שמתעדכן, ולא הודעה חדשה לכל פריט.
+
+    אם העריכה נכשלת — הלוח נמחק, או שטלגרם דוחה "אין שינוי" — שולחים
+    אחד חדש וזוכרים אותו. כך גם מי ששלח שלוש מאות הודעות רואה כפתור
+    אחד, והוא תמיד האחרון בשיחה."""
+    got = _bulk_pm.get(msg.from_user.id)
+    mid = got[4] if got else 0
+    if mid:
+        try:
+            await bot.edit_message_text(sc.text, chat_id=msg.chat.id,
+                                        message_id=mid, reply_markup=kb(sc))
+            return
+        except TelegramAPIError:
+            pass
+    sent = await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
+    if sent is not None and got is not None:
+        _bulk_pm[msg.from_user.id] = got[:4] + (sent.message_id,)
 
 
 async def _create_reply(msg: Message, chat_id: int, field: str,
@@ -5481,7 +5518,7 @@ async def _create_reply(msg: Message, chat_id: int, field: str,
         store, kind = "filter", "f"
     audit.log(chat_id, "filter.add", actor_id=msg.from_user.id, after=name,
               source="button", severity="info")
-    _bulk_pm[msg.from_user.id] = (chat_id, store, name, time.time())
+    _bulk_pm[msg.from_user.id] = (chat_id, store, name, time.time(), 0)
     sc = panel.collecting_screen(chat_id, _rep_label(kind, name),
                                  _rep_count(chat_id, kind, name), lg)
     await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
@@ -6311,7 +6348,10 @@ async def on_callback(q: CallbackQuery):
 
         if name == "repadd":
             waiting.clear(q.from_user.id)
-            _bulk_pm[q.from_user.id] = (chat_id, store, trg, time.time())
+            _bulk_pm[q.from_user.id] = (chat_id, store, trg,
+                                        time.time(),
+                                        q.message.message_id
+                                        if q.message else 0)
             sc = panel.collecting_screen(
                 chat_id, _rep_label(kind, trg),
                 _rep_count(chat_id, kind, trg), lg)

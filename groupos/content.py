@@ -292,6 +292,54 @@ def _strip_urls(text: str) -> str:
     return _RX_URL.sub(" ", text or "")
 
 
+# ── התאמת שם ──────────────────────────────────────────────────────────────
+# ‎blocklist.normalize‎ נבנה נגד **התחמקות**: הוא הופך ‎p0rn‎ ל-‎porn‎,
+# ולכן גם ‎!‎ ל-‎i‎. על רשימת חסומים זה נכון; על שם של סדרה שמנהל
+# הגדיר זה הרסני — ‎"ורדים וחטאים!"‎ הפך ל-‎"ורדים וחטאיםi"‎ ולא התאים
+# לשום דבר. אנשים מסיימים בקשה בסימן קריאה או בשאלה כמעט תמיד, וזו
+# הסיבה האמיתית ש"ההדקים לא עובדים".
+#
+# לשם של יצירה צריך בדיוק ההפך: לנקות סימני פיסוק ואימוג'י לרווח,
+# ולא להמציא אותיות.
+_RX_KEEP = re.compile(r"[^\w\s]", re.U)
+_RX_SPACE = re.compile(r"\s+")
+
+# אותיות השימוש בעברית. "אשמח **ל**ורדים וחטאים" הוא אותה בקשה
+# בדיוק כמו "אשמח לורדים וחטאים", ובעברית זו הצורה הרגילה לכתוב —
+# לא חריג. בלי זה ההדק נורה רק כשכותבים את השם חשוף.
+_HEB_PREFIX = "בהוכלמש"
+
+
+def plain(text: str) -> str:
+    """נרמול לשמות: אותיות קטנות, פיסוק לרווח, רווחים מכווצים."""
+    return _RX_SPACE.sub(" ", _RX_KEEP.sub(" ", (text or "").lower())).strip()
+
+
+def _word_rx(trigger: str) -> Optional[re.Pattern]:
+    """ההדק כמילה שלמה, עם אות שימוש אפשרית לפניו."""
+    t = plain(trigger)
+    if not t:
+        return None
+    body = r"\s+".join(re.escape(w) for w in t.split())
+    return re.compile(r"(?<!\w)[" + _HEB_PREFIX + r"]?" + body + r"(?!\w)")
+
+
+def _all_words_present(trigger: str, hay: str) -> bool:
+    """כל מילות השם מופיעות בהודעה, בכל סדר.
+
+    זה מה שעונה על "מישהו מבקש *אפשר בבקשה את הסדרה X*": הבקשה
+    נכתבת בעשרים נוסחים שונים, אבל מילות השם תמיד שם. נדרשות **שתי
+    מילים לפחות** בשם — לשם בן מילה אחת הכלל הזה מתנוון לחיפוש
+    מילה בודדת, וזה כבר מה שהכלל הרגיל עושה."""
+    words = plain(trigger).split()
+    if len(words) < 2:
+        return False
+    return all(
+        re.search(r"(?<!\w)[" + _HEB_PREFIX + r"]?" + re.escape(w) + r"(?!\w)",
+                  hay)
+        for w in words)
+
+
 def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
     """הפילטר הראשון שמתאים. טהור, כדי שאפשר לבדוק בלי מסד."""
     if not text or not rules:
@@ -302,7 +350,11 @@ def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
     # הזאת מחק לו את כל הרשימה. כתובת אינה מישהו שאמר את המילה.
     # ‎substring‎ ו-‎regex‎ נשארים על הטקסט המלא: מי שביקש אותם
     # במפורש כן רוצה להיתפס גם בתוך קישור.
-    norm = _bl.normalize(_strip_urls(text))
+    hay = plain(_strip_urls(text))
+    # סיבוב שני, ורק אם הראשון לא מצא כלום: שם שכל מילותיו מופיעות
+    # בהודעה. הוא רחב יותר, ולכן הוא לא רץ ראשון — התאמה מדויקת
+    # צריכה תמיד לנצח התאמה משוערת.
+    loose: Optional[FilterHit] = None
     for r in rules:
         trg, kind = r["trigger"], r.get("match_kind", "word")
         hit = False
@@ -316,12 +368,18 @@ def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
         elif kind == "starts":
             hit = low.startswith(trg)
         else:
-            p = re.escape(_bl.normalize(trg))
-            hit = bool(p) and re.search(r"(?<!\w)" + p + r"(?!\w)", norm)
+            rx = _word_rx(trg)
+            hit = rx is not None and rx.search(hay) is not None
+            if not hit and loose is None and _all_words_present(trg, hay):
+                loose = _as_hit(trg, r)
         if hit:
-            return FilterHit(trg, r.get("action", "reply"),
-                             r.get("content") or "",
-                             r.get("media_id") or "",
-                             r.get("media_kind") or "",
-                             r.get("buttons") or "")
-    return None
+            return _as_hit(trg, r)
+    return loose
+
+
+def _as_hit(trg: str, r: dict) -> FilterHit:
+    return FilterHit(trg, r.get("action", "reply"),
+                     r.get("content") or "",
+                     r.get("media_id") or "",
+                     r.get("media_kind") or "",
+                     r.get("buttons") or "")

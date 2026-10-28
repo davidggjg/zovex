@@ -95,6 +95,9 @@ def last() -> str:
 
 
 # ── טלגרם מדומה ───────────────────────────────────────────────────────────
+EDITED: list = []
+
+
 class FakeBot:
     """רק מה שהמטפלים קוראים בפועל, ושומר את מה שנשלח."""
 
@@ -131,6 +134,16 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id):
         DELETED.append(message_id)
+        return True
+
+    async def edit_message_text(self, text, chat_id=None, message_id=None,
+                                reply_markup=None, **kw):
+        # לוח האיסוף נערך במקום. בבדיקה זה נרשם כשליחה רגילה, כי מה
+        # שנבדק הוא **מה המנהל רואה** ולא איך זה הגיע לשם.
+        EDITED.append((chat_id, message_id, text))
+        SENT.append((chat_id, text, reply_markup is not None))
+        THREADS.append(None)
+        TO_USER.append(None)
         return True
 
     async def download(self, file_id, destination=None):
@@ -180,6 +193,20 @@ def msg(text: str, uid: int = ADM, reply_to=None, mid: int = 100) -> Message:
         from_user=User(id=uid, is_bot=False, first_name="דוד",
                        language_code="he"),
         text=text, reply_to_message=reply_to)
+
+
+def _now() -> float:
+    import time as _t
+    return _t.time()
+
+
+def _pm(text: str, uid: int = ADM, mid: int = 700) -> Message:
+    """הודעה בצ'אט הפרטי עם הבוט."""
+    return Message(message_id=mid, date=dt.datetime.now(),
+                   chat=Chat(id=uid, type="private"),
+                   from_user=User(id=uid, is_bot=False, first_name="דוד",
+                                  language_code="he"),
+                   text=text)
 
 
 def spam_msg(mid: int = 500) -> Message:
@@ -2205,11 +2232,19 @@ async def test_replies_panel():
     ok("שלוש הודעות בקבוצה", len(SENT) - before == 3,
        str(len(SENT) - before))
 
-    # פקודה בעברית נדחית בהסבר, לא בשקט. לחיצה על "➕" סוגרת איסוף
-    # פעיל, וכאן זה נעשה במפורש כי אין לחיצה.
+    # פקודה בעברית **מתקבלת**. מנהל ישראלי לא יכול היה להגדיר אף
+    # פקודה בשפה שלו, וזה היה "הוא לא עונה לפקודות שאני מגדיר".
+    # לחיצה על "➕" סוגרת איסוף פעיל, וכאן זה נעשה במפורש.
     B._bulk_pm.clear()
     B.waiting.start(ADM, CHAT, "newcmd")
-    out = await _out(B.on_private_text, pm("סרטים", mid=9506))
+    await _out(B.on_private_text, pm("סרטים", mid=9506))
+    ok("פקודה בעברית נוצרת", B.cmds.get(CHAT, "סרטים") is not None)
+    B.cmds.delete(CHAT, "סרטים")
+
+    # שם שבאמת פסול — רווח באמצע — עדיין נדחה בהסבר ולא בשקט
+    B._bulk_pm.clear()
+    B.waiting.start(ADM, CHAT, "newcmd")
+    out = await _out(B.on_private_text, pm("שם עם רווח", mid=9516))
     ok("שם פקודה לא חוקי מוסבר", bool(out) and B._pm_bulk(ADM) is None,
        out[:60])
 
@@ -3085,6 +3120,59 @@ async def test_image_not_shielded():
        B._ai_may_act(CHAT, V("csam", 0.5), cap))
 
 
+async def test_custom_cmd_and_board():
+    """פקודות מותאמות עובדות, וגם כשהמתג 'רק פקודות שפונות אליי' דלוק."""
+    section("פקודות מותאמות")
+    B._bot_username = "TestBot"
+    made, err = B.cmds.set(CHAT, "סרטים", "הנה הסרטים")
+    ok("אפשר להגדיר פקודה בעברית", made is not None and err is None, str(err))
+    try:
+        B.db.set(CHAT, "onlyme", "0")
+        before = len(SENT)
+        await B.on_custom_command(msg("/סרטים", uid=USER, mid=9300))
+        ok("פקודה מותאמת עונה",
+           any("הנה הסרטים" in t for _c, t, _m in SENT[before:]),
+           str([t for _c, t, _m in SENT[before:]])[:80])
+
+        # המתג נועד להתנגשות בשמות המובנים, לא להשתיק פקודות שהקבוצה בנתה
+        B.db.set(CHAT, "onlyme", "1")
+        ok("המתג לא חוסם פקודה שהקבוצה הגדירה",
+           not B._skip_foreign_command(msg("/סרטים", uid=USER, mid=9301)))
+        ok("אבל כן חוסם פקודה מובנית חשופה",
+           B._skip_foreign_command(msg("/filters", uid=ADM, mid=9302)))
+        before = len(SENT)
+        await B.on_custom_command(msg("/סרטים", uid=USER, mid=9303))
+        ok("והיא עדיין עונה בפועל",
+           any("הנה הסרטים" in t for _c, t, _m in SENT[before:]))
+    finally:
+        B.db.set(CHAT, "onlyme", "0")
+        B.cmds.delete(CHAT, "סרטים")
+
+
+async def test_one_finish_button():
+    """לוח איסוף אחד שמתעדכן — ולא 'סיימתי' לכל הודעה."""
+    section("לוח איסוף אחד")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.filters.add(CHAT, "אוסף", "", allow_empty=True)
+    B._bulk_pm[ADM] = (CHAT, "filter", "אוסף", _now(), 7777)
+    EDITED.clear()
+    try:
+        before = len(SENT)
+        for i in range(4):
+            await B.on_private_text(_pm(f"פריט {i}", mid=9400 + i))
+        new_msgs = len(SENT) - before
+        ok("ארבע הודעות נאספו",
+           B.filters.item_count(CHAT, "אוסף") == 4,
+           str(B.filters.item_count(CHAT, "אוסף")))
+        ok("הלוח נערך ולא נשלח מחדש", len(EDITED) == 4, str(len(EDITED)))
+        ok("וכל העריכות על אותה הודעה אחת",
+           {m for _c, m, _t in EDITED} == {7777}, str(EDITED[:2]))
+        ok("ולכן אין ארבעה כפתורי סיימתי", new_msgs == 4, str(new_msgs))
+    finally:
+        B._bulk_pm.pop(ADM, None)
+        B.filters.remove(CHAT, "אוסף")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3134,6 +3222,8 @@ async def main() -> int:
     await test_filter_stop()
     await test_two_bots()
     await test_image_not_shielded()
+    await test_custom_cmd_and_board()
+    await test_one_finish_button()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
