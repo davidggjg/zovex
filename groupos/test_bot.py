@@ -3213,6 +3213,62 @@ async def test_handlers_registered():
     ok("ועוזר פנימי לא נרשם בטעות", "_warn_other_bot" not in names)
 
 
+async def test_dead_groups_drop_out():
+    """קבוצה שנמחקה, שהבוט הוסר ממנה, או שהוא כבר לא מנהל בה."""
+    section("רשימת הקבוצות")
+    from aiogram.exceptions import TelegramForbiddenError
+
+    class Member:
+        def __init__(self, st):
+            self.status = st
+
+    B._me_id = 999
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
+
+    async def member_is(st):
+        B._me_in_chat.clear()
+        B.bot.get_chat_member = lambda c, u: _wrap(Member(st))
+        return await B.bot_is_admin(CHAT)
+
+    async def _wrap(v):
+        return v
+
+    try:
+        ok("מנהל — נשאר",
+           await member_is(B.ChatMemberStatus.ADMINISTRATOR))
+        ok("הודח לחבר רגיל — יורד",
+           not await member_is(B.ChatMemberStatus.MEMBER))
+        ok("אבל הקבוצה לא נמחקת מהמסד",
+           B.db.one("SELECT active FROM chats WHERE chat_id=?",
+                    (CHAT,)) is not None)
+
+        ok("הוסר מהקבוצה — יורד",
+           not await member_is(B.ChatMemberStatus.KICKED))
+        ok("והקבוצה מסומנת לא פעילה",
+           B.db.one("SELECT active FROM chats WHERE chat_id=?",
+                    (CHAT,))["active"] == 0)
+
+        # קבוצה שנמחקה: טלגרם עונה בשגיאה סופית
+        B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
+        B._me_in_chat.clear()
+
+        def boom(c, u):
+            raise TelegramForbiddenError(method=None,
+                                         message="chat not found")
+        B.bot.get_chat_member = boom
+        ok("קבוצה שנמחקה — יורדת", not await B.bot_is_admin(CHAT))
+        ok("ומסומנת לא פעילה",
+           B.db.one("SELECT active FROM chats WHERE chat_id=?",
+                    (CHAT,))["active"] == 0)
+        ok("ולכן אינה ברשימת הניהול",
+           CHAT not in [c for c, _t in B.my_groups(ADM)])
+    finally:
+        B.bot = FakeBot()
+        B._me_in_chat.clear()
+        B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3265,6 +3321,7 @@ async def main() -> int:
     await test_custom_cmd_and_board()
     await test_one_finish_button()
     await test_handlers_registered()
+    await test_dead_groups_drop_out()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

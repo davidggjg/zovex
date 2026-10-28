@@ -40,7 +40,9 @@ from typing import Callable, Optional
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import (TelegramAPIError, TelegramBadRequest,
+                                TelegramForbiddenError, TelegramNotFound,
+                                TelegramRetryAfter)
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BufferedInputFile, BotCommand,
                            EphemeralMessageParameters, LabeledPrice,
@@ -444,6 +446,11 @@ async def sync_admins(chat_id: int, force: bool = False) -> dict[int, str]:
                 continue
             role = "owner" if m.status == ChatMemberStatus.CREATOR else "admin"
             out[m.user.id] = role
+    except (TelegramForbiddenError, TelegramNotFound) as e:
+        # הקבוצה נמחקה, או שהבוט הוסר ממנה. נפילה חזרה למטמון כאן
+        # היא בדיוק מה שהשאיר קבוצות מתות ברשימה לנצח.
+        forget_chat(chat_id, str(e)[:80])
+        return {}
     except TelegramAPIError as e:
         log.warning("שליפת מנהלים נכשלה ב-%s: %s", chat_id, e)
         return hit[1] if hit else {}
@@ -543,14 +550,67 @@ async def group_status(chat_id: int, lg: str) -> str:
     return i18n.t("status.ready", lg, n=len(admins))
 
 
+# מצב הבוט בקבוצה, ממוטמע. ‎(מתי, האם הוא מנהל שם)‎.
+_me_in_chat: dict[int, tuple[float, bool]] = {}
+
+
+def forget_chat(chat_id: int, why: str) -> None:
+    """הקבוצה יורדת מהרשימה. לא נמחקת — מסומנת לא פעילה.
+
+    מחיקה הייתה מוחקת גם את ההגדרות, ההדקים והיומן. קבוצה שהבוט
+    הוחזר אליה צריכה לחזור עם כל מה שהיה בה, ולכן זה דגל ולא ‎DELETE‎."""
+    db.run("UPDATE chats SET active=0 WHERE chat_id=?", (chat_id,))
+    _me_in_chat.pop(chat_id, None)
+    _admin_cache.pop(chat_id, None)
+    log.info("קבוצה %s ירדה מהרשימה: %s", chat_id, why)
+
+
+async def bot_is_admin(chat_id: int) -> bool:
+    """האם הבוט **עצמו** עדיין מנהל שם.
+
+    זו שאלה נפרדת מ"מי המנהלים": ‎getChatAdministrators‎ מצליחה גם
+    כשהבוט הודח, ולכן קבוצה שבה הוא כבר לא מנהל נשארה ברשימה
+    ונראתה תקינה. וכשהקבוצה נמחקה או שהבוט הוסר ממנה, השליפה
+    נכשלת — והקוד נפל חזרה למטמון הישן, כלומר הקבוצה לא ירדה לעולם.
+    כאן שגיאה סופית **מורידה** את הקבוצה במקום להתעלם ממנה."""
+    if _me_id is None:
+        return True
+    hit = _me_in_chat.get(chat_id)
+    if hit and time.time() - hit[0] < ADMIN_TTL:
+        return hit[1]
+    try:
+        m = await bot.get_chat_member(chat_id, _me_id)
+    except (TelegramForbiddenError, TelegramNotFound, TelegramBadRequest) as e:
+        # הוסר, נחסם, או שהקבוצה כבר לא קיימת — כולן סופיות.
+        forget_chat(chat_id, str(e)[:80])
+        return False
+    except TelegramAPIError as e:
+        # תקלת רשת או הגבלת קצב: לא מסקנה על הקבוצה.
+        log.warning("בדיקת מצב הבוט ב-%s נכשלה: %s", chat_id, e)
+        return hit[1] if hit else True
+    ok_now = m.status in (ChatMemberStatus.ADMINISTRATOR,
+                          ChatMemberStatus.CREATOR)
+    if m.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        forget_chat(chat_id, f"status={m.status}")
+        return False
+    _me_in_chat[chat_id] = (time.time(), ok_now)
+    return ok_now
+
+
 async def my_groups_live(user_id: int) -> list[tuple[int, str]]:
     """הקבוצות שהאדם מנהל **באמת**, אחרי אימות מול טלגרם.
 
     הרשימה במסד היא נקודת מוצא בלבד: היא מתעדכנת כשמישהו כותב
     בקבוצה, ובקבוצה שקטה היא יכולה להיות בת חודש. מי שהוסר מניהול
-    ראה את הקבוצה ברשימה שלו והמשיך לנהל אותה."""
+    ראה את הקבוצה ברשימה שלו והמשיך לנהל אותה.
+
+    ושתי שאלות ולא אחת: גם האדם עדיין מנהל, וגם **הבוט** עדיין
+    מנהל שם. קבוצה שנמחקה, קבוצה שהבוט הוסר ממנה וקבוצה שבה הוא
+    כבר לא מנהל — כולן נראו ברשימה כאילו כלום לא קרה."""
     out = []
     for chat_id, title in my_groups(user_id):
+        if not await bot_is_admin(chat_id):
+            continue
         if await _has_access(chat_id, user_id):
             out.append((chat_id, title))
     return out
@@ -1519,10 +1579,13 @@ async def on_my_status(ev: ChatMemberUpdated):
         return
     new = ev.new_chat_member.status
     if new in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
-        db.run("UPDATE chats SET active=0 WHERE chat_id=?", (ev.chat.id,))
-        log.info("הוסרתי מ-%s", ev.chat.id)
+        forget_chat(ev.chat.id, f"status={new}")
         return
     register_chat(ev.chat)
+    # הודח לחבר רגיל: הקבוצה נשארת רשומה, אבל היא כבר לא ברשימת
+    # הניהול — הבוט לא יכול לעשות בה כלום, והצגתה שם היא הבטחה
+    # שלא תתקיים. המטמון מתעדכן מיד ולא עוד חמש דקות.
+    _me_in_chat[ev.chat.id] = (time.time(), new in ADMIN_STATUSES)
     admins = await sync_admins(ev.chat.id, force=True)
     audit.log(ev.chat.id, "bot.status", actor_kind="bot", source="system",
               before=ev.old_chat_member.status, after=new, severity="info")
