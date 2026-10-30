@@ -3421,6 +3421,69 @@ async def test_no_duplicate_names():
         B.filters.remove(OTHER, "מילה אחרת")
 
 
+async def test_schedule_recovers():
+    """הלוז מיישר את עצמו גם אחרי שהמצב נפרד מהדגל.
+
+    "פתאום הוא לא סוגר את הקבוצה בלוז." הסיבה: הסגירה פעלה רק על
+    מעבר — "אם אין בעלים, נעל" — ולכן ברגע שהדגל נשאר ‎hours‎ והקבוצה
+    בפועל נפתחה (מנהל פתח ידנית, אתחול באמצע, קריאה שנכשלה), התנאי
+    לא התקיים יותר והלוח לא סגר שוב עד הבוקר."""
+    section("הלוז מתאושש")
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    IL = ZoneInfo("Asia/Jerusalem")
+
+    B.db.set(CHAT, "tz", "Asia/Jerusalem")
+    B.db.set(CHAT, "hours", B.grouphours.set_day("", "sun", "!01:00-07:00"))
+    closed = _dt.datetime(2026, 11, 1, 1, 30, tzinfo=IL).timestamp()
+    openish = _dt.datetime(2026, 11, 1, 9, 0, tzinfo=IL).timestamp()
+    try:
+        # מצב רגיל: נסגר
+        B.db.set(CHAT, AK := B.AUTOLOCK_KEY, "")
+        B.db.set(CHAT, "lockdown", "0")
+        await B._tick_hours(CHAT, closed, False)
+        ok("בחלון סגור הקבוצה ננעלת",
+           B.db.get(CHAT, "lockdown", "0") == "1")
+        ok("ונרשם מי נעל", B.db.get(CHAT, AK, "") == "hours")
+
+        # **הבאג**: הדגל שלנו, אבל הקבוצה נפתחה ידנית
+        B.db.set(CHAT, "lockdown", "0")
+        await B._tick_hours(CHAT, closed, False)
+        ok("קבוצה שנפתחה ידנית באמצע חלון סגור — ננעלת שוב",
+           B.db.get(CHAT, "lockdown", "0") == "1")
+
+        # בשעת פתיחה היא נפתחת ומשחררת את הבעלות
+        await B._tick_hours(CHAT, openish, False)
+        ok("בשעת פתיחה נפתחת", B.db.get(CHAT, "lockdown", "0") == "0")
+        ok("והבעלות משתחררת", B.db.get(CHAT, AK, "") == "")
+
+        # דגל יתום: בעלות שלנו אבל הקבוצה כבר פתוחה
+        B.db.set(CHAT, AK, "hours")
+        B.db.set(CHAT, "lockdown", "0")
+        await B._tick_hours(CHAT, openish, False)
+        ok("דגל יתום מתנקה בשקט", B.db.get(CHAT, AK, "") == "")
+
+        # נעילה ידנית של מנהל אינה שלנו — לא נוגעים בה
+        B.db.set(CHAT, AK, "")
+        B.db.set(CHAT, "lockdown", "1")
+        await B._tick_hours(CHAT, openish, False)
+        ok("נעילה ידנית לא נפתחת על ידי הלוז",
+           B.db.get(CHAT, "lockdown", "0") == "1")
+
+        # שבת גוברת על הלוח
+        B.db.set(CHAT, AK, "shab")
+        B.db.set(CHAT, "lockdown", "1")
+        await B._tick_hours(CHAT, openish, True)
+        ok("שבת מחזיקה והלוז לא פותח",
+           B.db.get(CHAT, "lockdown", "0") == "1"
+           and B.db.get(CHAT, AK, "") == "shab")
+    finally:
+        B.db.set(CHAT, "hours", "")
+        B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+        B.db.set(CHAT, "lockdown", "0")
+        B.db.set(CHAT, "tz", "")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3477,6 +3540,7 @@ async def main() -> int:
     await test_every_button_answers()
     await test_long_names_dont_kill_the_screen()
     await test_no_duplicate_names()
+    await test_schedule_recovers()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

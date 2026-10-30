@@ -279,6 +279,27 @@ def test_spamguard() -> None:
 
 
 
+def test_emoji_is_not_evasion() -> None:
+    """אימוג'י מורכב אינו ניסיון לעקוף מסנן.
+
+    ‎🤦‍♀️‎ בנוי משני אימוג'י מחוברים בתו בלתי-נראה (ZWJ), וכך גם
+    ‎👩‍💻‎ וכל האימוג'י הממוגדרים. הבדיקה סימנה כל הודעה כזאת
+    כ"נכתבה כדי לעקוף", ובשטח נמחקה בגלל זה הודעה תמימה לגמרי."""
+    section("אימוג'י אינו הסוואה")
+    for e in ("🤦‍♀️", "👩‍💻", "👨‍👩‍👧", "🏳️‍🌈", "👍", "❤️"):
+        ok(f"אימוג'י תמים: {e}", not sg.obfuscated("שלום " + e))
+
+    real = "אם אין את עונה 5 אז איך יהיה בדיוק את העונות הבאות🤦‍♀️"
+    ok("ההודעה שנמחקה בשטח אינה מוסווית", not sg.obfuscated(real))
+    ok("ואין עליה שום פסק", sg.classify(real) is None,
+       str(sg.classify(real)))
+
+    # הסתרה אמיתית: התו הבלתי-נראה יושב **בין אותיות**
+    for t in ("p\u200do\u200dr\u200dn", "s\u200be\u200bx",
+              "פ\u200dו\u200dר\u200dנ\u200dו"):
+        ok("הסתרה בין אותיות עדיין נתפסת", sg.obfuscated(t), repr(t))
+
+
 def test_prompts() -> None:
     section("עריכה בכפתורים")
     # ‎repcmd‎ ו-‎repword‎ הם שלבי אשף: הם **יוצרים** תגובה ולא
@@ -648,6 +669,7 @@ def main() -> int:
     test_zone_catalog()
     test_support_and_stars()
     test_spamguard()
+    test_emoji_is_not_evasion()
     test_prompts()
     test_evidence()
     test_media_talk()

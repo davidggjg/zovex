@@ -189,10 +189,28 @@ def _hits(blob: str, words: tuple[str, ...], spaced: str = "") -> list[str]:
     return out
 
 
+# ZWJ בין שני אימוג'י הוא **הרכבת אימוג'י**, לא הסתרה. ‎🤦‍♀️‎ הוא
+# פרצוף ועליו סימן נקבה, מחוברים בתו בלתי-נראה — וכך בנויים גם
+# ‎👩‍💻‎, ‎👨‍👩‍👧‎ וכל האימוג'י הממוגדרים. הבדיקה סימנה כל הודעה כזאת
+# כ"נכתבה כדי לעקוף מסנן", ובקבוצה אמיתית נמחקה בגללה הודעה תמימה
+# לגמרי — "אם אין את עונה 5 אז איך יהיה בדיוק את העונות הבאות🤦‍♀️".
+#
+# הסתרה אמיתית נראית אחרת: ‎p‌o‌r‌n‎ — התו הבלתי-נראה יושב **בין
+# אותיות**, כי שם הוא עושה את העבודה. אימוג'י אינו אות.
+def _hides_in_word(text: str) -> bool:
+    """תו בלתי-נראה שיושב בתוך מילה, ולא בין אימוג'י."""
+    for m in _RX_INVISIBLE.finditer(text or ""):
+        before = text[m.start() - 1] if m.start() else ""
+        after = text[m.end()] if m.end() < len(text) else ""
+        if before.isalnum() and after.isalnum():
+            return True
+    return False
+
+
 def obfuscated(text: str) -> bool:
     """האם הטקסט נכתב כדי לא להיקרא במסנן."""
     low = (text or "").lower()
-    if _RX_INVISIBLE.search(text or ""):
+    if _hides_in_word(text or ""):
         return True
     if any(c in CONFUSABLE for c in low) and re.search(r"[a-z]", low):
         return True

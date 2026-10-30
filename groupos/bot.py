@@ -1132,6 +1132,13 @@ def _int(v, default: int) -> int:
         return default
 
 
+def _float(v, default: float) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _ai_context(chat_id: int) -> str:
     """מה הקבוצה הזאת **היא**, במילים של המנהל.
 
@@ -3870,12 +3877,28 @@ async def _tick_shabbat(chat_id: int, now: float) -> bool:
         return False
     wins = await _shab_windows(chat_id, cfg)
     if not wins:
-        return db.get(chat_id, AUTOLOCK_KEY, "") == "shab"
+        # לא הצלחנו להביא זמנים (רשת, שירות הזמנים). אם אנחנו
+        # מחזיקים נעילת שבת — ממשיכים להחזיק, אבל **לא לנצח**:
+        # שבת ארוכה מ-26 שעות אינה שבת, היא תקלה. בלי הגבול הזה
+        # כשל רשת אחד השאיר קבוצה סגורה עד שמישהו שם לב.
+        if db.get(chat_id, AUTOLOCK_KEY, "") != "shab":
+            return False
+        since = _float(db.get(chat_id, "shabbat_locked_at", "0"), 0.0)
+        if since and now - since > 26 * 3600:
+            log.warning("נעילת שבת ב-%s נתקעה %.0f שעות בלי זמנים — משחרר",
+                        chat_id, (now - since) / 3600)
+            await _auto_lock(chat_id, False, "", "")
+            return False
+        return True
     lg = lang.for_chat(chat_id)
     cur = zmanim.current(wins, now)
     owner = db.get(chat_id, AUTOLOCK_KEY, "")
     if cur is not None:
-        if owner != "shab":
+        locked_now = db.get(chat_id, "lockdown", "0") == "1"
+        # גם כאן מיישרים מול המצב בפועל ולא רק מול הדגל: קבוצה
+        # שנפתחה ידנית באמצע שבת נשארה פתוחה עד צאת השבת.
+        if owner != "shab" or not locked_now:
+            db.set(chat_id, "shabbat_locked_at", str(int(now)))
             await _auto_lock(chat_id, True, "shab",
                              await _shab_text(chat_id, "lock", cur, lg, cfg))
         return True
@@ -3897,20 +3920,44 @@ async def _tick_shabbat(chat_id: int, now: float) -> bool:
 
 
 async def _tick_hours(chat_id: int, now: float, shabbat_holds: bool) -> None:
+    """מיישר בין מה שהלוח אומר לבין מה שהקבוצה **באמת**.
+
+    קודם לכן זה פעל רק על מעבר: "אם אין בעלים — נעל". זה נשבר בכל
+    פעם שהמצב בפועל נפרד מהדגל, וזה קורה הרבה — מנהל פתח את הקבוצה
+    ידנית באמצע חלון סגור, השירות אותחל באמצע, או קריאה לטלגרם
+    נכשלה. הדגל נשאר ‎hours‎, התנאי ‎owner == ""‎ לא התקיים יותר, והלוח
+    **לא סגר שוב עד הבוקר**. זה "פתאום הוא לא סוגר".
+
+    עכשיו כל דקה נשאלת שאלה אחת: מה הלוח רוצה, ומה המצב בפועל. אם
+    הם נפרדו — מיישרים. כך זה מתאושש מעצמו מכל סטייה, ולא רק מזו
+    שחשבנו עליה מראש."""
     raw = db.get(chat_id, "hours", "") or ""
     owner = db.get(chat_id, AUTOLOCK_KEY, "")
+    locked_now = db.get(chat_id, "lockdown", "0") == "1"
     if not raw:
         if owner == "hours" and not shabbat_holds:
             await _auto_lock(chat_id, False, "", "")
         return
-    lg = lang.for_chat(chat_id)
-    should_open = grouphours.is_open(raw, now=now, tz_offset=_tz_of(chat_id))
-    if not should_open:
-        if owner == "":
+    # שבת גוברת על הלוח: היא הבעלים, והיא גם זו שתפתח.
+    if shabbat_holds:
+        return
+    want_closed = not grouphours.is_open(raw, now=now,
+                                         tz_offset=_tz_of(chat_id))
+    if want_closed:
+        # נועלים כשאנחנו הבעלים או שאין בעלים — **וגם** כשהדגל כבר
+        # שלנו אבל הקבוצה בפועל פתוחה. נעילה ידנית של מנהל אינה
+        # שלנו, ואותה לא נוגעים.
+        if owner in ("", "hours") and not locked_now:
             await _auto_lock(chat_id, True, "hours", "", field="hclose")
         return
-    if owner == "hours" and not shabbat_holds:
+    if owner != "hours":
+        return
+    if locked_now:
         await _auto_lock(chat_id, False, "", "", field="hopen")
+    else:
+        # דגל יתום: הקבוצה כבר פתוחה ואנחנו עדיין רשומים כבעלים.
+        # ניקוי שקט, בלי הודעת פתיחה על משהו שלא נסגר.
+        db.set(chat_id, AUTOLOCK_KEY, "")
 
 
 async def autolock_loop():
