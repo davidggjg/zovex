@@ -255,12 +255,22 @@ def classify(text: str) -> Optional[Verdict]:
         #
         # הבלם היחיד: שיחה על יצירה שיש בה מונח מיני אבל אין בה שום
         # הזמנה לשום מקום. "סדרה על תעשיית הפורנו" אינה מודעה.
-        hard = solicits(text) or not media_context(text)
+        hard = (solicits(text) or not media_context(text)) \
+            and not catalogue_post(text)
         return Verdict("adult_ad" if hard else "adult",
                        0.95 if hard else ADULT,
                        ",".join(sexual[:2] + bait[:1])[:48],
                        escalate=hard)
     if sexual:
+        # אזכור בתוך רשומת קטלוג אינו פסק כלל. ציון, ולו נמוך,
+        # מצטרף לאותות אחרים — וכך בדיוק הגיע פוסט של סרט ל-100%.
+        # אותם שלושה תנאים כמו בבלם, ולא רק "זה נראה קטלוג": מודעה
+        # שמדביקה לעצמה כותרות שדות עדיין נופלת על שער גיל, על
+        # מונח פיתיון ועל כל הזמנה.
+        if catalogue_post(text) and not solicits(text) \
+                and not ADULT_GATE.search(text or "") \
+                and not bait:
+            return None
         return Verdict("adult", ADULT - 0.2 + (0.1 if obf else 0.0),
                        ",".join(sexual[:2])[:48])
     if bait and obf:
@@ -409,6 +419,33 @@ def solicits(text: str) -> bool:
     return any(w.replace(" ", "") in blob for w in CTA_WORDS)
 
 
+# שדות של רשומת קטלוג. מודעת פורנו אינה כותבת "בימוי:" ואינה
+# מפנה ל-IMDb — היא מוכרת גישה, לא מתארת יצירה.
+CATALOGUE = (
+    "ז'אנר", "זאנר", "בימוי", "שחקנים", "תקציר", "עלילה", "שנת הפקה",
+    "מדינה", "אורך", "דירוג", "טריילר", "כתוביות", "פרק", "עונה",
+    "imdb", "tmdb", "rottentomatoes", "genre", "director", "cast",
+    "starring", "plot", "synopsis", "trailer", "subtitles", "runtime",
+)
+
+
+def catalogue_post(text: str) -> bool:
+    """האם זו **רשומת קטלוג** של סרט או סדרה, ולא פרסומת.
+
+    זה נולד ממקרה אמיתי: פוסט של סרט קומדיה נחסם, ואיתו נחסם אדם,
+    כי בתקציר העלילה הופיעה המילה "סקס" — "מסע מצחיק בעולם של סקס,
+    סמים ומוזיקה". זה תיאור של סרט, לא הצעה לקנות משהו.
+
+    הבלם הקודם סירב להגן על כל הודעה שיש בה מונח מיני מפורש, וזה
+    נכון למשפט שיווקי קצר. רשומת קטלוג אינה משפט שיווקי: יש בה
+    שדות מובנים — ז'אנר, בימוי, שחקנים, תקציר, קישור ל-IMDb — ומונח
+    שמופיע בתוך תקציר באורך פסקה הוא חלק מהעלילה.
+
+    שלושה שדות ולא אחד: "טריילר" לבדו יכול להופיע בכל מקום."""
+    low = (text or "").lower()
+    return sum(1 for w in CATALOGUE if w in low) >= 3
+
+
 def talks_not_sells(text: str) -> bool:
     """שיחה על תוכן ולא מודעה בשבילו — הבלם לפני מחיקה על שם של סרט.
 
@@ -417,6 +454,13 @@ def talks_not_sells(text: str) -> bool:
     מה שמונע מ"סרטי פורנו מלאים בערוץ שלנו" להיחשב שיחה על סרטים רק
     מפני שכתובה בה המילה "סרטי". שם של יצירה אינו מכיל את המילה
     פורנו; מודעה — כן."""
+    # רשומת קטלוג עוקפת את התנאי על מונח מיני: שם המונח יושב בתוך
+    # תקציר עלילה, לא בהצעה. אבל רק כשאין בה שום הזמנה, שער גיל או
+    # מונח פיתיון — מודעה שתתחפש לקטלוג עדיין תיפול על אלה.
+    if catalogue_post(text) and not solicits(text) \
+            and not ADULT_GATE.search(text or "") \
+            and not _hits(squeeze(text), BAIT, normalize(text)):
+        return True
     if not media_context(text) or solicits(text):
         return False
     # שער גיל **יחד עם** מונח מיני או פיתיון הורג את הבלם. לא שער
