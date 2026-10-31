@@ -135,6 +135,11 @@ class FakeBot:
     async def set_chat_permissions(self, chat_id, permissions, **kw):
         return True
 
+    async def get_chat(self, chat_id):
+        class C:
+            is_forum = False
+        return C()
+
     async def get_chat_member(self, chat_id, user_id):
         class M:
             status = "administrator"
@@ -3484,6 +3489,58 @@ async def test_schedule_recovers():
         B.db.set(CHAT, "tz", "")
 
 
+async def test_state_msg_goes_to_general():
+    """בקבוצת נושאים הודעת המצב יוצאת לנושא הראשי.
+
+    "יש את הראשי שאי אפשר למחוק אותו — הוא צריך לשלוח את זה שם."
+    הודעת מצב היא על הקבוצה כולה ולא על נושא מסוים, ושליחה בלי
+    מזהה נושא נכשלה בשקט בחלק מהקבוצות — ואז היא לא הופיעה בכלל."""
+    section("הודעת מצב בנושא הראשי")
+
+    class Forum:
+        is_forum = True
+
+    class Plain:
+        is_forum = False
+
+    B.db.set(CHAT, "lock_msg_close", "הקבוצה נסגרה")
+    real = B.bot.get_chat
+    try:
+        B._forum_cache.clear()
+        B.bot.get_chat = lambda c: _ret(Forum())
+        THREADS.clear()
+        await B._state_message(CHAT, "lockmsg", "", "he")
+        ok("בקבוצת נושאים נשלח לנושא הראשי",
+           THREADS and THREADS[-1] == B.GENERAL_THREAD, str(THREADS))
+
+        B._forum_cache.clear()
+        B.bot.get_chat = lambda c: _ret(Plain())
+        THREADS.clear()
+        await B._state_message(CHAT, "lockmsg", "", "he")
+        ok("ובקבוצה רגילה בלי נושא כלל",
+           THREADS and THREADS[-1] is None, str(THREADS))
+
+        # והמטמון חוסך קריאות חוזרות
+        calls = []
+        B._forum_cache.clear()
+
+        def counting(c):
+            calls.append(c)
+            return _ret(Forum())
+        B.bot.get_chat = counting
+        await B._is_forum(CHAT)
+        await B._is_forum(CHAT)
+        ok("מצב הפורום נשאל פעם אחת בלבד", len(calls) == 1, str(len(calls)))
+    finally:
+        B._forum_cache.clear()
+        B.db.set(CHAT, "lock_msg_close", "")
+        B.bot.get_chat = real
+
+
+async def _ret(v):
+    return v
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3541,6 +3598,7 @@ async def main() -> int:
     await test_long_names_dont_kill_the_screen()
     await test_no_duplicate_names()
     await test_schedule_recovers()
+    await test_state_msg_goes_to_general()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

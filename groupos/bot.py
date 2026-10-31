@@ -3867,7 +3867,9 @@ async def _auto_lock(chat_id: int, close: bool, owner: str, text: str,
                              dict(panel.STATE_DEFAULTS).get(field, ""),
                              lang.for_chat(chat_id))
     elif text:
-        await send(chat_id, text)
+        # גם הודעת השבת הולכת לנושא הראשי: היא על הקבוצה, לא על
+        # נושא מסוים.
+        await send(chat_id, text, thread_id=await _general_of(chat_id))
 
 
 async def _tick_shabbat(chat_id: int, now: float) -> bool:
@@ -4792,6 +4794,37 @@ async def cmd_linkcheck(msg: Message):
                        action=res["action"], dur="", signals=lines))
 
 
+# ── הנושא הראשי בקבוצת נושאים ─────────────────────────────────────────────
+# "יש את הראשי שאי אפשר למחוק אותו, רק לשנות לו את השם — הוא צריך
+# לשלוח את זה שם."
+#
+# בקבוצת נושאים לנושא "כללי" יש מזהה קבוע 1. הודעת מצב — נסגרה,
+# נפתחה, שבת — אינה שייכת לנושא שבו מישהו במקרה כתב: היא על הקבוצה
+# כולה, ולכן מקומה בראשי. שליחה בלי מזהה אמורה להגיע לשם, אבל
+# בקבוצות מסוימות היא פשוט נכשלת בשקט — ואז ההודעה לא מופיעה בשום
+# מקום, וזה מה שקרה.
+GENERAL_THREAD = 1
+_forum_cache: dict[int, tuple[float, bool]] = {}
+
+
+async def _is_forum(chat_id: int) -> bool:
+    hit = _forum_cache.get(chat_id)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    try:
+        chat = await bot.get_chat(chat_id)
+    except TelegramAPIError:
+        return hit[1] if hit else False
+    val = bool(getattr(chat, "is_forum", False))
+    _forum_cache[chat_id] = (time.time(), val)
+    return val
+
+
+async def _general_of(chat_id: int) -> Optional[int]:
+    """מזהה הנושא הראשי, או ‎None‎ בקבוצה רגילה."""
+    return GENERAL_THREAD if await _is_forum(chat_id) else None
+
+
 async def _state_message(chat_id: int, field: str, default_key: str,
                          lg: str) -> None:
     """ההודעה שנשלחת כשמצב הקבוצה משתנה.
@@ -4814,7 +4847,8 @@ async def _state_message(chat_id: int, field: str, default_key: str,
         # להופיע בשם הקבוצה; מי שרוצה אחת, כותב אותה בלחיצה.
         return
     await send_content(chat_id, tpl.render_pick(raw, tpl.context(
-        chat_id=chat_id, language=lg)), media or None, kind or None, "")
+        chat_id=chat_id, language=lg)), media or None, kind or None, "",
+        thread_id=await _general_of(chat_id))
 
 
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
