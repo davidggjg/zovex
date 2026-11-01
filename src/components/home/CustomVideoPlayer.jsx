@@ -34,10 +34,55 @@ function setupMediaSession(videoEl, movie) {
     navigator.mediaSession.setActionHandler("seekforward", (d) => seek(d?.seekOffset ?? 10));
     navigator.mediaSession.setActionHandler("stop", () => { videoEl.pause(); videoEl.currentTime = 0; });
     navigator.mediaSession.playbackState = "playing";
+
+    // [ms_state] המצב מתעדכן לאורך הצפייה, לא רק בהתחלה.
+    //
+    // ‎playbackState‎ נקבע כאן פעם אחת ל-"playing" ולא נגע בו שוב. לכן
+    // אחרי עצירה מתוך הנגן, החלון הצף, מגירת ההתראות ובקרת המדיה
+    // במסך הנעילה המשיכו להציג "מנגן" — והכפתור שם כבר לא תאם למה
+    // שקורה בפועל.
+    //
+    // ‎setPositionState‎ מזין את סרגל ההתקדמות באותן בקרות; בלעדיו הוא
+    // נשאר קפוא גם כשהמצב מתוקן.
+    const sync = () => {
+      try {
+        navigator.mediaSession.playbackState = videoEl.paused ? "paused" : "playing";
+      } catch {}
+    };
+    const syncPos = () => {
+      try {
+        if (!navigator.mediaSession.setPositionState) return;
+        const d = videoEl.duration;
+        if (!Number.isFinite(d) || d <= 0) return;   // שידור חי — אין משך
+        navigator.mediaSession.setPositionState({
+          duration: d,
+          playbackRate: videoEl.playbackRate || 1,
+          position: Math.min(Math.max(0, videoEl.currentTime || 0), d),
+        });
+      } catch {}
+    };
+    videoEl.addEventListener("play", sync);
+    videoEl.addEventListener("pause", sync);
+    videoEl.addEventListener("ratechange", syncPos);
+    videoEl.addEventListener("loadedmetadata", syncPos);
+    // לא על כל timeupdate: הוא נורה ארבע פעמים בשנייה, וזו עבודה מיותרת
+    // על כל פריים. פעם בשתי שניות מספיק לסרגל שמתעדכן בשניות.
+    const posTimer = setInterval(syncPos, 2000);
+    videoEl._msCleanup = () => {
+      clearInterval(posTimer);
+      videoEl.removeEventListener("play", sync);
+      videoEl.removeEventListener("pause", sync);
+      videoEl.removeEventListener("ratechange", syncPos);
+      videoEl.removeEventListener("loadedmetadata", syncPos);
+    };
+    sync(); syncPos();
   } catch {}
 }
 
-function clearMediaSession() {
+function clearMediaSession(videoEl) {
+  // [ms_state] מסירים גם את המאזינים שנרשמו, אחרת כל פתיחה של נגן
+  // מוסיפה עוד זוג על אותו אלמנט.
+  try { videoEl && videoEl._msCleanup && videoEl._msCleanup(); } catch {}
   if (!("mediaSession" in navigator)) return;
   navigator.mediaSession.metadata = null;
   ["play","pause","seekbackward","seekforward","stop"].forEach(a => {
@@ -902,6 +947,10 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
         position: "absolute", top: "50%", left: "50%",
         transform: "translate(-50%, -50%)",
         display: "flex", alignItems: "center", gap: 32,
+        // [ctl_dir] כיוון מפורש. המכולה יורשת direction: rtl משאר האתר,
+        // ולכן הסדר ב-DOM (אחורה → נגן → קדימה) צויר הפוך: אחורה מימין
+        // וקדימה משמאל. זה מנוגד לכל נגן וידאו, ולמה שהיד מצפה לו.
+        direction: "ltr",
         opacity: visible ? 1 : 0,
         transition: "opacity 0.3s",
         pointerEvents: visible ? "auto" : "none",
@@ -1242,7 +1291,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("ended", onEnded);
-      clearMediaSession();
+      clearMediaSession(video);
       postNative({ type: "video_playing", value: false });
       video.pause();
       video.src = "";
@@ -1461,7 +1510,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       if (stallTimerRef.current) { stallTimerRef.current(); stallTimerRef.current = null; }
       const v = videoElRef.current;
       if (!isLive && v) { const dur = getUsableDuration(v); if (dur > 0) reportProgress(onProgressRef, v.currentTime, dur); }
-      clearMediaSession();
+      clearMediaSession(v);
       postNative({ type: "video_playing", value: false });
       playerRef.current?.shaka?.destroy();
       playerRef.current?.vjs?.dispose();
