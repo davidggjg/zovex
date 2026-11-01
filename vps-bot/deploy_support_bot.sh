@@ -73,4 +73,4 @@ journalctl -u zovex-support -n 8 --no-pager
 echo
 echo "✅ בוט התמיכה פעיל."
 echo "   בדיקה: כתוב הודעה לבוט בטלגרם — היא תופיע בקבוצה עם כפתורים."
-echo "   הערה: הוסף את הבוט לקבוצה $(grep '^SUPPORT_GROUP_ID=' "$DIR/.env" | cut -d= -f2) כמנהל."
+echo "   כתוב /ping בקבוצה — הבוט יענה שם עם מצבו."

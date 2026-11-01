@@ -61,6 +61,7 @@ HTTP_PORT = int(os.environ.get("SUPPORT_HTTP_PORT", "8099"))
 CLAIM_REMIND = int(os.environ.get("SUPPORT_CLAIM_REMIND", "900"))   # 15 דקות
 CLAIM_RELEASE = int(os.environ.get("SUPPORT_CLAIM_RELEASE", "1800"))  # 30 דקות
 API = "https://api.telegram.org/bot%s/" % TOKEN
+START = time.time()
 
 if not TOKEN or not GROUP:
     sys.stderr.write("SUPPORT_BOT_TOKEN / SUPPORT_GROUP_ID חסרים\n")
@@ -282,8 +283,51 @@ def on_user_message(msg):
                  text="התקבל ✅ נציג יחזור אליך בהקדם.")
 
 
+# ── /ping בקבוצה ────────────────────────────────────────────────────────────
+#
+# הבוט מתעלם מכל הודעה בקבוצה שאינה תגובה לכרטיס, ולכן בלי זה אין שום
+# דרך לראות שהוא בכלל שם ושיש לו ההרשאות שהוא צריך.
+#
+# התשובה אינה "אני חי" בלבד: היא אומרת גם מה מצבו בקבוצה. בוט שלא
+# הוכנס לקבוצה בכלל עולה, מתחבר, ומחזיר getMe תקין — ורק אחרי שמשתמש
+# ראשון יכתוב יתברר שאין לאן לשלוח.
+#
+# מנהל אינו נדרש לזרימה שלנו: בוט תמיד יכול לערוך את ההודעות של עצמו,
+# ו-privacy mode מעביר אליו פקודות ותגובות להודעות שלו. מנהל כן עוזר
+# אם נרצה בעתיד למחוק הודעות או להצמיד כרטיס.
+def on_ping(msg):
+    up = int(time.time() - START)
+    with _lock:
+        tot = len(S["tickets"])
+        op = sum(1 for t in S["tickets"].values() if not t.get("closed"))
+        taken = sum(1 for t in S["tickets"].values()
+                    if not t.get("closed") and t.get("taken_by"))
+    me = call("getMe") or {}
+    cm = call("getChatMember", chat_id=GROUP, user_id=me.get("id")) or {}
+    status = cm.get("status", "?")
+    can_edit = bool(cm.get("can_edit_messages")) or status == "creator"
+    if status == "administrator":
+        perms = "✅ מנהל בקבוצה"
+    elif status == "member":
+        perms = "✅ חבר בקבוצה (מנהל אינו נדרש)"
+    else:
+        perms = "⚠️ מצב בקבוצה: %s" % esc(status)
+    call("sendMessage", chat_id=GROUP, parse_mode="HTML",
+         reply_to_message_id=msg["message_id"],
+         text="🟢 <b>בוט התמיכה פעיל</b>\n"
+              "@%s · למעלה %dh %dm\n"
+              "%s\n"
+              "עריכת הודעות של אחרים: %s\n"
+              "כרטיסים: %d פתוחים מתוך %d · %d נתפסו"
+              % (esc(me.get("username")), up // 3600, (up % 3600) // 60,
+                 perms, "✅" if can_edit else "—", op, tot, taken))
+
+
 # ── תשובת מנהל: תגובה להודעה בקבוצה ─────────────────────────────────────────
 def on_group_message(msg):
+    text0 = (msg.get("text") or "").strip()
+    if text0.split("@")[0].split()[0:1] and text0.split("@")[0].split()[0] in ("/ping", "/status"):
+        return on_ping(msg)
     rep = msg.get("reply_to_message")
     if not rep:
         return
