@@ -84,7 +84,7 @@ ME = {}
 # מספר גרסה שמודפס בעלייה ומוחזר ב-/ping. בלעדיו "הבוט לא מגיב"
 # ו"רץ בשרת קוד שאינו מכיר את הפקודה" נראים אותו דבר מבחוץ, וזה בדיוק
 # מה שבלבל אותנו: raw.githubusercontent מגיש מהמטמון עד חמש דקות.
-VERSION = "5"
+VERSION = "6"
 
 # --selftest מריץ את צד ה-HTTP בלי טלגרם: פותח כרטיס, עונה לו, קורא
 # את השיחה ובודק שה-token נדרש. זה מה שמוודא שהאתר והאפליקציה יעבדו
@@ -250,17 +250,41 @@ def who(u):
 # הכפתורים אינם פגים. מה שכן מתיישן הוא ה-callback: טלגרם מצפה
 # ל-answerCallbackQuery בתוך כמה שניות, אחרת המנהל רואה שעון מסתובב.
 # לכן answer נשלח ראשון, לפני כל עבודה אחרת.
-def kb_open(tid):
-    return {"inline_keyboard": [[
-        {"text": "✋ אני מטפל", "callback_data": "take:%s" % tid},
-        {"text": "✔️ סגור", "callback_data": "close:%s" % tid},
+# ── פתיחת פרופיל של משתמש בלי שם משתמש ─────────────────────────────────────
+#
+# ‎@username‎ אינו קיים אצל רוב האנשים, ואז למנהל אין לאן ללחוץ. מה
+# שכן קיים תמיד הוא המזהה המספרי, ולטלגרם יש שתי סכמות לפתוח לפיו:
+#
+#   tg://user?id=<id>              אנדרואיד, Desktop, Web
+#   tg://openmessage?user_id=<id>  אייפון ומק
+#
+# שתיהן נשלחות, כי אין דרך לדעת מאיזו מערכת המנהל קורא — ולחיצה על
+# הלא-נכונה פשוט לא עושה כלום.
+#
+# מה שחשוב לדעת: הקישור אינו "חיפוש". הוא עובד כשללקוח של המנהל כבר
+# יש את המשתמש — וכשהמשתמש כתב לבוט שיושב בקבוצה, בדרך כלל יש. אם
+# ההגדרות של המשתמש אוסרות, או שהלקוח אינו מכיר אותו, הקישור לא
+# ייפתח, ואין שום טכניקה שמשנה את זה: זו הגנת פרטיות של טלגרם ולא
+# מגבלה של הבוט. במקרה כזה נשאר המזהה המספרי להעתקה.
+def kb_rows(t):
+    rows = []
+    if t.get("src") == "tg" and t.get("user_id"):
+        rows.append([{"text": "👤 פתח פרופיל",
+                      "url": "tg://user?id=%s" % t["user_id"]}])
+    return rows
+
+
+def kb_open(t):
+    return {"inline_keyboard": kb_rows(t) + [[
+        {"text": "✋ אני מטפל", "callback_data": "take:%s" % t["id"]},
+        {"text": "✔️ סגור", "callback_data": "close:%s" % t["id"]},
     ]]}
 
 
-def kb_taken(tid):
-    return {"inline_keyboard": [[
-        {"text": "↩️ שחרר", "callback_data": "free:%s" % tid},
-        {"text": "✔️ סגור", "callback_data": "close:%s" % tid},
+def kb_taken(t):
+    return {"inline_keyboard": kb_rows(t) + [[
+        {"text": "↩️ שחרר", "callback_data": "free:%s" % t["id"]},
+        {"text": "✔️ סגור", "callback_data": "close:%s" % t["id"]},
     ]]}
 
 
@@ -269,8 +293,13 @@ def header(t):
            "fb": "אתר/אפליקציה"}.get(t.get("src", "tg"), t.get("src"))
     lines = ["🎫 <b>כרטיס #%s</b> · %s" % (t["id"], src),
              "👤 %s · %s" % (esc(t.get("name")), esc(t.get("tag")))]
-    if t.get("src") == "tg":
-        lines.append("🆔 <code>%s</code>" % t["user_id"])
+    if t.get("src") == "tg" and t.get("user_id"):
+        uid = t["user_id"]
+        lines.append('🆔 <code>%s</code> · <a href="tg://user?id=%s">פתח פרופיל</a>'
+                     % (uid, uid))
+        # אייפון ומק אינם מכירים את tg://user, ולכן גם הסכמה השנייה —
+        # כטקסט להעתקה, כי כפתור אחד אינו יכול להיות שניהם.
+        lines.append("<code>tg://openmessage?user_id=%s</code>" % uid)
     # רק תשובה מסמנת. פתיחת שיחה בפאנל אינה אות לכלום — פותחים שיחות
     # ולא עונים כל הזמן, וסימון כזה היה גורם למנהל בקבוצה לחשוב שיש מי
     # שמטפל, והפנייה הייתה נופלת בין הכיסאות.
@@ -295,7 +324,7 @@ def refresh_card(t):
     # בשיחה שכבר נענתה במקום אחר, וזה בדיוק מה שמונע שני מנהלים
     # שעונים לאותו אדם.
     kb = None if (t.get("closed") or t.get("panel_answered")) \
-        else (kb_taken(t["id"]) if t.get("taken_by") else kb_open(t["id"]))
+        else (kb_taken(t) if t.get("taken_by") else kb_open(t))
     body = header(t) + "\n\n" + t.get("body", "")
     fingerprint = body + "|" + json.dumps(kb, ensure_ascii=False, sort_keys=True)
     with _lock:
@@ -322,7 +351,7 @@ def open_ticket(src, user_id, name, tag, body, copy_from=None, copy_msg=None, ra
              "taken_at": 0, "closed": False, "reminded": False, "replies": []}
         S["tickets"][tid] = t
     m = call("sendMessage", chat_id=GROUP, text=header(t) + "\n\n" + body,
-             parse_mode="HTML", reply_markup=kb_open(tid), disable_web_page_preview=1)
+             parse_mode="HTML", reply_markup=kb_open(t), disable_web_page_preview=1)
     if not m:
         log("פתיחת כרטיס %s נכשלה — אין קבוצה?" % tid)
         return None
@@ -1043,7 +1072,24 @@ def selftest():
     check("פונה חדש אחרי הסנכרון כן מגיע לקבוצה",
           "שלום ראשון" in "".join(kw.get("text", "") for m, kw in sent))
 
-    # ⑧ קובץ חתוך באמצע כתיבה אינו מפיל כלום
+    # ⑧ פנייה מטלגרם בלי שם משתמש — קישורים לפרופיל לפי מזהה
+    sent.clear()
+    on_user_message({"message_id": 7001, "chat": {"id": 1022207172, "type": "private"},
+                     "from": {"id": 1022207172, "first_name": "בלי יוזר"},
+                     "text": "שלום"})
+    card = [kw for m, kw in sent if m == "sendMessage"][0]
+    check("נרשם שאין שם משתמש", "אין שם משתמש" in card["text"])
+    check("קישור פרופיל לאנדרואיד/דסקטופ",
+          'href="tg://user?id=1022207172"' in card["text"])
+    check("סכמת אייפון להעתקה",
+          "tg://openmessage?user_id=1022207172" in card["text"])
+    check("כפתור פרופיל בראש המקלדת",
+          card["reply_markup"]["inline_keyboard"][0][0]["url"]
+          == "tg://user?id=1022207172")
+    check("כפתורי הטיפול נשארו",
+          len(card["reply_markup"]["inline_keyboard"]) == 2)
+
+    # ⑨ קובץ חתוך באמצע כתיבה אינו מפיל כלום
     open(FB, "w", encoding="utf-8").write('{"g:d@x.com": {"mes')
     check("JSON חתוך מוחזר כ-None ולא קורס", fb_read() is None)
 
