@@ -84,7 +84,7 @@ ME = {}
 # מספר גרסה שמודפס בעלייה ומוחזר ב-/ping. בלעדיו "הבוט לא מגיב"
 # ו"רץ בשרת קוד שאינו מכיר את הפקודה" נראים אותו דבר מבחוץ, וזה בדיוק
 # מה שבלבל אותנו: raw.githubusercontent מגיש מהמטמון עד חמש דקות.
-VERSION = "3"
+VERSION = "4"
 
 # --selftest מריץ את צד ה-HTTP בלי טלגרם: פותח כרטיס, עונה לו, קורא
 # את השיחה ובודק שה-token נדרש. זה מה שמוודא שהאתר והאפליקציה יעבדו
@@ -183,7 +183,11 @@ def call(method, http_timeout=30, _lane="send", **params):
         wait = int(out.get("parameters", {}).get("retry_after", 3))
         log("429 על %s — ממתין %ds" % (method, wait))
         time.sleep(wait)
-    else:
+    elif "query is too old" in desc:
+        # הלחיצה נענתה מאוחר מדי. הפעולה עצמה כן בוצעה; מה שאבד הוא רק
+        # ההודעה הקופצת. נרשם כאזהרה עם הסבר, כדי שלא ייראה ככשל.
+        log("⚠️ לחיצה נענתה באיחור — הפעולה בוצעה, החיווי למנהל לא הוצג")
+    elif "message is not modified" not in desc:
         log("שגיאה %s: %s" % (method, desc))
     return None
 
@@ -282,14 +286,30 @@ def header(t):
 
 
 def refresh_card(t):
+    """מצייר מחדש את הכרטיס, ורק אם באמת השתנה משהו.
+
+    טלגרם מחזיר "message is not modified" על עריכה זהה, וזו הייתה
+    שליחה מיותרת שגם רשמה שגיאה ביומן על כל לחיצה שלא שינתה כלום.
+    """
     # כרטיס שנענה מהפאנל נשאר קריא אבל בלי כפתורים: אין מה "לתפוס"
     # בשיחה שכבר נענתה במקום אחר, וזה בדיוק מה שמונע שני מנהלים
     # שעונים לאותו אדם.
     kb = None if (t.get("closed") or t.get("panel_answered")) \
         else (kb_taken(t["id"]) if t.get("taken_by") else kb_open(t["id"]))
-    call("editMessageText", chat_id=GROUP, message_id=t["card_msg"],
-         text=header(t) + "\n\n" + t.get("body", ""), parse_mode="HTML",
-         reply_markup=kb, disable_web_page_preview=1)
+    body = header(t) + "\n\n" + t.get("body", "")
+    fingerprint = body + "|" + json.dumps(kb, ensure_ascii=False, sort_keys=True)
+    with _lock:
+        if t.get("card_fp") == fingerprint:
+            return
+    r = call("editMessageText", chat_id=GROUP, message_id=t["card_msg"],
+             text=body, parse_mode="HTML",
+             reply_markup=kb, disable_web_page_preview=1)
+    # נרשם רק אחרי הצלחה: אחרת עריכה שנכשלה ברשת לא הייתה מנוסה שוב
+    # לעולם, והכרטיס היה נשאר מציג מצב ישן.
+    if r is not None:
+        with _lock:
+            t["card_fp"] = fingerprint
+            save()
 
 
 # ── כרטיס חדש ───────────────────────────────────────────────────────────────
@@ -803,7 +823,8 @@ class Handler(BaseHTTPRequestHandler):
         with _lock:
             op = sum(1 for t in S["tickets"].values() if not t.get("closed"))
             br = len(S["fb"])
-        return self._json(200, {"ok": True, "bot": ME.get("username"),
+        return self._json(200, {"ok": True, "version": VERSION,
+                                "bot": ME.get("username"),
                                 "up": int(time.time() - START),
                                 "tickets": len(S["tickets"]), "open": op,
                                 "bridged_chats": br})
@@ -811,7 +832,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def http_server():
     # 127.0.0.1 בלבד: הפתיחה הזו אינה מאומתת, ואין לה מה לעשות באינטרנט.
-    srv = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), Handler)
+    #
+    # פורט תפוס אינו תקלה קטנה: הוא אומר שתהליך קודם עדיין רץ, ושני
+    # בוטים על אותו טוקן גונבים זה מזה עדכונים ב-getUpdates. עד עכשיו
+    # זה היה שורה ביומן בזמן שהשירות נראה תקין לגמרי. מעכשיו הוא נופל,
+    # systemd מנסה שוב, והיומן אומר מה לעשות.
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), Handler)
+    except OSError as e:
+        log("❌ הפורט %d תפוס (%s) — כנראה רץ עוד עותק של הבוט." % (HTTP_PORT, e))
+        log("   בדוק:  pgrep -af support_bot.py   ואז:  systemctl restart zovex-support")
+        os._exit(3)
     log("מאזין ב-127.0.0.1:%d" % HTTP_PORT)
     srv.serve_forever()
 
@@ -943,7 +974,14 @@ def selftest():
     check("ההמשך הגיע לקבוצה", "עדיין נתקע" in "".join(
         kw.get("text", "") for m, kw in sent[-4:]))
 
-    # ⑥ היסטוריה קיימת בעלייה ראשונה אינה מוצפת לקבוצה
+    # ⑥ ציור חוזר של אותו כרטיס אינו שולח עריכה זהה
+    n0 = len([1 for m, _ in sent if m == "editMessageText"])
+    refresh_card(t)
+    refresh_card(t)
+    check("עריכה זהה אינה נשלחת שוב",
+          len([1 for m, _ in sent if m == "editMessageText"]) == n0)
+
+    # ⑦ היסטוריה קיימת בעלייה ראשונה אינה מוצפת לקבוצה
     S["fb"].clear()
     S["tickets"].clear()
     before = len(sent)
@@ -954,7 +992,7 @@ def selftest():
     pump()
     check("40 הודעות היסטוריה לא הוצפו", len(sent) == before, len(sent) - before)
 
-    # ⑦ קובץ חתוך באמצע כתיבה אינו מפיל כלום
+    # ⑧ קובץ חתוך באמצע כתיבה אינו מפיל כלום
     open(FB, "w", encoding="utf-8").write('{"g:d@x.com": {"mes')
     check("JSON חתוך מוחזר כ-None ולא קורס", fb_read() is None)
 

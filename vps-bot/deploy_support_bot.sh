@@ -86,16 +86,42 @@ StandardError=journal
 WantedBy=multi-user.target
 UEOF
 systemctl daemon-reload
-systemctl enable --now zovex-support || die "ההפעלה נכשלה"
+systemctl enable zovex-support >/dev/null 2>&1
+
+# restart ולא enable --now: ‎--now‎ אינו עושה דבר כששירות כבר פעיל,
+# ולכן כל התקנה חוזרת החליפה את הקובץ בדיסק בעוד התהליך הישן ממשיך
+# לרוץ עם הקוד הקודם בזיכרון. זה בדיוק מה שקרה כאן, ולא נראה כשגיאה.
+systemctl stop zovex-support 2>/dev/null
+# התהליך הישן מחזיק את הפורט; בלי להמתין לשחרורו השירות החדש עולה
+# בלי שרת ה-HTTP ונראה תקין.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  pgrep -f "$DIR/support_bot.py" >/dev/null || break
+  sleep 1
+done
+pgrep -f "$DIR/support_bot.py" >/dev/null && { pkill -f "$DIR/support_bot.py"; sleep 2; }
+systemctl start zovex-support || die "ההפעלה נכשלה"
 
 echo "④ בודק"
 sleep 6
 systemctl is-active --quiet zovex-support || { journalctl -u zovex-support -n 30 --no-pager; die "השירות אינו פעיל"; }
 curl -fsS --max-time 5 http://127.0.0.1:8107/health && echo
-
 # מאמתים שהגרסה שרצה היא זו שהורדנו, ולא קוד ישן ששרד restart כלשהו.
-LIVE=$(journalctl -u zovex-support --since '-1 min' --no-pager | grep -o 'גרסה [0-9]*' | tail -1 | awk '{print $2}')
-[ "$LIVE" = "$VER" ] || echo "⚠️ ביומן מופיעה גרסה '$LIVE' ולא $VER — בדוק את היומן"
+LIVE=$(curl -fsS --max-time 5 http://127.0.0.1:8107/health | grep -o '"version": *"[^"]*"' | cut -d'"' -f4)
+if [ "$LIVE" = "$VER" ]; then
+  echo "   גרסה $LIVE רצה עכשיו ✓"
+else
+  echo "⚠️ השירות מדווח גרסה '$LIVE' ולא $VER"
+  journalctl -u zovex-support -n 30 --no-pager
+  die "הגרסה שרצה אינה זו שהותקנה"
+fi
+# הגשר שותק בשקט אם הקובץ אינו במקום שהוא מחפש בו, ולכן נבדק כאן
+# ולא מתגלה רק כשמשתמש כותב באתר.
+FB="$(grep -m1 '^DATA_DIR=' "$DIR/.env" | cut -d= -f2-)"; FB="${FB:-/opt/zovex-bot/data}/feedback.json"
+if [ -f "$FB" ]; then
+  echo "   גשר האתר: $FB ($(python3 -c "import json;print(len(json.load(open('$FB'))))" 2>/dev/null || echo '?') שיחות) ✓"
+else
+  echo "⚠️ $FB לא נמצא — פניות מהאתר/אפליקציה לא יגיעו לקבוצה"
+fi
 journalctl -u zovex-support -n 12 --no-pager
 echo
 echo "✅ בוט התמיכה פעיל."
