@@ -1335,8 +1335,33 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       // בתוך האפליקציה מקטינים את חלון ה-buffer כדי לצמצם זיכרון ולמנוע קריסה.
       const cfg = {};
       if (isLive) {
-        cfg.streaming = { bufferingGoal: 30, rebufferingGoal: 4,
-          retryParameters: { maxAttempts: 5, baseDelay: 500, backoffFactor: 2, timeout: 15000 } };
+        // [live_recover] שידור חי נתקע אחרי כ-10 דקות — בלי מנגנון התאוששות.
+        //
+        // נמדד: אותו שידור רץ שעתיים רצוף בדפדפן מחוץ לאתר, ונתקע אצלנו
+        // תוך עשר דקות. ההגדרה הקודמת נתנה חלון buffer ונסיונות חוזרים,
+        // אבל שום דבר שמחזיר את הנגן למסלול כשהוא כבר נתקע או נגרר אחורה.
+        //
+        // שלוש תוספות, וכל אחת עונה על כשל אחר:
+        //
+        //   stallEnabled — הנגן תקוע למרות שיש בייטים בבאפר. קורה כשה-
+        //     video element "נתקע" על פריים; דחיפה של 0.1 שנייה משחררת.
+        //   gapDetectionThreshold — חור בציר הזמן. בזרם מרולה חורים כאלה
+        //     נוצרים כשסגמנט חסר, והנגן ממתין שם לנצח במקום לדלג.
+        //   liveSync — הנגן נגרר אחורה מקצה השידור. אחרי מספיק זמן הוא
+        //     נופל מחוץ לחלון ה-DVR של הספק, והסגמנטים שהוא מבקש כבר לא
+        //     קיימים. זה מסביר למה זה קורה דווקא *אחרי* כמה דקות.
+        //
+        // liveSyncMaxLatency הוא 1 כברירת מחדל, ועם bufferingGoal של 20
+        // הנגן יושב ~20 שניות מאחור מעצם התכנון — הדלקה בלי כיוון הייתה
+        // מריצה אותו ב-1.1x ברציפות. 40 שניות הוא סף שמופעל רק על סחיפה
+        // אמיתית.
+        cfg.streaming = {
+          bufferingGoal: 20, rebufferingGoal: 4,
+          stallEnabled: true, stallThreshold: 1, stallSkip: 0.1,
+          gapDetectionThreshold: 0.5,
+          liveSync: true, liveSyncMaxLatency: 40,
+          retryParameters: { maxAttempts: 8, baseDelay: 400,
+                             backoffFactor: 1.8, timeout: 20000 } };
       } else if (inApp) {
         cfg.streaming = { bufferingGoal: 20, rebufferingGoal: 3 };
       }
