@@ -162,7 +162,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   // ‎/api/history‎ מחזיר ‎position‎ ו-‎duration‎ לכל רשומה, ולכן אין צורך
   // בקריאת רשת נוספת כדי לדעת אם יש מאיפה להמשיך. ההיסטוריה מכסה את
   // הפריטים האחרונים, וזה בדיוק מה ש"המשך צפייה" אמור לכסות.
-  const progressById = React.useMemo(() => {
+  const progressById = useMemo(() => {
     const m = {};
     for (const h of history || []) {
       if (h && h.media_id && Number.isFinite(h.position)) {
@@ -172,7 +172,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     return m;
   }, [history]);
 
-  const [resumeAsk, setResumeAsk] = React.useState(null);
+  const [resumeAsk, setResumeAsk] = useState(null);
 
   const fmtTime = (sec) => {
     const t = Math.max(0, Math.floor(sec || 0));
