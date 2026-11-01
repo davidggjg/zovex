@@ -137,9 +137,17 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
         // בלי מיקום, ‎Number.isFinite(item.position)‎ החזיר false, והנגן
         // נפתח על 0. כל שאר שרשרת ההמשכה הייתה תקינה — המיקום פשוט אבד
         // כאן, לפני שהגיע אליה.
-        return found
-          ? {...found, position: h.position, duration: h.duration}
+        if (!found) return null;
+        // [hist_label] עונה ופרק על הכרטיס.
+        //
+        // הכרטיס הציג את ‎title‎ של הפרק בלבד, ובסדרות רבות הוא זהה לכל
+        // הפרקים — ולכן אי אפשר היה לדעת איפה עצרת. התווית נוספת כשדה
+        // נפרד ולא דורסת את ‎title‎, שממנו נבנית הכתובת.
+        const se = (found.season_number && found.episode_number)
+          ? `${found.series_name || found.title} · ע׳${found.season_number} פ׳${found.episode_number}`
           : null;
+        return {...found, position: h.position, duration: h.duration,
+                ...(se ? {_label: se} : {})};
       }).filter(Boolean)
     : [];
 

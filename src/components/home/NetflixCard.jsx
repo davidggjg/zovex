@@ -18,7 +18,10 @@ function buildCardHref(item, isSer, isLive) {
 }
 
 function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
-  const title = isSer ? item.name : item.title;
+  // [hist_label] ‎_label‎ גובר כשהוא קיים — שורת "המשך צפייה" משתמשת בו
+  // כדי להציג עונה ופרק. לא דורסים את ‎title‎ עצמו, כי ‎buildCardHref‎
+  // בונה ממנו את הכתובת כשאין ‎custom_slug‎.
+  const title = item._label || (isSer ? item.name : item.title);
   const href = buildCardHref(item, isSer, isLive);
   return (
     <a

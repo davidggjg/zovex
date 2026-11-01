@@ -157,6 +157,51 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   // ── handlers ──
   // המשך צפייה / היסטוריה — קליק פותח את הנגן ישירות בדיוק בשנייה שנשמרה,
   // בלי לעבור קודם דרך מסך הפרטים ולחצן "המשך לצפייה" נוסף
+  // [resume_ask] מיקום שמור לכל פריט, מתוך ההיסטוריה שכבר נטענה.
+  //
+  // ‎/api/history‎ מחזיר ‎position‎ ו-‎duration‎ לכל רשומה, ולכן אין צורך
+  // בקריאת רשת נוספת כדי לדעת אם יש מאיפה להמשיך. ההיסטוריה מכסה את
+  // הפריטים האחרונים, וזה בדיוק מה ש"המשך צפייה" אמור לכסות.
+  const progressById = React.useMemo(() => {
+    const m = {};
+    for (const h of history || []) {
+      if (h && h.media_id && Number.isFinite(h.position)) {
+        m[h.media_id] = {position: h.position, duration: h.duration || 0};
+      }
+    }
+    return m;
+  }, [history]);
+
+  const [resumeAsk, setResumeAsk] = React.useState(null);
+
+  const fmtTime = (sec) => {
+    const t = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = t % 60;
+    const p = n => String(n).padStart(2, "0");
+    return h ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`;
+  };
+
+  // [resume_ask] נקודת הכניסה היחידה לנגן.
+  //
+  // קודם כל מסלול פתח ישירות: כפתור ההפעלה בדף הסרט, לחיצה על פרק
+  // בסדרה, ולחיצה מההיסטוריה — וכל אחד התנהג אחרת. רק מסלול ההיסטוריה
+  // העביר מיקום, ולכן "המשך צפייה" עבד רק משם. עכשיו כולם עוברים כאן.
+  const playItem = (item, knownPos = null) => {
+    if (!item) return;
+    const saved = Number.isFinite(knownPos)
+      ? {position: knownPos, duration: item.duration || 0}
+      : progressById[item.id];
+    const pos = saved && saved.position;
+    // פחות מדקה אינו "המשך צפייה", וסיום כמעט מלא אומר שהפריט נצפה —
+    // בשני המקרים שאלה כאן היא הטרדה.
+    const nearEnd = saved && saved.duration && pos > saved.duration - 60;
+    if (Number.isFinite(pos) && pos > 60 && !nearEnd) {
+      setResumeAsk({item, position: pos});
+      return;
+    }
+    openWithKalturaRefresh(item, 0);
+  };
+
   const handleContinueWatchingClick = (item) => {
     const action = () => {
       if (item.series_name) setSelectedSeries(item.series_name);
@@ -172,8 +217,8 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
       // fix_history_resume.py בשרת), ולכן אין יותר קריאה שנייה ואין
       // תחרות. שרת שעוד לא עודכן אינו שולח את השדה, ואז ‎null‎ מחזיר
       // את ההתנהגות הקודמת — כלומר זה נופל אחורה ולא נשבר.
-      openWithKalturaRefresh(
-        item, Number.isFinite(item.position) ? item.position : null);
+      // [resume_ask] גם מההיסטוריה שואלים, ולא מדלגים בשקט.
+      playItem(item, Number.isFinite(item.position) ? item.position : null);
     };
     setPendingAction(() => action); setShowDonation(true);
   };
@@ -308,17 +353,54 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     />
   );
 
+  // [resume_ask] הדיאלוג מרונדר בכל ענף render, כי לדף הסרט ולדף הסדרה
+  // יש return מוקדם משלהם — בלעדיו הוא היה מופיע רק במסך הבית.
+  const resumeModal = resumeAsk ? (
+    <div style={{position: "fixed", inset: 0, zIndex: 99999, background: "rgba(0,0,0,.75)",
+                 display: "flex", alignItems: "center", justifyContent: "center",
+                 padding: 20, direction: "rtl"}}
+         onClick={() => setResumeAsk(null)}>
+      <div onClick={e => e.stopPropagation()}
+           style={{background: "#1c1c1e", borderRadius: 18, padding: "22px 20px",
+                   maxWidth: 360, width: "100%", textAlign: "center",
+                   border: "1px solid rgba(255,255,255,.1)"}}>
+        <div style={{fontSize: 17, fontWeight: 800, color: "#fff", marginBottom: 6}}>
+          להמשיך מאיפה שעצרת?
+        </div>
+        <div style={{fontSize: 13, color: "#aaa", marginBottom: 18}}>
+          {resumeAsk.item._label || resumeAsk.item.title || resumeAsk.item.name}
+          <br />עצרת ב-{fmtTime(resumeAsk.position)}
+        </div>
+        <button onClick={() => { const a = resumeAsk; setResumeAsk(null);
+                                 openWithKalturaRefresh(a.item, a.position); }}
+                style={{width: "100%", padding: "13px", borderRadius: 12, border: "none",
+                        background: "#e50914", color: "#fff", fontSize: 15,
+                        fontWeight: 800, cursor: "pointer", fontFamily: "inherit"}}>
+          ▶ המשך מ-{fmtTime(resumeAsk.position)}
+        </button>
+        <button onClick={() => { const a = resumeAsk; setResumeAsk(null);
+                                 openWithKalturaRefresh(a.item, 0); }}
+                style={{width: "100%", padding: "12px", borderRadius: 12, marginTop: 9,
+                        border: "1px solid rgba(255,255,255,.15)", background: "transparent",
+                        color: "#ddd", fontSize: 14, fontWeight: 700,
+                        cursor: "pointer", fontFamily: "inherit"}}>
+          התחל מההתחלה
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   // ── Series page ──
   if (selectedSeries) return (
-    <SeriesView
+    <>{resumeModal}<SeriesView
       seriesName={selectedSeries}
       seriesMap={seriesMap}
-      onEpisodePlay={openWithKalturaRefresh}
+      onEpisodePlay={playItem}
       // BASE_URL ולא "/zovex/" קשיח: הבסיס הוא /zovex/ ב-GitHub Pages
       // ו-/ בשרת. הכתובת הקשיחה הפכה סגירת דף בשרת לכתובת שמחזירה 404
       // ברענון.
       onClose={() => { setSelectedSeries(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
-    />
+    /></>
   );
 
   // ── דף ערוץ חי: פוסטר, כפתור צפייה, ומתחתיו לוח השידורים ──
@@ -339,20 +421,21 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
 
   // ── Movie page ──
   if (selectedMovie) return (
-    <MovieDetail
+    <>{resumeModal}<MovieDetail
       movie={selectedMovie}
       movies={movies}
-      onPlay={() => openWithKalturaRefresh(selectedMovie)}
+      onPlay={() => playItem(selectedMovie)}
       onClose={() => { setSelectedMovie(null); window.history.replaceState(null, "", import.meta.env.BASE_URL); }}
       onSelectMovie={setSelectedMovie}
       isFavorite={isFavorite(selectedMovie.id)}
       onToggleFavorite={user?.id ? toggleFavorite : null}
-    />
+    /></>
   );
 
   // ── Home grid ──
   return (
     <>
+      {resumeModal}
       {donationModal}
 
       {/* ── Live Player — נפתח מתוך קטגוריית "שידורים חיים", דרך אותו נגן מאוחד כמו כל שאר התוכן ── */}
