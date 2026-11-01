@@ -84,7 +84,7 @@ ME = {}
 # מספר גרסה שמודפס בעלייה ומוחזר ב-/ping. בלעדיו "הבוט לא מגיב"
 # ו"רץ בשרת קוד שאינו מכיר את הפקודה" נראים אותו דבר מבחוץ, וזה בדיוק
 # מה שבלבל אותנו: raw.githubusercontent מגיש מהמטמון עד חמש דקות.
-VERSION = "4"
+VERSION = "5"
 
 # --selftest מריץ את צד ה-HTTP בלי טלגרם: פותח כרטיס, עונה לו, קורא
 # את השיחה ובודק שה-token נדרש. זה מה שמוודא שהאתר והאפליקציה יעבדו
@@ -646,8 +646,11 @@ def fb_src(th):
 
 def fb_ticket(uid, th):
     with _lock:
-        rec = S["fb"].get(uid)
-        t = S["tickets"].get(rec["tid"]) if rec else None
+        # ‎.get("tid")‎ ולא ‎["tid"]‎: הרשומה נוצרת בעלייה הראשונה עם
+        # ‎seen‎ בלבד, ו-tid נולד רק בפנייה הראשונה. הגישה הישירה זרקה
+        # KeyError בדיוק ברגע שבו הגשר היה אמור לעבוד.
+        rec = S["fb"].get(uid) or {}
+        t = S["tickets"].get(rec.get("tid") or "")
     if t and not t.get("closed"):
         return t
     name = th.get("name") or th.get("email") or uid
@@ -664,42 +667,61 @@ def fb_ticket(uid, th):
 KINDS = {"support": "💬 תמיכה", "review": "⭐ חוות דעת", "tip": "💡 טיפ"}
 
 
+# הסריקה הראשונה מסמנת את ההיסטוריה הקיימת כנראה, כדי שעלייה של
+# השירות לא תשפוך 72 שיחות ישנות לקבוצה. אחריה, שיחה שלא ראינו היא
+# שיחה **חדשה** — משתמש שכותב בפעם הראשונה — וההודעה שלו חייבת לעבור.
+# בלי ההבחנה הזו כל פונה חדש היה נבלע בשקט.
+_primed = False
+
+
 def fb_watch():
-    first = True
+    global _primed
     while True:
         try:
             d = fb_read()
             if d is None:
                 time.sleep(FEEDBACK_POLL)
                 continue
-            for uid, th in d.items():
-                if not isinstance(th, dict):
-                    continue
-                msgs = th.get("messages") or []
+            if not _primed:
                 with _lock:
-                    rec = S["fb"].setdefault(uid, {})
-                    seen = rec.get("seen")
-                    if seen is None:
-                        # בעלייה ראשונה לא מציפים את הקבוצה בכל ההיסטוריה:
-                        # מסמנים את מה שקיים כנראה וממשיכים מכאן.
-                        rec["seen"] = len(msgs)
-                        save()
-                        seen = len(msgs)
-                fresh = msgs[seen:]
-                if not fresh:
-                    continue
-                for m in fresh:
-                    if m.get("from") == "user":
-                        fb_user_msg(uid, th, m)
-                    elif m.get("from") == "admin":
-                        fb_admin_msg(uid, m)
-                with _lock:
-                    S["fb"][uid]["seen"] = len(msgs)
+                    for uid, th in d.items():
+                        if isinstance(th, dict):
+                            S["fb"].setdefault(uid, {}).setdefault(
+                                "seen", len(th.get("messages") or []))
                     save()
+                _primed = True
+                log("גשר התמיכה מסונכרן: %d שיחות" % len(d))
+            for uid, th in d.items():
+                try:
+                    fb_scan_one(uid, th)
+                except Exception as e:
+                    # לכל שיחה try משלה. קודם החריגה נתפסה סביב כל
+                    # הסריקה, ולכן שיחה אחת שבורה שתקה את כל 72 —
+                    # וזה בדיוק מה שקרה.
+                    log("שיחה %s נכשלה: %s: %s" % (uid, type(e).__name__, e))
         except Exception as e:
-            log("גשר התמיכה נפל: %s" % e)
-        first = False
+            log("גשר התמיכה נפל: %s: %s" % (type(e).__name__, e))
         time.sleep(FEEDBACK_POLL)
+
+
+def fb_scan_one(uid, th):
+    """סורק שיחה אחת ומעביר לקבוצה את מה שחדש בה."""
+    if not isinstance(th, dict):
+        return
+    msgs = th.get("messages") or []
+    with _lock:
+        # ברירת המחדל היא 0, לא len(msgs): שיחה שאינה מוכרת בשלב הזה
+        # היא פונה חדש, וההודעה הראשונה שלו היא בדיוק מה שצריך להגיע
+        # לקבוצה. ההיסטוריה הישנה כבר סומנה בסריקה הראשונה של fb_watch.
+        seen = S["fb"].setdefault(uid, {}).setdefault("seen", 0)
+    for m in msgs[seen:]:
+        if m.get("from") == "user":
+            fb_user_msg(uid, th, m)
+        elif m.get("from") == "admin":
+            fb_admin_msg(uid, m)
+    with _lock:
+        S["fb"][uid]["seen"] = len(msgs)
+        save()
 
 
 def fb_user_msg(uid, th, m):
@@ -914,21 +936,42 @@ def selftest():
                                  "email": email, "messages": msgs}},
                   open(FB, "w", encoding="utf-8"), ensure_ascii=False)
 
+    errs = []
+
+    def prime():
+        """מדמה את הסריקה הראשונה של fb_watch, שמסמנת היסטוריה כנראה."""
+        d = fb_read() or {}
+        for uid, th in d.items():
+            S["fb"].setdefault(uid, {}).setdefault("seen", len(th.get("messages") or []))
+        globals()["_primed"] = True
+
     def pump():
+        # דרך fb_scan_one ולא עקיפה שלו: הבאג שהשבית את הגשר בשרת היה
+        # בתוכו, ובדיקה שמדלגת עליו לא הייתה תופסת אותו.
         d = fb_read()
         for uid, th in d.items():
-            msgs = th.get("messages") or []
-            rec = S["fb"].setdefault(uid, {})
-            seen = rec.get("seen") or 0
-            for m in msgs[seen:]:
-                if m.get("from") == "user":
-                    fb_user_msg(uid, th, m)
-                else:
-                    fb_admin_msg(uid, m)
-            S["fb"][uid]["seen"] = len(msgs)
+            try:
+                fb_scan_one(uid, th)
+            except Exception as e:
+                errs.append("%s: %s" % (type(e).__name__, e))
 
     def last_text():
         return [kw for m, kw in sent if m in ("sendMessage", "editMessageText")][-1]["text"]
+
+    # ⓪ רשומה מעלייה קודמת מחזיקה seen בלבד, בלי tid. זה המצב המדויק
+    #    שהיה ב-support_state.json בשרת: 72 שיחות, כולן בלי tid, וכל
+    #    סריקה נפלה על KeyError לפני שהספיקה להעביר משהו לקבוצה.
+    write_fb([{"from": "user", "text": "ישן", "ts": "t0"}])
+    S["fb"]["g:d@x.com"] = {"seen": 1}
+    write_fb([{"from": "user", "text": "ישן", "ts": "t0"},
+              {"from": "user", "text": "בדיקה", "ts": "t1"}])
+    pump()
+    check("רשומה בלי tid אינה מפילה את הסריקה", errs == [], errs)
+    check("הפנייה אחרי שדרוג גרסה כן מגיעה לקבוצה",
+          "בדיקה" in "".join(kw.get("text", "") for m, kw in sent))
+    S["fb"].clear()
+    S["tickets"].clear()
+    sent.clear()
 
     # ① פנייה חדשה מהאתר נכנסת לקבוצה
     write_fb([{"from": "user", "text": "הסרט נתקע <b>בדקה 3</b>", "ts": "t1",
@@ -981,16 +1024,24 @@ def selftest():
     check("עריכה זהה אינה נשלחת שוב",
           len([1 for m, _ in sent if m == "editMessageText"]) == n0)
 
-    # ⑦ היסטוריה קיימת בעלייה ראשונה אינה מוצפת לקבוצה
+    # ⑦ היסטוריה קיימת בעלייה ראשונה אינה מוצפת לקבוצה — אבל פונה
+    #    חדש שמגיע *אחריה* כן עובר.
     S["fb"].clear()
     S["tickets"].clear()
+    globals()["_primed"] = False
     before = len(sent)
     write_fb([{"from": "user", "text": "הודעה %d" % i, "ts": "t"} for i in range(40)])
-    d = fb_read()
-    for uid, th in d.items():
-        S["fb"].setdefault(uid, {})["seen"] = len(th["messages"])
+    prime()
     pump()
     check("40 הודעות היסטוריה לא הוצפו", len(sent) == before, len(sent) - before)
+
+    json.dump({"g:new@x.com": {"user_id": "g:new@x.com", "name": "חדש",
+                               "messages": [{"from": "user", "text": "שלום ראשון",
+                                             "ts": "t9", "kind": "support"}]}},
+              open(FB, "w", encoding="utf-8"), ensure_ascii=False)
+    pump()
+    check("פונה חדש אחרי הסנכרון כן מגיע לקבוצה",
+          "שלום ראשון" in "".join(kw.get("text", "") for m, kw in sent))
 
     # ⑧ קובץ חתוך באמצע כתיבה אינו מפיל כלום
     open(FB, "w", encoding="utf-8").write('{"g:d@x.com": {"mes')
