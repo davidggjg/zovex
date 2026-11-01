@@ -713,8 +713,8 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
           onTouchEnd={() => setDragging(false)}
         >
           <div style={{ width: "100%", height: 5, background: "rgba(255,255,255,0.25)", borderRadius: 3, position: "relative" }}>
-            <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${progress}%`, background: "#e91e8c", borderRadius: 3 }} />
-            <div style={{ position: "absolute", top: "50%", left: `${progress}%`, transform: "translate(-50%,-50%)", width: 16, height: 16, borderRadius: "50%", background: "#e91e8c", boxShadow: "0 0 6px rgba(233,30,140,0.7)" }} />
+            <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: `${progress}%`, background: "#2f7dfb", borderRadius: 3 }} />
+            <div style={{ position: "absolute", top: "50%", left: `${progress}%`, transform: "translate(-50%,-50%)", width: 16, height: 16, borderRadius: "50%", background: "#2f7dfb", boxShadow: "0 0 6px rgba(47,125,251,0.65)" }} />
           </div>
         </div>
       )}
@@ -790,13 +790,37 @@ const iconBtn = {
   WebkitTapHighlightColor: "transparent",
 };
 
+// [player_skin] כפתורי המרכז — עיגול כהה שקוף במקום אייקון עירום.
+//
+// קודם הם היו ‎background: none‎, כלומר אייקון לבן ישירות על הווידאו.
+// בסצנה בהירה הוא נבלע, ובסצנה כהה הוא נראה מרחף בלי גבול. עיגול כהה
+// עם טשטוש נותן ניגוד קבוע בלי קשר למה שמתנגן מאחור — זה מה שנגני
+// הסטרימינג הגדולים עושים, ומאותה סיבה.
+//
+// הטשטוש עם נפילה חזרה: ‎backdrop-filter‎ אינו נתמך בכל מנוע, ואז
+// נשאר רקע כהה אטום למחצה שעדיין עושה את העבודה.
 const centerBtn = {
-  background: "none", border: "none", color: "#fff",
-  width: 60, height: 60, borderRadius: "50%", cursor: "pointer",
+  background: "rgba(22,22,26,0.55)",
+  backdropFilter: "blur(10px) saturate(140%)",
+  WebkitBackdropFilter: "blur(10px) saturate(140%)",
+  border: "1px solid rgba(255,255,255,0.14)",
+  color: "#fff",
+  width: 56, height: 56, borderRadius: "50%", cursor: "pointer",
   display: "flex", alignItems: "center", justifyContent: "center",
   position: "relative", flexShrink: 0,
+  transition: "transform .15s ease, background .2s ease",
   WebkitTapHighlightColor: "transparent",
   outline: "none",
+};
+
+// כפתור הנגינה גדול יותר ונושא את צבע ההדגשה — הוא הפעולה הראשית,
+// ושאר הכפתורים משניים לו.
+const playBtn = {
+  ...centerBtn,
+  width: 72, height: 72,
+  background: "rgba(47,125,251,0.22)",
+  border: "1px solid rgba(47,125,251,0.55)",
+  boxShadow: "0 0 22px rgba(47,125,251,0.35)",
 };
 
 // ─── אייקון הדילוג ─────────────────────────────────────────────
@@ -963,7 +987,7 @@ function ControlsLayer({ videoRef, title, episode, onClose, onSkip, skipAnim, is
           </button>
         )}
         {/* play/pause */}
-        <button onClick={togglePlay} style={{ ...centerBtn, width: 64, height: 64 }}>
+        <button onClick={togglePlay} style={playBtn}>
           {playing
             ? <svg width="34" height="34" viewBox="0 0 28 28" fill="white"><rect x="3" y="3" width="8" height="22" rx="2"/><rect x="17" y="3" width="8" height="22" rx="2"/></svg>
             : <svg width="34" height="34" viewBox="0 0 28 28" fill="white"><polygon points="5,2 26,14 5,26"/></svg>
@@ -1331,7 +1355,7 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
     <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
       {loading && (
         <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center", background: "#000" }}>
-          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #e91e8c", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #2f7dfb", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
@@ -1544,7 +1568,7 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
     <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
       {loading && (
         <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center", background: "#000" }}>
-          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #e91e8c", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #2f7dfb", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
         </div>
       )}
       <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
@@ -1593,7 +1617,7 @@ function IframePlayer({ src, movie, onClose }) {
       {/* loading spinner */}
       {!loaded && (
         <div style={{ position: "absolute", inset: 0, zIndex: 10, background: "#000", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ width: 48, height: 48, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #e91e8c", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <div style={{ width: 48, height: 48, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #2f7dfb", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
         </div>
       )}
 
