@@ -22,7 +22,10 @@
 set -u
 DIR=/opt/zovex-bot
 BRANCH="claude/telegram-bots-video-freezing-m8rk0n"
-RAW="https://raw.githubusercontent.com/davidggjg/zovex/${BRANCH}/vps-bot/support_bot.py"
+# ?t= מכריח את המטמון של raw.githubusercontent להתחדש. בלעדיו הרצה
+# מחדש מיד אחרי דחיפה מורידה עד חמש דקות את הקובץ הקודם, והשרת ממשיך
+# להריץ קוד שאינו מכיר את התיקון שזה עתה נכתב. זה בדיוק מה שקרה.
+RAW="https://raw.githubusercontent.com/davidggjg/zovex/${BRANCH}/vps-bot/support_bot.py?t=$(date +%s)"
 UNIT=/etc/systemd/system/zovex-support.service
 die(){ echo "❌ $*" >&2; exit 1; }
 
@@ -44,10 +47,22 @@ fi
 chmod 600 "$DIR/.env"
 
 echo "① מוריד את הקוד"
-curl -fsSL "$RAW" -o "$DIR/support_bot.py" || die "ההורדה נכשלה"
-python3 -m py_compile "$DIR/support_bot.py" || die "הקוד לא מתקמפל"
+curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+     "$RAW" -o "$DIR/support_bot.py.new" || die "ההורדה נכשלה"
+python3 -m py_compile "$DIR/support_bot.py.new" || die "הקוד שהורד לא מתקמפל"
+VER=$(grep -m1 '^VERSION = ' "$DIR/support_bot.py.new" | cut -d'"' -f2)
+[ -n "$VER" ] || die "הקובץ שהתקבל אינו support_bot.py (מטמון?)"
+echo "   גרסה $VER"
+mv "$DIR/support_bot.py.new" "$DIR/support_bot.py"
 
-echo "② כותב יחידת systemd"
+echo "② בדיקה עצמית לפני שמחליפים שירות פעיל"
+SUPPORT_STATE=/tmp/zovex_support_pre.json python3 "$DIR/support_bot.py" --selftest \
+  >/tmp/zovex_support_selftest.log 2>&1 \
+  || { tail -20 /tmp/zovex_support_selftest.log; die "הבדיקה העצמית נכשלה — השירות לא נוגע"; }
+grep -c '✅' /tmp/zovex_support_selftest.log | xargs -I{} echo "   {} בדיקות עברו"
+rm -f /tmp/zovex_support_pre.json
+
+echo "③ כותב יחידת systemd"
 cat > "$UNIT" <<UEOF
 [Unit]
 Description=ZOVEX support bridge bot
@@ -73,11 +88,15 @@ UEOF
 systemctl daemon-reload
 systemctl enable --now zovex-support || die "ההפעלה נכשלה"
 
-echo "③ בודק"
+echo "④ בודק"
 sleep 6
 systemctl is-active --quiet zovex-support || { journalctl -u zovex-support -n 30 --no-pager; die "השירות אינו פעיל"; }
 curl -fsS --max-time 5 http://127.0.0.1:8107/health && echo
-journalctl -u zovex-support -n 8 --no-pager
+
+# מאמתים שהגרסה שרצה היא זו שהורדנו, ולא קוד ישן ששרד restart כלשהו.
+LIVE=$(journalctl -u zovex-support --since '-1 min' --no-pager | grep -o 'גרסה [0-9]*' | tail -1 | awk '{print $2}')
+[ "$LIVE" = "$VER" ] || echo "⚠️ ביומן מופיעה גרסה '$LIVE' ולא $VER — בדוק את היומן"
+journalctl -u zovex-support -n 12 --no-pager
 echo
 echo "✅ בוט התמיכה פעיל."
 echo "   בדיקה 1: כתוב /ping בקבוצה — הבוט יענה שם עם מצבו."

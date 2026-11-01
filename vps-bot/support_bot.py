@@ -81,6 +81,10 @@ CLAIM_RELEASE = int(os.environ.get("SUPPORT_CLAIM_RELEASE", "1800"))  # 30 דק�
 API = "https://api.telegram.org/bot%s/" % TOKEN
 START = time.time()
 ME = {}
+# מספר גרסה שמודפס בעלייה ומוחזר ב-/ping. בלעדיו "הבוט לא מגיב"
+# ו"רץ בשרת קוד שאינו מכיר את הפקודה" נראים אותו דבר מבחוץ, וזה בדיוק
+# מה שבלבל אותנו: raw.githubusercontent מגיש מהמטמון עד חמש דקות.
+VERSION = "3"
 
 # --selftest מריץ את צד ה-HTTP בלי טלגרם: פותח כרטיס, עונה לו, קורא
 # את השיחה ובודק שה-token נדרש. זה מה שמוודא שהאתר והאפליקציה יעבדו
@@ -402,15 +406,21 @@ def on_ping(msg):
         perms = "✅ חבר בקבוצה (מנהל אינו נדרש)"
     else:
         perms = "⚠️ מצב בקבוצה: %s" % esc(status)
+    with _lock:
+        bridged = len(S["fb"])
+    fb_ok = os.path.exists(FEEDBACK_FILE)
     call("sendMessage", chat_id=GROUP, parse_mode="HTML",
          reply_to_message_id=msg["message_id"],
          text="🟢 <b>בוט התמיכה פעיל</b>\n"
-              "@%s · למעלה %dh %dm\n"
+              "@%s · גרסה %s · למעלה %dh %dm\n"
               "%s\n"
-              "עריכת הודעות של אחרים: %s\n"
+              "גשר האתר/אפליקציה: %s · %d שיחות\n"
+              "החזרת תשובות לאתר: %s\n"
               "כרטיסים: %d פתוחים מתוך %d · %d נתפסו"
-              % (esc(me.get("username")), up // 3600, (up % 3600) // 60,
-                 perms, "✅" if can_edit else "—", op, tot, taken))
+              % (esc(me.get("username")), VERSION, up // 3600, (up % 3600) // 60,
+                 perms, "✅" if fb_ok else "❌ feedback.json לא נמצא", bridged,
+                 "✅" if PANEL_PASSWORD else "❌ PANEL_PASSWORD חסר",
+                 op, tot, taken))
 
 
 # ── תשובת מנהל: תגובה להודעה בקבוצה ─────────────────────────────────────────
@@ -517,22 +527,25 @@ def on_group_edit(msg):
 
 # ── כפתורים ─────────────────────────────────────────────────────────────────
 def on_callback(cq):
-    call("answerCallbackQuery", callback_query_id=cq["id"])  # ראשון, תמיד
+    # answerCallbackQuery נשלח פעם אחת בלבד: הראשון הוא שמוריד את השעון
+    # המסתובב, והשני מתעלמים ממנו — ולכן ההודעה "כבר מטפל בזה" צריכה
+    # להיות בראשון. הפענוח שלפניו הוא מקומי ואינו לוקח זמן.
     data = cq.get("data") or ""
-    if ":" not in data:
-        return
-    act, tid = data.split(":", 1)
+    act, tid = (data.split(":", 1) + [""])[:2] if ":" in data else ("", "")
     with _lock:
         t = S["tickets"].get(tid)
-    if not t:
-        return
     name = who(cq["from"])[0]
+    note = None
+    if not t:
+        note = "הכרטיס הזה לא קיים יותר"
+    elif act == "take" and t.get("taken_by") and t["taken_by"] != name:
+        note = "%s כבר מטפל בזה" % t["taken_by"]
+    call("answerCallbackQuery", callback_query_id=cq["id"], text=note,
+         show_alert=1 if note else None)
+    if note or not t:
+        return
     with _lock:
         if act == "take":
-            if t.get("taken_by") and t["taken_by"] != name:
-                call("answerCallbackQuery", callback_query_id=cq["id"],
-                     text="%s כבר מטפל בזה" % t["taken_by"], show_alert=True)
-                return
             t["taken_by"], t["taken_at"], t["reminded"] = name, int(time.time()), False
         elif act == "free":
             t["taken_by"], t["taken_at"], t["reminded"] = None, 0, False
@@ -958,7 +971,18 @@ def main():
     if not me:
         log("getMe נכשל — טוקן שגוי או אין רשת")
         sys.exit(1)
-    log("עלה כ-@%s" % me.get("username"))
+    log("עלה כ-@%s · גרסה %s" % (me.get("username"), VERSION))
+    # privacy mode הוא ההסבר הנפוץ ל"בקבוצה הוא לא מגיב": בוט שהוא
+    # דלוק אינו מקבל הודעות רגילות בקבוצה, אלא רק פקודות ותגובות
+    # להודעות שלו עצמו. זה מודפס כדי שלא נחפש את זה בקוד.
+    if not me.get("can_read_all_group_messages"):
+        log("privacy mode דלוק — הבוט מקבל בקבוצה רק פקודות ותגובות "
+            "להודעות שלו. לכיבוי: BotFather → Bot Settings → Group Privacy → Turn off")
+    log("גשר התמיכה: %s" % FEEDBACK_FILE)
+    if not os.path.exists(FEEDBACK_FILE):
+        log("⚠️ הקובץ אינו קיים — הגשר לא יראה פניות מהאתר. בדוק DATA_DIR ב-.env")
+    if not PANEL_PASSWORD:
+        log("⚠️ PANEL_PASSWORD חסר — אי אפשר להחזיר תשובה לצ'אט של האתר")
     threading.Thread(target=janitor, daemon=True).start()
     threading.Thread(target=http_server, daemon=True).start()
     threading.Thread(target=fb_watch, daemon=True).start()
