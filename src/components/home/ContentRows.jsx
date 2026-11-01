@@ -130,7 +130,16 @@ function NetflixRows({ movies, seriesMap, liveChannels, allCategories, selectedC
     ? history.slice(0, 10).map(h => {
         const found = movies.find(m => m.id === h.media_id) ||
           Object.values(seriesMap).flatMap(s => s.episodes).find(e => e.id === h.media_id);
-        return found ? found : null;
+        // [resume] המיקום נוסע יחד עם הפריט.
+        //
+        // ‎found‎ הוא הפריט מהקטלוג, ולפריט קטלוג אין ‎position‎ — זה נתון
+        // היסטוריה. בלי השורה הזו ‎handleContinueWatchingClick‎ קיבל פריט
+        // בלי מיקום, ‎Number.isFinite(item.position)‎ החזיר false, והנגן
+        // נפתח על 0. כל שאר שרשרת ההמשכה הייתה תקינה — המיקום פשוט אבד
+        // כאן, לפני שהגיע אליה.
+        return found
+          ? {...found, position: h.position, duration: h.duration}
+          : null;
       }).filter(Boolean)
     : [];
 
