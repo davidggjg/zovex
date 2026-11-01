@@ -33,11 +33,23 @@
 #
 # ## אתר ואפליקציה
 #
-# השירות מאזין גם ב-127.0.0.1:8099 על /ticket, כדי שהאתר והאפליקציה
-# יוכלו לפתוח כרטיס דרך main.py בלי שהתמיכה תהיה תלויה בו. פנייה כזו
-# נכנסת לאותה קבוצה ומסומנת כ"אתר" או "אפליקציה"; אין למי להחזיר
-# תשובה בטלגרם, ולכן התשובה נשמרת בקובץ המצב וה-API של האתר יקרא
-# אותה. חלק זה פתוח לשימוש רק מהמכונה עצמה.
+# לאתר ולאפליקציה **כבר יש** צ'אט תמיכה: SupportModal.jsx כותב
+# ל-/feedback/send, המשתמש קורא ב-/feedback/mine, והמנהל עונה בפאנל.
+# לכן לא נבנה כאן ממשק שני — זה היה מפצל את התמיכה לשני מקומות שאינם
+# רואים אחד את השני, וזה גרוע מלא לעשות כלום.
+#
+# מה שנבנה הוא גשר:
+#
+#   משתמש באתר/באפליקציה כותב → feedback.json → כרטיס באותה קבוצה
+#   מנהל מגיב להודעה בקבוצה → POST /feedback/reply → ההודעה מופיעה
+#   בצ'אט שלו באתר ובאפליקציה, ובטלפון מגיעה התראה
+#
+# התשובה נכתבת דרך ה-API של main.py ולא ישירות ל-feedback.json: הנתיב
+# הזה הוא שמסמן unread, ושולח את ה-push דרך FCM. כתיבה ישירה לקובץ
+# הייתה גם מתחרה על אותו קובץ עם main.py וגם משתיקה את ההתראה.
+#
+# התוצאה: המנהלים עונים לאתר, לאפליקציה ולטלגרם מאותה קבוצה אחת,
+# והמשתמש מקבל את התשובה במקום שבו הוא שאל.
 #
 #   SUPPORT_BOT_TOKEN  — טוקן הבוט (ב-/opt/zovex-bot/.env)
 #   SUPPORT_GROUP_ID   — מזהה קבוצת המנהלים
@@ -57,11 +69,27 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TOKEN = os.environ.get("SUPPORT_BOT_TOKEN", "").strip()
 GROUP = os.environ.get("SUPPORT_GROUP_ID", "").strip()
 STATE = os.environ.get("SUPPORT_STATE", "/opt/zovex-bot/support_state.json")
-HTTP_PORT = int(os.environ.get("SUPPORT_HTTP_PORT", "8099"))
+HTTP_PORT = int(os.environ.get("SUPPORT_HTTP_PORT", "8107"))
+FEEDBACK_FILE = os.environ.get(
+    "FEEDBACK_FILE",
+    os.path.join(os.environ.get("DATA_DIR", "/opt/zovex-bot/data"), "feedback.json"))
+MAIN_API = "http://127.0.0.1:%s" % os.environ.get("PORT", "8000")
+PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "").strip()
+FEEDBACK_POLL = int(os.environ.get("SUPPORT_FEEDBACK_POLL", "10"))
 CLAIM_REMIND = int(os.environ.get("SUPPORT_CLAIM_REMIND", "900"))   # 15 דקות
 CLAIM_RELEASE = int(os.environ.get("SUPPORT_CLAIM_RELEASE", "1800"))  # 30 דקות
 API = "https://api.telegram.org/bot%s/" % TOKEN
 START = time.time()
+ME = {}
+
+# --selftest מריץ את צד ה-HTTP בלי טלגרם: פותח כרטיס, עונה לו, קורא
+# את השיחה ובודק שה-token נדרש. זה מה שמוודא שהאתר והאפליקציה יעבדו
+# בלי לחכות למשתמש אמיתי.
+SELFTEST = "--selftest" in sys.argv
+if SELFTEST:
+    TOKEN = TOKEN or "selftest"
+    GROUP = GROUP or "-1"
+    STATE = os.environ.get("SUPPORT_STATE", "/tmp/zovex_support_selftest.json")
 
 if not TOKEN or not GROUP:
     sys.stderr.write("SUPPORT_BOT_TOKEN / SUPPORT_GROUP_ID חסרים\n")
@@ -77,36 +105,87 @@ def log(msg):
 #
 # שגיאה מטלגרם אינה מפילה את התהליך: הבוט הזה אמור לשרוד רעש רשת,
 # 429, ומשתמש שחסם את הבוט. כל קריאה מחזירה None בכשל והקורא מחליט.
-def call(method, http_timeout=30, **params):
-    data = urllib.parse.urlencode(
+#
+# ## למה http.client ולא urllib
+#
+# urlopen פותח חיבור חדש לכל קריאה: TCP, ואחריו TLS handshake שלם.
+# מהשרת הזה ל-api.telegram.org זה היה הרוב המוחלט של זמן התגובה —
+# תשובה אחת למנהל היא שתיים-שלוש קריאות (שליחה, עריכת כרטיס, ריאקשן),
+# כלומר שלושה handshakes. חיבור אחד שנשמר פתוח משלם את זה פעם אחת.
+#
+# הנעילה נחוצה כי התגובות מטופלות בשרשורים: שתי קריאות במקביל על אותו
+# socket מערבבות תשובות. ה-polling מחזיק חיבור נפרד משלו כדי שלא יחסום
+# שליחות בזמן שהוא תלוי 60 שניות על getUpdates.
+import http.client
+
+_HOST = "api.telegram.org"
+_PATH = "/bot%s/" % TOKEN
+_conn = {}
+_conn_lock = {"send": threading.Lock(), "poll": threading.Lock()}
+SLOW_MS = int(os.environ.get("SUPPORT_SLOW_MS", "2500"))
+
+
+def _request(lane, method, http_timeout, body):
+    with _conn_lock[lane]:
+        for attempt in (1, 2):
+            c = _conn.get(lane)
+            if c is None or getattr(c, "_zovex_timeout", None) != http_timeout:
+                if c is not None:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                c = http.client.HTTPSConnection(_HOST, timeout=http_timeout)
+                c._zovex_timeout = http_timeout
+                _conn[lane] = c
+            try:
+                c.request("POST", _PATH + method, body,
+                          {"Content-Type": "application/x-www-form-urlencoded",
+                           "Connection": "keep-alive"})
+                r = c.getresponse()
+                return r.status, r.read()
+            except Exception as e:
+                # חיבור שנשמר פתוח נסגר מהצד השני בשקט. ניסיון שני על
+                # חיבור חדש אינו "ניסיון חוזר" אמיתי אלא אותה קריאה.
+                try:
+                    c.close()
+                except Exception:
+                    pass
+                _conn[lane] = None
+                if attempt == 2:
+                    raise
+    return None, None
+
+
+def call(method, http_timeout=30, _lane="send", **params):
+    body = urllib.parse.urlencode(
         {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
          for k, v in params.items() if v is not None}
     ).encode()
-    req = urllib.request.Request(API + method, data=data)
+    t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=http_timeout) as r:
-            out = json.loads(r.read().decode())
-        return out.get("result") if out.get("ok") else None
-    except urllib.error.HTTPError as e:
-        try:
-            body = json.loads(e.read().decode())
-        except Exception:
-            body = {}
-        desc = body.get("description", str(e))
-        if e.code == 429:
-            wait = int(body.get("parameters", {}).get("retry_after", 3))
-            log("429 על %s — ממתין %ds" % (method, wait))
-            time.sleep(wait)
-        else:
-            log("שגיאה %s: %s" % (method, desc))
-        return None
+        code, raw = _request(_lane, method, http_timeout, body)
+        out = json.loads(raw.decode())
     except Exception as e:
-        log("כשל %s: %s" % (method, e))
+        log("כשל %s: %s (%.0fms)" % (method, e, (time.time() - t0) * 1000))
         return None
+    ms = (time.time() - t0) * 1000
+    if method != "getUpdates" and ms > SLOW_MS:
+        log("⏱ %s לקח %.0fms" % (method, ms))
+    if out.get("ok"):
+        return out.get("result")
+    desc = out.get("description", "")
+    if code == 429:
+        wait = int(out.get("parameters", {}).get("retry_after", 3))
+        log("429 על %s — ממתין %ds" % (method, wait))
+        time.sleep(wait)
+    else:
+        log("שגיאה %s: %s" % (method, desc))
+    return None
 
 
 def call_poll(secs):
-    return call("getUpdates", http_timeout=secs + 15, offset=S["offset"],
+    return call("getUpdates", http_timeout=secs + 15, _lane="poll", offset=S["offset"],
                 allowed_updates=["message", "edited_message", "callback_query"],
                 **{"timeout": secs})
 
@@ -116,7 +195,8 @@ def call_poll(secs):
 # נכתב דרך קובץ זמני ו-os.replace: קריסה באמצע כתיבה לא משאירה JSON
 # חתוך. זה בדיוק הכישלון שמחק 25,084 פריטים מהקטלוג בשבוע הזה.
 _lock = threading.Lock()
-S = {"offset": 0, "seq": 0, "tickets": {}, "by_group_msg": {}, "edit_map": {}, "web": {}}
+S = {"offset": 0, "seq": 0, "tickets": {}, "by_group_msg": {}, "edit_map": {},
+     "fb": {}, "secret": None}
 
 
 def load():
@@ -177,11 +257,17 @@ def kb_taken(tid):
 
 
 def header(t):
-    src = {"tg": "טלגרם", "web": "אתר", "app": "אפליקציה"}.get(t.get("src", "tg"), t.get("src"))
+    src = {"tg": "טלגרם", "web": "אתר", "app": "אפליקציה",
+           "fb": "אתר/אפליקציה"}.get(t.get("src", "tg"), t.get("src"))
     lines = ["🎫 <b>כרטיס #%s</b> · %s" % (t["id"], src),
              "👤 %s · %s" % (esc(t.get("name")), esc(t.get("tag")))]
     if t.get("src") == "tg":
         lines.append("🆔 <code>%s</code>" % t["user_id"])
+    # רק תשובה מסמנת. פתיחת שיחה בפאנל אינה אות לכלום — פותחים שיחות
+    # ולא עונים כל הזמן, וסימון כזה היה גורם למנהל בקבוצה לחשוב שיש מי
+    # שמטפל, והפנייה הייתה נופלת בין הכיסאות.
+    if t.get("panel_answered"):
+        lines.append("💼 <b>נענה מפאנל הניהול</b> — אין צורך לענות כאן")
     if t.get("taken_by"):
         lines.append("✋ מטפל: %s" % esc(t["taken_by"]))
     if t.get("closed"):
@@ -192,19 +278,23 @@ def header(t):
 
 
 def refresh_card(t):
-    kb = None if t.get("closed") else (kb_taken(t["id"]) if t.get("taken_by") else kb_open(t["id"]))
+    # כרטיס שנענה מהפאנל נשאר קריא אבל בלי כפתורים: אין מה "לתפוס"
+    # בשיחה שכבר נענתה במקום אחר, וזה בדיוק מה שמונע שני מנהלים
+    # שעונים לאותו אדם.
+    kb = None if (t.get("closed") or t.get("panel_answered")) \
+        else (kb_taken(t["id"]) if t.get("taken_by") else kb_open(t["id"]))
     call("editMessageText", chat_id=GROUP, message_id=t["card_msg"],
          text=header(t) + "\n\n" + t.get("body", ""), parse_mode="HTML",
          reply_markup=kb, disable_web_page_preview=1)
 
 
 # ── כרטיס חדש ───────────────────────────────────────────────────────────────
-def open_ticket(src, user_id, name, tag, body, copy_from=None, copy_msg=None):
+def open_ticket(src, user_id, name, tag, body, copy_from=None, copy_msg=None, raw=None):
     with _lock:
         S["seq"] += 1
         tid = str(S["seq"])
         t = {"id": tid, "src": src, "user_id": user_id, "name": name, "tag": tag,
-             "body": body, "opened": int(time.time()), "taken_by": None,
+             "body": body, "raw": raw, "opened": int(time.time()), "taken_by": None,
              "taken_at": 0, "closed": False, "reminded": False, "replies": []}
         S["tickets"][tid] = t
     m = call("sendMessage", chat_id=GROUP, text=header(t) + "\n\n" + body,
@@ -302,7 +392,7 @@ def on_ping(msg):
         op = sum(1 for t in S["tickets"].values() if not t.get("closed"))
         taken = sum(1 for t in S["tickets"].values()
                     if not t.get("closed") and t.get("taken_by"))
-    me = call("getMe") or {}
+    me = ME
     cm = call("getChatMember", chat_id=GROUP, user_id=me.get("id")) or {}
     status = cm.get("status", "?")
     can_edit = bool(cm.get("can_edit_messages")) or status == "creator"
@@ -338,10 +428,41 @@ def on_group_message(msg):
         return
     if t.get("src") != "tg":
         # אתר/אפליקציה: אין צ'אט טלגרם להחזיר אליו, התשובה נשמרת ל-API.
+        # אתר/אפליקציה: התשובה חוזרת לצ'אט שבו המשתמש שאל, דרך
+        # /feedback/reply — הנתיב שגם שולח לו את ההתראה לטלפון.
+        admin = who(msg["from"])[0]
+        body = msg.get("text") or msg.get("caption") or ""
+        if not body:
+            call("sendMessage", chat_id=GROUP, reply_to_message_id=msg["message_id"],
+                 text="⚠️ לצ'אט האתר/האפליקציה אפשר לשלוח טקסט בלבד.")
+            return
+        uid = t.get("fb_uid")
+        if not uid:
+            return
         with _lock:
-            t["replies"].append({"at": int(time.time()),
-                                 "text": msg.get("text") or msg.get("caption") or ""})
+            # נרשם לפני השליחה: הגשר קורא את feedback.json כל כמה שניות,
+            # ובלי זה הוא היה רואה את התשובה של עצמו וחושב שענו מהפאנל.
+            S["fb"].setdefault(uid, {}).setdefault("pending", []).append(body)
             save()
+        ok, why = fb_reply(uid, body)
+        if not ok:
+            with _lock:
+                try:
+                    S["fb"][uid]["pending"].remove(body)
+                except Exception:
+                    pass
+                save()
+            call("sendMessage", chat_id=GROUP, parse_mode="HTML",
+                 reply_to_message_id=msg["message_id"],
+                 text="⚠️ התשובה לא נשלחה: %s" % esc(why))
+            return
+        with _lock:
+            t["replies"].append({"at": int(time.time()), "side": "team",
+                                 "by": admin, "text": body})
+            if not t.get("taken_by"):
+                t["taken_by"], t["taken_at"] = admin, int(time.time())
+            save()
+        refresh_card(t)
         call("setMessageReaction", chat_id=GROUP, message_id=msg["message_id"],
              reaction=[{"type": "emoji", "emoji": "👍"}])
         return
@@ -370,7 +491,8 @@ def on_group_message(msg):
                                                  "msg": sent["message_id"]}
         if not t.get("taken_by"):
             t["taken_by"], t["taken_at"] = admin_name, int(time.time())
-        t["replies"].append({"at": int(time.time()), "by": admin_name, "text": text})
+        t["replies"].append({"at": int(time.time()), "side": "team",
+                             "by": admin_name, "text": text})
         save()
     refresh_card(t)
     call("setMessageReaction", chat_id=GROUP, message_id=msg["message_id"],
@@ -423,6 +545,190 @@ def on_callback(cq):
              text="הפנייה נסגרה ✔️ אם זה לא נפתר — כתוב שוב ונפתח כרטיס חדש.")
 
 
+# ── גשר לצ'אט התמיכה של האתר והאפליקציה ─────────────────────────────────────
+#
+# לאתר ולאפליקציה כבר יש צ'אט תמיכה שעובד מול /feedback ב-main.py.
+# הגשר מביא אותו לקבוצה, כדי שכל המנהלים יקבלו התראה ויוכלו לענות —
+# ולא רק מי שיושב מול הפאנל.
+#
+# ## קוראים קובץ, כותבים דרך ה-API
+#
+# הקריאה היא מ-feedback.json ישירות: זה קובץ מקומי, וקריאה ממנו אינה
+# מעמיסה את main.py שכבר מזרים וידאו מ-31 בוטים.
+#
+# הכתיבה, לעומת זה, **חייבת** לעבור ב-POST /feedback/reply: הנתיב הזה
+# הוא שמסמן unread_user ושולח את ה-push ל-FCM. כתיבה ישירה לקובץ הייתה
+# משתיקה את ההתראה בטלפון, וגם מתחרה על אותו קובץ עם main.py — שתי
+# כתיבות במקביל, והשיחה נעלמת. ראינו בשבוע הזה מה זה עושה לקטלוג.
+#
+# ## "ענו מהפאנל"
+#
+# אם מנהל עונה מהפאנל, מופיעה בשיחה הודעת admin שהבוט לא שלח. הכרטיס
+# בקבוצה מסומן "נענה מפאנל הניהול" והכפתורים מוסרים — אחרת שני מנהלים
+# עונים לאותו אדם, אחד בפאנל ואחד בטלגרם.
+#
+# הזיהוי הוא לפי מה שהבוט עצמו שלח: כל תשובה שהוא כותב נרשמת, וכשהיא
+# חוזרת מהקובץ היא מזוהה ולא נחשבת לתשובה מהפאנל.
+def fb_read():
+    try:
+        with open(FEEDBACK_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        # main.py כותב את הקובץ בלי קובץ זמני, ולכן קריאה בדיוק באמצע
+        # כתיבה מחזירה JSON חתוך. הסבב הבא יקרא אותו שלם; אין מה להתריע.
+        log("feedback.json לא נקרא (%s)" % e)
+        return None
+
+
+def fb_reply(user_id, text):
+    """תשובה לצ'אט של האתר/האפליקציה דרך ה-API של main.py."""
+    if not PANEL_PASSWORD:
+        return False, "PANEL_PASSWORD חסר ב-.env"
+    body = json.dumps({"password": PANEL_PASSWORD, "user_id": user_id,
+                       "text": text}, ensure_ascii=False).encode()
+    req = urllib.request.Request(MAIN_API + "/feedback/reply", data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            json.loads(r.read().decode())
+        return True, ""
+    except urllib.error.HTTPError as e:
+        try:
+            why = json.loads(e.read().decode()).get("detail", str(e))
+        except Exception:
+            why = str(e)
+        return False, "%s: %s" % (e.code, why)
+    except Exception as e:
+        return False, str(e)
+
+
+def fb_src(th):
+    # ‎g:<email>‎ הוא הפורמט שהאתר שולח; האפליקציה שולחת את אותו מזהה,
+    # ולכן אין כאן הפרדה אמיתית בין השניים ואין טעם להמציא אחת.
+    return "fb"
+
+
+def fb_ticket(uid, th):
+    with _lock:
+        rec = S["fb"].get(uid)
+        t = S["tickets"].get(rec["tid"]) if rec else None
+    if t and not t.get("closed"):
+        return t
+    name = th.get("name") or th.get("email") or uid
+    tag = th.get("email") or uid
+    t = open_ticket(fb_src(th), None, name, tag, "<i>(ממתין להודעה)</i>", raw="")
+    if t:
+        with _lock:
+            t["fb_uid"] = uid
+            S["fb"].setdefault(uid, {})["tid"] = t["id"]
+            save()
+    return t
+
+
+KINDS = {"support": "💬 תמיכה", "review": "⭐ חוות דעת", "tip": "💡 טיפ"}
+
+
+def fb_watch():
+    first = True
+    while True:
+        try:
+            d = fb_read()
+            if d is None:
+                time.sleep(FEEDBACK_POLL)
+                continue
+            for uid, th in d.items():
+                if not isinstance(th, dict):
+                    continue
+                msgs = th.get("messages") or []
+                with _lock:
+                    rec = S["fb"].setdefault(uid, {})
+                    seen = rec.get("seen")
+                    if seen is None:
+                        # בעלייה ראשונה לא מציפים את הקבוצה בכל ההיסטוריה:
+                        # מסמנים את מה שקיים כנראה וממשיכים מכאן.
+                        rec["seen"] = len(msgs)
+                        save()
+                        seen = len(msgs)
+                fresh = msgs[seen:]
+                if not fresh:
+                    continue
+                for m in fresh:
+                    if m.get("from") == "user":
+                        fb_user_msg(uid, th, m)
+                    elif m.get("from") == "admin":
+                        fb_admin_msg(uid, m)
+                with _lock:
+                    S["fb"][uid]["seen"] = len(msgs)
+                    save()
+        except Exception as e:
+            log("גשר התמיכה נפל: %s" % e)
+        first = False
+        time.sleep(FEEDBACK_POLL)
+
+
+def fb_user_msg(uid, th, m):
+    t = fb_ticket(uid, th)
+    if not t:
+        return
+    kind = KINDS.get(m.get("kind") or "support", "")
+    text = esc(m.get("text") or "")
+    with _lock:
+        t["replies"].append({"at": int(time.time()), "side": "user",
+                             "text": m.get("text") or ""})
+        if not t.get("raw"):
+            t["raw"] = m.get("text") or ""
+            t["body"] = "%s\n%s" % (kind, text) if kind else text
+            new_card = True
+        else:
+            new_card = False
+        # תשובה מהפאנל אינה נועלת את השיחה לנצח: הודעה חדשה מהמשתמש
+        # מחזירה את הכרטיס למשחק, אחרת פנייה שנייה שלו לא תגיע לאף אחד.
+        t["panel_answered"] = False
+        save()
+    if new_card:
+        refresh_card(t)
+    else:
+        mm = call("sendMessage", chat_id=GROUP, parse_mode="HTML",
+                  reply_to_message_id=t["card_msg"],
+                  text="➕ <b>#%s</b> המשך מהמשתמש:\n\n%s%s"
+                       % (t["id"], (kind + "\n") if kind else "", text))
+        if mm:
+            with _lock:
+                S["by_group_msg"][str(mm["message_id"])] = t["id"]
+                save()
+        refresh_card(t)
+
+
+def fb_admin_msg(uid, m):
+    """הודעת admin שהופיעה בשיחה. אם לא הבוט שלח אותה — ענו מהפאנל."""
+    text = (m.get("text") or "").strip()
+    with _lock:
+        rec = S["fb"].get(uid) or {}
+        t = S["tickets"].get(rec.get("tid") or "")
+        mine = rec.get("pending") or []
+        if text in mine:
+            mine.remove(text)
+            rec["pending"] = mine
+            save()
+            return
+    if not t or t.get("closed"):
+        return
+    with _lock:
+        t["panel_answered"] = True
+        t["taken_by"] = None
+        t["taken_at"] = 0
+        t["replies"].append({"at": int(time.time()), "side": "team",
+                             "by": "פאנל הניהול", "text": text})
+        save()
+    refresh_card(t)
+    call("sendMessage", chat_id=GROUP, parse_mode="HTML",
+         reply_to_message_id=t["card_msg"],
+         text="💼 <b>#%s</b> נענה מפאנל הניהול:\n\n%s" % (t["id"], esc(text[:600])))
+
+
 # ── תפיסה שנשכחה ────────────────────────────────────────────────────────────
 #
 # מנהל שלוחץ "אני מטפל" ונעלם חוסם את הכרטיס: שאר המנהלים רואים
@@ -434,7 +740,8 @@ def janitor():
         for t in list(S["tickets"].values()):
             if t.get("closed") or not t.get("taken_by"):
                 continue
-            answered = any(r.get("by") for r in t.get("replies", []) if r["at"] >= t["taken_at"])
+            answered = any(r.get("side") == "team" for r in t.get("replies", [])
+                           if r["at"] >= t["taken_at"])
             if answered:
                 continue
             age = now - t["taken_at"]
@@ -456,12 +763,20 @@ def janitor():
                      parse_mode="HTML", reply_to_message_id=t["card_msg"])
 
 
-# ── כרטיס מהאתר/אפליקציה ────────────────────────────────────────────────────
+# ── בדיקת מצב מקומית ────────────────────────────────────────────────────────
+#
+# אין כאן API לאתר. האתר והאפליקציה מדברים עם /feedback ב-main.py כמו
+# קודם, והגשר למעלה הוא שמחבר אותם לקבוצה — ולכן אין מה לחשוף לדפדפן,
+# ו-nginx לא נוגעים בו בכלל. נקודה אחת, ל-localhost, כדי שסקריפט
+# ההתקנה יוכל לוודא שהשירות עלה.
 class Handler(BaseHTTPRequestHandler):
+    server_version = "zovex-support"
+
     def _json(self, code, obj):
         b = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
@@ -469,33 +784,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def do_POST(self):
-        if self.path.split("?")[0] != "/ticket":
-            return self._json(404, {"error": "not found"})
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-            d = json.loads(self.rfile.read(n).decode() or "{}")
-        except Exception:
-            return self._json(400, {"error": "bad json"})
-        src = d.get("src") if d.get("src") in ("web", "app") else "web"
-        body = str(d.get("text") or "").strip()[:3000]
-        if not body:
-            return self._json(400, {"error": "empty"})
-        t = open_ticket(src, None, str(d.get("name") or "אנונימי")[:80],
-                        str(d.get("contact") or "ללא פרטי קשר")[:80], esc(body))
-        return self._json(200, {"ticket": t["id"] if t else None})
-
     def do_GET(self):
-        p = urllib.parse.urlparse(self.path)
-        if p.path == "/health":
-            return self._json(200, {"ok": True, "tickets": len(S["tickets"])})
-        if p.path == "/replies":
-            tid = urllib.parse.parse_qs(p.query).get("ticket", [""])[0]
-            t = S["tickets"].get(tid)
-            if not t:
-                return self._json(404, {"error": "no such ticket"})
-            return self._json(200, {"closed": t.get("closed"), "replies": t.get("replies", [])})
-        return self._json(404, {"error": "not found"})
+        if (urllib.parse.urlparse(self.path).path.rstrip("/") or "/") != "/health":
+            return self._json(404, {"error": "not found"})
+        with _lock:
+            op = sum(1 for t in S["tickets"].values() if not t.get("closed"))
+            br = len(S["fb"])
+        return self._json(200, {"ok": True, "bot": ME.get("username"),
+                                "up": int(time.time() - START),
+                                "tickets": len(S["tickets"]), "open": op,
+                                "bridged_chats": br})
 
 
 def http_server():
@@ -505,16 +803,165 @@ def http_server():
     srv.serve_forever()
 
 
+def handle(up):
+    try:
+        if "callback_query" in up:
+            on_callback(up["callback_query"])
+        elif "message" in up:
+            m = up["message"]
+            if str(m["chat"]["id"]) == str(GROUP):
+                on_group_message(m)
+            elif m["chat"]["type"] == "private":
+                on_user_message(m)
+        elif "edited_message" in up:
+            m = up["edited_message"]
+            if str(m["chat"]["id"]) == str(GROUP):
+                on_group_edit(m)
+    except Exception as e:
+        log("עדכון %s נפל: %s" % (up.get("update_id"), e))
+
+
 # ── לופ ─────────────────────────────────────────────────────────────────────
+def selftest():
+    """מריץ את הגשר מול feedback.json מדומה, בלי טלגרם ובלי main.py.
+
+    זה המסלול שהמשתמש באמת הולך בו: הוא כותב באתר, מנהל עונה בקבוצה,
+    ואחר כך מנהל אחר עונה מהפאנל. בלי בדיקה כזו הייתי מגלה את זה רק
+    כשמשתמש אמיתי כותב.
+    """
+    global call, fb_reply
+    sent = []
+    seq = {"n": 1000}
+    FB = "/tmp/zovex_fb_selftest.json"
+    globals()["FEEDBACK_FILE"] = FB
+    globals()["ME"] = {"username": "selftest_bot"}
+
+    def fake(method, http_timeout=30, _lane="send", **kw):
+        sent.append((method, kw))
+        if method == "getMe":
+            return {"id": 1, "username": "selftest_bot"}
+        if method in ("sendMessage", "copyMessage"):
+            seq["n"] += 1
+            return {"message_id": seq["n"]}
+        return True
+
+    pushed = []
+
+    def fake_reply(uid, text):
+        pushed.append((uid, text))
+        fb = json.load(open(FB, encoding="utf-8"))
+        fb[uid]["messages"].append({"from": "admin", "text": text, "ts": "now"})
+        json.dump(fb, open(FB, "w", encoding="utf-8"), ensure_ascii=False)
+        return True, ""
+
+    call = fake
+    fb_reply = fake_reply
+    load()
+
+    ok = True
+
+    def check(name, cond, extra=""):
+        nonlocal ok
+        print("  %s %s %s" % ("✅" if cond else "❌", name, extra))
+        ok = ok and cond
+
+    def write_fb(msgs, name="דוד", email="d@x.com"):
+        json.dump({"g:d@x.com": {"user_id": "g:d@x.com", "name": name,
+                                 "email": email, "messages": msgs}},
+                  open(FB, "w", encoding="utf-8"), ensure_ascii=False)
+
+    def pump():
+        d = fb_read()
+        for uid, th in d.items():
+            msgs = th.get("messages") or []
+            rec = S["fb"].setdefault(uid, {})
+            seen = rec.get("seen") or 0
+            for m in msgs[seen:]:
+                if m.get("from") == "user":
+                    fb_user_msg(uid, th, m)
+                else:
+                    fb_admin_msg(uid, m)
+            S["fb"][uid]["seen"] = len(msgs)
+
+    def last_text():
+        return [kw for m, kw in sent if m in ("sendMessage", "editMessageText")][-1]["text"]
+
+    # ① פנייה חדשה מהאתר נכנסת לקבוצה
+    write_fb([{"from": "user", "text": "הסרט נתקע <b>בדקה 3</b>", "ts": "t1",
+               "kind": "support"}])
+    pump()
+    tid = S["fb"]["g:d@x.com"]["tid"]
+    t = S["tickets"][tid]
+    card = [kw for m, kw in sent if m == "editMessageText"][-1]["text"]
+    check("פנייה מהאתר נפתחה ככרטיס", "🎫" in card and "אתר/אפליקציה" in card)
+    check("השם והאימייל מוצגים למנהלים", "דוד" in card and "d@x.com" in card)
+    check("HTML מהמשתמש מנוטרל", "&lt;b&gt;" in card and "<b>בדקה" not in card)
+    check("סוג הפנייה מסומן", "💬 תמיכה" in card)
+
+    # ② מנהל עונה בקבוצה → ההודעה חוזרת לצ'אט של המשתמש
+    on_group_message({"message_id": 5001, "chat": {"id": GROUP, "type": "supergroup"},
+                      "from": {"id": 9, "first_name": "אבי"},
+                      "reply_to_message": {"message_id": t["card_msg"]},
+                      "text": "בודקים, תודה"})
+    check("התשובה נשלחה לצ'אט של המשתמש", pushed == [("g:d@x.com", "בודקים, תודה")], pushed)
+    check("הכרטיס מסומן כמטופל", t.get("taken_by") == "אבי")
+
+    # ③ אותה תשובה חוזרת מהקובץ — אסור שתיחשב "ענו מהפאנל"
+    pump()
+    check("תשובה של הבוט אינה מזוהה כפאנל", not t.get("panel_answered"))
+
+    # ④ מנהל אחר עונה מהפאנל
+    fb = json.load(open(FB, encoding="utf-8"))
+    fb["g:d@x.com"]["messages"].append({"from": "admin", "text": "טופל, תודה", "ts": "t3"})
+    json.dump(fb, open(FB, "w", encoding="utf-8"), ensure_ascii=False)
+    pump()
+    check("תשובה מהפאנל מסומנת בכרטיס", t.get("panel_answered") is True)
+    check("התפיסה שוחררה", t.get("taken_by") is None)
+    check("הודעה בקבוצה אומרת שענו מהפאנל", "נענה מפאנל הניהול" in last_text())
+    check("הכפתורים הוסרו", [kw for m, kw in sent if m == "editMessageText"][-1]
+          .get("reply_markup") is None)
+
+    # ⑤ הודעה חדשה מהמשתמש מחזירה את הכרטיס למשחק
+    fb = json.load(open(FB, encoding="utf-8"))
+    fb["g:d@x.com"]["messages"].append({"from": "user", "text": "עדיין נתקע", "ts": "t4"})
+    json.dump(fb, open(FB, "w", encoding="utf-8"), ensure_ascii=False)
+    pump()
+    check("פנייה חוזרת פותחת את הכרטיס מחדש", not t.get("panel_answered"))
+    check("ההמשך הגיע לקבוצה", "עדיין נתקע" in "".join(
+        kw.get("text", "") for m, kw in sent[-4:]))
+
+    # ⑥ היסטוריה קיימת בעלייה ראשונה אינה מוצפת לקבוצה
+    S["fb"].clear()
+    S["tickets"].clear()
+    before = len(sent)
+    write_fb([{"from": "user", "text": "הודעה %d" % i, "ts": "t"} for i in range(40)])
+    d = fb_read()
+    for uid, th in d.items():
+        S["fb"].setdefault(uid, {})["seen"] = len(th["messages"])
+    pump()
+    check("40 הודעות היסטוריה לא הוצפו", len(sent) == before, len(sent) - before)
+
+    # ⑦ קובץ חתוך באמצע כתיבה אינו מפיל כלום
+    open(FB, "w", encoding="utf-8").write('{"g:d@x.com": {"mes')
+    check("JSON חתוך מוחזר כ-None ולא קורס", fb_read() is None)
+
+    os.remove(FB)
+    print("\n%s" % ("✅ הכל עבר" if ok else "❌ נכשל"))
+    return 0 if ok else 1
+
+
 def main():
     load()
-    me = call("getMe")
+    global ME
+    ME = call("getMe")
+    me = ME
     if not me:
         log("getMe נכשל — טוקן שגוי או אין רשת")
         sys.exit(1)
     log("עלה כ-@%s" % me.get("username"))
     threading.Thread(target=janitor, daemon=True).start()
     threading.Thread(target=http_server, daemon=True).start()
+    threading.Thread(target=fb_watch, daemon=True).start()
     fails = 0
     while True:
         # long polling: טלגרם מחזיק את החיבור 60 שניות, ולכן ה-timeout של
@@ -528,24 +975,13 @@ def main():
         for up in ups:
             with _lock:
                 S["offset"] = up["update_id"] + 1
-            try:
-                if "callback_query" in up:
-                    on_callback(up["callback_query"])
-                elif "message" in up:
-                    m = up["message"]
-                    if str(m["chat"]["id"]) == str(GROUP):
-                        on_group_message(m)
-                    elif m["chat"]["type"] == "private":
-                        on_user_message(m)
-                elif "edited_message" in up:
-                    m = up["edited_message"]
-                    if str(m["chat"]["id"]) == str(GROUP):
-                        on_group_edit(m)
-            except Exception as e:
-                log("עדכון %s נפל: %s" % (up.get("update_id"), e))
+            # כל עדכון בשרשור משלו: תשובה למשתמש היא שתיים-שלוש קריאות
+            # ל-API, וכל עוד הן רצו בלופ הראשי, העדכון הבא חיכה להן.
+            # זה מה שנראה כמו "לוקח לו מלא זמן להגיב".
+            threading.Thread(target=handle, args=(up,), daemon=True).start()
         with _lock:
             save()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(selftest() if SELFTEST else main())
