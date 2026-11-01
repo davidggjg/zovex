@@ -1362,8 +1362,10 @@ def _flood_check(msg: Message, text: str):
         return None
     ents = (msg.entities or []) + (msg.caption_entities or [])
     mentions = sum(1 for e in ents if e.type in ("mention", "text_mention"))
+    has_media = bool(msg.photo or msg.video or msg.document or msg.animation
+                     or msg.audio or msg.voice or msg.video_note)
     return flood.note(
-        msg.chat.id, msg.from_user.id, text, mentions,
+        msg.chat.id, msg.from_user.id, text, mentions, media=has_media,
         rate=_int(db.get(msg.chat.id, "flood_rate", ""), AF_RATE),
         window=float(_int(db.get(msg.chat.id, "flood_window", ""), AF_WINDOW)),
         repeat=_int(db.get(msg.chat.id, "flood_repeat", ""), AF_REPEAT),

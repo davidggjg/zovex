@@ -127,10 +127,27 @@ def risk_of(signals: Iterable[Signal]) -> float:
     return round(1.0 - left, 4)
 
 
+# אותות שהם **הקשר** ולא ראיה. הם מטים החלטה גבולית, ולעולם אינם
+# מקימים אותה לבדם.
+CONTEXT_SOURCES = ("reputation",)
+# מתחת לזה אות תוכן הוא רמז, לא ממצא.
+EVIDENCE_FLOOR = 0.3
+
+
 def decide(signals: Iterable[Signal],
            rules: Iterable[Rule] = DEFAULT_RULES) -> Decision:
-    """הכלל החמור ביותר שהתאים. טהור."""
+    """הכלל החמור ביותר שהתאים. טהור.
+
+    אות הקשר נספר רק כשיש לצידו **ראיה** — אות תוכן אמיתי משל עצמו.
+    בלי הכלל הזה "אמון נמוך" הפך לעונש על כך שנכנסת אתמול: הוא חל
+    על כל חבר חדש, הוא גדול, והוא צריך רק רמז זניח כדי לעבור את
+    הסף. חבר חדש שכתב משפט תמים עם אימוג'י קיבל אזהרה."""
     sigs = [s for s in signals if s.clamped() > 0]
+    evidence = [s for s in sigs
+                if s.source not in CONTEXT_SOURCES
+                and s.clamped() >= EVIDENCE_FLOOR]
+    if not evidence:
+        sigs = [s for s in sigs if s.source not in CONTEXT_SOURCES]
     risk = risk_of(sigs)
     seen = {s.source for s in sigs}
     best: Optional[Rule] = None

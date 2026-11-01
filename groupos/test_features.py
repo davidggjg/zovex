@@ -329,6 +329,48 @@ def test_catalogue_post() -> None:
     ok("מילה אחת אינה קטלוג", not sg.catalogue_post("יש טריילר לסרט"))
 
 
+def test_flood_knows_the_room() -> None:
+    """הצפה נמדדת יחסית לקבוצה, לא לפי מספר קבוע.
+
+    "הוא צריך לדעת להבדיל — יש מאגרים ששולחים מלא סרטים בלי סוף,
+    ויש קבוצות דיבורים שאנשים מדברים שם בלי סוף." סף קבוע לא יכול
+    לשרת את שניהם: אותו מספר הוא במקום אחד שימוש רגיל ובמקום אחר
+    הצפה. בשטח מישהי הושתקה על העלאת פרקים של סדרה."""
+    section("הצפה לפי הקבוצה")
+    from antiflood import AntiFlood as AF
+    CH, ME = -100555, 5
+
+    def run(n, *, media=False, others=0, step=0.3, rate=8):
+        a, t, hit = AF(), 100.0, None
+        for i in range(n):
+            for o in range(others):
+                a.note(CH, 900 + o, f"ד {i}-{o}", now=t, rate=rate)
+            r = a.note(CH, ME, f"הודעה {i}", now=t, rate=rate, media=media)
+            if r and hit is None:
+                hit = i + 1
+            t += step
+        return hit
+
+    ok("מאגר: 45 קבצים ברצף עוברים", run(45, media=True) is None)
+    ok("קבוצת דיבורים: 20 הודעות בשיחה של שישה עוברות",
+       run(20, others=6) is None)
+    ok("אדם רגיל בקבוצה שקטה עובר", run(8) is None)
+
+    ok("אבל 40 הודעות טקסט בקבוצה שקטה נתפסות",
+       run(40, step=0.1) is not None)
+    ok("ו-120 קבצים בשתי שניות נתפסים",
+       run(120, media=True, step=0.02) is not None)
+    ok("וגם הצפה בתוך קבוצה ערה נתפסת",
+       run(80, others=6, step=0.05) is not None)
+
+    # הסף עולה לפי **אחרים**, כדי שספאמר לא ירים אותו לעצמו
+    alone = run(30, step=0.1)
+    crowd = run(30, others=6, step=0.1)
+    ok("ספאמר לבדו נתפס מוקדם יותר מאשר בתוך שיחה",
+       alone is not None and (crowd is None or crowd > alone),
+       f"לבד={alone} בשיחה={crowd}")
+
+
 def test_prompts() -> None:
     section("עריכה בכפתורים")
     # ‎repcmd‎ ו-‎repword‎ הם שלבי אשף: הם **יוצרים** תגובה ולא
@@ -700,6 +742,7 @@ def main() -> int:
     test_spamguard()
     test_emoji_is_not_evasion()
     test_catalogue_post()
+    test_flood_knows_the_room()
     test_prompts()
     test_evidence()
     test_media_talk()
