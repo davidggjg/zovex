@@ -30,6 +30,7 @@ prompts.py
 ratelimit.py
 reports.py
 reputation.py
+seasons.py
 scheduler.py
 spamguard.py
 templates.py

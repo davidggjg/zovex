@@ -1313,6 +1313,28 @@ def reply_item(chat_id: int, kind: str, name: str, count: int,
     return Screen(body, rows)
 
 
+# ── בחירה לפני שליחה ──────────────────────────────────────────────────────
+# "תגובה אחת שמחזירה מאתיים הודעות" אינה שימושית גם כשהיא מותרת.
+# מי שביקש סדרה רוצה עונה אחת, ומי שכתב "אווטאר" התכוון לאחת משתיים.
+def variant_buttons(chat_id: int, name: str, rows: list[tuple[int, str]],
+                    lang: str = i18n.DEFAULT) -> tuple[str, list]:
+    """‎(טקסט, שורות כפתורים)‎ — איזו גרסה של אותו שם."""
+    btns = [[(v or name, cb(chat_id, "rpick", str(fid)))]
+            for fid, v in rows[:12]]
+    return i18n.t("rep.which_one", lang, name=name), btns
+
+
+def season_buttons(chat_id: int, fid: int, seasons: list[int],
+                   lang: str = i18n.DEFAULT) -> tuple[str, list]:
+    """‎(טקסט, שורות כפתורים)‎ — איזו עונה. שלוש בשורה, שלא יתארך."""
+    cells = [(i18n.t("rep.season_n", lang, n=n),
+              cb(chat_id, "rseas", f"{fid}|{n}")) for n in seasons[:40]]
+    rows = [cells[i:i + 3] for i in range(0, len(cells), 3)]
+    rows.append([(i18n.t("rep.all_seasons", lang),
+                  cb(chat_id, "rseas", f"{fid}|0"))])
+    return i18n.t("rep.which_season", lang), rows
+
+
 def collecting_screen(chat_id: int, label: str, count: int,
                       lang: str = i18n.DEFAULT) -> Screen:
     """"שלח עכשיו". המסך שמחליף את ‎/filterbulk‎ ואת ‎/done‎."""

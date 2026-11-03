@@ -395,6 +395,21 @@ MIGRATIONS: list[tuple[int, str]] = [
     ALTER TABLE filters ADD COLUMN alias TEXT NOT NULL DEFAULT '';
     CREATE INDEX idx_filters_alias ON filters (chat_id, alias);
     """),
+    (9, """
+    -- שתי סדרות באותו שם.
+    --
+    -- "יש את אווטאר המצויר ואת האמיתי — איך מבדילים ביניהם?" לא
+    -- מבדילים: שתיהן נקראות אווטאר, וזה נכון. מי שכותב "אווטאר"
+    -- צריך לקבל שאלה איזו מהן, ולא את אחת מהן באקראי.
+    --
+    -- ‎vargroup‎ הוא השם המשותף. שתי תגובות עם אותו ‎vargroup‎ הן
+    -- שתי גרסאות של אותו שם, ו-‎variant‎ הוא מה שמבדיל ביניהן
+    -- בכפתור ("מצויר", "לייב אקשן").
+    ALTER TABLE filters ADD COLUMN vargroup TEXT NOT NULL DEFAULT '';
+    ALTER TABLE filters ADD COLUMN variant  TEXT NOT NULL DEFAULT '';
+    CREATE INDEX idx_filters_vargroup ON filters (chat_id, vargroup);
+    UPDATE filters SET vargroup = trigger WHERE vargroup = '';
+    """),
 ]
 
 

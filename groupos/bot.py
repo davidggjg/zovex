@@ -66,6 +66,7 @@ import disabling                                # noqa: E402
 import linksec                                  # noqa: E402
 import policy                                   # noqa: E402
 import scheduler as schedmod                    # noqa: E402
+import seasons                                  # noqa: E402
 import captcha as cap                           # noqa: E402
 import customcmd                                # noqa: E402
 import emergency as emerg                       # noqa: E402
@@ -143,7 +144,17 @@ PURGE_MAX = 200
 # הודעות לדקה בקבוצה, ותשובה של 300 הודעות פירושה בוט חנוק לכל
 # הקבוצות האחרות לרבע שעה. שומר המכסות מווסת את הקצב ממילא, והתקרה
 # הזאת היא מה שמונע מהדק אחד להפוך להצפה.
-FILTER_ITEMS_MAX = 30
+# כמה הודעות תגובה אחת יכולה להחזיק.
+#
+# "אפשר עד 30, אני רוצה שזה יהיה לא מוגבל." עונה שלמה היא ארבעים
+# פרקים, וסדרה עם חמש עונות היא מאתיים — 30 היה מספר שנבחר בלי
+# לחשוב על המקרה הזה. התקרה כאן היא רק הגנה מפני טעות (לולאה,
+# העברה אוטומטית), ולא מגבלת שימוש: מי שמגיע אליה באמת צריך לפצל
+# את התגובה ממילא.
+#
+# ומה שבאמת פתר את הבעיה אינו המספר אלא **בחירת עונה**: תגובה
+# שפורסת מאתיים הודעות בבת אחת אינה שימושית גם אם מותר לה.
+FILTER_ITEMS_MAX = 1000
 
 # איסוף הודעות למתג אחד: ‎(צ'אט, מנהל) → (סוג, הדק, מתי התחיל)‎.
 # בזיכרון, כי זו פעולה של דקה — לא מצב ששורד אתחול.
@@ -1548,26 +1559,56 @@ async def _run_filter(msg: Message, fh, staff: bool = False) -> None:
             await bot.delete_message(msg.chat.id, msg.message_id)
         await _tell_why(msg, "delete", fh.trigger, "filter.triggered")
     if fh.action in ("reply", "delete_reply"):
-        # ההודעה הראשונה, ואז כל מה שהמנהל צירף — לפי הסדר שבו שמר.
-        # שלוש הודעות נשארות שלוש הודעות.
+        # שתי שאלות לפני ששולחים משהו, וכל אחת נשאלת רק כשיש בה טעם.
         #
-        # הדק שנבנה במצב איסוף אין לו "הודעה ראשונה" משלו: הוא נוצר
-        # ריק והכול בפריטים. לכן השליחה הראשונה מותנית, והפריטים לא.
-        if fh.content.strip() or fh.media_id:
-            await send_content(msg.chat.id,
-                               tpl.render_pick(fh.content, _ctx(msg)),
-                               fh.media_id or None, fh.media_kind or None,
-                               fh.buttons or "", thread_id=_thread_of(msg))
-        for extra in filters.items(msg.chat.id, fh.trigger)[:FILTER_ITEMS_MAX]:
-            await send_content(msg.chat.id,
-                               tpl.render_pick(extra["content"], _ctx(msg)),
-                               extra["media_id"] or None,
-                               extra["media_kind"] or None,
-                               extra["buttons"] or "",
-                               thread_id=_thread_of(msg))
+        # 1. כמה דברים נקראים כך? "אווטאר" הוא גם המצויר וגם האמיתי.
+        # 2. כמה עונות יש? מי שביקש סדרה רוצה עונה, לא מאתיים הודעות.
+        lg = lang_of(msg)
+        same = filters.variants(msg.chat.id, fh.vargroup or fh.trigger)
+        if len(same) > 1:
+            text, rows = panel.variant_buttons(
+                msg.chat.id, fh.vargroup or fh.trigger,
+                [(v["id"], v["variant"]) for v in same], lg)
+            await send(msg.chat.id, text, markup=kb(panel.Screen(text, rows)),
+                       thread_id=_thread_of(msg))
+            return
+        await _deliver(msg.chat.id, msg, fh.trigger,
+                       filters.id_of(msg.chat.id, fh.trigger), fh, lg)
         return
     if fh.action in ("warn", "mute", "kick", "ban"):
         await _enforce(msg, fh.action, None, fh.trigger, "filter.triggered")
+
+
+async def _deliver(chat_id: int, msg: Message, trigger: str, fid: int, fh,
+                   lg: str, season: Optional[int] = None) -> None:
+    """שולח תגובה — או שואל קודם איזו עונה.
+
+    ‎season=None‎ = עוד לא נבחרה; ‎0‎ = "הכול"; מספר = עונה אחת.
+
+    ‎chat_id‎ מפורש ולא ‎msg.chat.id‎: הלחיצה על הכפתור מגיעה עם
+    ההודעה שנושאת אותו, והקבוצה שהתגובה שייכת לה היא זו שבמזהה
+    הכפתור — לא בהכרח הצ'אט שבו ההודעה יושבת."""
+    items = filters.items(chat_id, trigger)[:FILTER_ITEMS_MAX]
+    if season is None and seasons.multi_season(items):
+        text, rows = panel.season_buttons(
+            chat_id, fid, seasons.seasons_of(items), lg)
+        await send(msg.chat.id, text, markup=kb(panel.Screen(text, rows)),
+                   thread_id=_thread_of(msg))
+        return
+    if season:
+        items = seasons.pick(items, season)
+    if fh is not None and (fh.content.strip() or fh.media_id):
+        await send_content(msg.chat.id,
+                           tpl.render_pick(fh.content, _ctx(msg)),
+                           fh.media_id or None, fh.media_kind or None,
+                           fh.buttons or "", thread_id=_thread_of(msg))
+    for extra in items:
+        await send_content(msg.chat.id,
+                           tpl.render_pick(extra["content"], _ctx(msg)),
+                           extra["media_id"] or None,
+                           extra["media_kind"] or None,
+                           extra["buttons"] or "",
+                           thread_id=_thread_of(msg))
 
 
 def _name(msg: Message) -> str:
@@ -5691,16 +5732,33 @@ async def _reply_wizard(msg: Message, chat_id: int, field: str,
         await send(msg.chat.id, i18n.t("rep.need_word", lg), is_group=False)
         waiting.start(msg.from_user.id, chat_id, "repword", arg=arg)
         return
+    # ‎שם | תווית‎ — שתי סדרות באותו שם.
+    #
+    # "יש את אווטאר המצויר ואת האמיתי." שתיהן נקראות אווטאר, וזה
+    # נכון; מה שצריך הוא להבדיל ביניהן ברגע הבחירה, לא להכריח שם
+    # מלאכותי. ‎אווטאר | מצויר‎ יוצר גרסה תחת השם המשותף, ומי שיכתוב
+    # "אווטאר" יקבל כפתורים.
+    group, variant = word, ""
+    if "|" in word:
+        a, _, b = word.partition("|")
+        group, variant = a.strip(), b.strip()[:40]
+    name = f"{group} ({variant})" if variant else group
+    if not group:
+        await send(msg.chat.id, i18n.t("rep.need_word", lg), is_group=False)
+        waiting.start(msg.from_user.id, chat_id, "repword", arg=arg)
+        return
     # מילה שכבר קיימת **אינה נדרסת**. ‎add‎ מוחק ומכניס מחדש, ולכן
     # הדק קיים היה מאבד בשקט את כל ההודעות שנבנו בו — ומנהל שחשב
     # שהוא מוסיף גילה שהוא מחק.
-    if word in filters.triggers(chat_id):
+    if name in filters.triggers(chat_id):
         await send(msg.chat.id,
-                   i18n.t("rep.word_taken", lg, word=tpl.esc(word)),
+                   i18n.t("rep.word_taken", lg, word=tpl.esc(name)),
                    is_group=False)
         waiting.start(msg.from_user.id, chat_id, "repword", arg=arg)
         return
-    filters.add(chat_id, word, "", allow_empty=True)
+    word = name
+    filters.add(chat_id, word, "", allow_empty=True,
+                vargroup=group, variant=variant)
     if arg:
         filters.set_alias(chat_id, word, arg)
     audit.log(chat_id, "filter.add", actor_id=msg.from_user.id, after=word,
@@ -5900,6 +5958,29 @@ async def on_callback(q: CallbackQuery):
     #
     # ההודעה שמוחזרת היא "אין לך גישה" ולא "אין לך הרשאה": מי שהוסר
     # מניהול צריך להבין שהוא כבר לא שם, לא שהוא חסר הרשאה מסוימת.
+    # ── בחירת גרסה ובחירת עונה, בקבוצה ─────────────────────────────
+    # אלה הכפתורים היחידים שכל חבר לוחץ עליהם ולא רק מנהל: הם חלק
+    # מהתשובה, לא מהניהול.
+    if name in ("rpick", "rseas"):
+        if q.message is None:
+            await q.answer(i18n.t("btn.unknown", lg))
+            return
+        token, _, rest = arg.partition("|")
+        fid = _int(token, 0)
+        trg = filters.name_by_id(chat_id, fid)
+        if not trg:
+            await q.answer(i18n.t("rep.gone", lg), show_alert=True)
+            return
+        fh = filters.check(chat_id, trg)
+        season = _int(rest, 0) if name == "rseas" else None
+        await q.answer()
+        # ההודעה עם הכפתורים עשתה את שלה
+        with contextlib.suppress(TelegramAPIError):
+            await bot.delete_message(q.message.chat.id, q.message.message_id)
+        await _deliver(chat_id, q.message, trg, fid, fh, lg,
+                       season)
+        return
+
     if chat_id and not await _has_access(chat_id, q.from_user.id):
         await q.answer(i18n.t("err.no_access", lg), show_alert=True)
         with contextlib.suppress(TelegramAPIError):

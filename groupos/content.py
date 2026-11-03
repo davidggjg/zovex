@@ -142,6 +142,8 @@ class FilterHit:
     media_id: str = ""
     media_kind: str = ""
     buttons: str = ""
+    # השם המשותף שעליו נמצאה ההתאמה. הוא מה שמוביל אל שאר הגרסאות.
+    vargroup: str = ""
 
 
 class Filters:
@@ -151,14 +153,15 @@ class Filters:
     def all(self, chat_id: int) -> list[dict]:
         return [dict(r) for r in self.db.q(
             """SELECT id,trigger,match_kind,action,content,media_id,
-                      media_kind,buttons
+                      media_kind,buttons,vargroup
                FROM filters WHERE chat_id=? AND enabled=1 ORDER BY id""",
             (chat_id,))]
 
     def add(self, chat_id: int, trigger: str, content: str, *,
             match_kind: str = "word", action: str = "reply",
             media_id: str = "", media_kind: str = "",
-            buttons: str = "", allow_empty: bool = False) -> bool:
+            buttons: str = "", allow_empty: bool = False,
+            vargroup: str = "", variant: str = "") -> bool:
         trigger = (trigger or "").strip().lower()
         if not trigger or match_kind not in MATCH_KINDS:
             return False
@@ -179,11 +182,12 @@ class Filters:
                     (chat_id, trigger))
         self.db.run("""INSERT INTO filters
                        (chat_id,trigger,match_kind,action,content,media_id,
-                        media_kind,buttons,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                        media_kind,buttons,created_at,vargroup,variant)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (chat_id, trigger, match_kind, action, content,
                      media_id or "", media_kind or "", buttons or "",
-                     time.time()))
+                     time.time(), (vargroup or trigger).strip().lower(),
+                     (variant or "").strip()[:40]))
         return True
 
     def remove(self, chat_id: int, trigger: str) -> int:
@@ -278,6 +282,26 @@ class Filters:
             "SELECT name FROM custom_cmds WHERE chat_id=? AND name=?",
             (chat_id, a))
         return r["name"] if r else ""
+
+    def variants(self, chat_id: int, name: str) -> list[dict]:
+        """כל הגרסאות שחולקות את אותו שם, לפי סדר ההוספה.
+
+        שתיים או יותר = צריך לשאול את האדם איזו מהן. אחת = שולחים
+        אותה בלי לשאול, כי שאלה עם תשובה אחת אינה שאלה."""
+        n = (name or "").strip().lower()
+        if not n:
+            return []
+        return [dict(r) for r in self.db.q(
+            """SELECT id,trigger,match_kind,action,content,media_id,
+                      media_kind,buttons,variant
+               FROM filters WHERE chat_id=? AND vargroup=? AND enabled=1
+               ORDER BY id""", (chat_id, n))]
+
+    def vargroup_of(self, chat_id: int, trigger: str) -> str:
+        r = self.db.one(
+            "SELECT vargroup FROM filters WHERE chat_id=? AND trigger=?",
+            (chat_id, (trigger or "").strip().lower()))
+        return (r["vargroup"] or "") if r else ""
 
     def id_of(self, chat_id: int, trigger: str) -> int:
         r = self.db.one(
@@ -437,18 +461,27 @@ def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
         elif kind == "starts":
             hit = low.startswith(trg)
         else:
-            rx = _word_rx(trg)
-            hit = rx is not None and rx.search(hay) is not None
-            if not hit and loose is None and _all_words_present(trg, hay):
+            # גם השם המשותף נבדק: מי שכותב "אווטאר" מתכוון לשתי
+            # הגרסאות, והשם הפרטי של כל אחת ("אווטאר (מצויר)") אינו
+            # מה שאנשים מקלידים.
+            names = [trg]
+            vg = (r.get("vargroup") or "").strip().lower()
+            if vg and vg != trg:
+                names.append(vg)
+            hit = any((rx := _word_rx(n)) is not None and rx.search(hay)
+                      for n in names)
+            if not hit and loose is None and any(
+                    _all_words_present(n, hay) for n in names):
                 loose = _as_hit(trg, r)
         if hit:
             return _as_hit(trg, r)
     return loose
 
 
-def _as_hit(trg: str, r: dict) -> FilterHit:
+def _as_hit(trg: str, r: dict, vargroup: str = "") -> FilterHit:
     return FilterHit(trg, r.get("action", "reply"),
                      r.get("content") or "",
                      r.get("media_id") or "",
                      r.get("media_kind") or "",
-                     r.get("buttons") or "")
+                     r.get("buttons") or "",
+                     vargroup or r.get("vargroup") or trg)

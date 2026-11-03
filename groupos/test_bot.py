@@ -2167,8 +2167,10 @@ async def test_bulk_collect():
     out = await _out(B.cmd_cancel, msg("/cancel", mid=9708))
     ok("ביטול עובד", B._bulk_get(CHAT, ADM) is None and bool(out), out[:40])
 
-    # תקרה
-    ok("התקרה היא 30", B.FILTER_ITEMS_MAX == 30)
+    # תקרה: הגנה מפני טעות, לא מגבלת שימוש. עונה שלמה היא ארבעים
+    # פרקים, וסדרה בת חמש עונות היא מאתיים.
+    ok("התקרה מאפשרת סדרה שלמה", B.FILTER_ITEMS_MAX >= 200,
+       str(B.FILTER_ITEMS_MAX))
     B.filters.remove(CHAT, word)
 
 
@@ -3406,6 +3408,19 @@ async def test_no_duplicate_names():
         ok("וההודעות שנבנו לא אבדו",
            B.filters.item_count(CHAT, "ראשון") == 1)
 
+        # "שם | תווית" יוצר גרסה שנייה תחת אותו שם
+        B._bulk_pm.clear()
+        B.waiting.start(ADM, CHAT, "repword", arg="")
+        await _out(B.on_private_text, pm("ראשון | מצויר", mid=9705))
+        ok("גרסה שנייה נוצרת תחת אותו שם",
+           "ראשון (מצויר)" in B.filters.triggers(CHAT),
+           str(B.filters.triggers(CHAT))[:80])
+        ok("והיא חולקת את השם המשותף",
+           B.filters.vargroup_of(CHAT, "ראשון (מצויר)") == "ראשון")
+        ok("ולכן יש עכשיו שתי גרסאות",
+           len(B.filters.variants(CHAT, "ראשון")) == 2)
+        B.filters.remove(CHAT, "ראשון (מצויר)")
+
         # אותה פקודה בקבוצה אחרת — מותרת לגמרי
         ok("בקבוצה אחרת הפקודה פנויה",
            B.filters.alias_taken(OTHER, "gg") == "")
@@ -3541,6 +3556,74 @@ async def _ret(v):
     return v
 
 
+async def test_seasons_and_variants():
+    """בחירת עונה, ובחירה בין שתי סדרות באותו שם."""
+    section("עונות וגרסאות")
+    B.perms.set_role(CHAT, USER, "member")
+    B.db.set(CHAT, "replies", "1")
+    B.filters.add(CHAT, "ספיידרז", "", allow_empty=True)
+    for t in ("ספיידרז עונה 1 פרק 2", "ספיידרז עונה 1 פרק 37",
+              "ספיידרז עונה 2 פרק 1", "ספיידרז עונה 3 פרק 5",
+              "כרזה לסדרה"):
+        B.filters.add_item(CHAT, "ספיידרז", t)
+    B.filters.add(CHAT, "אווטאר (מצויר)", "המצויר",
+                  vargroup="אווטאר", variant="מצויר")
+    B.filters.add(CHAT, "אווטאר (לייב אקשן)", "האמיתי",
+                  vargroup="אווטאר", variant="לייב אקשן")
+    try:
+        # סדרה רב-עונתית: שאלה, לא מאתיים הודעות
+        before = len(SENT)
+        await B.on_group_message(msg("ספיידרז", uid=USER, mid=9800))
+        out = [t for _c, t, _m in SENT[before:]]
+        ok("סדרה עם כמה עונות שואלת איזו עונה",
+           len(out) == 1 and "עונה" in out[0], str(out)[:80])
+
+        fid = B.filters.id_of(CHAT, "ספיידרז")
+        q = FakeQ2(panel.cb(CHAT, "rseas", f"{fid}|1"), USER)
+        before = len(SENT)
+        await B.on_callback(q)
+        got = [t for _c, t, _m in SENT[before:]]
+        ok("בחירת עונה 1 מחזירה את פרקי העונה",
+           any("פרק 2" in t for t in got)
+           and any("פרק 37" in t for t in got), str(got)[:100])
+        ok("ולא פרקים של עונה אחרת",
+           not any("עונה 2" in t or "עונה 3" in t for t in got),
+           str(got)[:100])
+        ok("ומה שאין לו עונה נשלח תמיד",
+           any("כרזה" in t for t in got), str(got)[:100])
+        ok("והסדר לפי מספר הפרק",
+           [t for t in got if "פרק" in t][0].endswith("2"),
+           str(got)[:100])
+
+        # "הכול"
+        q = FakeQ2(panel.cb(CHAT, "rseas", f"{fid}|0"), USER)
+        before = len(SENT)
+        await B.on_callback(q)
+        ok("הכול מחזיר את כל הפריטים", len(SENT) - before == 5,
+           str(len(SENT) - before))
+
+        # שתי סדרות באותו שם
+        before = len(SENT)
+        await B.on_group_message(msg("אווטאר", uid=USER, mid=9801))
+        out = [t for _c, t, _m in SENT[before:]]
+        ok("שם כפול שואל איזו גרסה",
+           len(out) == 1 and "אווטאר" in out[0], str(out)[:80])
+
+        vid = B.filters.id_of(CHAT, "אווטאר (מצויר)")
+        q = FakeQ2(panel.cb(CHAT, "rpick", str(vid)), USER)
+        before = len(SENT)
+        await B.on_callback(q)
+        got = [t for _c, t, _m in SENT[before:]]
+        ok("ובחירה מחזירה את הגרסה הנכונה",
+           any("המצויר" in t for t in got), str(got)[:80])
+
+        # וחבר רגיל, לא מנהל, יכול ללחוץ
+        ok("גם מי שאינו מנהל יכול לבחור", bool(q.answers), str(q.answers))
+    finally:
+        for n in ("ספיידרז", "אווטאר (מצויר)", "אווטאר (לייב אקשן)"):
+            B.filters.remove(CHAT, n)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3599,6 +3682,7 @@ async def main() -> int:
     await test_no_duplicate_names()
     await test_schedule_recovers()
     await test_state_msg_goes_to_general()
+    await test_seasons_and_variants()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
