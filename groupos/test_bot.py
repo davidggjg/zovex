@@ -3624,6 +3624,50 @@ async def test_seasons_and_variants():
             B.filters.remove(CHAT, n)
 
 
+async def test_long_upload_stays_open():
+    """העלאה ארוכה לא נסגרת באמצע, וסגירה אינה שקטה.
+
+    "הבאתי לו 52 פרקים, הוא תקוע על 28." השעון נקבע פעם אחת בפתיחה
+    ולא התחדש, ולכן רבע שעה אחרי הלחיצה האיסוף נסגר — וכל מה
+    שנשלח אחר כך נבלע בלי מילה."""
+    section("העלאה ארוכה")
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.filters.add(CHAT, "קורה", "", allow_empty=True)
+    t0 = _now()
+    B._bulk_pm[ADM] = (CHAT, "filter", "קורה", t0, 7001)
+    B._bulk_gone.pop(ADM, None)
+    try:
+        # 52 פריטים, כל אחד שתי דקות אחרי הקודם — כמעט שעתיים בסך
+        # הכול, הרבה מעבר ל-‎BULK_TTL‎. כל פריט מזדקן בשתי דקות לפני
+        # שהוא נשלח; מה שמחזיק את האיסוף פתוח הוא **החידוש**, ובלעדיו
+        # הוא היה נסגר אחרי שמונה פריטים.
+        for i in range(52):
+            cid, knd, trg, since, mid = B._bulk_pm[ADM]
+            B._bulk_pm[ADM] = (cid, knd, trg, since - 120, mid)
+            await B.on_private_text(_pm(f"קורה עונה 1 פרק {i}",
+                                        mid=9900 + i))
+        ok("כל 52 הפרקים נאספו",
+           B.filters.item_count(CHAT, "קורה") == 52,
+           str(B.filters.item_count(CHAT, "קורה")))
+
+        # הפסקה ארוכה באמת — נסגר, אבל **אומר**
+        B._bulk_pm[ADM] = (CHAT, "filter", "קורה",
+                           _now() - B.BULK_TTL - 10, 7001)
+        before = len(SENT)
+        await B.on_private_text(_pm("עוד פרק", mid=9990))
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("אחרי הפסקה ארוכה האיסוף נסגר",
+           B._pm_bulk(ADM) is None)
+        ok("והבוט אומר שזה נסגר", "נסגר" in out, out[:80])
+        ok("ואומר כמה נשמרו", "52" in out, out[:80])
+        ok("וההודעה הזאת לא נוספה",
+           B.filters.item_count(CHAT, "קורה") == 52)
+    finally:
+        B._bulk_pm.pop(ADM, None)
+        B._bulk_gone.pop(ADM, None)
+        B.filters.remove(CHAT, "קורה")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3683,6 +3727,7 @@ async def main() -> int:
     await test_schedule_recovers()
     await test_state_msg_goes_to_general()
     await test_seasons_and_variants()
+    await test_long_upload_stays_open()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

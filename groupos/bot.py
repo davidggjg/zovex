@@ -158,7 +158,16 @@ FILTER_ITEMS_MAX = 1000
 
 # איסוף הודעות למתג אחד: ‎(צ'אט, מנהל) → (סוג, הדק, מתי התחיל)‎.
 # בזיכרון, כי זו פעולה של דקה — לא מצב ששורד אתחול.
-BULK_TTL = 900.0
+# כמה זמן איסוף נשאר פתוח **בלי פעילות**.
+#
+# זה היה קבוע מרגע הפתיחה ולא התחדש, ולכן מי שהעלה 52 פרקים ראה
+# את המונה נתקע על 28: רבע שעה אחרי הלחיצה האיסוף נסגר, וכל מה
+# שהוא המשיך לשלוח נבלע בשקט. העלאה של עונה שלמה אורכת יותר מרבע
+# שעה, ובצדק.
+#
+# עכשיו זה חלון מתגלגל: כל הודעה שנקלטה מאריכה אותו. מי שממשיך
+# לשלוח לא ייפול באמצע, ומי שהלך באמת ייסגר.
+BULK_TTL = 3600.0
 _bulk: dict[tuple[int, int], tuple[str, str, float]] = {}
 ADMIN_TTL = 300
 
@@ -5594,6 +5603,12 @@ async def _undo_action(chat_id: int, it, by: int) -> bool:
 _bulk_pm: dict[int, tuple[int, str, str, float, int]] = {}
 
 
+# איסוף שפג, כדי שאפשר יהיה **לומר** שהוא פג. סגירה שקטה היא
+# הגרסה הגרועה ביותר: המשתמש ממשיך לשלוח, שום דבר לא נשמר, ואין
+# שום סימן.
+_bulk_gone: dict[int, tuple[int, str]] = {}
+
+
 def _pm_bulk(user_id: int) -> Optional[tuple[int, str, str]]:
     got = _bulk_pm.get(user_id)
     if got is None:
@@ -5601,8 +5616,16 @@ def _pm_bulk(user_id: int) -> Optional[tuple[int, str, str]]:
     chat_id, kind, trigger, since, _mid = got
     if time.time() - since > BULK_TTL:
         _bulk_pm.pop(user_id, None)
+        _bulk_gone[user_id] = (chat_id, trigger)
         return None
     return chat_id, kind, trigger
+
+
+def _bulk_touch(user_id: int) -> None:
+    """מאריך את האיסוף. נקרא על כל פריט שנקלט."""
+    got = _bulk_pm.get(user_id)
+    if got is not None:
+        _bulk_pm[user_id] = got[:3] + (time.time(), got[4])
 
 
 def _rep_label(kind: str, name: str) -> str:
@@ -5635,6 +5658,22 @@ async def _pm_take(msg: Message) -> bool:
     """הודעה בפרטי שנאספת להדק. ‎True‎ = נבלעה."""
     got = _pm_bulk(msg.from_user.id)
     if got is None:
+        # נסגר הרגע מחוסר פעילות? **אומרים**, פעם אחת. מי שחזר אחרי
+        # שעה וממשיך לשלוח צריך לדעת שההודעות כבר לא נשמרות — ולא
+        # לגלות את זה בסוף, כשהמונה לא זז.
+        gone = _bulk_gone.pop(msg.from_user.id, None)
+        if gone is not None:
+            cid, trg = gone
+            n = _rep_count(cid, "f", trg)
+            await send(msg.chat.id,
+                       i18n.t("rep.collect_closed", lang_of(msg),
+                              name=tpl.esc(trg), n=n),
+                       is_group=False,
+                       markup=kb(panel.Screen("", [[(
+                           "➕ " + i18n.t("rep.add_more", lang_of(msg)),
+                           panel.cb(cid, "repadd",
+                                    f"f|{filters.id_of(cid, trg)}"))]])))
+            return True
         return False
     chat_id, kind, trigger = got
     lg = lang_of(msg)
@@ -5654,6 +5693,7 @@ async def _pm_take(msg: Message) -> bool:
     if not filters.add_item(chat_id, trigger, text, media_id=mid or "",
                             media_kind=mkind or "", kind=kind):
         return True
+    _bulk_touch(msg.from_user.id)
     n = _rep_count(chat_id, "c" if kind == "cmd" else "f", trigger)
     sc = panel.collecting_screen(
         chat_id, _rep_label("c" if kind == "cmd" else "f", trigger), n, lg)
