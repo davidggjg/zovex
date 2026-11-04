@@ -24,8 +24,18 @@ const TYPES = {'.html':'text/html','.js':'text/javascript','.css':'text/css',
                '.json':'application/json','.svg':'image/svg+xml','.png':'image/png',
                '.ico':'image/x-icon','.webp':'image/webp','.jpg':'image/jpeg'};
 
+// הבנייה הרגילה יוצאת עם base=/zovex/ (GitHub Pages), ולכן הנכסים
+// מבוקשים מ-/zovex/assets/… . שרת שמגיש מהשורש החזיר להם index.html,
+// הדפדפן סירב לטעון מודול עם MIME של HTML, והבדיקה דיווחה "מסך לבן"
+// על כל בנייה — כולל תקינה. הקידומת נחתכת כאן.
+const BASE = (await readFile(join(DIST, 'index.html'), 'utf8')
+  .then(h => (h.match(/src="(\/[^"]*?)assets\//) || [, '/'])[1])
+  .catch(() => '/'));
+
 const server = createServer(async (req, res) => {
-  let p = join(DIST, decodeURIComponent(req.url.split('?')[0]));
+  let url = decodeURIComponent(req.url.split('?')[0]);
+  if (BASE !== '/' && url.startsWith(BASE)) url = '/' + url.slice(BASE.length);
+  let p = join(DIST, url);
   try {
     if ((await stat(p)).isDirectory()) p = join(p, 'index.html');
   } catch {
@@ -49,7 +59,10 @@ page.on('pageerror', e => errors.push('PAGEERROR: ' + String(e).slice(0, 200)));
 
 let failed = false;
 try {
-  await page.goto(`http://127.0.0.1:${PORT}/`, {waitUntil: 'load', timeout: 25000});
+  // נכנסים דרך ה-base עצמו: ה-Router מקבל basename ממנו, ובשורש אף
+  // מסלול אינו תואם — העמוד נטען ונשאר ריק, וזה נראה בדיוק כמו תקלה.
+  if (BASE !== '/') console.log(`base הבנייה: ${BASE}`);
+  await page.goto(`http://127.0.0.1:${PORT}${BASE}`, {waitUntil: 'load', timeout: 25000});
   await page.waitForTimeout(4000);
   const len = await page.$eval('#root', el => el.innerHTML.length);
   // שגיאות רשת צפויות כאן (אין גישה ל-API), ולכן נספרות רק שגיאות

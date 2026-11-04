@@ -11,7 +11,10 @@
     "postbuild": "node scripts/prerender-routes.js",
     "preview": "vite preview",
     "scan": "node scripts/scan.js",
-    "scan:fix": "node scripts/scan.js --fix"
+    "scan:fix": "node scripts/scan.js --fix",
+    "test:fullscreen": "node scripts/test-fullscreen.mjs",
+    "test:player": "node scripts/test-player-ios.mjs",
+    "test": "node scripts/test-fullscreen.mjs && node scripts/test-player-ios.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",

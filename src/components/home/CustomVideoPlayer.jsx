@@ -1,5 +1,6 @@
 import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, Share2, PictureInPicture2, SkipForward, Settings} from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { iosEnterFullscreen } from "./videoFullscreen";
 import { t } from "../../i18n";
 
 // אורך הדילוג, בשניות. היה מוטבע בארבעה מקומות — שני הנגנים, הכיתוב על
@@ -505,12 +506,28 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [pipSupported, setPipSupported] = useState(false);
   const progressRef = useRef(null);
+  // סיבת הכישלון של מסך מלא, מוצגת למשתמש. קודם כל כשל נבלע ב-catch
+  // ריק, וזה בדיוק מה שנראה כמו "הכפתור לא עושה כלום".
+  const [fsError, setFsError] = useState("");
+  const fsBusy = useRef(0);
+  const wasPlayingRef = useRef(true);
+  // הטיימרים נשמרים כדי לבטל אותם: בלעדיהם טיימר של כישלון קודם היה
+  // מוחק הודעה חדשה שנכתבה שנייה לפניו, והמשתמש היה רואה הבהוב ותו לא.
+  const fsMsgTimer = useRef(null);
+  const fsCheckTimer = useRef(null);
+  // נדלק מ-webkitbeginfullscreen. בלעדיו בדיקת "המכשיר דחה" הייתה נורית
+  // גם כשהמשתמש נכנס ויצא בתוך שנייה וחצי, ומאשימה את המכשיר לשווא.
+  const fsEntered = useRef(false);
   // נגיעה בפס לפני שהאורך ידוע — נשמרת כאן ומוחלת כשהאורך מגיע
   const pendingRatio = useRef(null);
 
   useEffect(() => {
     setPipSupported(!!(document.pictureInPictureEnabled || document.webkitSupportsPresentationMode));
-    const onFs = () => setIsFullscreen(!!document.fullscreenElement);
+    // webkitFullscreenElement נבדק גם הוא: באייפד ובספארי במק אין
+    // document.fullscreenElement, ובלעדיו הכפתור נשאר על "הגדל" גם
+    // כשהנגן כבר במסך מלא.
+    const onFs = () => setIsFullscreen(
+      !!(document.fullscreenElement || document.webkitFullscreenElement));
     document.addEventListener("fullscreenchange", onFs);
     document.addEventListener("webkitfullscreenchange", onFs);
     return () => {
@@ -518,6 +535,35 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
       document.removeEventListener("webkitfullscreenchange", onFs);
     };
   }, []);
+
+  // ── מצב מסך מלא באייפון ───────────────────────────────────────────────
+  //
+  // באייפון המצב מדווח **על אלמנט הווידאו** ולא על המסמך:
+  // ‎webkitDisplayingFullscreen‎ עם האירועים ‎webkitbeginfullscreen‎ ו-
+  // ‎webkitendfullscreen‎. ‎document.fullscreenElement‎ ו-
+  // ‎fullscreenchange‎ לעולם אינם נורים שם, ולכן ה-state היה נשאר false
+  // והכפתור הציג "הגדל" גם בזמן שהסרט רץ במסך מלא.
+  //
+  // ביציאה ממסך מלא iOS עוצר לפעמים את הווידאו. אם הוא ניגן קודם —
+  // ממשיכים. זה "הנגן נתקע אחרי יציאה ממסך מלא".
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onBegin = () => { fsEntered.current = true; setIsFullscreen(true); };
+    const onEnd = () => {
+      setIsFullscreen(false);
+      if (!v.paused) return;
+      if (wasPlayingRef.current) v.play().catch(() => {});
+    };
+    v.addEventListener("webkitbeginfullscreen", onBegin);
+    v.addEventListener("webkitendfullscreen", onEnd);
+    return () => {
+      v.removeEventListener("webkitbeginfullscreen", onBegin);
+      v.removeEventListener("webkitendfullscreen", onEnd);
+    };
+    // videoReady הוא הטריגר: ה-<video> נוצר ב-createElement אחרי הרנדר,
+    // ובלעדיו האפקט היה רץ כשעוד אין למה להאזין.
+  }, [videoRef, videoReady]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -624,39 +670,92 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
     };
   }, [dragging]);
 
+  // ── מסך מלא ───────────────────────────────────────────────────────────
+  //
+  // ההסבר המלא ובחירת המסלולים — ב-videoFullscreen.js. כאן רק השימוש:
+  // כל כישלון מדווח למשתמש ולקונסול, ואינו נבלע.
+  const showFsError = (why) => {
+    if (!why) return;
+    console.warn("[zovex][fullscreen]", why);
+    setFsError(why);
+    if (fsMsgTimer.current) clearTimeout(fsMsgTimer.current);
+    fsMsgTimer.current = setTimeout(() => setFsError(""), 4000);
+  };
+
   const goFullscreen = () => {
+    // הגנה מלחיצה כפולה: שתי כניסות רצופות למסך מלא באייפון משאירות
+    // את הנגן במצב ביניים שממנו הוא לא יוצא.
+    const now = Date.now();
+    if (now - fsBusy.current < 600) return;
+    fsBusy.current = now;
+
     const v = videoRef.current;
+    if (v) wasPlayingRef.current = !v.paused;
     const inApp = !!window.ReactNativeWebView;
-    const nativeFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
-    const currentlyFs = nativeFs || (inApp && isFullscreen);
+    const docFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    const iosFs = !!(v && v.webkitDisplayingFullscreen);
+    const currentlyFs = docFs || iosFs || (inApp && isFullscreen);
 
     if (currentlyFs) {
-      if (nativeFs) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      if (docFs) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      // יציאה באייפון היא על הווידאו, לא על המסמך.
+      if (iosFs && typeof v.webkitExitFullscreen === "function") {
+        try { v.webkitExitFullscreen(); } catch {}
+      }
       setIsFullscreen(false);
       postNative({ type: "fullscreen", enter: false });
-    } else {
-      postNative({ type: "fullscreen", enter: true });
-      if (inApp) {
-        setIsFullscreen(true);
-      } else {
-        // Fullscreen our specific container — keeps custom controls visible.
-        // Using documentElement or the video element directly can cause the
-        // browser to show its native player instead of our custom overlay.
-        const el = videoRef.current?.closest("[data-cvp]") || document.documentElement;
-        const req = el.requestFullscreen || el.webkitRequestFullscreen;
-        if (req) {
-          req.call(el);
-        } else if (v && typeof v.webkitEnterFullscreen === "function") {
-          // אייפון: ל-Safari באייפון אין Fullscreen API בכלל — requestFullscreen
-          // אינו קיים, וגם לא webkitRequestFullscreen (באייפד כן). הדרך היחידה
-          // היא webkitEnterFullscreen על אלמנט הווידאו עצמו, שפותח את הנגן
-          // המובנה של iOS. מאבדים את הפקדים שלנו ומקבלים את של אפל — אבל
-          // מקבלים מסך מלא, סיבוב מסך ו-AirPlay, במקום כפתור שלא עושה כלום.
-          try { v.webkitEnterFullscreen(); } catch {}
-          setIsFullscreen(false);   // המצב מנוהל ע"י iOS, לא על ידינו
-        }
-      }
+      return;
     }
+
+    postNative({ type: "fullscreen", enter: true });
+    if (inApp) {
+      setIsFullscreen(true);
+      return;
+    }
+
+    // מסך מלא על המיכל שלנו ולא על הווידאו — כך הפקדים שלנו נשארים
+    // גלויים. זה המסלול של אנדרואיד, דסקטופ ואייפד, והוא לא משתנה.
+    const el = v?.closest("[data-cvp]") || document.documentElement;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) {
+      let p;
+      try {
+        p = req.call(el);
+      } catch (e) {
+        showFsError(iosEnterFullscreen(v) || "");
+        return;
+      }
+      // Promise שנדחה בלי catch אינו מגיע לשום מקום, וזה היה חלק
+      // מהשקט. אם הבקשה נדחתה — מנסים את מסלול הווידאו לפני שמוותרים.
+      if (p && typeof p.catch === "function") {
+        p.catch((e) => {
+          console.warn("[zovex][fullscreen] requestFullscreen נדחה:", e?.name || e);
+          showFsError(iosEnterFullscreen(v) || "");
+        });
+      }
+      return;
+    }
+
+    // אין Fullscreen API על אלמנטים: אייפון.
+    const why = iosEnterFullscreen(v);
+    if (why) {
+      showFsError(why);
+      return;
+    }
+    // הכניסה היא אסינכרונית. אם אחרי שנייה וחצי הווידאו עדיין אינו
+    // במסך מלא, הבקשה נדחתה בשקט ועדיף לומר זאת מאשר להשאיר את
+    // המשתמש מול כפתור שלא עשה כלום. הבדיקה הזו אינה הפעולה עצמה
+    // ולכן אינה תלויה בהרשאת הלחיצה.
+    fsEntered.current = false;
+    if (fsCheckTimer.current) clearTimeout(fsCheckTimer.current);
+    fsCheckTimer.current = setTimeout(() => {
+      // fsEntered מכסה את המקרה שבו המשתמש נכנס ויצא בתוך שנייה וחצי:
+      // בלעדיו הבדיקה הייתה מאשימה את המכשיר בדחייה שלא קרתה.
+      if (fsEntered.current) return;
+      if (videoRef.current && !videoRef.current.webkitDisplayingFullscreen) {
+        showFsError("המכשיר דחה את הבקשה למסך מלא");
+      }
+    }, 1500);
   };
 
   const goPip = async () => {
@@ -685,6 +784,13 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
     if (v) { try { v.playbackRate = rate; } catch {} }
   }, [rate, videoRef, videoReady]);
 
+  // ניקוי הטיימרים בפירוק הרכיב: מעבר לפרק הבא מפרק את הסרגל, וטיימר
+  // ששורד אותו קורא ל-setState על רכיב שכבר אינו קיים.
+  useEffect(() => () => {
+    if (fsMsgTimer.current) clearTimeout(fsMsgTimer.current);
+    if (fsCheckTimer.current) clearTimeout(fsCheckTimer.current);
+  }, []);
+
   const progress = duration ? (currentTime / duration) * 100 : 0;
 
   return (
@@ -699,6 +805,17 @@ function BottomBar({ videoRef, onSkip, visible, isLive = false, videoReady, menu
       // ומזיז פקדים שמוקמו בהנחת ימין-לשמאל. הנגן לא אמור להשתנות עם השפה.
       direction: "ltr",
     }}>
+      {/* הודעת כישלון של מסך מלא. בלעדיה הכישלון נראה כמו כפתור מת:
+          המשתמש לוחץ, כלום לא קורה, ואין שום רמז למה. */}
+      {fsError && (
+        <div style={{ direction: "rtl", textAlign: "center", marginBottom: 8,
+                      background: "rgba(0,0,0,0.75)", color: "#ffd9d9",
+                      border: "1px solid rgba(255,120,120,0.45)", borderRadius: 10,
+                      padding: "7px 12px", fontSize: 13 }}>
+          {fsError}
+        </div>
+      )}
+
       {/* progress bar — לא רלוונטי בשידור חי */}
       {!isLive && (
         <div style={{ marginBottom: 8, padding: "16px 0", cursor: "pointer",
