@@ -134,7 +134,9 @@ bot: Optional[Bot] = None
 GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
 _admin_cache: dict[int, tuple[float, dict[int, str]]] = {}
 # ברירות המחדל של הגנת ההצפה, לדריסה פר-קבוצה דרך settings
-AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 8, 10, 4, 8
+# שמונה הודעות בעשר שניות היה סף של "קבוצה שקטה", והוא הוחל על
+# כל קבוצה. בקבוצה שמדברים בה זה פשוט אנשים שמדברים.
+AF_RATE, AF_WINDOW, AF_REPEAT, AF_MENTIONS = 15, 10, 5, 8
 # תקרת מחיקה בפעולה אחת. כל מחיקה היא קריאת API, ומחיקה של 5000
 # הודעות תתקע את הבוט לכל הקבוצות האחרות לדקות.
 PURGE_MAX = 200
@@ -992,7 +994,16 @@ async def on_group_message(msg: Message):
     # 3. הצפה
     fl = _flood_check(msg, text)
     if fl:
-        act = db.get(msg.chat.id, "flood_action", "mute")
+        # **אזהרה ולא השתקה**, כברירת מחדל.
+        #
+        # השתקה לשעה היא הפעולה החמורה ביותר שאפשר להפעיל על חבר
+        # קבוצה, והיא הייתה התשובה **הראשונה** לרצף הודעות. בקבוצת
+        # תוכן זה נפל בדיוק על מי שהכי תורם: מישהי העלתה פרקים של
+        # סדרה והושתקה ארבע פעמים באותה דקה.
+        #
+        # הצפה שחוזרת אחרי אזהרה עדיין מגיעה להשתקה — דרך הכללים,
+        # שמצטברים. מה שהשתנה הוא שהמכה הראשונה אינה הכבדה ביותר.
+        act = db.get(msg.chat.id, "flood_action", "warn")
         dur = _int(db.get(msg.chat.id, "flood_time", "3600"), 3600)
         await _enforce(msg, act, dur, fl.kind, "flood." + fl.kind,
                        severity="medium", notice=f"flood.{fl.kind}")
@@ -1197,6 +1208,18 @@ def _ai_may_act(chat_id: int, v, text: str, *, media: bool = False) -> bool:
         return True
     if db.get(chat_id, "ai_titles_ok", "1") != "1":
         return True
+    # ── על טקסט, רק מודעה ──────────────────────────────────────────
+    #
+    # בקטגוריות האלה — ספאם, פרסומת, תוכן מיני, הימורים — הפסק של
+    # המודל על **טקסט** הוא דעה על מילים. בקבוצת תוכן זה הפיל אנשים
+    # שתיארו סרט, שאלו שאלה או ביקשו פרק.
+    #
+    # מה שהופך מילים למודעה הוא מה שמסביבן: קישור, קריאה לפעולה,
+    # שער גיל. בלי אלה אין פעולה, אלא אם המודל כמעט ודאי. תמונה
+    # היא עניין אחר לגמרי, והיא יצאה מכאן למעלה.
+    if not spamguard.solicits(text) \
+            and not spamguard.ADULT_GATE.search(text or ""):
+        return getattr(v, "confidence", 0.0) >= 0.9
     if not spamguard.talks_not_sells(text):
         return True
     if getattr(v, "confidence", 0.0) >= 0.9:
@@ -1380,6 +1403,27 @@ async def _spam_check(msg: Message, text: str, lg: str, *,
 def _flood_check(msg: Message, text: str):
     if db.get(msg.chat.id, "flood", "1") != "1":
         return None
+    # ותיק אינו מציף, הוא משתמש.
+    #
+    # מי שנמצא בקבוצה מזמן, כתב בה הרבה ומעולם לא נענש — ההסבר
+    # הסביר לרצף הודעות שלו הוא שהוא עושה את עבודתו, לא שהוא תקף
+    # את הקבוצה. ספירת הנפח היא אות טוב נגד חשבון שנכנס עכשיו,
+    # והיא אות גרוע נגד מי שבונה את הקבוצה כבר חודשים.
+    #
+    # חזרתיות ותיוגים **כן** ממשיכים לחול עליו: אלה דפוסים של
+    # חשבון שנפרץ, וותק אינו צריך לכסות עליהם.
+    if rep.trusted_regular(msg.chat.id, msg.from_user.id):
+        ents = (msg.entities or []) + (msg.caption_entities or [])
+        ment = sum(1 for e in ents if e.type in ("mention", "text_mention"))
+        hit = flood.note(
+            msg.chat.id, msg.from_user.id, text, ment,
+            rate=0,                 # ‎0‎ = אל תספור נפח בכלל
+            window=float(_int(db.get(msg.chat.id, "flood_window", ""),
+                              AF_WINDOW)),
+            repeat=_int(db.get(msg.chat.id, "flood_repeat", ""), AF_REPEAT),
+            mention_max=_int(db.get(msg.chat.id, "flood_mentions", ""),
+                             AF_MENTIONS))
+        return hit
     ents = (msg.entities or []) + (msg.caption_entities or [])
     mentions = sum(1 for e in ents if e.type in ("mention", "text_mention"))
     has_media = bool(msg.photo or msg.video or msg.document or msg.animation
@@ -1429,6 +1473,36 @@ def _risk_of(label: str) -> float:
     return (int(m.group(1)) / 100.0) if m else 0.0
 
 
+_staff_now: dict[tuple[int, int], tuple[float, bool]] = {}
+
+
+async def _is_staff_now(chat_id: int, user_id: int) -> bool:
+    """האם האדם הזה מנהל **כרגע**, לפי טלגרם ולא לפי המסד.
+
+    ‎GroupAnonymousBot‎ נחשב מנהל תמיד: רק מנהל יכול לשלוח בשמו,
+    וזו בדיוק הדרך שבה מנהלת אנונימית נראית לנו כזרה."""
+    if user_id == ANON_BOT_ID:
+        return True
+    if perms.rank_of(chat_id, user_id) >= RANK["moderator"]:
+        return True
+    # מטמון קצר. בפשיטה הענישה קורית על כל הודעה, ובלי המטמון כל
+    # אחת מהן הייתה קריאת רשת נוספת — בדיוק ברגע שבו הבוט הכי עמוס.
+    key = (chat_id, user_id)
+    hit = _staff_now.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    try:
+        m = await bot.get_chat_member(chat_id, user_id)
+    except TelegramAPIError:
+        return False        # לא יודעים — ממשיכים כרגיל
+    val = m.status in (ChatMemberStatus.ADMINISTRATOR,
+                       ChatMemberStatus.CREATOR)
+    _staff_now[key] = (time.time(), val)
+    if len(_staff_now) > 2000:
+        _staff_now.clear()
+    return val
+
+
 async def _enforce(msg: Message, action: str, duration: Optional[int],
                    label: str, log_action: str, *, severity: str = "low",
                    notice: Optional[str] = None) -> None:
@@ -1440,6 +1514,26 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
     # שיעביר אותו לכאן בטעות היה מוחק הודעה בלי שאף כלל נדרס.
     if action in ("off", "none"):
         return
+    # ── רשת הביטחון האחרונה: לא נוגעים במנהל ─────────────────────────
+    #
+    # "הוא השתיק לי את המנהלת הכי טובה שלי."
+    #
+    # הפטור למנהלים נבדק מול **המסד**, והמסד יכול להיות לא מעודכן:
+    # מנהלת שמונתה לפני דקה, מנהלת אנונימית שההודעה שלה מגיעה בשם
+    # ‎GroupAnonymousBot‎, או סנכרון שנכשל. בכל אחד מהמקרים האלה
+    # הענישה יצאה לדרך על מי שאסור לגעת בה.
+    #
+    # כאן נשאלת טלגרם עצמה, ברגע האחרון שלפני הפעולה. זו קריאה
+    # ממוטמעת ולא רשת לכל הודעה — היא רצה רק כשעומדים להעניש, וזה
+    # נדיר. עדיף לשלם עליה מאשר להשתיק מנהלת.
+    if msg.from_user is not None and await _is_staff_now(msg.chat.id,
+                                                         msg.from_user.id):
+        log.info("ענישה בוטלה ב-%s: %s הוא מנהל", msg.chat.id,
+                 msg.from_user.id)
+        audit.log(msg.chat.id, "enforce.skipped_admin",
+                  target_id=msg.from_user.id, actor_kind="bot",
+                  reason=label, source="policy", severity="info")
+        return
     _keep_proof(msg, action, f"{log_action} · {label}", _risk_of(label))
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
@@ -1447,8 +1541,15 @@ async def _enforce(msg: Message, action: str, duration: Optional[int],
     audit.log(msg.chat.id, log_action, target_id=msg.from_user.id,
               actor_kind="bot", reason=label, after=action,
               source="policy", severity=severity)
-    rep.penalize(msg.chat.id, msg.from_user.id,
-                 0.5 if action == "delete" else 1.0)
+    # **קצב אינו עבירה.**
+    #
+    # עונש על קצב נרשם באמון, האמון הנמוך חזר כאות חשד על ההודעה
+    # הבאה, וההודעה הבאה נענשה ביתר קלות. כלומר אדם שדיבר מהר פעם
+    # אחת נעשה חשוד לצמיתות. דפוסים שהם באמת התקפה — אותו טקסט שוב
+    # ושוב, הצפת תיוגים, תוכן אסור — כן נרשמים.
+    if log_action != "flood.rate":
+        rep.penalize(msg.chat.id, msg.from_user.id,
+                     0.5 if action == "delete" else 1.0)
     if action == "delete":
         return
     if action == "warn":
@@ -3546,7 +3647,7 @@ async def cmd_floodaction(msg: Message):
     valid = ("delete", "warn", "mute", "kick", "ban")
     if len(parts) < 2 or parts[1].lower() not in valid:
         await reply(msg, T(msg, "set.usage", cmd="/floodaction " + "|".join(valid),
-                           cur=db.get(msg.chat.id, "flood_action", "mute")))
+                           cur=db.get(msg.chat.id, "flood_action", "warn")))
         return
     db.set(msg.chat.id, "flood_action", parts[1].lower(), msg.from_user.id)
     await reply(msg, T(msg, "set.done", key="flood_action", value=parts[1].lower()))

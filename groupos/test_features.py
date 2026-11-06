@@ -232,9 +232,10 @@ def test_spamguard() -> None:
     # בטלגרם כל עשר שניות, ולכן הוא מסלול מהיר ולא ציון מצטבר.
     ok("פיתיון מיני נתפס", v2 is not None and v2.kind == "adult_ad", str(v2))
     ok("והוא מסלים", v2 is not None and v2.escalate)
+    # אזכור בלי הזמנה אינו פסק **בכלל** — לא ציון נמוך שמצטבר עם
+    # אותות אחרים, אלא כלום. אדם שאמר מילה אינו מקרה.
     v3 = sg.classify("יש פה הרבה דיבורים על סקס לאחרונה")
-    ok("אזכור בלי הזמנה אינו מסלים",
-       v3 is not None and not v3.escalate, str(v3))
+    ok("אזכור בלי הזמנה אינו פסק", v3 is None, str(v3))
 
     for clean in ("שלום לכולם, מה המצב?",
                   "Hey, photos from the kids school trip are up",
@@ -369,6 +370,53 @@ def test_flood_knows_the_room() -> None:
     ok("ספאמר לבדו נתפס מוקדם יותר מאשר בתוך שיחה",
        alone is not None and (crowd is None or crowd > alone),
        f"לבד={alone} בשיחה={crowd}")
+
+
+def test_words_alone_never_punish() -> None:
+    """מילה בשיחה אינה עבירה — רק מודעה היא עבירה.
+
+    "הוא צריך למחוק פורנו, לא הודעות של אנשים רגילים שסתם מדברים
+    ומעיף אותם על טיל." פסק על **אזכור** נתן ציון נמוך שהצטרף
+    לאותות אחרים, ובצירוף הזה אנשים שתיארו סרט או שאלו שאלה נענשו.
+    """
+    section("מילה אינה עבירה")
+    for t in ("מסע מצחיק בעולם של סקס, סמים ומוזיקה",
+              "הסרט הזה מלא סצנות סקס",
+              "מישהו ראה את הסדרה על תעשיית הפורנו?",
+              "איזה סרט מומלץ לערב?",
+              "אם אין את עונה 5 איך יהיה את העונות הבאות🤦‍♀️"):
+        ok(f"שיחה נשארת נקייה: {t[:30]}", sg.classify(t) is None,
+           str(sg.classify(t)))
+
+    # ומה שבאמת מודעה עדיין נופל
+    for t in ("🔥 סרטי סקס מלאים בערוץ שלנו הצטרפו https://t.me/x",
+              "פורנו ישראלי 18+ לצפייה ישירה",
+              "XXX full videos join now"):
+        v = sg.classify(t)
+        ok(f"מודעה נתפסת: {t[:30]}", v is not None and v.kind == "adult_ad",
+           str(v))
+    v = sg.classify("teen sex 14 years https://t.me/y")
+    ok("ותוכן אסור נשאר במסלול המהיר",
+       v is not None and v.kind == "illegal" and v.escalate, str(v))
+
+    # הסוואה מכוונת אינה "אדם שמדבר", אבל גם היא חלשה
+    v = sg.classify("s\u200de\u200dx")
+    ok("הסוואה נספרת אך חלשה",
+       v is not None and v.kind == "obfuscated" and v.weight <= 0.25, str(v))
+
+
+def test_switch_rows() -> None:
+    """מתג עם כיתוב ארוך מקבל שורה משלו, אחרת לא רואים אם הוא דלוק."""
+    section("שורות המתגים")
+    import panel as _p
+    for lg in ("he", "en"):
+        sc = _p.switches_screen(-100, {}, lg)
+        wide = [b[0] for r in sc.rows if len(r) == 2
+                for b in r if len(b[0]) > 18]
+        ok(f"אין כיתוב ארוך בחצי שורה ({lg})", not wide, str(wide))
+        ok(f"ולכל מתג יש נורה ({lg})",
+           all(b[0][0] in "🟢⚪" for r in sc.rows for b in r
+               if ":sw:" in b[1]))
 
 
 def test_prompts() -> None:
@@ -743,6 +791,8 @@ def main() -> int:
     test_emoji_is_not_evasion()
     test_catalogue_post()
     test_flood_knows_the_room()
+    test_words_alone_never_punish()
+    test_switch_rows()
     test_prompts()
     test_evidence()
     test_media_talk()

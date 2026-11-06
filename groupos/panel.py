@@ -389,11 +389,24 @@ SWITCH_DEFAULT = {k: d for k, d, _ in SWITCHES}
 def switches_screen(chat_id: int, values: dict,
                     lang: str = i18n.DEFAULT) -> Screen:
     """כל המתגים, כל אחד עם מצבו. לחיצה מחליפה — ורואים את התוצאה."""
+    # שני מתגים בשורה — **אלא אם הכיתוב ארוך**.
+    #
+    # "יש דברים שהם יותר מדי גדולים בכתב וצריכים שורה משלהם, כי לא
+    # רואים אם זה מופעל או כבוי." כיתוב ארוך בחצי שורה נגזר או
+    # נשבר, והנורה שבתחילתו — שהיא כל העניין — יורדת מהמסך. מתג
+    # שלא רואים את מצבו גרוע ממתג שאינו קיים.
+    SIDE_BY_SIDE_MAX = 15
     rows, line = [], []
     for key, default, label in SWITCHES:
         on = values.get(key, default) == "1"
-        line.append((("🟢 " if on else "⚪ ") + i18n.t(label, lang),
-                     cb(chat_id, "sw", key)))
+        text = i18n.t(label, lang)
+        cell = (("🟢 " if on else "⚪ ") + text, cb(chat_id, "sw", key))
+        if len(text) > SIDE_BY_SIDE_MAX:
+            if line:
+                rows.append(line); line = []
+            rows.append([cell])
+            continue
+        line.append(cell)
         if len(line) == 2:
             rows.append(line); line = []
     if line:

@@ -240,13 +240,24 @@ def classify(text: str) -> Optional[Verdict]:
     # שער גיל נספר כמונח מיני. ההודעה שהגיעה מהשטח לא הכילה אף מילה
     # מפורשת — כל התוכן ישב ב**כפתורים**: "Great videos for 18+",
     # "Try watching". בלי זה שום דפוס לא נגע בה.
-    if ADULT_GATE.search(text or "") or ADULT_GATE.search(norm):
+    # המונחים האמיתיים, לפני ששער הגיל מצטרף אליהם. ההפרדה חשובה:
+    # שער גיל **ליד** מונח מיני הוא מודעה, ושער גיל לבדו אינו.
+    real_terms = list(sexual)
+    gated = bool(ADULT_GATE.search(text or "") or ADULT_GATE.search(norm))
+    if gated:
         sexual = sexual + ["18+"]
 
     if sexual and (minor or age):
         # זה המסלול הנפרד. לא צובר, לא ממתין, לא תלוי בסף של הקבוצה.
         why = ",".join((sexual[:2] + minor[:2])) + (" age" if age else "")
         return Verdict("illegal", ILLEGAL, why[:48], escalate=True)
+    # שער גיל יחד עם מונח מיני הוא מודעה, גם בלי קישור ובלי כפתור.
+    # אף אחד לא מסמן ‎18+‎ על שיחה: הוא שם כדי להבטיח מה שמעבר.
+    # זה מה שתופס מודעה שמדביקה לעצמה כותרות של רשומת קטלוג.
+    if gated and real_terms:
+        return Verdict("adult_ad", 0.95,
+                       ",".join(real_terms[:2] + ["18+"])[:48],
+                       escalate=True)
     if sexual and (bait or solicits(text)):
         # **מודעה** מינית, לא אזכור: מונח מיני יחד עם קישור, תיוג או
         # קריאה לפעולה. זה מה שמוצף כל עשר שניות בטלגרם, ולכן הוא
@@ -262,17 +273,22 @@ def classify(text: str) -> Optional[Verdict]:
                        ",".join(sexual[:2] + bait[:1])[:48],
                        escalate=hard)
     if sexual:
-        # אזכור בתוך רשומת קטלוג אינו פסק כלל. ציון, ולו נמוך,
-        # מצטרף לאותות אחרים — וכך בדיוק הגיע פוסט של סרט ל-100%.
-        # אותם שלושה תנאים כמו בבלם, ולא רק "זה נראה קטלוג": מודעה
-        # שמדביקה לעצמה כותרות שדות עדיין נופלת על שער גיל, על
-        # מונח פיתיון ועל כל הזמנה.
-        if catalogue_post(text) and not solicits(text) \
-                and not ADULT_GATE.search(text or "") \
-                and not bait:
-            return None
-        return Verdict("adult", ADULT - 0.2 + (0.1 if obf else 0.0),
-                       ",".join(sexual[:2])[:48])
+        # ── מילה לבדה אינה עבירה ──────────────────────────────────
+        #
+        # כאן ישב פסק על **אזכור**: מונח מיני בלי קישור, בלי קריאה
+        # לפעולה ובלי שער גיל. הציון היה נמוך, אבל הוא הצטרף
+        # לאותות אחרים — ובצירוף הזה הועפו אנשים שדיברו על סרטים.
+        #
+        # מודעה נתפסת למעלה, על הצירוף; תמונת פורנו נתפסת על
+        # התמונה עצמה. מה שנשאר כאן הוא אדם שאמר מילה, ועל זה אין
+        # לבוט מה להגיד.
+        #
+        # הסוואה מכוונת כן נספרת — ‎s‌e‌x‎ עם תווים נסתרים אינו אדם
+        # שמדבר — אבל גם היא לבדה חלשה מכדי להעניש.
+        if obf:
+            return Verdict("obfuscated", OBFUS,
+                           ",".join(sexual[:2])[:48])
+        return None
     if bait and obf:
         return Verdict("bait", BAIT_W + 0.15, ",".join(bait[:2])[:48])
     if bait:

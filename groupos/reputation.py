@@ -160,6 +160,22 @@ class Reputation:
                                  f"level {r.level}")
         return None
 
+    # ותיק אמיתי: גם נוכחות לאורך זמן, גם אמון, וגם היעדר עבירות.
+    #
+    # שלושת התנאים יחד ולא אחד מהם: ‎xp‎ לבדו הוא ספירת הודעות, ואת
+    # זה ספאמר צובר בשעה. ‎strikes==0‎ הוא מה שהופך את זה לאמירה —
+    # מי שכבר נענש כאן אינו "ותיק ללא רבב".
+    # חמישים הודעות, לא שלוש מאות: הרף אמור לתאר "אדם שנמצא כאן
+    # ומשתתף", לא ותיק נדיר. מי שכתב חמישים הודעות בלי אף עבירה
+    # אינו מי שצריך להגן מפניו מפני ריבוי הודעות.
+    REGULAR_XP = 50
+    REGULAR_TRUST = 0.6
+
+    def trusted_regular(self, chat_id: int, user_id: int) -> bool:
+        r = self.get(chat_id, user_id)
+        return (r.xp >= self.REGULAR_XP and r.trust >= self.REGULAR_TRUST
+                and r.strikes == 0)
+
     def discount(self, chat_id: int, user_id: int) -> float:
         """מקדם הנחה לציון הסיכון, 0–0.5. ותיק אינו חסין — הוא סלחני.
 

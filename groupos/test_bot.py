@@ -141,8 +141,11 @@ class FakeBot:
         return C()
 
     async def get_chat_member(self, chat_id, user_id):
+        # חבר רגיל כברירת מחדל. בדיקה שרוצה מנהל דורסת את זה
+        # במפורש — אחרת כל הבדיקות היו "מנהל", והאכיפה לא הייתה
+        # נבדקת בכלל.
         class M:
-            status = "administrator"
+            status = "member"
         return M()
 
     async def send_invoice(self, chat_id, **kw):
@@ -3668,6 +3671,58 @@ async def test_long_upload_stays_open():
         B.filters.remove(CHAT, "קורה")
 
 
+async def test_never_punish_an_admin():
+    """אף ענישה לא יוצאת על מנהל — גם כשהמסד לא יודע שהוא מנהל.
+
+    "הוא השתיק לי את המנהלת הכי טובה שלי." היא מנהלת אנונימית:
+    טלגרם שולחת את ההודעה בשם ‎GroupAnonymousBot‎, הפטור נבדק מול
+    המסד, והמסד לא מכיר אותה. אותו דבר קורה למנהלת שמונתה לפני
+    דקה או כשסנכרון נכשל."""
+    section("לא נוגעים במנהל")
+    OUTSIDER = 77001
+
+    class M:
+        def __init__(self, st):
+            self.status = st
+
+    real = B.bot.get_chat_member
+    B._staff_now.clear()
+    B.perms.set_role(CHAT, OUTSIDER, "member")
+    try:
+        # המסד אומר "חבר רגיל", טלגרם אומרת "מנהל"
+        B.bot.get_chat_member = lambda c, u: _ret(
+            M(B.ChatMemberStatus.ADMINISTRATOR))
+        ok("טלגרם מכריעה על פני המסד",
+           await B._is_staff_now(CHAT, OUTSIDER))
+
+        DELETED.clear()
+        m = msg("הודעה כלשהי", uid=OUTSIDER, mid=9970)
+        await B._enforce(m, "mute", 3600, "flood.rate", "flood.rate")
+        ok("ולכן ההודעה לא נמחקת", 9970 not in DELETED, str(DELETED))
+        ok("והענישה נרשמת כמבוטלת",
+           any(r["action"] == "enforce.skipped_admin"
+               for r in B.db.q(
+                   "SELECT action FROM audit_log WHERE chat_id=? "
+                   "ORDER BY id DESC LIMIT 5", (CHAT,))))
+
+        # מנהלת אנונימית: הבוט האנונימי הוא תמיד מנהל
+        ok("הבוט האנונימי נחשב מנהל",
+           await B._is_staff_now(CHAT, B.ANON_BOT_ID))
+
+        # וחבר רגיל באמת כן נענש. המטמון מנוקה כי זה אותו מזהה —
+        # בשטח הוא היה פג מעצמו אחרי דקה.
+        B._staff_now.clear()
+        B.bot.get_chat_member = lambda c, u: _ret(
+            M(B.ChatMemberStatus.MEMBER))
+        DELETED.clear()
+        m2 = msg("ספאם", uid=OUTSIDER, mid=9971)
+        await B._enforce(m2, "delete", None, "spam", "spam.adult")
+        ok("אבל חבר רגיל כן נאכף", 9971 in DELETED, str(DELETED))
+    finally:
+        B._staff_now.clear()
+        B.bot.get_chat_member = real
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3728,6 +3783,7 @@ async def main() -> int:
     await test_state_msg_goes_to_general()
     await test_seasons_and_variants()
     await test_long_upload_stays_open()
+    await test_never_punish_an_admin()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
