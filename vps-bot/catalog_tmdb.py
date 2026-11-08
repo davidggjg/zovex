@@ -72,6 +72,9 @@ VERSION_FILE = DATA_DIR / "content_version.txt"
 BAK_DIR = DATA_DIR / "catalog_tmdb_backups"
 CACHE_FILE = DATA_DIR / "tmdb_cache.json"
 REPORT = DATA_DIR / "catalog_tmdb_report.csv"
+# מיפוי ידני לכותרות ש-TMDB אינו יכול למצוא לפי שם עברי. גובר על הכל.
+#   {"קסם של הורים": 1433, "ארמון הצדק": "https://.../poster.jpg"}
+OVERRIDES = DATA_DIR / "poster_overrides.json"
 IMG = "https://image.tmdb.org/t/p/w500"
 TMDB = os.environ.get("TMDB_BASE", "https://api.themoviedb.org/3")
 
@@ -186,8 +189,16 @@ def details(kind, tid):
 def search(kind, title, year=None):
     """חיפוש ב-TMDB. מחזיר תוצאה רק אם השם תואם באמת.
 
-    התאמה חלקית היא מה שמדביק פוסטר של סרט אחר, ולכן נדרש שהשם
-    המנורמל יהיה זהה או שאחד יכיל את השני.
+    ## למה אין כאן "ניחוש מושכל"
+
+    גרסה קודמת קיבלה את התוצאה הראשונה כששאילתה בעברית החזירה מעט
+    תוצאות, בהנחה ש-TMDB התאים אותה לכותרת חלופית. היא לא: לשאילתה
+    בעברית הוחזר הסרט הברזילאי "Beware Boiúna", והוא היה מודבק
+    כפוסטר לפריט שאין לו שום קשר אליו. דוד תפס את זה.
+
+    TMDB אינו מאנדקס שמות בעברית של תוכן זר. בלי שם לטיני אין מה
+    להשוות, ולכן עדיף בלי פוסטר מאשר פוסטר של סרט אחר. פריט כזה
+    מדווח ונשאר לקביעה ידנית דרך poster_overrides.json.
     """
     p = {"query": title, "include_adult": "false"}
     if year:
@@ -198,11 +209,6 @@ def search(kind, title, year=None):
     if not d or not d.get("results"):
         return None
     want = norm(title)
-    if not re.search(r"[A-Za-z]", title) and len(d["results"]) <= 3:
-        # שאילתה בעברית שהחזירה מעט תוצאות: TMDB התאים אותה לכותרת
-        # חלופית, ואין לנו שם לטיני להשוות אליו. מקבלים את הראשונה
-        # ומסמנים בדוח כ"לבדיקה" — עדיף פוסטר שאפשר לבדוק מאשר כלום.
-        return d["results"][0]
     for r in d["results"][:5]:
         for fld in ("name", "original_name", "title", "original_title"):
             got = norm(r.get(fld))
@@ -263,6 +269,36 @@ def main():
         print("   מהם פרקים של %d סדרות, ועוד %d פריטים בודדים"
               % (len(by_series), len(singles)))
 
+        # ── שלב 0: מיפוי ידני ───────────────────────────────────────────
+        #
+        # קיים כי יש כותרות ש-TMDB באמת אינו יכול למצוא לפי שם עברי,
+        # ובלי דרך לקבוע אותן ידנית הן נשארות בלי פוסטר לנצח. ערך
+        # מספרי הוא tmdb_id, ומחרוזת היא כתובת תמונה ישירה.
+        try:
+            ov = json.loads(OVERRIDES.read_text(encoding="utf-8"))
+        except Exception:
+            ov = {}
+        if ov:
+            print("   מיפוי ידני: %d כותרות" % len(ov))
+        for name, val in ov.items():
+            items = by_series.pop(name, None)
+            if not items:
+                continue
+            url = val if isinstance(val, str) and val.startswith("http") else None
+            if url is None:
+                det = details("tv", val) or details("movie", val)
+                if not det or not det.get("poster_path"):
+                    print("   ✗ מיפוי ידני לא החזיר פוסטר: %s" % name)
+                    by_series[name] = items
+                    continue
+                url = IMG + det["poster_path"]
+            for x in items:
+                x["_new_thumb"] = url
+                changes["poster"] += 1
+                add("פוסטר", "מיפוי ידני (poster_overrides.json)", x,
+                    "thumbnail_url", url, str(val)[:40])
+            print("   ✓ %-28s %4d פרקים  (ידני)" % (str(name)[:28], len(items)))
+
         # ── שלב א: פוסטר מאח באותה סדרה ─────────────────────────────────
         #
         # נמדד: 1,094 מתוך 1,271 הפרקים החסרים שייכים לסדרה שכבר יש בה
@@ -274,6 +310,7 @@ def main():
             t = str(i.get("thumbnail_url") or "").strip()
             if n and t and n not in sib_poster:
                 sib_poster[n] = t
+        unresolved = []
         covered = []
         for name, items in list(by_series.items()):
             src = sib_poster.get(name)
@@ -295,7 +332,6 @@ def main():
         for name, items in sorted(by_series.items(), key=lambda kv: -len(kv[1])):
             tid = next((x.get("tmdb_id") for x in items if x.get("tmdb_id")), None)
             det = details("tv", tid) if tid else None
-            loose = False
             if not det:
                 # TMDB אינו מאנדקס שמות בעברית של סדרות זרות, ולכן
                 # מנסים קודם את השם האנגלי אם הוא קיים אצלנו.
@@ -304,16 +340,18 @@ def main():
                     v = next((x.get(fld) for x in items if x.get(fld)), None)
                     if v and norm(v) != norm(name):
                         names.append(v)
-                names.append(name)
+                # רק שם בכתב לטיני. שם עברי אינו מחפש כלום ב-TMDB
+                # והתוצאה שתחזור תהיה של תוכן אחר לגמרי.
+                names = [c for c in names if re.search(r"[A-Za-z]", c)]
                 hit = None
                 for cand in names:
                     hit = search("tv", cand)
                     if hit:
-                        loose = not re.search(r"[A-Za-z]", cand)
                         break
                 if not hit:
-                    print("   ✗ לא נמצאה ב-TMDB: %s (%d פרקים) — השם בעברית,"
-                          " ואין לנו שם אנגלי" % (name, len(items)))
+                    print("   ✗ %-28s %4d פרקים — אין שם אנגלי, לא מנחשים"
+                          % (str(name)[:28], len(items)))
+                    unresolved.append((name, len(items)))
                     continue
                 det, tid = hit, hit.get("id")
             poster = det.get("poster_path")
@@ -324,10 +362,8 @@ def main():
             for x in items:
                 x["_new_thumb"] = url
                 changes["poster"] += 1
-                add("פוסטר",
-                    "פוסטר הסדרה מ-TMDB" + ("  [התאמה לפי חיפוש בעברית — לבדיקה]"
-                                            if loose else ""),
-                    x, "thumbnail_url", url, "tmdb=%s" % tid)
+                add("פוסטר", "פוסטר הסדרה מ-TMDB", x, "thumbnail_url", url,
+                    "tmdb=%s" % tid)
                 if args.set_tmdb and not x.get("tmdb_id"):
                     x["_new_tmdb"] = tid
             print("   ✓ %-28s %4d פרקים  tmdb=%s" % (str(name)[:28], len(items), tid))
@@ -339,7 +375,13 @@ def main():
                 det = details(kind, tid) or details(
                     "tv" if kind == "movie" else "movie", tid)
             if not det:
-                det = search(kind, x.get("title") or "", x.get("year"))
+                # גם כאן: רק שם לטיני. זה המסלול שבו פריט בודד קיבל
+                # את הפוסטר של "Beware Boiúna".
+                cand = next((x.get(f) for f in ("en_title", "title")
+                             if x.get(f) and re.search(r"[A-Za-z]", str(x.get(f)))), None)
+                det = search(kind, cand, x.get("year")) if cand else None
+                if not det:
+                    unresolved.append((x.get("title") or x.get("id"), 1))
             if not det or not det.get("poster_path"):
                 continue
             x["_new_thumb"] = IMG + det["poster_path"]
@@ -348,6 +390,16 @@ def main():
                 "tmdb=%s" % det.get("id"))
             if args.set_tmdb and not x.get("tmdb_id") and det.get("id"):
                 x["_new_tmdb"] = det["id"]
+
+    if args.posters and unresolved:
+        tot = sum(n for _, n in unresolved)
+        print("\n   נשארו בלי פוסטר: %d פריטים ב-%d כותרות."
+              % (tot, len(unresolved)))
+        print("   לאלה אין שם אנגלי אצלנו ו-TMDB אינו מוצא שם עברי.")
+        print("   אפשר לקבוע להן ידנית: %s" % OVERRIDES)
+        print('   בפורמט  {"שם הסדרה": 1433, "שם אחר": "https://.../poster.jpg"}')
+        for n_, c in sorted(unresolved, key=lambda x: -x[1])[:10]:
+            print("      %-32s %d" % (str(n_)[:32], c))
 
     # ── ישראלי ─────────────────────────────────────────────────────────────
     if args.israeli:
