@@ -1,6 +1,7 @@
 import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, Share2, PictureInPicture2, SkipForward, Settings} from "lucide-react";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { iosEnterFullscreen } from "./videoFullscreen";
+import { bestVariant } from "./videoQuality";
 import { t } from "../../i18n";
 
 // אורך הדילוג, בשניות. היה מוטבע בארבעה מקומות — שני הנגנים, הכיתוב על
@@ -1555,6 +1556,16 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       } else if (inApp) {
         cfg.streaming = { bufferingGoal: 20, rebufferingGoal: 3 };
       }
+      // ── איכות: להתחיל בגבוהה ביותר ──────────────────────────────────
+      //
+      // לא הייתה כאן שום הגדרת ABR, ולכן Shaka השתמש בברירת המחדל שלו:
+      // הערכת רוחב פס התחלתית נמוכה, בחירת וריאנט נמוך, וטיפוס הדרגתי.
+      // בזרם עם 1080p זה אומר שהצופה רואה איכות נמוכה בשניות הראשונות,
+      // ולפעמים נתקע שם אם ההערכה לא מספיקה לעלות.
+      //
+      // ההערכה ההתחלתית מורמת ל-8Mb/s כדי שהבחירה הראשונה תהיה הגבוהה,
+      // ומיד אחרי הטעינה נבחר במפורש הווריאנט הטוב ביותר.
+      cfg.abr = { ...(cfg.abr || {}), defaultBandwidthEstimate: 8000000 };
       if (Object.keys(cfg).length) shaka.configure(cfg);
       await shaka.attach(videoEl);
       playerRef.current = { shaka };
@@ -1614,8 +1625,36 @@ function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = fa
       });
       stallTimerRef.current = clearStall;
 
+      // בוחר את הווריאנט הגבוה ביותר ומכבה ABR, עם רשת ביטחון: אם
+      // הרשת באמת לא עומדת בזה — שלוש הפסקות באגירה בתוך דקה — ABR
+      // חוזר ומחליט לבד. בלי זה צופה בחיבור חלש היה נתקע לנצח על
+      // איכות שהקו שלו לא יכול לשאת.
+      const pickBest = () => {
+        try {
+          const tracks = shaka.getVariantTracks();
+          if (!tracks || tracks.length < 2) return;
+          const best = bestVariant(tracks);
+          if (!best) return;
+          shaka.configure({ abr: { enabled: false } });
+          shaka.selectVariantTrack(best, true);
+          let rebuffers = 0;
+          const since = Date.now();
+          shaka.addEventListener("buffering", (e) => {
+            if (!e.buffering) return;
+            if (Date.now() - since > 60000) return;
+            if (++rebuffers >= 3) {
+              // הקו לא עומד בזה. מחזירים את ההחלטה ל-ABR.
+              shaka.configure({ abr: { enabled: true } });
+            }
+          });
+        } catch {
+          /* זרם בלי וריאנטים, או גרסת Shaka אחרת — ממשיכים כרגיל */
+        }
+      };
+
       try {
         await shaka.load(src);
+        pickBest();
         if (!destroyed) {
           if (!isLive && startTime > 1) { try { videoEl.currentTime = startTime; } catch {} }
           videoEl.play().catch(() => {});
