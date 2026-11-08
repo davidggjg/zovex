@@ -18,8 +18,16 @@ import { join, extname } from 'node:path';
 const DIST='dist', PORT=8869;
 const T={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json'};
 let blocked = false;
+// הבנייה הרגילה יוצאת עם base=/zovex/, ולכן הנכסים מבוקשים מ-
+// /zovex/assets/… . שרת שמגיש מהשורש החזיר להם index.html, הדפדפן
+// סירב לטעון מודול עם MIME של HTML, והבדיקה "נכשלה" על בנייה תקינה.
+const BASE = await readFile(join(DIST, 'index.html'), 'utf8')
+  .then(h => (h.match(/src="(\/[^"]*?)assets\//) || [, '/'])[1])
+  .catch(() => '/');
+const strip = u => (BASE !== '/' && u.startsWith(BASE)) ? '/' + u.slice(BASE.length) : u;
+
 const srv=createServer(async(req,res)=>{
-  const path=decodeURIComponent(req.url.split('?')[0]);
+  const path=strip(decodeURIComponent(req.url.split('?')[0]));
   if (path === '/api/access') {
     // Buffer.byteLength ולא b.length: עברית היא שני בתים לתו, ו-
     // Content-Length קצר מדי חותך את ה-JSON באמצע.
@@ -51,7 +59,7 @@ for (const [label, isBlocked] of [['משתמש חסום', true], ['משתמש ת
     try { localStorage.setItem('zovex_user', JSON.stringify(u)); } catch {}
   });
   pg.on('console', m => { if (m.type()==='error') console.log('     [שגיאה]', m.text().slice(0,100)); });
-  await pg.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  await pg.goto(`http://127.0.0.1:${PORT}${BASE}`, { waitUntil: 'domcontentloaded' });
   await pg.waitForTimeout(3500);
   await pg.waitForTimeout(2000);
   const txt = await pg.$eval('body', e => e.innerText);

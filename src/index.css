@@ -41,3 +41,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-s
   .zv-card:hover .zv-card__art,
   .zv-card:focus-visible .zv-card__art { transform: none; }
 }
+
+/* ── מצב טלוויזיה ─────────────────────────────────────────────────────
+   נדלק מ-TvNavigation כשהזיהוי אומר שזו טלוויזיה. שלושה דברים בלבד,
+   וכל אחד עונה על בעיה אמיתית בצפייה ממרחק:
+
+   · סימון פוקוס ברור — בלעדיו המשתמש אינו יודע על מה השלט מצביע.
+   · טקסט גדול יותר — מה שקריא בטלפון במרחק 30 ס"מ אינו קריא
+     ממרחק שלושה מטרים.
+   · שוליים בטוחים — טלוויזיות רבות חותכות את קצה התמונה (overscan).
+*/
+html[data-tv] { font-size: 20px; }
+html[data-tv] body { padding: 2.5vh 2.5vw; }
+html[data-tv] *:focus {
+  outline: 3px solid var(--z-primaryHi, #FF3348);
+  outline-offset: 3px;
+  border-radius: var(--z-radius-card, 12px);
+}
+html[data-tv] *:focus-visible { outline: 3px solid var(--z-primaryHi, #FF3348); }
+/* הפוקוס גדל מעט, כדי שיהיה ברור גם ממרחק */
+html[data-tv] a:focus, html[data-tv] button:focus, html[data-tv] [data-tv-focus]:focus {
+  transform: scale(1.06);
+  transition: transform 140ms ease;
+  z-index: 5;
+  position: relative;
+}

@@ -1,6 +1,7 @@
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import Home from './pages/Home';
 import Legal from './pages/Legal';
+import TvNavigation from './components/home/TvNavigation';
 
 export default function App() {
   // ה-basename נגזר מ-base של הבנייה: ב-GitHub Pages בונים עם base=/zovex/
@@ -14,6 +15,8 @@ export default function App() {
         <Route path="/:slug" element={<Home />} />
         <Route path="/:slug/:episode" element={<Home />} />
       </Routes>
+      {/* לא מרנדר כלום. נדלק רק כשהאתר נפתח בטלוויזיה. */}
+      <TvNavigation />
     </Router>
   );
 }

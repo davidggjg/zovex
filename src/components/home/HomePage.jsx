@@ -1,3 +1,4 @@
+import { colors, radius } from "@/theme/tokens";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { t, getLanguage, setLanguage, catName } from '../../i18n';
 
@@ -72,9 +73,13 @@ export default function HomePage({
       {freeBar && (
         <div style={{
           display: "flex", alignItems: "center", gap: 10,
-          padding: "9px 14px", fontSize: 13, lineHeight: 1.5,
-          color: "#ffd9db", background: "rgba(229,9,20,0.14)",
-          borderBottom: "1px solid rgba(229,9,20,0.35)",
+          // היה שטיפה אדומה על כל רוחב המסך — הדבר הראשון שהעין
+          // תופסת, לפני התוכן. אותה הודעה, בזכוכית של מערכת העיצוב.
+          padding: "8px 14px", fontSize: 12.5, lineHeight: 1.45,
+          color: colors.textSecondary, background: colors.glass,
+          backdropFilter: "blur(14px) saturate(140%)",
+          WebkitBackdropFilter: "blur(14px) saturate(140%)",
+          borderBottom: `1px solid ${colors.glassBorder}`,
           // AmbientGlow הוא position:fixed עם zIndex:0, וזה מספיק כדי
           // לצייר אותו **מעל** תוכן רגיל. בלי המיקום כאן הפס היה בקוד,
           // נמדד כ"גלוי", ולא נראה על המסך — נתפס רק בצילום מסך.
@@ -83,7 +88,7 @@ export default function HomePage({
           <span style={{ flex: 1 }}>
             {getLanguage() === "he" ? (
               <>
-                <strong style={{ color: "#fff" }}>ZOVEX חינמי לגמרי</strong>
+                <strong style={{ color: colors.text }}>ZOVEX חינמי לגמרי</strong>
                 {" — אין מנוי ואין תשלום. מישהו גבה ממך כסף עליו? זה לא אנחנו, "}
                 <button onClick={() => setSupportOpen(true)} style={freeLinkStyle}>
                   כתוב לנו
@@ -252,25 +257,29 @@ export default function HomePage({
           href="https://github.com/davidggjg/zovex-android/releases/download/latest/zovex.apk"
           download
           style={{
-            display: "flex", alignItems: "center", gap: 11,
-            padding: "12px 14px", marginBottom: 11, borderRadius: 14,
-            background: "linear-gradient(135deg, rgba(229,9,20,0.15), rgba(229,9,20,0.06))",
-            border: "1px solid rgba(229,9,20,0.32)",
+            // היה כרטיס אדום גדול שתפס את כל האזור שמעל הקיפול, לפני
+            // שהמשתמש ראה תוכן אחד. אותו מידע, שורה אחת, בזכוכית.
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "9px 12px", marginBottom: 10, borderRadius: radius.card,
+            background: colors.glass,
+            backdropFilter: "blur(14px) saturate(140%)",
+            WebkitBackdropFilter: "blur(14px) saturate(140%)",
+            border: `1px solid ${colors.glassBorder}`,
             textDecoration: "none",
           }}
         >
           <span style={{
-            width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-            background: "rgba(229,9,20,0.18)",
+            width: 28, height: 28, borderRadius: radius.sm, flexShrink: 0,
+            background: colors.focusTint,
             display: "flex", alignItems: "center", justifyContent: "center",
           }}>
-            <Download size={17} color="#ff2b38" />
+            <Download size={15} color={colors.primaryHi} />
           </span>
           <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-            <span style={{ fontSize: 13.5, fontWeight: 800, color: "#fff" }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: colors.text }}>
               {t("home.downloadApp")}
             </span>
-            <span style={{ fontSize: 11, color: "#a9a9ad" }}>
+            <span style={{ fontSize: 11, color: colors.textMuted }}>
               {t("home.downloadAppSub")}
             </span>
           </span>
@@ -278,7 +287,7 @@ export default function HomePage({
         <div style={{ paddingBottom: 11 }}>
           <button
             onClick={() => setShowCatModal(true)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", borderRadius: 16, padding: "14px 16px", cursor: "pointer", fontFamily: "inherit" }}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${colors.glassBorder}`, borderRadius: radius.card, padding: "11px 14px", cursor: "pointer", fontFamily: "inherit" }}
           >
             <span style={{ fontSize: 14, fontWeight: 800, color: "#fff", display: "flex", alignItems: "center", gap: 6 }}>
               {selectedCategory === "שידורים חיים" && <Eye size={14} color="#e50914" />}

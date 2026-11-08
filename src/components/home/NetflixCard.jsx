@@ -1,3 +1,4 @@
+import { colors } from "@/theme/tokens";
 import React from "react";
 import { Eye } from "lucide-react";
 
@@ -33,7 +34,9 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
       {/* ההרמה, הצל וטבעת המיקוד יושבים ב-CSS (‎.zv-card‎ ב-index.css) ולא
           במטפלי עכבר: בטלוויזיה אין עכבר, ו-focus-visible הוא הדרך היחידה
           שהכרטיס שהשלט עומד עליו ייראה שונה מהשאר. */}
-      <div className="zv-card__art" style={{ width: cardW, height: cardH, background: isLive ? "#1a1a1a" : "#1c1c1e", border: isLive ? "2px solid #e50914" : "1px solid rgba(255,255,255,0.07)" }}>
+      <div className="zv-card__art" style={{ width: cardW, height: cardH, background: isLive ? colors.surface : colors.surfaceElevated,
+                 border: `1px solid ${isLive ? colors.glowRed : colors.glassBorder}`,
+                 boxShadow: isLive ? `0 0 18px ${colors.focusTint}` : "none" }}>
         {isLive && item.thumbnail_url ? (
           // contain ולא cover: לוגו ערוץ חייב להיראות במלואו. הרקע הרדיאלי
           // ממלא את השוליים שנוצרים סביבו כשיחס הלוגו אינו 16:9.
