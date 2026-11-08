@@ -38,7 +38,19 @@ if [ "${1:-}" = "--rollback" ]; then
 fi
 
 echo "① nginx: ניתוב /vodinfo"
-bash /tmp/p_ng.sh || die "תיקון nginx נכשל"
+if ! bash /tmp/p_ng.sh; then
+  echo
+  echo "— אבחון, כדי שלא נישאר בלי מידע —"
+  echo "קבצי nginx:"
+  ls -l /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null | sed 's/^/   /'
+  echo "קבצים שמזכירים zovex:"
+  grep -Rl zovex /etc/nginx/ 2>/dev/null | sed 's/^/   /'
+  echo "שורות root ו-location:"
+  for f in $(grep -Rl zovex /etc/nginx/ 2>/dev/null | head -2); do
+    echo "   == $f"; grep -nE 'root|server_name|location' "$f" | sed 's/^/     /'
+  done
+  die "תיקון nginx נכשל — שלח לי את האבחון שלמעלה"
+fi
 
 echo "② main.py: החזרת browser_ok"
 python3 /tmp/p_vb.py "$DIR/main.py" || die "הטלאי נכשל"

@@ -22,14 +22,48 @@
 #   sudo bash fix_nginx_vodinfo.sh
 #   sudo bash fix_nginx_vodinfo.sh --remove
 # ─────────────────────────────────────────────────────────────────────────────
-set -euo pipefail
+# בלי pipefail באיתור: ‎grep | head‎ מחזיר את כישלון ה-grep, ו-set -e
+# הפיל את הסקריפט **בלי להדפיס מילה**. זה בדיוק מה שקרה בהרצה
+# הראשונה אצל דוד: "❌ תיקון nginx נכשל" בלי שום סיבה.
+set -u
 PORT="${API_PORT:-8000}"
 MARK="# zovex-vodinfo"
-ANCHOR="root /opt/zovex-site;"
 
-CONF=$(grep -rl -- "$ANCHOR" /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null | head -1)
-[ -n "$CONF" ] || { echo "לא מצאתי קובץ nginx עם '$ANCHOR'"; exit 1; }
+# איתור הקובץ לפי שלושה סימנים, לא אחד: ההנחה שהעוגן הוא
+# "root /opt/zovex-site;" במדויק אינה נכונה בכל התקנה — רווחים,
+# נתיב אחר, או server block מפוצל.
+DIRS="/etc/nginx/sites-enabled /etc/nginx/conf.d /etc/nginx/sites-available"
+find_conf() {
+  for pat in 'root[[:space:]]\+/opt/zovex-site' 'proxy_pass[^;]*127\.0\.0\.1:8000' 'server_name[^;]*zovex'; do
+    # ‎-R‎ ולא ‎-r‎: sites-enabled הוא כמעט תמיד קישורים סימבוליים
+    # ל-sites-available, ו-grep -r מדלג עליהם בשקט. זו הסיבה שהריצה
+    # הראשונה נכשלה בלי להדפיס מילה.
+    f=$(grep -RlE -- "$pat" $DIRS 2>/dev/null | grep -v '\.bak' | head -1)
+    [ -n "$f" ] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+CONF=$(find_conf) || true
+if [ -z "${CONF:-}" ]; then
+  echo "❌ לא מצאתי את קובץ ה-nginx של האתר. מה שקיים:"
+  ls -1 $DIRS 2>/dev/null | sed 's/^/     /'
+  echo "   חפש ידנית:  grep -rl zovex /etc/nginx/"
+  exit 1
+fi
+# הקישור מוביל לקובץ האמיתי; עורכים אותו ולא את הקישור, כדי שהגיבוי
+# יהיה של התוכן ולא של הקישור.
+CONF=$(readlink -f "$CONF")
 echo "קובץ: $CONF"
+
+# נקודת ההכנסה: אחרי שורת ה-root אם יש, אחרת אחרי פתיחת ה-server
+# שמאזין ל-443, אחרת אחרי כל server block ראשון.
+ANCHOR=$(grep -oE 'root[[:space:]]+/opt/zovex-site[^;]*;' "$CONF" | head -1)
+if [ -z "$ANCHOR" ] || [ "$(grep -cF -- "$ANCHOR" "$CONF")" != "1" ]; then
+  # נפילה אחורה: שורת server_name, שהיא ייחודית ובתוך ה-server block.
+  ANCHOR=$(grep -oE 'server_name[^;]*;' "$CONF" | head -1)
+fi
+[ -n "$ANCHOR" ] || { echo "❌ לא מצאתי נקודת הכנסה בטוחה ב-$CONF"; echo "   שלח לי:  grep -nE 'root|location' $CONF"; exit 1; }
+echo "נקודת הכנסה: $ANCHOR"
 
 if [ "${1:-}" = "--remove" ]; then
   grep -q -- "$MARK" "$CONF" || { echo "לא מותקן."; exit 0; }
@@ -44,6 +78,7 @@ if n == 0:
     sys.exit("✗ לא נמצא הבלוק להסרה")
 open(path, "w", encoding="utf-8").write(s)
 PY
+  if [ "${NGX_DRY:-0}" = "1" ]; then echo "✓ (NGX_DRY) הוסר"; exit 0; fi
   nginx -t && systemctl reload nginx && echo "✓ הוסר"
   exit 0
 fi
@@ -79,6 +114,11 @@ if s.count(anchor) != 1:
 open(path, "w", encoding="utf-8").write(s.replace(anchor, anchor + "\n" + block, 1))
 PY
 
+# NGX_DRY=1 מדלג על nginx -t ועל ה-reload, לבדיקת הלוגיקה בלבד.
+if [ "${NGX_DRY:-0}" = "1" ]; then
+  echo "✓ (NGX_DRY) הבלוק הוכנס, בלי nginx -t ובלי reload"
+  exit 0
+fi
 if ! nginx -t; then
   cp -a "$CONF.bak_vodinfo" "$CONF"
   echo "✗ בדיקת nginx נכשלה — הקובץ שוחזר"
