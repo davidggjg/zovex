@@ -12,10 +12,18 @@
 #
 # ## פוסטרים
 #
-# נמדד בקטלוג החי: 1,294 פריטים בלי פוסטר, ו-1,271 מהם פרקים של **37
-# סדרות בלבד** — "טיטוף" לבדה היא 316 פרקים. לכן מחפשים כל סדרה פעם
-# אחת ומחילים את הפוסטר שלה על כל פרקיה: כ-60 קריאות ל-TMDB במקום
-# 1,294.
+# נמדד בקטלוג החי: 1,294 פריטים בלי פוסטר, ו-1,271 מהם פרקים של 37
+# סדרות בלבד — "טיטוף" לבדה היא 316 פרקים.
+#
+# **הפוסטר נלקח קודם כול מאח באותה סדרה.** נמדד שלכמעט כל סדרה כזו
+# יש כבר פרק אחד או שניים עם פוסטר, ושכך אפשר לכסות 1,094 מתוך
+# 1,271 הפרקים — בלי רשת, בלי מפתח ובלי שום סיכון של התאמה שגויה.
+#
+# רק מה שנשאר הולך ל-TMDB. וזה חשוב כי **TMDB אינו מאנדקס שמות
+# בעברית של סדרות זרות**: חיפוש "ההמבורגרים של בוב" מחזיר כלום, כי
+# שם הוא "Bob's Burgers". לכן מנסים לפי הסדר: en_title אם קיים,
+# ואז הכותרת, ואז שם הסדרה. התאמה שהתקבלה מחיפוש בעברית בלבד
+# מסומנת בדוח כ"לבדיקה", כי אי אפשר לאמת את השם מול התוצאה.
 #
 # tmdb_id נכתב רק עם ‎--set-tmdb‎. בלי זה נכתב פוסטר בלבד, כי מזהה
 # שגוי גורר אחריו תיאור, טריילר וקטגוריה שגויים — ואילו פוסטר שגוי
@@ -190,6 +198,11 @@ def search(kind, title, year=None):
     if not d or not d.get("results"):
         return None
     want = norm(title)
+    if not re.search(r"[A-Za-z]", title) and len(d["results"]) <= 3:
+        # שאילתה בעברית שהחזירה מעט תוצאות: TMDB התאים אותה לכותרת
+        # חלופית, ואין לנו שם לטיני להשוות אליו. מקבלים את הראשונה
+        # ומסמנים בדוח כ"לבדיקה" — עדיף פוסטר שאפשר לבדוק מאשר כלום.
+        return d["results"][0]
     for r in d["results"][:5]:
         for fld in ("name", "original_name", "title", "original_title"):
             got = norm(r.get(fld))
@@ -243,7 +256,6 @@ def main():
         missing = [i for i in arr if not str(i.get("thumbnail_url") or "").strip()]
         print("\nפוסטרים חסרים: %d" % len(missing))
 
-        # פרקים: חיפוש אחד לכל סדרה, ואז הפוסטר על כל פרקיה.
         by_series = collections.defaultdict(list)
         singles = []
         for i in missing:
@@ -251,13 +263,57 @@ def main():
         print("   מהם פרקים של %d סדרות, ועוד %d פריטים בודדים"
               % (len(by_series), len(singles)))
 
+        # ── שלב א: פוסטר מאח באותה סדרה ─────────────────────────────────
+        #
+        # נמדד: 1,094 מתוך 1,271 הפרקים החסרים שייכים לסדרה שכבר יש בה
+        # פרק עם פוסטר. זה מכסה את רובם בלי רשת, בלי מפתח, ובלי שום
+        # סיכון של התאמה שגויה — ולכן זה השלב הראשון ולא האחרון.
+        sib_poster = {}
+        for i in arr:
+            n = i.get("series_name")
+            t = str(i.get("thumbnail_url") or "").strip()
+            if n and t and n not in sib_poster:
+                sib_poster[n] = t
+        covered = []
+        for name, items in list(by_series.items()):
+            src = sib_poster.get(name)
+            if not src:
+                continue
+            for x in items:
+                x["_new_thumb"] = src
+                changes["poster"] += 1
+                add("פוסטר", "פוסטר מפרק אחר באותה סדרה", x, "thumbnail_url", src)
+            covered.append((name, len(items)))
+            del by_series[name]
+        if covered:
+            print("   מאח באותה סדרה: %d פרקים ב-%d סדרות"
+                  % (sum(n for _, n in covered), len(covered)))
+        if by_series:
+            print("   נשארו ל-TMDB: %d פרקים ב-%d סדרות"
+                  % (sum(len(v) for v in by_series.values()), len(by_series)))
+
         for name, items in sorted(by_series.items(), key=lambda kv: -len(kv[1])):
             tid = next((x.get("tmdb_id") for x in items if x.get("tmdb_id")), None)
             det = details("tv", tid) if tid else None
+            loose = False
             if not det:
-                hit = search("tv", name)
+                # TMDB אינו מאנדקס שמות בעברית של סדרות זרות, ולכן
+                # מנסים קודם את השם האנגלי אם הוא קיים אצלנו.
+                names = []
+                for fld in ("en_title", "title"):
+                    v = next((x.get(fld) for x in items if x.get(fld)), None)
+                    if v and norm(v) != norm(name):
+                        names.append(v)
+                names.append(name)
+                hit = None
+                for cand in names:
+                    hit = search("tv", cand)
+                    if hit:
+                        loose = not re.search(r"[A-Za-z]", cand)
+                        break
                 if not hit:
-                    print("   ✗ לא נמצאה: %s (%d פרקים)" % (name, len(items)))
+                    print("   ✗ לא נמצאה ב-TMDB: %s (%d פרקים) — השם בעברית,"
+                          " ואין לנו שם אנגלי" % (name, len(items)))
                     continue
                 det, tid = hit, hit.get("id")
             poster = det.get("poster_path")
@@ -268,8 +324,10 @@ def main():
             for x in items:
                 x["_new_thumb"] = url
                 changes["poster"] += 1
-                add("פוסטר", "פוסטר הסדרה מ-TMDB", x, "thumbnail_url", url,
-                    "tmdb=%s" % tid)
+                add("פוסטר",
+                    "פוסטר הסדרה מ-TMDB" + ("  [התאמה לפי חיפוש בעברית — לבדיקה]"
+                                            if loose else ""),
+                    x, "thumbnail_url", url, "tmdb=%s" % tid)
                 if args.set_tmdb and not x.get("tmdb_id"):
                     x["_new_tmdb"] = tid
             print("   ✓ %-28s %4d פרקים  tmdb=%s" % (str(name)[:28], len(items), tid))
