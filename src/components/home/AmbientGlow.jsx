@@ -1,34 +1,58 @@
 import { useMemo } from "react";
 
 /**
- * שכבת זוהר צבעונית מאחורי כל התוכן.
+ * רקע נוזלי מאחורי כל התוכן.
  *
- * מה זה פותר: הרקע היה #0a0a0a שטוח לחלוטין, וזה מה שגורם לאתר להיראות
- * "פשוט" גם כשהתוכן עצמו עשיר. באתרים שנראים יקרים הרקע אינו שחור אלא
- * זוהר כהה שמשתנה תוך כדי גלילה, וזה כל ההבדל בתחושת העומק.
+ * ## מה לא עבד קודם
  *
- * למה הגוון נגזר מהקטגוריה ולא מהפוסטרים: שאיבת צבע מתמונה דורשת לצייר
- * אותה ל-canvas, והתמונות כאן מגיעות מדומיינים אחרים — canvas היה נהיה
- * "מזוהם" והקריאה נחסמת. גזירה משם הקטגוריה נותנת את אותה חוויה בדיוק
- * (הרקע מתחלף כשעוברים בין אזורים), עולה אפס, ולא נשברת על CORS.
+ * שלוש גרסאות, שלוש דרכים להיכשל: כתמים רוויים בכל גוון (נראה
+ * מלוכלך), אדום־סגול חזק (המסך קיבל גוון סגלגל), ואפור כמעט־ניטרלי
+ * (שטוח ומת). המשותף לכולן: **צורות שעומדות במקום.** כתם סטטי נקרא
+ * תמיד כ"כתם צבע על רקע", יהיה הגוון אשר יהיה.
  *
- * הכל דקורטיבי בלבד: pointerEvents none ו-aria-hidden, כדי שלא יפריע
- * ללחיצות ולא ייקרא ע"י קורא מסך.
+ * ## מה עושה את ההבדל
+ *
+ * תנועה שמערבבת. כל צורה נעה, מסתובבת ומשנה גודל בקצב משלה, ומעליהן
+ * טשטוש אחד גדול — כך הגבולות ביניהן נמסים זה לזה, והעין קוראת נוזל
+ * ולא עיגולים. זה אותו עיקרון של "silk/mesh gradient": אין קו בשום
+ * מקום, רק מעברים.
+ *
+ * הזמנים ראשוניים זה לזה בכוונה (37/53/71/89 שניות), כך שהצירוף
+ * אינו חוזר על עצמו במחזור קצר ואין תחושת לולאה.
+ *
+ * ## אילוצים
+ *
+ * · ‎transform‎ בלבד — מתנהל ב-compositor ולא מצייר מחדש פריסה.
+ * · §14 של apple-design אוסר תנודה סביב 0.2Hz ותנועת רקע גדולה;
+ *   המחזורים כאן הם עשרות שניות, והכל נעצר תחת
+ *   ‎prefers-reduced-motion‎.
+ * · הטשטוש יושב על **עטיפה אחת** ולא על כל צורה: מסנן אחד במקום
+ *   ארבעה.
+ * · דקורטיבי בלבד — ‎pointerEvents: none‎ ו-‎aria-hidden‎.
  */
 
-// hash יציב → גוון. יציב חשוב: אותה קטגוריה חייבת לקבל אותו צבע בכל
-// טעינה, אחרת האתר "מהבהב" בצבע אחר בכל רענון.
-function hueOf(seed) {
+function hashOf(seed) {
   let h = 0;
   for (const ch of String(seed || "zovex")) h = (h * 31 + ch.codePointAt(0)) >>> 0;
-  return h % 360;
+  return h;
 }
 
 export const AMBIENT_KEYFRAMES = `
-@keyframes zvDrift {
-  0%   { transform: translate3d(0,0,0); }
-  50%  { transform: translate3d(4%, -3%, 0); }
-  100% { transform: translate3d(0,0,0); }
+@keyframes zvFlowA {
+  0%   { transform: translate3d(0,0,0) rotate(0deg) scale(1); }
+  33%  { transform: translate3d(6%, 4%, 0) rotate(40deg) scale(1.18); }
+  66%  { transform: translate3d(-4%, 7%, 0) rotate(80deg) scale(0.92); }
+  100% { transform: translate3d(0,0,0) rotate(120deg) scale(1); }
+}
+@keyframes zvFlowB {
+  0%   { transform: translate3d(0,0,0) rotate(0deg) scale(1.08); }
+  50%  { transform: translate3d(-7%, -5%, 0) rotate(-55deg) scale(0.88); }
+  100% { transform: translate3d(0,0,0) rotate(-110deg) scale(1.08); }
+}
+@keyframes zvFlowC {
+  0%   { transform: translate3d(0,0,0) rotate(0deg) scale(0.95); }
+  40%  { transform: translate3d(5%, -6%, 0) rotate(60deg) scale(1.22); }
+  100% { transform: translate3d(0,0,0) rotate(140deg) scale(0.95); }
 }
 @media (prefers-reduced-motion: reduce) {
   .zv-blob { animation: none !important; }
@@ -37,42 +61,16 @@ export const AMBIENT_KEYFRAMES = `
 
 export default function AmbientGlow({ seed }) {
   const blobs = useMemo(() => {
-    const h = hueOf(seed);
-    // שלושה גוונים סמוכים ולא משלימים: משלימים היו יוצרים רקע "מלוכלך"
-    // חום־אפור ברגע שהם מתערבבים בטשטוש.
-    // הערכים מכוילים מול הדמיה פיקסלית של מה שהדפדפן מצייר בפועל. הגרסה
-    // הראשונה (אלפא 0.5/0.38/0.32 עם החשכה 0.62→0.90) יצאה כמעט שחורה
-    // לגמרי — שכבת ההחשכה בלעה את כל הצבע ולא נשאר שום אפקט.
-    // המידות ב-vmax ולא ב-vw, וזה תיקון ולא העדפה: vw הוא אחוז מ*רוחב*
-    // המסך, ובטלפון (390 רוחב על 844 גובה) כתם של 78vw הוא 304 פיקסלים
-    // בלבד על מסך בגובה 844 — כיסוי של שליש, שאחרי טשטוש של 72 פיקסלים
-    // כמעט נעלם. בדסקטופ אותו ערך הוא 1123 פיקסלים ונראה מצוין, ולכן
-    // הכיול המקורי (שנעשה בפרופורציות של מסך רחב) הטעה. vmax נמדד לפי
-    // הצלע הגדולה, כך שהאפקט זהה בשני המקרים.
-    // [perf_cap] תקרה בפיקסלים לצד הכתם.
-    //
-    // vmax לבדו אומר שהעלות גדלה עם המסך: בטלפון 390x844 הכתם הוא 692
-    // פיקסלים, ובמסך 1920 הוא 1574 — פי חמישה שטח, וכפול שלושה כתמים.
-    // זה מה שהפך את האתר לכבד דווקא במחשב. התקרה שומרת על אותו מראה
-    // (הכתם ממילא גדול מהמסך) ומנתקת את העלות מגודל הצג.
-    const SZ = (v) => `min(${v}vmax, 1100px)`;
+    const h = hashOf(seed);
+    // טווח צר של גוונים קרים. ה-seed מזיז בתוכו, ולא בוחר גוון חדש:
+    // כך קטגוריה מרגישה שונה בלי שהמסך יחליף צבע.
+    const base = 178 + (h % 46);           // 178–224: טורקיז עד כחול
+    const SZ = (v) => `min(${v}vmax, 1250px)`;
     return [
-      // ── גוונים חלשים, קרים, כמעט ניטרליים ─────────────────────────
-      //
-      // שתי גרסאות קודמות נכשלו מאותה סיבה הפוכה: הראשונה הייתה
-      // כתמים רוויים בכל גוון שה-seed נתן (כתום, זית) — נראה מלוכלך;
-      // השנייה דחפה אדום וסגול חזק — והמסך קיבל גוון סגלגל.
-      //
-      // מה שנותן את התחושה הנקייה הוא **רוויה נמוכה**, לא גוון מסוים:
-      // טווח צר של כחול-אפור עד טורקיז-אפור, ברוויה של 20–30% בלבד.
-      // העין קוראת את זה כעומק ולא כצבע, וזה בדיוק ההבדל בין רקע
-      // ש"נראה יקר" לרקע צבעוני.
-      //
-      // ה-seed מזיז בטווח של 18 מעלות בלבד — מספיק כדי שקטגוריות
-      // ייראו מעט שונות, לא מספיק כדי להפוך את המסך לצבעוני.
-      { hue: 214 + (h % 18), sat: 28, top: "-20%", left: "50%", size: SZ(92), a: 0.30, dur: "58s", delay: "0s" },
-      { hue: 196 + (h % 14), sat: 24, top: "42%", left: "-22%", size: SZ(88), a: 0.24, dur: "72s", delay: "-22s" },
-      { hue: 232 + (h % 12), sat: 22, top: "80%", left: "34%", size: SZ(76), a: 0.20, dur: "64s", delay: "-40s" },
+      { hue: base,       sat: 62, lig: 48, top: "-26%", left: "38%", size: SZ(96),  a: 0.42, anim: "zvFlowA", dur: "37s" },
+      { hue: base + 34,  sat: 58, lig: 44, top: "28%",  left: "-28%", size: SZ(104), a: 0.34, anim: "zvFlowB", dur: "53s" },
+      { hue: base - 26,  sat: 55, lig: 46, top: "62%",  left: "34%",  size: SZ(92),  a: 0.30, anim: "zvFlowC", dur: "71s" },
+      { hue: base + 62,  sat: 48, lig: 42, top: "6%",   left: "74%",  size: SZ(80),  a: 0.24, anim: "zvFlowB", dur: "89s" },
     ];
   }, [seed]);
 
@@ -80,84 +78,57 @@ export default function AmbientGlow({ seed }) {
     <div
       aria-hidden="true"
       style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 0,
-        pointerEvents: "none",
+        position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none",
         overflow: "hidden",
-        // לא #0a0a0a אחיד. שחור שטוח לחלוטין הוא מה שגורם למסך להיראות
-        // "ריק"; מדרג עדין לכחלחל־כהה נותן עומק עוד לפני שהצבע נכנס.
-        // כמעט שחור, עם נטייה קרה. זה הרקע של האפליקציה (colors.bg
-        // הוא #07070C) עם מדרג עדין שנותן עומק בלי צבע.
-        // בסיס כמעט ניטרלי עם נטייה קרה זעירה.
-        background: "radial-gradient(120% 90% at 50% 0%, #121520 0%, #0A0B10 55%, #07070C 100%)",
+        background: "linear-gradient(165deg, #0E1620 0%, #0B1119 50%, #080C12 100%)",
       }}
     >
-      {blobs.map((b, i) => (
-        <div
-          key={i}
-          className="zv-blob"
-          style={{
-            position: "absolute",
-            top: b.top,
-            left: b.left,
-            width: b.size,
-            height: b.size,
-            borderRadius: "50%",
-            // saturation גבוה עם lightness נמוך: אחרי הטשטוש זה נקרא כזוהר
-            // עמוק ולא כפסטל שטוח.
-            // [perf_noblur] אין כאן filter: blur.
-            //
-            // היה כאן blur(72px) מעל ה-gradient, ובמסך מחשב זה אומר
-            // לטשטש משטח של 1574x1574 שלוש פעמים — ומחדש בכל פריים של
-            // האנימציה, בלי הפסקה. זה היה רוב העומס, והוא נגבה גם כשלא
-            // עושים כלום: גלילה נתקעת והווידאו מגמגם.
-            //
-            // ויזואלית הוא כמעט לא תרם. radial-gradient שדועך לאלפא 0
-            // הוא כבר כתם רך; טשטוש על גבי דעיכה רכה אינו מוסיף רכות,
-            // רק עלות. הדעיכה הורחבה מעט (68%→78%) ובאמצע נוספה נקודת
-            // ביניים, וזה מחזיר בדיוק את אותה תחושה בחינם.
-            background:
-              `radial-gradient(circle at 50% 50%,` +
-              // בהירות נמוכה ורוויה גבוהה: צבע עמוק שלא "שורף" את
-              // הטקסט שמעליו, ושה-saturate של הזכוכית מחזיר לחיים.
-              ` hsla(${b.hue},${b.sat}%,52%,${b.a}) 0%,` +
-              ` hsla(${b.hue},${b.sat}%,38%,${(b.a * 0.42).toFixed(3)}) 44%,` +
-              ` hsla(${b.hue},${b.sat}%,24%,0) 78%)`,
-            animation: `zvDrift ${b.dur} ease-in-out ${b.delay} infinite`,
-            willChange: "transform",
-            // המעבר בין קטגוריות מתרכך, אחרת הצבע קופץ בבת אחת
-            transition: "background 900ms ease",
-          }}
-        />
-      ))}
-      {/* שכבת החשכה: בלעדיה הטקסט הלבן מאבד ניגודיות מעל הזוהר */}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          background:
-            // מסך כהה מעל האורורה: הצבע נשאר נראה דרך הזכוכית, אבל
-            // הטקסט שמעליו אינו יושב על צבע רווי. מתחזק כלפי מטה,
-            // שם יש הכי הרבה טקסט של כותרות שורות.
-            "linear-gradient(180deg, rgba(7,7,12,0.30) 0%, rgba(7,7,12,0.46) 45%, rgba(7,7,12,0.62) 100%)",
-        }}
-      />
-      {/* גרעין עדין. שיפועים גדולים על מסך כהה מייצרים פסי banding
-          נראים לעין; רעש של אחוזים בודדים שובר אותם. SVG מוטבע ולא
-          קובץ — אין בקשת רשת, ואין מה לטעון. */}
-      <div
-        style={{
-          position: "absolute", inset: 0, pointerEvents: "none",
-          opacity: 0.035, mixBlendMode: "overlay",
-          backgroundImage:
-            "url(\"data:image/svg+xml;utf8," +
-            "<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'>" +
-            "<filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/></filter>" +
-            "<rect width='160' height='160' filter='url(%23n)'/></svg>\")",
-          backgroundSize: "160px 160px",
-        }}
-      />
+      {/* העטיפה נושאת את הטשטוש — מסנן אחד לכל הצורות יחד, וזה גם
+          מה שממיס את הגבולות ביניהן לנוזל אחד. */}
+      <div style={{
+        position: "absolute", inset: "-20%",
+        filter: "blur(80px) saturate(135%)",
+        willChange: "transform",
+      }}>
+        {blobs.map((b, i) => (
+          <div
+            key={i}
+            className="zv-blob"
+            style={{
+              position: "absolute",
+              top: b.top, left: b.left, width: b.size, height: b.size,
+              borderRadius: "50%",
+              background:
+                `radial-gradient(circle at 50% 50%,` +
+                ` hsla(${b.hue},${b.sat}%,${b.lig}%,${b.a}) 0%,` +
+                ` hsla(${b.hue},${b.sat}%,${b.lig - 10}%,${(b.a * 0.5).toFixed(3)}) 45%,` +
+                ` hsla(${b.hue},${b.sat}%,${b.lig - 20}%,0) 72%)`,
+              animation: `${b.anim} ${b.dur} ease-in-out infinite`,
+              willChange: "transform",
+            }}
+          />
+        ))}
+      </div>
+
+      {/* מסך כהה עדין: שומר על קריאות הטקסט בלי להחזיר את האפור.
+          מתחזק כלפי מטה, שם יושבות כותרות השורות. */}
+      <div style={{
+        position: "absolute", inset: 0, pointerEvents: "none",
+        background:
+          "linear-gradient(180deg, rgba(8,12,18,0.18) 0%, rgba(8,12,18,0.34) 55%, rgba(8,12,18,0.50) 100%)",
+      }} />
+
+      {/* גרעין נגד banding — שיפועים גדולים על מסך כהה מייצרים פסים. */}
+      <div style={{
+        position: "absolute", inset: 0, pointerEvents: "none",
+        opacity: 0.03, mixBlendMode: "overlay",
+        backgroundImage:
+          "url(\"data:image/svg+xml;utf8," +
+          "<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'>" +
+          "<filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/></filter>" +
+          "<rect width='160' height='160' filter='url(%23n)'/></svg>\")",
+        backgroundSize: "160px 160px",
+      }} />
     </div>
   );
 }

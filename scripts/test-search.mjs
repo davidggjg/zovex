@@ -54,7 +54,9 @@ await pg.goto(`http://127.0.0.1:${PORT}${BASE}`, { waitUntil: 'domcontentloaded'
 await pg.getByText('דלג', { exact: false }).first().click({ timeout: 15000 }).catch(() => {});
 await pg.waitForTimeout(3000);
 
-await pg.getByText('חיפוש', { exact: true }).first().click({ timeout: 10000 });
+// הסרגל הוא אייקונים בלבד, ולכן הכפתור מאותר לפי aria-label —
+// שהוא גם מה שקורא מסך מקריא.
+await pg.locator('[aria-label="חיפוש"]').first().click({ timeout: 10000 });
 await pg.waitForTimeout(400);
 check('נפתחה תיבת חיפוש', await pg.locator('input[placeholder*="חפש"]').count() > 0);
 

@@ -13,15 +13,16 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const colors = {
-  bg: "#07070C",
-  surface: "#11121A",
-  surfaceElevated: "#1A1C28",
+  // הורם משחור לכחול־אפור רך: המסך צריך להרגיש אוויר, לא חור.
+  bg: "#131A23",
+  surface: "#1B2430",
+  surfaceElevated: "#24303E",
   primary: "#E50924",
   primaryHi: "#FF3348",
   text: "#F7F7F9",
   textSecondary: "#A6A9B3",
   textMuted: "#737783",
-  border: "#292D37",
+  border: "#334052",
   success: "#3CBF8A",
   warning: "#F2B84B",
 
@@ -109,9 +110,9 @@ export const lift = {
 // §12 גם קובע את ההיררכיה: משטח גדול נקרא עבה יותר — טשטוש חזק
 // יותר וצל עמוק יותר מצ'יפ קטן. לכן ‎weight‎ ולא ערך אחד לכולם.
 const MATERIAL = {
-  chip:    { blur: 18, bg: 0.30, edge: 0.14, sat: 170 },
-  panel:   { blur: 26, bg: 0.38, edge: 0.16, sat: 180 },
-  chrome:  { blur: 36, bg: 0.46, edge: 0.20, sat: 190 },
+  chip:    { blur: 18, bg: 0.22, edge: 0.18, sat: 170 },
+  panel:   { blur: 26, bg: 0.28, edge: 0.20, sat: 180 },
+  chrome:  { blur: 36, bg: 0.34, edge: 0.24, sat: 190 },
 };
 
 export function glass(weight = "panel") {
@@ -119,7 +120,7 @@ export function glass(weight = "panel") {
   return {
     background:
       `linear-gradient(180deg, rgba(255,255,255,0.09) 0%, rgba(255,255,255,0.025) 48%, rgba(255,255,255,0.01) 100%), ` +
-      `rgba(16,17,25,${m.bg})`,
+      `rgba(32,42,56,${m.bg})`,
     backdropFilter: `blur(${m.blur}px) saturate(${m.sat}%)`,
     WebkitBackdropFilter: `blur(${m.blur}px) saturate(${m.sat}%)`,
     border: `1px solid rgba(255,255,255,${m.edge * 0.6})`,
