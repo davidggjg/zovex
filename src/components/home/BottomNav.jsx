@@ -49,17 +49,25 @@ export default function BottomNav({
 
   return (
     <>
+      {/* ── שורת חיפוש, לא מסך חיפוש ──────────────────────────────────
+          מה שהיה: שכבה שמכסה את כל המסך, ומתחתיה הכיתוב "התוצאות
+          מתעדכנות מאחור — סגור כדי לראות אותן". כלומר המשתמש הקליד
+          וראה מסך ריק. זו הייתה רגרסיה שלי.
+
+          מה שיש: רק השורה עצמה צפה למעלה, והתוצאות מתחתיה — אותו
+          מסך, מסונן תוך כדי הקלדה. §12 של הסקיל: שכבה צפה שהתוכן
+          גולל מתחתיה, לא פס שבולע את המסך. ואין scrim, כי זו אינה
+          משימה חוסמת. */}
       {searchOpen && (
         <div dir="rtl" style={{
-          position: "fixed", inset: 0, zIndex: 998,
-          background: "rgba(7,7,12,0.55)",
-          backdropFilter: "blur(30px) saturate(180%)",
-          WebkitBackdropFilter: "blur(30px) saturate(180%)",
-          padding: "18px 14px", display: "flex", flexDirection: "column", gap: 12,
+          position: "fixed", top: 0, left: 0, right: 0, zIndex: 998,
+          marginInline: "auto", width: "calc(100% - 28px)", maxWidth: 560,
+          marginTop: 12,
         }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 9,
-            ...glass(22), borderRadius: radius.pill, padding: "11px 15px",
+            ...glassFloating("chrome", 3), borderRadius: radius.pill,
+            padding: "11px 15px",
           }}>
             <Search size={17} color={colors.textMuted} />
             <input ref={inputRef} type="text" value={searchTerm}
@@ -67,15 +75,17 @@ export default function BottomNav({
               placeholder="חפש סרט או סדרה…"
               style={{ background: "none", border: "none", outline: "none", width: "100%",
                        fontSize: 16, color: colors.text, fontFamily: "inherit" }} />
-            <button onClick={() => { setSearchTerm(""); setSearchOpen(false); }}
+            {!!searchTerm && (
+              <button onClick={() => setSearchTerm("")}
+                style={{ background: "none", border: "none", cursor: "pointer",
+                         padding: 0, display: "flex", color: colors.textMuted,
+                         fontSize: 18, lineHeight: 1 }}>×</button>
+            )}
+            <button onClick={() => setSearchOpen(false)}
               style={{ background: "none", border: "none", cursor: "pointer", padding: 0,
                        display: "flex" }}>
               <X size={19} color={colors.textMuted} />
             </button>
-          </div>
-          <div style={{ color: colors.textMuted, fontSize: 12.5, textAlign: "center" }}>
-            {searchTerm ? "התוצאות מתעדכנות מאחור — סגור כדי לראות אותן"
-                        : "הקלד כדי לחפש"}
           </div>
         </div>
       )}
