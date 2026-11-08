@@ -54,17 +54,14 @@ export const AMBIENT_KEYFRAMES = `
   40%  { transform: translate3d(5%, -6%, 0) rotate(60deg) scale(1.22); }
   100% { transform: translate3d(0,0,0) rotate(140deg) scale(0.95); }
 }
-/* סחיפת גוון איטית מאוד על כל השכבה. זה מה שנותן "הצבעים זזים"
-   בלי להוסיף אף צורה: אותו נוזל, בגוון שנודד. 150 שניות למחזור —
-   אי אפשר לראות את זה קורה, רק לראות שהמסך לא אותו דבר. */
-@keyframes zvHue {
-  0%   { filter: blur(80px) saturate(135%) hue-rotate(0deg); }
-  50%  { filter: blur(80px) saturate(150%) hue-rotate(26deg); }
-  100% { filter: blur(80px) saturate(135%) hue-rotate(0deg); }
-}
+/* אין כאן אנימציית filter, בכוונה.
+   הייתה כזו (סחיפת גוון על כל השכבה) והיא גרמה לריצוד: הדפדפן
+   מחשב מחדש טשטוש של 80px על שטח גדול מהמסך בכל פריים, וזה חורג
+   מה-compositor אל ציור מלא. על טלפון זה נראה כמו הבהוב שחור.
+   §11 של apple-design אומר את זה במפורש — להנפיש transform
+   ו-opacity בלבד. התנועה כאן מגיעה מהצורות עצמן. */
 @media (prefers-reduced-motion: reduce) {
   .zv-blob { animation: none !important; }
-  .zv-flow { animation: none !important; }
   /* בלי פרלקסה: הערך נשאר 0 וה-transform מתבטל. */
   .zv-parallax { transform: none !important; }
 }
@@ -132,9 +129,16 @@ export default function AmbientGlow({ seed }) {
         className="zv-flow"
         style={{
           position: "absolute", inset: "-20%",
-          filter: "blur(80px) saturate(135%)",
-          animation: "zvHue 150s ease-in-out infinite",
-          willChange: "filter",
+          // ── אין כאן filter בכלל, וזו הנקודה ─────────────────────
+          //
+          // טשטוש על ההורה מאלץ את הדפדפן לרנדר את כל תת-העץ לטקסטורה
+          // אחת ולטשטש אותה. כל עוד הילדים נעים, הטקסטורה הזו נבנית
+          // **מחדש בכל פריים** — על שטח גדול מהמסך. זה מה שגרם
+          // להבהוב השחור בטלפון, ולא רק אנימציית ה-hue שהוסרה לפניו.
+          //
+          // הרכות מגיעה מהשיפוע עצמו: radial-gradient שדועך לאפס
+          // כבר נראה כמו ענן, ולא צריך מסנן כדי לרכך אותו. התוצאה
+          // זהה למראה, והעלות היא אפס ציור — רק הרכבה.
           // נקרא על ידי כל שכבה דרך calc(). ברירת מחדל 0 כדי
           // שהחישוב יהיה תקף עוד לפני הגלילה הראשונה.
           "--zv-sy": 0,

@@ -21,6 +21,25 @@ import AmbientGlow, { AMBIENT_KEYFRAMES } from "./AmbientGlow";
 import SupportModal from "./SupportModal";
 
 // מסך הבית — לוגו, חיפוש, תפריט משתמש, קטגוריות, ורשימות התוכן
+// סמל לכל קטגוריה. רשימה קצרה ומפורשת, עם נפילה חזרה ל-🎞️ —
+// קטגוריה חדשה לא תישבר, היא רק תקבל את ברירת המחדל.
+const CAT_ICON = {
+  "הכל": "✨",
+  "סדרות": "📺",
+  "סדרות ישראליות": "🇮🇱",
+  "סדרות לילדים": "🧸",
+  "סדרות טורקיות": "🌙",
+  "אנימה": "🌸",
+  "סרטים": "🎬",
+  "סרטים ישראלים": "🇮🇱",
+  "סרטים לילדים (מתאים גם למשפחה)": "🧒",
+  "אימה": "👻",
+  "מארוול": "🦸",
+  "שידורים חיים": "🔴",
+  "היסטוריה": "🕘",
+  "מועדפים": "❤️",
+};
+
 export default function HomePage({
   user, onLogout, loginWithGoogle, searchTerm, setSearchTerm, selectedCategory, setSelectedCategory,
   allCategories, refreshHistory, onLogoClick, onOpenSearch,
@@ -331,30 +350,91 @@ export default function HomePage({
 
       {/* תפריט קטגוריות במסך מלא — נפתח מהכפתור למעלה */}
       {showCatModal && (
+        /* ── בורר הקטגוריות ───────────────────────────────────────────
+           מה שהיה: רשימת טקסט ממורכז על שחור 92%, וכפתור X לבן
+           ‎position: fixed‎ בתחתית המסך שריחף מעל הרשימה וכיסה את
+           הפריט האחרון — "היסטוריה". הפריט פשוט לא היה לחיץ.
+
+           מה שיש: גיליון זכוכית, סגירה בפינה (לעולם לא מעל התוכן),
+           ושורות גלולה עם סמל. הנבחרת נושאת מדרג ורוד→סגול→תכלת —
+           זה הצבע החזק היחיד כאן, והוא על **פריט אחד בלבד**. זה מה
+           שמאפשר לו להיות עז בלי שהמסך ייראה כבד. */
         <div
           onClick={() => setShowCatModal(false)}
-          style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.92)", display: "flex", flexDirection: "column", alignItems: "center", overflowY: "auto", padding: "60px 20px 130px" }}
+          style={{ // 1100 ולא 300: סרגל הניווט הצף יושב על 999, והוא
+                   // כיסה את שתי השורות האחרונות בגיליון. זו בדיוק
+                   // אותה תקלה של כפתור ה-X, בלבוש אחר — ולכן הבדיקה
+                   // עוברת על **כל** הפריטים ולא על אחד.
+                   position: "fixed", inset: 0, zIndex: 1100,
+                   background: "rgba(6,9,14,0.6)",
+                   backdropFilter: "blur(28px) saturate(170%)",
+                   WebkitBackdropFilter: "blur(28px) saturate(170%)",
+                   display: "flex", alignItems: "center",
+                   justifyContent: "center", padding: 16 }}
         >
-          {allCategories.map(cat => {
-            const isActive = cat === selectedCategory;
-            const isLiveCat = cat === "שידורים חיים";
-            return (
-              <div
-                key={cat}
-                onClick={(e) => { e.stopPropagation(); setSelectedCategory(cat); if (cat === "היסטוריה") refreshHistory(); setShowCatModal(false); }}
-                style={{ padding: "14px 20px", width: "100%", maxWidth: 480, textAlign: "center", cursor: "pointer", fontSize: isActive ? 26 : 21, fontWeight: isActive ? 900 : 400, color: isActive ? "#fff" : (isLiveCat ? "#e50914" : "rgba(255,255,255,0.45)"), display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-              >
-                {isLiveCat && <Eye size={isActive ? 22 : 18} />}
-                {catName(cat)}
-              </div>
-            );
-          })}
-          <button
-            onClick={() => setShowCatModal(false)}
-            style={{ position: "fixed", bottom: 116, left: "50%", transform: "translateX(-50%)", width: 58, height: 58, borderRadius: 29, background: "#fff", border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 18px rgba(0,0,0,.5)" }}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ ...glass("chrome"), width: "100%", maxWidth: 440,
+                     borderRadius: 28, padding: "16px 14px 18px",
+                     maxHeight: "86vh", display: "flex", flexDirection: "column",
+                     boxShadow: `${glass("chrome").boxShadow}, ${depth(3).boxShadow}` }}
           >
-            <X size={24} color="#000" />
-          </button>
+            <div style={{ display: "flex", alignItems: "center",
+                          justifyContent: "space-between", marginBottom: 14 }}>
+              <button
+                onClick={() => setShowCatModal(false)}
+                aria-label="סגור"
+                style={{ ...glass("chip"), borderRadius: "50%", width: 38, height: 38,
+                         display: "flex", alignItems: "center", justifyContent: "center",
+                         cursor: "pointer", color: colors.text, flexShrink: 0 }}
+              >
+                <X size={18} />
+              </button>
+              <div style={{ fontSize: 19, fontWeight: 800, color: colors.text,
+                            letterSpacing: "-0.01em" }}>
+                {catName(selectedCategory)}
+              </div>
+              <span style={{ width: 38, flexShrink: 0 }} />
+            </div>
+
+            <div style={{ overflowY: "auto", display: "flex", flexDirection: "column",
+                          gap: 8, paddingBottom: 2 }}>
+              {allCategories.map(cat => {
+                const isActive = cat === selectedCategory;
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => { setSelectedCategory(cat);
+                                     if (cat === "היסטוריה") refreshHistory();
+                                     setShowCatModal(false); }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 11,
+                      width: "100%", padding: "13px 16px", cursor: "pointer",
+                      fontFamily: "inherit", textAlign: "start",
+                      borderRadius: radius.pill, border: "none",
+                      fontSize: 15.5, fontWeight: isActive ? 800 : 600,
+                      color: isActive ? "#fff" : colors.textSecondary,
+                      background: isActive
+                        ? "linear-gradient(95deg, #FF4FB8 0%, #7E5BFF 52%, #2FB6FF 100%)"
+                        : glass("panel").background,
+                      backdropFilter: isActive ? "none" : glass("panel").backdropFilter,
+                      WebkitBackdropFilter: isActive ? "none" : glass("panel").backdropFilter,
+                      boxShadow: isActive
+                        ? "inset 0 1px 0 rgba(255,255,255,0.35), 0 8px 22px -10px rgba(126,91,255,0.75)"
+                        : glass("panel").boxShadow,
+                      transition: "transform 110ms ease-out",
+                    }}
+                  >
+                    <span style={{ fontSize: 19, lineHeight: 1, flexShrink: 0 }}>
+                      {CAT_ICON[cat] || "🎞️"}
+                    </span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis",
+                                   whiteSpace: "nowrap" }}>{catName(cat)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
       <main style={{ padding: "8px 0 100px", position: "relative", zIndex: 1 }}>
