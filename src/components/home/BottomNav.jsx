@@ -1,6 +1,5 @@
-import { useEffect, useRef } from "react";
-import { Home, Search, Heart, User as UserIcon, X } from "lucide-react";
-import { colors, radius, glass, glassFloating } from "@/theme/tokens";
+import { Home, Search, Heart, User as UserIcon } from "lucide-react";
+import { colors, radius, glassFloating } from "@/theme/tokens";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // סרגל ניווט תחתון, כמו באפליקציה.
@@ -27,14 +26,7 @@ const ITEM = {
 };
 const LABEL = { fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
 
-export default function BottomNav({
-  active, onHome, onFavorites, onUser, user,
-  searchOpen, setSearchOpen, searchTerm, setSearchTerm,
-}) {
-  const inputRef = useRef(null);
-  useEffect(() => {
-    if (searchOpen) inputRef.current?.focus();
-  }, [searchOpen]);
+export default function BottomNav({ active, onHome, onSearch, onFavorites, onUser, user }) {
 
   const item = (key, Icon, label, onClick) => {
     const on = active === key;
@@ -49,47 +41,8 @@ export default function BottomNav({
 
   return (
     <>
-      {/* ── שורת חיפוש, לא מסך חיפוש ──────────────────────────────────
-          מה שהיה: שכבה שמכסה את כל המסך, ומתחתיה הכיתוב "התוצאות
-          מתעדכנות מאחור — סגור כדי לראות אותן". כלומר המשתמש הקליד
-          וראה מסך ריק. זו הייתה רגרסיה שלי.
-
-          מה שיש: רק השורה עצמה צפה למעלה, והתוצאות מתחתיה — אותו
-          מסך, מסונן תוך כדי הקלדה. §12 של הסקיל: שכבה צפה שהתוכן
-          גולל מתחתיה, לא פס שבולע את המסך. ואין scrim, כי זו אינה
-          משימה חוסמת. */}
-      {searchOpen && (
-        <div dir="rtl" style={{
-          position: "fixed", top: 0, left: 0, right: 0, zIndex: 998,
-          marginInline: "auto", width: "calc(100% - 28px)", maxWidth: 560,
-          marginTop: 12,
-        }}>
-          <div style={{
-            display: "flex", alignItems: "center", gap: 9,
-            ...glassFloating("chrome", 3), borderRadius: radius.pill,
-            padding: "11px 15px",
-          }}>
-            <Search size={17} color={colors.textMuted} />
-            <input ref={inputRef} type="text" value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="חפש סרט או סדרה…"
-              style={{ background: "none", border: "none", outline: "none", width: "100%",
-                       fontSize: 16, color: colors.text, fontFamily: "inherit" }} />
-            {!!searchTerm && (
-              <button onClick={() => setSearchTerm("")}
-                style={{ background: "none", border: "none", cursor: "pointer",
-                         padding: 0, display: "flex", color: colors.textMuted,
-                         fontSize: 18, lineHeight: 1 }}>×</button>
-            )}
-            <button onClick={() => setSearchOpen(false)}
-              style={{ background: "none", border: "none", cursor: "pointer", padding: 0,
-                       display: "flex" }}>
-              <X size={19} color={colors.textMuted} />
-            </button>
-          </div>
-        </div>
-      )}
-
+      {/* החיפוש הוא דף משלו (SearchPage), ולא שכבה מעל דף הבית:
+          שם יש מסננים, ספירת תוצאות, וכפתור "חזור" של הדפדפן שעובד. */}
       <nav style={{
         // רוחב מוגבל וממורכז. ‎left/right: 14‎ לבדם מתחו את הקפסולה
         // על כל רוחב המסך במחשב, וארבעה פריטים נפרשו מקצה לקצה —
@@ -103,7 +56,7 @@ export default function BottomNav({
         borderRadius: 34, padding: 6,
       }}>
         {item("home", Home, "בית", onHome)}
-        {item("search", Search, "חיפוש", () => setSearchOpen(true))}
+        {item("search", Search, "חיפוש", onSearch)}
         {item("fav", Heart, "מועדפים", onFavorites)}
         <button onClick={onUser} style={{ ...ITEM, color: colors.textMuted }}>
           {user?.picture

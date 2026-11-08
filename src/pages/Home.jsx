@@ -16,6 +16,7 @@ import { useApiKeyEndpoint } from "@/components/home/useApiKeyEndpoint";
 import { useSlugRouting } from "@/components/home/useSlugRouting";
 import { usePlayback } from "@/components/home/usePlayback";
 import { useMovieLibrary } from "@/components/home/useMovieLibrary";
+import SearchPage from "@/components/home/SearchPage";
 import { useCategories } from "@/components/home/useCategories";
 import { useIsDesktop } from "@/components/home/useIsDesktop";
 import { ls, lsSet, lsDel, lsJson, SPIN } from "@/components/home/helpers";
@@ -302,6 +303,21 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   }, [slug, episode, liveChannels]);
 
   // ── early returns ──
+  // ── דף החיפוש ──
+  // כמו מסך החיפוש באפליקציה: מסך משלו, ולא שכבה מעל דף הבית. הניווט
+  // דרך ה-URL כדי שכפתור "חזור" של הדפדפן יעבוד כמצופה.
+  if (slug === "search") {
+    return (
+      <SearchPage
+        movies={movies}
+        seriesMap={seriesMap}
+        liveChannels={liveChannels}
+        handleItemClick={handleItemClick}
+        onClose={() => navigate(-1)}
+      />
+    );
+  }
+
   if (kalturaRefreshing) return (
     <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20 }}>
       <style>{SPIN}</style>
@@ -487,6 +503,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
         setSelectedCategory={setSelectedCategory}
         allCategories={allCategories}
         refreshHistory={refreshHistory}
+        onOpenSearch={() => navigate("/search")}
         onLogoClick={onLogoClick}
         movies={movies}
         seriesMap={seriesMap}

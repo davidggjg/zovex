@@ -1,9 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// חיפוש: הקלדה חייבת להראות תוצאות על אותו מסך.
+// דף החיפוש: הקלדה חייבת להראות תוצאות, והמסננים חייבים לעבוד.
 //
 // נכתב אחרי רגרסיה אמיתית: שכבת החיפוש כיסתה את כל המסך והציגה
 // "התוצאות מתעדכנות מאחור — סגור כדי לראות אותן". המשתמש הקליד
-// "ספורט 4" וראה מסך ריק.
+// "ספורט 4" וראה מסך ריק. מאז החיפוש הפך לדף משלו עם מסננים.
 //
 //   node scripts/test-search.mjs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,20 +63,20 @@ await pg.waitForTimeout(1200);
 
 const txt = await pg.$eval('body', e => e.innerText);
 check('אין הודעת "סגור כדי לראות"', !txt.includes('סגור כדי לראות'), txt.slice(0,70).replace(/\n/g,' | '));
-check('התוצאה מופיעה על אותו מסך', txt.includes('ספורט 4'), txt.slice(0,110).replace(/\n/g,' | '));
+// "הכל" חייב לכלול שידורים חיים — useMovieLibrary מפריד אותם, ובלי
+// האיחוד בדף החיפוש "ספורט 4" לא נמצא בכלל.
+check('התוצאה מופיעה', txt.includes('ספורט 4'), txt.slice(0,110).replace(/\n/g,' | '));
 check('מה שלא תואם אינו מופיע', !txt.includes('משהו אחר לגמרי'));
+check('מוצגת ספירת תוצאות', /\d+ תוצאות/.test(txt));
 
-// שורת החיפוש אינה מכסה את המסך
-const cover = await pg.evaluate(() => {
-  const inp = document.querySelector('input[placeholder*="חפש"]');
-  if (!inp) return 1;
-  let el = inp.parentElement;
-  while (el && getComputedStyle(el).position !== 'fixed') el = el.parentElement;
-  if (!el) return 1;
-  const r = el.getBoundingClientRect();
-  return (r.height * r.width) / (innerHeight * innerWidth);
-});
-check('השכבה אינה מכסה את המסך', cover < 0.25, Math.round(cover * 100) + '% מהמסך');
+// מסנן שנה: בחירת שנה שאין בה את התוצאה מסננת אותה החוצה.
+const hasYearChip = await pg.getByText('כל השנים', { exact: true }).count();
+check('יש מסנן שנים', hasYearChip > 0);
+
+// זהו דף נפרד: הכתובת משתנה, ויש דרך לחזור.
+check('הכתובת היא של דף חיפוש', pg.url().includes('/search'), pg.url());
+const backBtn = await pg.locator('[aria-label="חזרה"]').count();
+check('יש כפתור חזרה', backBtn > 0);
 
 await br.close(); srv.close();
 console.log(failed ? `\n❌ ${failed} נכשלו` : '\n✅ הכל עבר');

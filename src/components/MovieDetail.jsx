@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useDescription } from "./home/useDescription";
-import { ArrowRight, Play, Heart, X } from "lucide-react";
+import { ArrowRight, Play, Heart, X, Volume2, VolumeX } from "lucide-react";
 import { useTrailer } from "./home/useFavorites";
+import { glass } from "@/theme/tokens";
 import { t } from "../i18n";
 
 // מזהה "שם בסיס" של סרט כדי לאתר סרטי המשך - מסיר מספר עוקב בסוף השם, כולל
@@ -20,6 +21,8 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
   // התיאור אינו חלק מהקטלוג המהיר — הוא נמשך לפריט הזה בלבד.
   const description = useDescription(movie);
   const [trailerOff, setTrailerOff] = useState(false);
+  // מושתק בהתחלה: זה התנאי של הדפדפנים להפעלה אוטומטית.
+  const [heroMuted, setHeroMuted] = useState(true);
   const baseName = baseTitle(movie.title);
   // חלק מסרטי ההמשך לא נקראים "שם 2" (למשל "ראלף ההורס" -> "ראלף שובר את
   // האינטרנט") - אז אי אפשר לזהות אותם לפי מספר בסוף השם. במקרים כאלה
@@ -31,13 +34,70 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
     return baseTitle(m.title) === baseName;
   }).sort((a, b) => (a.year || 0) - (b.year || 0));
   return (
-    <div style={{ background: "#111", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
+    <div style={{ background: "#07070C", minHeight: "100vh", direction: "rtl", fontFamily: "Arial, sans-serif", color: "#fff" }}>
       <button onClick={onClose} style={{ position: "fixed", top: 15, right: 15, zIndex: 100, background: "rgba(0,0,0,.7)", border: "none", color: "#fff", borderRadius: "50%", width: 44, height: 44, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
         <ArrowRight size={22} />
       </button>
-      <div style={{ position: "relative" }}>
-        {movie.thumbnail_url && <img src={movie.thumbnail_url} alt="" style={{ width: "100%", height: "55vw", maxHeight: 380, objectFit: "cover", display: "block" }} onError={e => e.target.style.display = "none"} />}
-        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 130, background: "linear-gradient(transparent,#111)" }} />
+      {/* ── הכותר: טריילר אם יש, אחרת התמונה ────────────────────────────
+          התמונה היא פוסטר לאורך, ו-objectFit: cover בתוך מלבן רחב
+          ונמוך חתך ממנו פס מהאמצע — הראש והכיתוב נעלמו. זה מה
+          שנראה "לחוץ".
+
+          כשיש טריילר הוא עולה לכאן ומתנגן מיד. מושתק, כי זה התנאי
+          של כל הדפדפנים להפעלה אוטומטית — וידאו עם קול אינו מורשה
+          להתחיל לבד, והניסיון פשוט נדחה. יש כפתור קול, וכיבוי
+          הטריילר מחזיר את התמונה.
+
+          היחס הוא 16:9 האמיתי של הסרטון ולא גובה קבוע, אחרת נחזור
+          בדיוק לחיתוך שממנו ברחנו. */}
+      <div style={{ position: "relative", background: "#000" }}>
+        {trailerKey && !trailerOff ? (
+          <div style={{ position: "relative", width: "100%", paddingTop: "56.25%" }}>
+            <iframe
+              src={`https://www.youtube-nocookie.com/embed/${trailerKey}?autoplay=1&mute=${heroMuted ? 1 : 0}&playsinline=1&rel=0&modestbranding=1&controls=0&loop=1&playlist=${trailerKey}`}
+              title={t("detail.trailer")}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              referrerPolicy="strict-origin-when-cross-origin"
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
+            />
+            <div style={{ position: "absolute", bottom: 10, insetInlineStart: 12,
+                          display: "flex", gap: 8, zIndex: 3 }}>
+              <button onClick={() => setHeroMuted(m => !m)}
+                aria-label={heroMuted ? "הפעל קול" : "השתק"}
+                style={{ ...glass("chip"), borderRadius: 999, width: 38, height: 38,
+                         display: "flex", alignItems: "center", justifyContent: "center",
+                         color: "#fff", cursor: "pointer" }}>
+                {heroMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}
+              </button>
+              <button onClick={() => setTrailerOff(true)}
+                style={{ ...glass("chip"), borderRadius: 999, height: 38, padding: "0 14px",
+                         color: "#fff", cursor: "pointer", fontSize: 12.5, fontWeight: 700,
+                         fontFamily: "inherit" }}>
+                {t("common.close")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          movie.thumbnail_url && (
+            <div style={{ position: "relative", width: "100%", paddingTop: "56.25%",
+                          overflow: "hidden" }}>
+              {/* אותה תמונה פעמיים: מטושטשת ב-cover כדי למלא את
+                  המסגרת, ושלמה ב-contain מלפנים — כך הפוסטר נראה
+                  בשלמותו ולא נחתך. */}
+              <img src={movie.thumbnail_url} alt="" aria-hidden="true"
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
+                         objectFit: "cover", filter: "blur(26px) saturate(150%)",
+                         transform: "scale(1.2)" }} />
+              <img src={movie.thumbnail_url} alt=""
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
+                         objectFit: "contain" }}
+                onError={e => (e.target.style.display = "none")} />
+            </div>
+          )
+        )}
+        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 120,
+                      pointerEvents: "none",
+                      background: "linear-gradient(transparent, #07070C)" }} />
       </div>
       <div style={{ padding: 20 }}>
         <h1 style={{ fontSize: 22, fontWeight: 900, margin: "0 0 8px", color: "#fff" }}>{movie.title}</h1>
@@ -62,32 +122,7 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
             </button>
           )}
         </div>
-        {trailerKey && !trailerOff && (
-          <div style={{ marginTop: 22 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-              <div style={{ fontSize: 14, fontWeight: 900, color: "#fff" }}>🎬 {t("detail.trailer")}</div>
-              <button onClick={() => setTrailerOff(true)}
-                style={{ background: "none", border: "none", color: "#888", fontSize: 12,
-                         cursor: "pointer", padding: 4 }}>
-                {t("common.close")}
-              </button>
-            </div>
-            {/* נגן יוטיוב מלא ולא תצוגה מקדימה: בלי autoplay ובלי mute, עם
-                הפקדים המקוריים ועם הרשאת מסך מלא. כך אפשר להשהות, להגביר,
-                להשתיק ולהגדיל — קודם זה היה סרטון מושתק שלא הגיב לכלום. */}
-            <div style={{ position: "relative", width: "100%", paddingTop: "56.25%",
-                          borderRadius: 12, overflow: "hidden", background: "#000" }}>
-              <iframe
-                src={`https://www.youtube-nocookie.com/embed/${trailerKey}?playsinline=1&rel=0&modestbranding=1&fs=1`}
-                title={t("detail.trailer")}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
-                allowFullScreen
-                referrerPolicy="strict-origin-when-cross-origin"
-                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
-              />
-            </div>
-          </div>
-        )}
+        {/* הטריילר עבר לראש העמוד ומתנגן שם מיד. */}
 
         {sequels.length > 0 && (
           <div style={{ marginTop: 24 }}>

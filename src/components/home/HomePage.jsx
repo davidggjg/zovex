@@ -23,7 +23,7 @@ import SupportModal from "./SupportModal";
 // מסך הבית — לוגו, חיפוש, תפריט משתמש, קטגוריות, ורשימות התוכן
 export default function HomePage({
   user, onLogout, loginWithGoogle, searchTerm, setSearchTerm, selectedCategory, setSelectedCategory,
-  allCategories, refreshHistory, onLogoClick,
+  allCategories, refreshHistory, onLogoClick, onOpenSearch,
   movies, seriesMap, liveChannels, isDesktop, handleItemClick, handleContinueWatchingClick, history,
   favIds,
 }) {
@@ -50,7 +50,6 @@ export default function HomePage({
   const [showCatModal, setShowCatModal] = useState(false);
   const [showTelegramTip, setShowTelegramTip] = useState(() => !ls("zovex_hide_telegram_tip"));
   const [supportOpen, setSupportOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
   // הכותרת מתכווצת אחרי גלילה קטנה. 24px ולא 0 כדי שרעידה של פיקסל
   // אחד במגע לא תגרום להבהוב בין שני המצבים.
   const [scrolled, setScrolled] = useState(false);
@@ -487,15 +486,12 @@ export default function HomePage({
 
       {/* סרגל הניווט התחתון, כמו באפליקציה. החיפוש חי כאן עכשיו. */}
       <BottomNav
-        active={searchOpen ? "search" : (selectedCategory === "מועדפים" ? "fav" : "home")}
+        active={selectedCategory === "מועדפים" ? "fav" : "home"}
         user={user}
-        searchOpen={searchOpen}
-        setSearchOpen={setSearchOpen}
-        searchTerm={searchTerm}
-        setSearchTerm={setSearchTerm}
-        onHome={() => { setSearchTerm(""); setSelectedCategory("הכל"); setSearchOpen(false);
+        onSearch={() => onOpenSearch()}
+        onHome={() => { setSearchTerm(""); setSelectedCategory("הכל");
                         window.scrollTo({ top: 0, behavior: "smooth" }); }}
-        onFavorites={() => { setSearchOpen(false); setSelectedCategory("מועדפים"); }}
+        onFavorites={() => setSelectedCategory("מועדפים")}
         onUser={() => (user ? setUserMenuOpen(v => !v) : loginWithGoogle())}
       />
       {/* מרווח שלא יסתיר את סוף התוכן מאחורי הסרגל הצף */}
