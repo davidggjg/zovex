@@ -280,24 +280,35 @@ def main():
             ov = {}
         if ov:
             print("   מיפוי ידני: %d כותרות" % len(ov))
-        for name, val in ov.items():
-            items = by_series.pop(name, None)
-            if not items:
+        # המפתח מתאים לשם סדרה או לכותרת של פריט בודד, אחרי אותו
+        # נרמול של שאר הסקריפט — כדי שרווח או גרש לא יפילו התאמה.
+        ov_n = {norm(k): v for k, v in ov.items()}
+        used = set()
+        for key, val in list(ov_n.items()):
+            targets = [x for x in missing
+                       if norm(x.get("series_name")) == key or norm(x.get("title")) == key]
+            if not targets:
                 continue
             url = val if isinstance(val, str) and val.startswith("http") else None
             if url is None:
                 det = details("tv", val) or details("movie", val)
                 if not det or not det.get("poster_path"):
-                    print("   ✗ מיפוי ידני לא החזיר פוסטר: %s" % name)
-                    by_series[name] = items
+                    print("   ✗ מיפוי ידני לא החזיר פוסטר: %s" % key)
                     continue
                 url = IMG + det["poster_path"]
-            for x in items:
+            for x in targets:
                 x["_new_thumb"] = url
                 changes["poster"] += 1
                 add("פוסטר", "מיפוי ידני (poster_overrides.json)", x,
                     "thumbnail_url", url, str(val)[:40])
-            print("   ✓ %-28s %4d פרקים  (ידני)" % (str(name)[:28], len(items)))
+                used.add(id(x))
+            print("   ✓ %-28s %4d פריטים  (ידני)" % (str(key)[:28], len(targets)))
+        # מה שכוסה ידנית יוצא מהמשך העיבוד.
+        for name in list(by_series):
+            by_series[name] = [x for x in by_series[name] if id(x) not in used]
+            if not by_series[name]:
+                del by_series[name]
+        singles = [x for x in singles if id(x) not in used]
 
         # ── שלב א: פוסטר מאח באותה סדרה ─────────────────────────────────
         #
