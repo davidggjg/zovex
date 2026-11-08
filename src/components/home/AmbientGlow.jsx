@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 /**
  * רקע נוזלי מאחורי כל התוכן.
@@ -54,12 +54,52 @@ export const AMBIENT_KEYFRAMES = `
   40%  { transform: translate3d(5%, -6%, 0) rotate(60deg) scale(1.22); }
   100% { transform: translate3d(0,0,0) rotate(140deg) scale(0.95); }
 }
+/* סחיפת גוון איטית מאוד על כל השכבה. זה מה שנותן "הצבעים זזים"
+   בלי להוסיף אף צורה: אותו נוזל, בגוון שנודד. 150 שניות למחזור —
+   אי אפשר לראות את זה קורה, רק לראות שהמסך לא אותו דבר. */
+@keyframes zvHue {
+  0%   { filter: blur(80px) saturate(135%) hue-rotate(0deg); }
+  50%  { filter: blur(80px) saturate(150%) hue-rotate(26deg); }
+  100% { filter: blur(80px) saturate(135%) hue-rotate(0deg); }
+}
 @media (prefers-reduced-motion: reduce) {
   .zv-blob { animation: none !important; }
+  .zv-flow { animation: none !important; }
+  /* בלי פרלקסה: הערך נשאר 0 וה-transform מתבטל. */
+  .zv-parallax { transform: none !important; }
 }
 `;
 
 export default function AmbientGlow({ seed }) {
+  const layerRef = useRef(null);
+
+  // ── פרלקסה בגלילה ───────────────────────────────────────────────────
+  //
+  // השכבות נעות בקצב שונה מהתוכן, וזה מה שיוצר עומק: המוח מפרש
+  // הפרש מהירויות כמרחק. בלי זה הרקע "מודבק" לתוכן וכל התחושה
+  // התלת־ממדית אובדת, גם כשהצורות עצמן זזות.
+  //
+  // הערך נכתב כמשתנה CSS ונקרא ב-transform, ולכן אין כאן שום
+  // חישוב פריסה — רק הזזה ב-compositor. העדכון ב-
+  // requestAnimationFrame ולא בכל אירוע scroll: אירועי גלילה
+  // מגיעים הרבה יותר מהר מקצב הציור, וכתיבה בכל אחד מהם היא עבודה
+  // שנזרקת.
+  useEffect(() => {
+    const el = layerRef.current;
+    if (!el) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
+      const y = window.scrollY || 0;
+      el.style.setProperty("--zv-sy", String(y));
+    };
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(apply); };
+    apply();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => { window.removeEventListener("scroll", onScroll); if (raf) cancelAnimationFrame(raf); };
+  }, []);
+
   const blobs = useMemo(() => {
     const h = hashOf(seed);
     // טווח צר של גוונים קרים. ה-seed מזיז בתוכו, ולא בוחר גוון חדש:
@@ -67,10 +107,12 @@ export default function AmbientGlow({ seed }) {
     const base = 178 + (h % 46);           // 178–224: טורקיז עד כחול
     const SZ = (v) => `min(${v}vmax, 1250px)`;
     return [
-      { hue: base,       sat: 62, lig: 48, top: "-26%", left: "38%", size: SZ(96),  a: 0.42, anim: "zvFlowA", dur: "37s" },
-      { hue: base + 34,  sat: 58, lig: 44, top: "28%",  left: "-28%", size: SZ(104), a: 0.34, anim: "zvFlowB", dur: "53s" },
-      { hue: base - 26,  sat: 55, lig: 46, top: "62%",  left: "34%",  size: SZ(92),  a: 0.30, anim: "zvFlowC", dur: "71s" },
-      { hue: base + 62,  sat: 48, lig: 42, top: "6%",   left: "74%",  size: SZ(80),  a: 0.24, anim: "zvFlowB", dur: "89s" },
+      // ‎par‎ = כמה השכבה "נגררת" עם הגלילה. ערכים שונים = שכבות
+      // במרחקים שונים. שלילי אצל אחת כדי שהן גם יחצו זו את זו.
+      { hue: base,       sat: 62, lig: 48, top: "-26%", left: "38%", size: SZ(96),  a: 0.42, anim: "zvFlowA", dur: "37s", par: 0.18 },
+      { hue: base + 34,  sat: 58, lig: 44, top: "28%",  left: "-28%", size: SZ(104), a: 0.34, anim: "zvFlowB", dur: "53s", par: -0.10 },
+      { hue: base - 26,  sat: 55, lig: 46, top: "62%",  left: "34%",  size: SZ(92),  a: 0.30, anim: "zvFlowC", dur: "71s", par: 0.30 },
+      { hue: base + 62,  sat: 48, lig: 42, top: "6%",   left: "74%",  size: SZ(80),  a: 0.24, anim: "zvFlowB", dur: "89s", par: -0.22 },
     ];
   }, [seed]);
 
@@ -85,14 +127,32 @@ export default function AmbientGlow({ seed }) {
     >
       {/* העטיפה נושאת את הטשטוש — מסנן אחד לכל הצורות יחד, וזה גם
           מה שממיס את הגבולות ביניהן לנוזל אחד. */}
-      <div style={{
-        position: "absolute", inset: "-20%",
-        filter: "blur(80px) saturate(135%)",
-        willChange: "transform",
-      }}>
+      <div
+        ref={layerRef}
+        className="zv-flow"
+        style={{
+          position: "absolute", inset: "-20%",
+          filter: "blur(80px) saturate(135%)",
+          animation: "zvHue 150s ease-in-out infinite",
+          willChange: "filter",
+          // נקרא על ידי כל שכבה דרך calc(). ברירת מחדל 0 כדי
+          // שהחישוב יהיה תקף עוד לפני הגלילה הראשונה.
+          "--zv-sy": 0,
+        }}>
         {blobs.map((b, i) => (
+          // שתי שכבות ולא אחת: ה-transform של הצורה כבר תפוס על ידי
+          // אנימציית הזרימה, ואי אפשר להוסיף עליו גם את הפרלקסה.
+          // העטיפה נושאת את ההזזה לפי הגלילה, והילד את הזרימה.
           <div
             key={i}
+            className="zv-parallax"
+            style={{
+              position: "absolute", inset: 0,
+              transform: `translate3d(0, calc(var(--zv-sy, 0) * ${b.par}px), 0)`,
+              willChange: "transform",
+            }}
+          >
+          <div
             className="zv-blob"
             style={{
               position: "absolute",
@@ -107,6 +167,7 @@ export default function AmbientGlow({ seed }) {
               willChange: "transform",
             }}
           />
+          </div>
         ))}
       </div>
 
