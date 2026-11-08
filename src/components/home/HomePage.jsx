@@ -1,4 +1,5 @@
 import { colors, radius } from "@/theme/tokens";
+import BottomNav from "./BottomNav";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { t, getLanguage, setLanguage, catName } from '../../i18n';
 
@@ -49,6 +50,7 @@ export default function HomePage({
   const [showCatModal, setShowCatModal] = useState(false);
   const [showTelegramTip, setShowTelegramTip] = useState(() => !ls("zovex_hide_telegram_tip"));
   const [supportOpen, setSupportOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const userMenuRef = useRef(null);
 
   // סגירת התפריט בלחיצה מחוץ לו
@@ -128,11 +130,22 @@ export default function HomePage({
           <h1
             onClick={onLogoClick}
             style={{ color: "#e50914", fontSize: 26, fontWeight: 900, letterSpacing: 4, margin: 0, flexShrink: 0, cursor: "pointer" }}>ZOVEX</h1>
-          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: "1px solid rgba(255,255,255,0.11)", padding: "10px 15px", borderRadius: 50 }}>
-            <Search size={16} color="#888" />
-            <input type="text" placeholder={t("common.search")} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} style={{ background: "none", border: "none", outline: "none", width: "100%", fontSize: 15, color: "#fff" }} />
-            {searchTerm && <span onClick={() => setSearchTerm("")} style={{ cursor: "pointer", color: "#888", fontSize: 18 }}>×</span>}
-          </div>
+          {/* החיפוש ירד לסרגל התחתון (BottomNav), כמו באפליקציה: בטלפון
+              האגודל מגיע לתחתית המסך, ולא לראש הדף. כשיש חיפוש פעיל
+              מוצג כאן שבב שמזכיר מה מסונן ומאפשר לנקות. */}
+          {searchTerm ? (
+            <button onClick={() => setSearchTerm("")}
+              style={{ flex: 1, display: "flex", alignItems: "center", gap: 7, minWidth: 0,
+                       background: colors.glass, border: `1px solid ${colors.glassBorder}`,
+                       padding: "8px 13px", borderRadius: radius.pill, cursor: "pointer",
+                       fontFamily: "inherit", color: colors.textSecondary, fontSize: 13 }}>
+              <Search size={14} color={colors.textMuted} />
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {searchTerm}
+              </span>
+              <span style={{ marginInlineStart: "auto", color: colors.textMuted }}>×</span>
+            </button>
+          ) : <div style={{ flex: 1 }} />}
           {/* אזור משתמש */}
           <div ref={userMenuRef} style={{ position: "relative", flexShrink: 0 }}>
             {user ? (
@@ -320,7 +333,7 @@ export default function HomePage({
           })}
           <button
             onClick={() => setShowCatModal(false)}
-            style={{ position: "fixed", bottom: 90, left: "50%", transform: "translateX(-50%)", width: 58, height: 58, borderRadius: 29, background: "#fff", border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 18px rgba(0,0,0,.5)" }}
+            style={{ position: "fixed", bottom: 116, left: "50%", transform: "translateX(-50%)", width: 58, height: 58, borderRadius: 29, background: "#fff", border: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 18px rgba(0,0,0,.5)" }}
           >
             <X size={24} color="#000" />
           </button>
@@ -350,7 +363,7 @@ export default function HomePage({
         />
       </main>
       {/* Telegram bubble — bottom מוגבה כדי לא להיחסם ע"י באנר הפרסומת הקבוע בתחתית */}
-      <div style={{ position: "fixed", bottom: 78, left: 14, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 8 }}>
+      <div style={{ position: "fixed", bottom: 104, left: 14, zIndex: 1000, display: "flex", alignItems: "flex-end", gap: 8 }}>
         {showTelegramTip && (
           <div style={{ position: "relative", background: "rgba(26,26,26,0.92)", backdropFilter: "blur(6px)", borderRadius: "14px 14px 14px 4px", padding: "8px 24px 8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,.3)", border: "1px solid #2a2a2a", maxWidth: 150, direction: "rtl" }}>
             <button
@@ -437,6 +450,22 @@ export default function HomePage({
           )}
         </div>
       </footer>
+
+      {/* סרגל הניווט התחתון, כמו באפליקציה. החיפוש חי כאן עכשיו. */}
+      <BottomNav
+        active={searchOpen ? "search" : (selectedCategory === "מועדפים" ? "fav" : "home")}
+        user={user}
+        searchOpen={searchOpen}
+        setSearchOpen={setSearchOpen}
+        searchTerm={searchTerm}
+        setSearchTerm={setSearchTerm}
+        onHome={() => { setSearchTerm(""); setSelectedCategory("הכל"); setSearchOpen(false);
+                        window.scrollTo({ top: 0, behavior: "smooth" }); }}
+        onFavorites={() => { setSearchOpen(false); setSelectedCategory("מועדפים"); }}
+        onUser={() => (user ? setUserMenuOpen(v => !v) : loginWithGoogle())}
+      />
+      {/* מרווח שלא יסתיר את סוף התוכן מאחורי הסרגל הצף */}
+      <div style={{ height: 92 }} />
     </div>
   );
 }

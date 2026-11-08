@@ -50,12 +50,9 @@ export default function Home() {
         {access.message || "הגישה שלך ל-ZOVEX נחסמה."}
       </p>
       <div style={{ color: "#737783", fontSize: 13, fontFamily: "Arial" }}>{user?.email}</div>
-      <button onClick={logout}
-        style={{ marginTop: 6, background: "rgba(255,255,255,0.08)", color: "#fff",
-                 border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10,
-                 padding: "10px 20px", fontSize: 14, cursor: "pointer", fontFamily: "Arial" }}>
-        התנתק
-      </button>
+      {/* אין כאן כפתור התנתקות, בכוונה. עם כפתור כזה החסימה חסרת
+          ערך: הנחסם מתנתק, מתחבר עם מייל אחר, וממשיך. מי שנחסם
+          נשאר חסום. פנייה אלינו היא הדרך היחידה חזרה. */}
     </div>
   );
 

@@ -35,8 +35,10 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
           במטפלי עכבר: בטלוויזיה אין עכבר, ו-focus-visible הוא הדרך היחידה
           שהכרטיס שהשלט עומד עליו ייראה שונה מהשאר. */}
       <div className="zv-card__art" style={{ width: cardW, height: cardH, background: isLive ? colors.surface : colors.surfaceElevated,
-                 border: `1px solid ${isLive ? colors.glowRed : colors.glassBorder}`,
-                 boxShadow: isLive ? `0 0 18px ${colors.focusTint}` : "none" }}>
+                 // הגבול זהה לכל כרטיס; מה שמסמן "חי" הוא הזוהר והתג,
+                 // לא קו אדום עבה שמתחרה עם התמונה עצמה.
+                 border: `1px solid ${colors.glassBorder}`,
+                 boxShadow: isLive ? `0 0 0 1px ${colors.focusTint}, 0 0 22px ${colors.focusTint}` : "none" }}>
         {isLive && item.thumbnail_url ? (
           // contain ולא cover: לוגו ערוץ חייב להיראות במלואו. הרקע הרדיאלי
           // ממלא את השוליים שנוצרים סביבו כשיחס הלוגו אינו 16:9.

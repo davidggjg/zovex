@@ -67,8 +67,13 @@ for (const [label, isBlocked] of [['משתמש חסום', true], ['משתמש ת
   console.log(`\n── ${label}`);
   check(isBlocked ? 'מוצג מסך החסימה' : 'לא מוצג מסך חסימה', seen === isBlocked,
         txt.slice(0,60).replace(/\n/g,' | '));
-  if (isBlocked && seen)
+  if (isBlocked && seen) {
     check('ההודעה מהשרת מוצגת', txt.includes('הודעות פוגעניות'));
+    // בלי זה החסימה חסרת ערך: הנחסם מתנתק, נכנס עם מייל אחר, וממשיך.
+    check('אין כפתור התנתקות במסך החסימה', !txt.includes('התנתק'));
+    const buttons = await pg.$$eval('button', bs => bs.length);
+    check('אין בכלל כפתורים במסך החסימה', buttons === 0, 'יש ' + buttons);
+  }
   await ctx.close();
 }
 await br.close(); srv.close();
