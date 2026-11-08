@@ -20,14 +20,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -u
 DIR=/opt/zovex-bot
-BRANCH="claude/telegram-bots-video-freezing-m8rk0n"
-B="https://raw.githubusercontent.com/davidggjg/zovex/${BRANCH}/vps-bot"
+# ZOVEX_REF מאפשר להצמיד לקומיט מסוים. raw.githubusercontent מגיש
+# מהמטמון גם כש-?t= משתנה, ושם של ענף תמיד עלול להיות ישן; מזהה
+# קומיט הוא קבוע ולכן לעולם אינו מוגש מגרסה אחרת.
+REF="${ZOVEX_REF:-claude/telegram-bots-video-freezing-m8rk0n}"
+B="https://raw.githubusercontent.com/davidggjg/zovex/${REF}/vps-bot"
 T=$(date +%s)
 die() { echo "❌ $*" >&2; exit 1; }
 [ -f "$DIR/main.py" ] || die "$DIR/main.py לא קיים"
 
 curl -fsSL -H 'Cache-Control: no-cache' "$B/patch_vodinfo_browser_ok.py?t=$T" -o /tmp/p_vb.py || die "הורדה נכשלה"
 curl -fsSL -H 'Cache-Control: no-cache' "$B/fix_nginx_vodinfo.sh?t=$T" -o /tmp/p_ng.sh || die "הורדה נכשלה"
+# אימות שמה שהורד הוא אכן הגרסה המתוקנת ולא עותק ישן מהמטמון.
+grep -q 'grep -RlE' /tmp/p_ng.sh \
+  || die "הקובץ שהתקבל הוא גרסה ישנה (מטמון). הרץ שוב עם ZOVEX_REF=<sha>"
 
 if [ "${1:-}" = "--rollback" ]; then
   python3 /tmp/p_vb.py "$DIR/main.py" --revert
