@@ -28,12 +28,12 @@ step() {  # step "שם" "פקודה"
 
 get() { curl -fsSL -H 'Cache-Control: no-cache' "$B/$1" -o "/tmp/$1" || return 1; }
 
-get deploy_vodinfo_fix.sh && get deploy_bans.sh && get deploy_site_v4.sh \
+get deploy_vodinfo_fix.sh && get deploy_bans.sh && get deploy_site_v5.sh \
   || { echo "❌ הורדת הסקריפטים נכשלה"; exit 1; }
 
 step "① /vodinfo — קול לקבצי DivX" "ZOVEX_REF='$REF' bash /tmp/deploy_vodinfo_fix.sh"
 step "② חסימת מייל"                "ZOVEX_REF='$REF' bash /tmp/deploy_bans.sh"
-step "③ האתר"                      "ZOVEX_REF='$REF' bash /tmp/deploy_site_v4.sh"
+step "③ האתר"                      "ZOVEX_REF='$REF' bash /tmp/deploy_site_v5.sh"
 
 echo
 echo "═══════════════ סיכום ═══════════════"
@@ -43,7 +43,7 @@ echo
 echo "לחזרה, כל אחד בנפרד:"
 echo "  sudo bash /tmp/deploy_vodinfo_fix.sh --rollback"
 echo "  sudo bash /tmp/deploy_bans.sh --rollback"
-echo "  sudo bash /tmp/deploy_site_v4.sh --rollback"
+echo "  sudo bash /tmp/deploy_site_v5.sh --rollback"
 echo
 echo "באתר: רענן עם Ctrl+Shift+R. בטלפון — סגור את הלשונית ופתח מחדש."
 [ ${#BAD[@]} -eq 0 ]

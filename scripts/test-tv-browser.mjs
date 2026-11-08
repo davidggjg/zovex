@@ -63,6 +63,57 @@ const open = async (ua, viewport) => {
   check('חצים נוספים מזיזים את הפוקוס', new Set(moved.seq).size > 1, JSON.stringify(moved.seq));
   await ctx.close();
 }
+// ①ב הסרגל התחתון חייב להיות בר-הגעה עם השלט.
+//    נכשל קודם: TvNavigation הוסיף scrollY גם לאלמנט position:fixed,
+//    והסרגל "נדחף" אלפי פיקסלים מטה במפה — החץ מעולם לא הגיע אליו.
+{
+  const { ctx, pg } = await open(
+    'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 Chrome/76 Safari/537.36',
+    { width: 1920, height: 1080 });
+  // התרחיש שבאמת מבדיל: גוללים לתחתית העמוד ומתמקדים בכרטיס
+  // האחרון שעל המסך. הסרגל הצף נמצא ויזואלית ממש מתחתיו, ולכן חץ
+  // אחד למטה חייב להגיע אליו.
+  //
+  // עם קואורדינטות מסמך הסרגל ממופה ל-y של scrollY+גובה המסך —
+  // כלומר הרחק מתחת לכל התוכן — ואין שום מועמד "מתחת" לכרטיס
+  // האחרון שקרוב יותר ממנו, אז החץ קופץ למקום אחר או לשום מקום.
+  const reached = await pg.evaluate(async () => {
+    const nav = document.querySelector('nav');
+    if (!nav) return 'אין סרגל';
+    window.scrollTo(0, document.body.scrollHeight);
+    await new Promise(r => setTimeout(r, 500));
+    const SEL = 'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const vh = window.innerHeight;
+    // הכרטיס הנמוך ביותר שעדיין על המסך ואינו בתוך הסרגל
+    const cand = [...document.querySelectorAll(SEL)]
+      .filter(el => !nav.contains(el))
+      .map(el => ({ el, r: el.getBoundingClientRect() }))
+      .filter(({ r }) => r.height > 0 && r.top > 0 && r.top < vh - 120)
+      .sort((a, b) => b.r.top - a.r.top)[0];
+    if (!cand) return 'לא נמצא כרטיס מתאים';
+    cand.el.focus({ preventScroll: true });
+    const inNav = () => !!(document.activeElement && nav.contains(document.activeElement));
+    for (let i = 0; i < 3; i++) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await new Promise(r => setTimeout(r, 150));
+      if (inNav()) return true;
+    }
+    return false;
+  });
+  check('השלט מגיע לסרגל התחתון', reached === true, String(reached));
+
+  // ויציאה חזרה: חץ למעלה מתוך הסרגל חייב להחזיר לתוכן, אחרת
+  // המשתמש נכנס לסרגל ונתקע בו.
+  const back = await pg.evaluate(async () => {
+    const nav = document.querySelector('nav');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await new Promise(r => setTimeout(r, 250));
+    return !!(document.activeElement && !nav.contains(document.activeElement));
+  });
+  check('חץ למעלה יוצא מהסרגל חזרה לתוכן', back === true);
+  await ctx.close();
+}
+
 // ② מחשב רגיל — אסור שישתנה כלום
 {
   const { ctx, pg } = await open(
@@ -71,6 +122,13 @@ const open = async (ua, viewport) => {
   check('במחשב מצב הטלוויזיה כבוי', await pg.evaluate(() => document.documentElement.getAttribute('data-tv')) === null);
   const fs = await pg.evaluate(() => getComputedStyle(document.documentElement).fontSize);
   check('במחשב הטקסט לא הוגדל', parseFloat(fs) < 20, fs);
+  // הסרגל נמתח קודם על כל רוחב המסך במחשב, וארבעה פריטים נפרשו
+  // מקצה לקצה. באפליקציה זה נראה נכון רק כי מסך טלפון צר.
+  const navW = await pg.evaluate(() => {
+    const n = document.querySelector('nav');
+    return n ? Math.round(n.getBoundingClientRect().width) : -1;
+  });
+  check('במחשב הסרגל אינו נמתח על כל הרוחב', navW > 0 && navW <= 460, navW + 'px');
   await ctx.close();
 }
 await br.close(); srv.close();

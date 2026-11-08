@@ -81,7 +81,11 @@ export default function BottomNav({
       )}
 
       <nav style={{
-        position: "fixed", left: 14, right: 14, bottom: 18, zIndex: 999,
+        // רוחב מוגבל וממורכז. ‎left/right: 14‎ לבדם מתחו את הקפסולה
+        // על כל רוחב המסך במחשב, וארבעה פריטים נפרשו מקצה לקצה —
+        // באפליקציה זה נראה נכון כי מסך טלפון רחב 400 נקודות.
+        position: "fixed", left: 0, right: 0, bottom: 18, zIndex: 999,
+        marginInline: "auto", width: "calc(100% - 28px)", maxWidth: 440,
         display: "flex", alignItems: "center", justifyContent: "space-around",
         // זכוכית אמיתית ולא משטח כהה: רקע שקוף, טשטוש חזק ורוויה
         // מוגברת, כך שהתוכן שעובר מתחת באמת נראה דרכו.
