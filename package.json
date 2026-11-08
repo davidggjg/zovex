@@ -14,8 +14,9 @@
     "scan:fix": "node scripts/scan.js --fix",
     "test:fullscreen": "node scripts/test-fullscreen.mjs",
     "test:player": "node scripts/test-player-ios.mjs",
-    "test": "node scripts/test-fullscreen.mjs && node scripts/test-quality.mjs && node scripts/test-player-ios.mjs",
-    "test:quality": "node scripts/test-quality.mjs"
+    "test": "node scripts/test-fullscreen.mjs && node scripts/test-quality.mjs && node scripts/test-player-ios.mjs && node scripts/test-ban.mjs",
+    "test:quality": "node scripts/test-quality.mjs",
+    "test:ban": "node scripts/test-ban.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.383.0",

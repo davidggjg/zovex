@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useDescription } from "./home/useDescription";
 import { ArrowRight, Play, Heart, X } from "lucide-react";
 import { useTrailer } from "./home/useFavorites";
 import { t } from "../i18n";
@@ -16,6 +17,8 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
   // הטריילר מחליף את הפוסטר כשיש. הפוסטר נשאר ברירת המחדל ולא מוחלף עד
   // שהמפתח חוזר בפועל — פריט בלי טריילר נראה בדיוק כמו קודם, בלי הבהוב.
   const trailerKey = useTrailer(movie);
+  // התיאור אינו חלק מהקטלוג המהיר — הוא נמשך לפריט הזה בלבד.
+  const description = useDescription(movie);
   const [trailerOff, setTrailerOff] = useState(false);
   const baseName = baseTitle(movie.title);
   // חלק מסרטי ההמשך לא נקראים "שם 2" (למשל "ראלף ההורס" -> "ראלף שובר את
@@ -42,7 +45,7 @@ export default function MovieDetail({ movie, movies, onPlay, onClose, onSelectMo
           {movie.category && <span style={{ background: "#e50914", color: "#fff", padding: "4px 12px", borderRadius: 20, fontSize: 12, fontWeight: "bold" }}>{movie.category}</span>}
           {movie.year && <span style={{ background: "#222", color: "#888", padding: "4px 12px", borderRadius: 20, fontSize: 12 }}>{movie.year}</span>}
         </div>
-        {movie.description && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסרט 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#bbb", margin: 0 }}>{movie.description}</p></div>}
+        {description && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסרט 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#bbb", margin: 0 }}>{description}</p></div>}
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={onPlay} style={{ flex: 1, background: "#e50914", color: "#fff", border: "none", padding: 16, fontSize: 17, fontWeight: "bold", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer" }}>
             <Play fill="white" size={20} /> לצפייה עכשיו

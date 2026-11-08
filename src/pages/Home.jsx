@@ -19,17 +19,45 @@ import { useMovieLibrary } from "@/components/home/useMovieLibrary";
 import { useCategories } from "@/components/home/useCategories";
 import { useIsDesktop } from "@/components/home/useIsDesktop";
 import { ls, lsSet, lsDel, lsJson, SPIN } from "@/components/home/helpers";
+import { useAccessCheck } from "@/components/home/useAccessCheck";
 
 const SECRET_TRIGGER = "ZovexAdmin2026";
 
 export default function Home() {
   const { user, skipped, loginWithGoogle, logout, skip } = useGoogleAuth();
+  // חסימה לפי מייל. עד עכשיו אף לקוח לא שאל את /api/access, ולכן
+  // כפתור החסימה בפאנל לא עשה דבר.
+  const access = useAccessCheck(user?.email);
   const [introDone, setIntroDone] = useState(false);
 
   // הפתיח הקולנועי — משחק פעם אחת בכניסה, לפני כל השאר (בדיוק כמו באפליקציה).
   if (!introDone) {
     return <ZovexIntro onDone={() => setIntroDone(true)} />;
   }
+
+  // חסימה: מסך במקום התוכן, לפני כל שאר המסכים. נבדק רק למי שמחובר
+  // עם מייל — אורח אינו נחסם, כי אין את מי לחסום.
+  if (access.blocked) return (
+    <div dir="rtl" style={{ position: "fixed", inset: 0, background: "#07070C", zIndex: 99999,
+                            display: "flex", flexDirection: "column", alignItems: "center",
+                            justifyContent: "center", gap: 18, padding: 24, textAlign: "center" }}>
+      <div style={{ fontSize: 54 }}>🚫</div>
+      <div style={{ color: "#fff", fontSize: 21, fontWeight: 800, fontFamily: "Arial" }}>
+        הגישה שלך נחסמה
+      </div>
+      <p style={{ color: "#A6A9B3", fontSize: 15, lineHeight: 1.7, maxWidth: 440, margin: 0,
+                  fontFamily: "Arial", whiteSpace: "pre-wrap" }}>
+        {access.message || "הגישה שלך ל-ZOVEX נחסמה."}
+      </p>
+      <div style={{ color: "#737783", fontSize: 13, fontFamily: "Arial" }}>{user?.email}</div>
+      <button onClick={logout}
+        style={{ marginTop: 6, background: "rgba(255,255,255,0.08)", color: "#fff",
+                 border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10,
+                 padding: "10px 20px", fontSize: 14, cursor: "pointer", fontFamily: "Arial" }}>
+        התנתק
+      </button>
+    </div>
+  );
 
   // מסך כניסה — הצג אם לא מחובר ולא דילג
   if (!user && !skipped) {

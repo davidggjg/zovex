@@ -25,23 +25,72 @@ export function useMovieLibrary() {
   const [loading, setLoading] = useState(true);
   const [liveChannels, setLiveChannels] = useState([]);
 
+  // ── טעינת הקטלוג בשני שלבים ────────────────────────────────────────────
+  //
+  // נמדד מול השרת החי: דף הבית הוריד ‎/movies.json‎ — **2.6MB דחוס**,
+  // 30MB לפני דחיסה, 26,006 פריטים — לפני שהופיע כרטיס אחד. הכרטיס
+  // הראשון הגיע אחרי 10.2 שניות במחשב ו-11.2 בטלפון.
+  //
+  // ‎?t=<זמן>‎ בכתובת הפך כל טעינה להורדה מחדש: הדפדפן לא יכול לשמור
+  // במטמון כתובת שמשתנה. בלעדיו השרת מחזיר 304 ריק, כי הוא כבר שולח
+  // ETag ו-Cache-Control: no-cache ("שמור אבל אמת").
+  //
+  // והשרת כבר מגיש גרסה מהירה שהאתר לא השתמש בה:
+  //
+  //     /content/lite?limit=800   52KB     ← ציור ראשון
+  //     /content/lite            1.86MB    ← הושלם ברקע
+  //     /movies.json             2.6MB     ← מה שהיה
+  //
+  // הרשימה כבר מגיעה מהחדש לישן, ולכן 800 הראשונים הם 800 החדשים.
+  //
+  // ‎/content/lite‎ אינו כולל ‎description‎ (הוא נחסך בשרת) — התיאור
+  // נמשך לפריט בודד דרך ‎/content/item/{id}‎ כשפותחים אותו.
+  const CATALOG = "/content/lite";
+
+  const fetchCatalog = async (limit) => {
+    const res = await fetch(limit ? `${CATALOG}?limit=${limit}` : CATALOG);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.json();
+  };
+
+  const apply = (arr) => {
+    // reverse נשמר מההתנהגות הקודמת של Movie.list("-created_date"):
+    // שינוי הסדר כאן היה משנה אילו פריטים מופיעים בכל שורה, וזה לא
+    // מה שהשינוי הזה בא לעשות.
+    const all = [...arr].reverse();
+    setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
+    setMovies(all.filter(m => !m.is_live));
+  };
+
   const loadMovies = async () => {
     setLoading(true);
     try {
-      const all = (await Movie.list("-created_date", 100000)) || [];
-      setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
-      setMovies(all.filter(m => !m.is_live));
-    } catch {}
+      apply(await fetchCatalog(800));   // ציור ראשון, 52KB
+      setLoading(false);
+      apply(await fetchCatalog(0));     // השלמה ברקע
+    } catch {
+      // נפילה חזרה למקור הישן: עדיף איטי מאשר ריק.
+      try {
+        const all = (await Movie.list("-created_date", 100000)) || [];
+        setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
+        setMovies(all.filter(m => !m.is_live));
+      } catch {}
+    }
     setLoading(false);
   };
 
   // קריאה מ-raw.githubusercontent.com — מתעדכן מיד אחרי שמירה בלי לחכות ל-build
   const loadLiveFromGitHub = async () => {
     try {
-      const res = await fetch(`https://raw.githubusercontent.com/davidggjg/zovex/main/public/movies.json?t=` + Date.now());
+      // ‎/content/live‎ מחזיר רק את השידורים החיים — עשרות KB במקום
+      // הקטלוג כולו. קודם זה משך את movies.json מגיטהאב בכל רענון,
+      // כלומר מגה-בייטים כל חמש דקות לכל לשונית פתוחה, רק כדי לבדוק
+      // אם ערוץ אחד השתנה.
+      const res = await fetch("/content/live");
       if (!res.ok) return;
       const all = await res.json();
-      setLiveChannels(prev => mergeLiveChannels(prev, all.filter(m => m.is_live === true)));
+      const live = Array.isArray(all) ? all.filter(m => m.is_live === true) : [];
+      if (live.length) setLiveChannels(prev => mergeLiveChannels(prev, live));
     } catch {}
   };
 

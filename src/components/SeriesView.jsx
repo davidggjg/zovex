@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useDescription } from "./home/useDescription";
 import { ArrowRight, ChevronDown, Play } from "lucide-react";
 import { SPIN } from "./home/helpers";
 
@@ -9,6 +10,9 @@ export default function SeriesView({ seriesName, seriesMap, onEpisodePlay, onClo
   const [showSeasonMenu, setShowSeasonMenu] = useState(false);
 
   const series = seriesMap[seriesName];
+  // התיאור אינו חלק מהקטלוג המהיר. נמשך לפרק הראשון, שנושא את תיאור
+  // הסדרה — כך שאין צורך בבקשה נפרדת לכל פרק.
+  const description = useDescription(series?.episodes?.[0] || series);
   const episodes = series?.episodes || [];
   const seasonNums = [...new Set(episodes.map(e => e.season_number || 1))].sort((a, b) => a - b);
   const activeSeason = openSeasons._active !== undefined ? openSeasons._active : seasonNums[0];
@@ -30,7 +34,7 @@ export default function SeriesView({ seriesName, seriesMap, onEpisodePlay, onClo
           <span style={{ background: "#1a1a1a", color: "#ccc", border: "1px solid #333", padding: "4px 12px", borderRadius: 20, fontSize: 12 }}>{episodes.length} פרקים</span>
           <span style={{ background: "#1a1a1a", color: "#ccc", border: "1px solid #333", padding: "4px 12px", borderRadius: 20, fontSize: 12 }}>{seasonNums.length} עונות</span>
         </div>
-        {series?.description && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסדרה 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#aaa", margin: 0 }}>{series.description}</p></div>}
+        {description && <div style={{ margin: "0 0 20px" }}><div style={{ fontSize: 13, fontWeight: 700, color: "#ddd", marginBottom: 6 }}>תיאור הסדרה 🎬:</div><p style={{ fontSize: 14, lineHeight: 1.8, color: "#aaa", margin: 0 }}>{description}</p></div>}
         <div style={{ position: "relative", marginBottom: 18 }}>
           <button onClick={() => setShowSeasonMenu(s => !s)} style={{ display: "flex", alignItems: "center", gap: 10, background: "#1a1a1a", border: "1px solid #333", color: "#fff", borderRadius: 10, padding: "12px 18px", fontSize: 15, fontWeight: 900, cursor: "pointer", fontFamily: "inherit", minWidth: 160 }}>
             <span>עונה {activeSeason}</span><ChevronDown size={18} color="#fff" />
