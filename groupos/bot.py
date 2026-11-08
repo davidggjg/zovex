@@ -1646,7 +1646,8 @@ async def _content_reply(msg: Message, text: str,
     # מדליקים בחזרה בלי שאבד כלום.
     if db.get(msg.chat.id, "replies", "1") != "1":
         return False
-    fh = filters.check(msg.chat.id, text)
+    fh = filters.check(msg.chat.id, text,
+                       db.get(msg.chat.id, "askonly", "1") == "1")
     if fh is None:
         return False
     if staff and fh.action not in ("reply", "delete_reply"):

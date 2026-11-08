@@ -370,8 +370,9 @@ class Filters:
             "SELECT trigger FROM filters WHERE chat_id=? ORDER BY trigger",
             (chat_id,))]
 
-    def check(self, chat_id: int, text: str) -> Optional[FilterHit]:
-        return match_filters(text, self.all(chat_id))
+    def check(self, chat_id: int, text: str,
+              ask_only: bool = True) -> Optional[FilterHit]:
+        return match_filters(text, self.all(chat_id), ask_only)
 
 
 _RX_URL = re.compile(
@@ -433,8 +434,66 @@ def _all_words_present(trigger: str, hay: str) -> bool:
         for w in words)
 
 
-def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
-    """הפילטר הראשון שמתאים. טהור, כדי שאפשר לבדוק בלי מסד."""
+# ── בקשה מול שיחה ─────────────────────────────────────────────────────────
+#
+# "אם אפשר בבקשה קישור לסדרה — כן מגיב. אבל אם בן אדם סתם מדבר על
+# זה, אז הוא לא צריך לשלוח."
+#
+# הדק על שם של סדרה נורה עד כה על **כל** אזכור, ולכן מי שכתב
+# "מה יש בסדרה בריחה, למה זה ככה?" קיבל את כל הפרקים. זו לא תשובה
+# לשאלה שלו, זו הצפה של השיחה.
+#
+# שתי צורות נענות, והן מכסות כמעט הכול:
+#   1. ההודעה **היא** השם — "ורדים וחטאים", "ספיידרז 720p עונה 2".
+#   2. ההודעה **מבקשת** — "אפשר בבקשה את...", "אשמח ל...", "יש למישהו".
+# כל השאר הוא שיחה, ובשיחה הבוט שותק.
+ASK_WORDS = (
+    "אפשר", "בבקשה", "אשמח", "מחפש", "מחפשת", "מישהו יכול", "יש למישהו",
+    "יש לך", "אפשר לקבל", "תוכל", "תוכלי", "תעלה", "תעלו", "להעלות",
+    "שלח", "שלחו", "תשלח", "תשלחי", "קישור ל", "לינק ל", "מבקש",
+    "מבקשת", "בבקשהה", "אם אפשר", "אפשרי",
+    "please", "can i get", "could you", "anyone have", "looking for",
+    "send me", "upload", "link to", "pls", "plz",
+)
+
+# מילים שאינן חלק מהשם אבל גם אינן שיחה: עונה, פרק, רזולוציה, שנה.
+# הודעה שהיא השם ועוד אלה בלבד היא עדיין "השם".
+_FILLER = re.compile(
+    r"^(?:\d+|עונה|עונות|פרק|פרקים|חלק|ע|פ|s\d*|e\d*|season|episode|part|"
+    r"\d{3,4}p|hd|fhd|4k|web|dl|rip|bluray|x264|x265|מלא|כל|הכל|"
+    r"סדרה|סרט|הסדרה|הסרט)$", re.I)
+
+
+def asks_for(text: str) -> bool:
+    """האם ההודעה מבקשת משהו, ולא רק מזכירה."""
+    low = plain(text)
+    if "?" in (text or "") and len(low.split()) <= 6:
+        # "ורדים וחטאים?" — שאלה קצרה שכולה השם היא בקשה.
+        return True
+    return any(w in low for w in ASK_WORDS)
+
+
+def is_bare_name(text: str, names: list[str]) -> bool:
+    """האם ההודעה היא בעצם השם עצמו, ולא משפט שמזכיר אותו."""
+    low = plain(_strip_urls(text))
+    for n in names:
+        nm = plain(n)
+        if not nm or nm not in low:
+            continue
+        rest = low.replace(nm, " ", 1).split()
+        if all(_FILLER.match(w) for w in rest):
+            return True
+    return False
+
+
+def match_filters(text: str, rules: list[dict],
+                  ask_only: bool = True) -> Optional[FilterHit]:
+    """הפילטר הראשון שמתאים. טהור, כדי שאפשר לבדוק בלי מסד.
+
+    ‎ask_only‎ הוא אופי הקבוצה. בקבוצה שמדברים בה, הדק שנורה על כל
+    אזכור מציף את השיחה; בקבוצת מאגר שקטה, דווקא שם מצפים שכל
+    אזכור של שם יחזיר את הסדרה. אותה התנהגות אינה נכונה לשתיהן,
+    ולכן זו בחירה של הקבוצה ולא החלטה שלנו."""
     if not text or not rules:
         return None
     low = text.lower()
@@ -470,12 +529,27 @@ def match_filters(text: str, rules: list[dict]) -> Optional[FilterHit]:
                 names.append(vg)
             hit = any((rx := _word_rx(n)) is not None and rx.search(hay)
                       for n in names)
+            # תגובה נשלחת רק על בקשה או על השם לבדו. הדק שמוחק או
+            # מעניש **אינו** כפוף לזה: מילה חסומה היא חסומה גם
+            # באמצע משפט, וזו בדיוק המטרה שלה.
+            if hit and ask_only and _is_reply(r) \
+                    and not is_bare_name(text, names) \
+                    and not asks_for(text):
+                hit = False
             if not hit and loose is None and any(
                     _all_words_present(n, hay) for n in names):
-                loose = _as_hit(trg, r)
+                # ההתאמה המשוערת רחבה ממילא, ולכן היא נענית רק
+                # לבקשה מפורשת.
+                if not (ask_only and _is_reply(r)) or asks_for(text):
+                    loose = _as_hit(trg, r)
         if hit:
             return _as_hit(trg, r)
     return loose
+
+
+def _is_reply(r: dict) -> bool:
+    """האם הכלל הזה **עונה** (שולח תוכן) ולא אוכף."""
+    return r.get("action", "reply") in ("reply", "delete_reply")
 
 
 def _as_hit(trg: str, r: dict, vargroup: str = "") -> FilterHit:

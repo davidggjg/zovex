@@ -3091,7 +3091,9 @@ async def test_filter_stop():
     try:
         before = len(SENT)
         n0 = B.proof.count(CHAT)
-        await B.on_group_message(msg("רשמו סדרות חדשות", uid=USER, mid=9120))
+        # בקשה מפורשת — ההדק אמור לפעול
+        await B.on_group_message(msg("אפשר בבקשה חדשות", uid=USER,
+                                     mid=9120))
         out = " ".join(t for _c, t, _m in SENT[before:])
         ok("ההודעה נמחקה", 9120 in DELETED, str(DELETED))
         ok("ההסבר נוקב במילה שתפסה", "חדשות" in out, out[:90])
@@ -3099,10 +3101,17 @@ async def test_filter_stop():
         ok("ומחיקת הדק נשמרת ביומן האכיפה",
            B.proof.count(CHAT) == n0 + 1)
 
+        # ושיחה רגילה שמזכירה את המילה — לא נוגעים בה
+        DELETED.clear()
+        await B.on_group_message(msg("רשמו סדרות חדשות", uid=USER,
+                                     mid=9119))
+        ok("שיחה שמזכירה את המילה אינה נמחקת",
+           9119 not in DELETED, str(DELETED))
+
         # השהיה: לא יורה, ולא נמחק
         B.filters.set_enabled(CHAT, "חדשות", False)
         DELETED.clear()
-        await B.on_group_message(msg("עוד סדרות חדשות", uid=USER, mid=9121))
+        await B.on_group_message(msg("אשמח לחדשות", uid=USER, mid=9121))
         ok("מושהה לא מוחק", 9121 not in DELETED, str(DELETED))
         ok("והוא עדיין קיים", B.filters.row(CHAT, "חדשות") is not None)
         B.filters.set_enabled(CHAT, "חדשות", True)
@@ -3110,7 +3119,7 @@ async def test_filter_stop():
         # מתג ראשי: כיבוי מיידי של כל התגובות
         B.db.set(CHAT, "replies", "0")
         DELETED.clear()
-        await B.on_group_message(msg("ושוב סדרות חדשות", uid=USER, mid=9122))
+        await B.on_group_message(msg("יש למישהו חדשות", uid=USER, mid=9122))
         ok("מתג ראשי כבוי עוצר הכול", 9122 not in DELETED, str(DELETED))
     finally:
         B.db.set(CHAT, "replies", "1")
