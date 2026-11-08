@@ -57,9 +57,25 @@ export default function AmbientGlow({ seed }) {
     // (הכתם ממילא גדול מהמסך) ומנתקת את העלות מגודל הצג.
     const SZ = (v) => `min(${v}vmax, 1100px)`;
     return [
-      { hue: h, top: "-18%", left: "-14%", size: SZ(82), a: 0.66, dur: "26s", delay: "0s" },
-      { hue: (h + 38) % 360, top: "22%", left: "44%", size: SZ(74), a: 0.54, dur: "34s", delay: "-8s" },
-      { hue: (h + 320) % 360, top: "62%", left: "-6%", size: SZ(78), a: 0.48, dur: "30s", delay: "-16s" },
+      // ── אורורה, לא כתמים ───────────────────────────────────────────
+      //
+      // הזכוכית נקראת כזכוכית רק כשיש מה לראות דרכה. על רקע שחור
+      // ‎backdrop-filter‎ מטשטש שחור, והתוצאה היא מלבן אפור — בדיוק
+      // מה שנראה כמו "פס שחור מעפן".
+      //
+      // שלושת גווני המותג של האפליקציה (auroraRed / auroraViolet /
+      // auroraBlue), בבהירות נמוכה ובשקיפות שמספיקה כדי להיראות דרך
+      // החומר. ה-seed מזיז אותם מעט בלבד, כך שיש שינוי בין קטגוריות
+      // בלי שהמסך ישנה צבע לגמרי.
+      //
+      // §14 של הסקיל אוסר תנודה איטית סביב 0.2Hz (מחזור לכל 5 שניות)
+      // ותנועת רקע גדולה — ולכן המחזורים כאן הם 48 עד 72 שניות,
+      // התנועה היא ‎transform‎ בלבד, והיא נעצרת לגמרי תחת
+      // ‎prefers-reduced-motion‎.
+      { hue: 348 + (h % 10), top: "-22%", left: "48%", size: SZ(86), a: 0.42, dur: "54s", delay: "0s" },
+      { hue: 266 + (h % 12), top: "14%", left: "-20%", size: SZ(80), a: 0.38, dur: "66s", delay: "-14s" },
+      { hue: 222 + (h % 10), top: "58%", left: "26%", size: SZ(92), a: 0.34, dur: "72s", delay: "-28s" },
+      { hue: 316 + (h % 8), top: "76%", left: "-10%", size: SZ(70), a: 0.26, dur: "48s", delay: "-36s" },
     ];
   }, [seed]);
 
@@ -74,7 +90,9 @@ export default function AmbientGlow({ seed }) {
         overflow: "hidden",
         // לא #0a0a0a אחיד. שחור שטוח לחלוטין הוא מה שגורם למסך להיראות
         // "ריק"; מדרג עדין לכחלחל־כהה נותן עומק עוד לפני שהצבע נכנס.
-        background: "linear-gradient(170deg, #101018 0%, #0b0b10 40%, #08080b 100%)",
+        // כמעט שחור, עם נטייה קרה. זה הרקע של האפליקציה (colors.bg
+        // הוא #07070C) עם מדרג עדין שנותן עומק בלי צבע.
+        background: "radial-gradient(120% 90% at 50% 0%, #15131F 0%, #0B0B12 55%, #07070C 100%)",
       }}
     >
       {blobs.map((b, i) => (
@@ -103,9 +121,11 @@ export default function AmbientGlow({ seed }) {
             // ביניים, וזה מחזיר בדיוק את אותה תחושה בחינם.
             background:
               `radial-gradient(circle at 50% 50%,` +
-              ` hsla(${b.hue},72%,48%,${b.a}) 0%,` +
-              ` hsla(${b.hue},72%,42%,${(b.a * 0.45).toFixed(3)}) 38%,` +
-              ` hsla(${b.hue},72%,34%,0) 78%)`,
+              // בהירות נמוכה ורוויה גבוהה: צבע עמוק שלא "שורף" את
+              // הטקסט שמעליו, ושה-saturate של הזכוכית מחזיר לחיים.
+              ` hsla(${b.hue},85%,42%,${b.a}) 0%,` +
+              ` hsla(${b.hue},85%,32%,${(b.a * 0.45).toFixed(3)}) 42%,` +
+              ` hsla(${b.hue},85%,22%,0) 78%)`,
             animation: `zvDrift ${b.dur} ease-in-out ${b.delay} infinite`,
             willChange: "transform",
             // המעבר בין קטגוריות מתרכך, אחרת הצבע קופץ בבת אחת
@@ -119,7 +139,25 @@ export default function AmbientGlow({ seed }) {
           position: "absolute",
           inset: 0,
           background:
-            "linear-gradient(180deg, rgba(8,8,11,0.26) 0%, rgba(8,8,11,0.42) 45%, rgba(8,8,11,0.58) 100%)",
+            // מסך כהה מעל האורורה: הצבע נשאר נראה דרך הזכוכית, אבל
+            // הטקסט שמעליו אינו יושב על צבע רווי. מתחזק כלפי מטה,
+            // שם יש הכי הרבה טקסט של כותרות שורות.
+            "linear-gradient(180deg, rgba(7,7,12,0.30) 0%, rgba(7,7,12,0.46) 45%, rgba(7,7,12,0.62) 100%)",
+        }}
+      />
+      {/* גרעין עדין. שיפועים גדולים על מסך כהה מייצרים פסי banding
+          נראים לעין; רעש של אחוזים בודדים שובר אותם. SVG מוטבע ולא
+          קובץ — אין בקשת רשת, ואין מה לטעון. */}
+      <div
+        style={{
+          position: "absolute", inset: 0, pointerEvents: "none",
+          opacity: 0.035, mixBlendMode: "overlay",
+          backgroundImage:
+            "url(\"data:image/svg+xml;utf8," +
+            "<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'>" +
+            "<filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/></filter>" +
+            "<rect width='160' height='160' filter='url(%23n)'/></svg>\")",
+          backgroundSize: "160px 160px",
         }}
       />
     </div>

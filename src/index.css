@@ -66,3 +66,49 @@ html[data-tv] a:focus, html[data-tv] button:focus, html[data-tv] [data-tv-focus]
   z-index: 5;
   position: relative;
 }
+
+/* ── חומר ותנועה, לפי skills/apple-design ──────────────────────────────
+   §1 — משוב על הלחיצה עצמה, לא על השחרור, ומיד.
+   §14 — "reduced motion" אינו ביטול משוב אלא משוב עדין יותר, ושלושת
+         ההעדפות הן עצמאיות זו מזו.                                      */
+
+a, button, [role="button"], [data-tv-focus] {
+  -webkit-tap-highlight-color: transparent;
+}
+a:active, button:active, [role="button"]:active {
+  transform: scale(0.97);
+  transition: transform 100ms ease-out;
+}
+
+/* §14: תנועה מופחתת — הצלבה בעמעום במקום החלקה וקפיץ. המשוב נשאר. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 160ms !important;
+    scroll-behavior: auto !important;
+  }
+  a:active, button:active, [role="button"]:active { transform: none; opacity: 0.75; }
+}
+
+/* §14: שקיפות מופחתת — החומר נעשה אטום, הטשטוש יורד. */
+@media (prefers-reduced-transparency: reduce) {
+  [style*="backdrop-filter"] {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: #0E0F16 !important;
+  }
+}
+
+/* §14: ניגודיות גבוהה — רקע כמעט אטום וגבול מוגדר. */
+@media (prefers-contrast: more) {
+  [style*="backdrop-filter"] {
+    background: #0B0C12 !important;
+    border: 1px solid rgba(255,255,255,0.45) !important;
+  }
+}
+
+/* §15: tracking תלוי־גודל. טקסט גדול נקרא מרוח אם לא מהדקים אותו,
+   וטקסט קטן נקרא דחוס אם לא פותחים אותו מעט.                        */
+h1, h2 { letter-spacing: -0.02em; line-height: 1.08; }
+h3 { letter-spacing: -0.01em; line-height: 1.2; }

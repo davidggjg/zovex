@@ -1,4 +1,4 @@
-import { colors } from "@/theme/tokens";
+import { colors, radius, depth, lift } from "@/theme/tokens";
 import React from "react";
 import { Eye } from "lucide-react";
 
@@ -38,7 +38,12 @@ function NetflixCard({ item, isSer, isLive, onClick, cardW, cardH }) {
                  // הגבול זהה לכל כרטיס; מה שמסמן "חי" הוא הזוהר והתג,
                  // לא קו אדום עבה שמתחרה עם התמונה עצמה.
                  border: `1px solid ${colors.glassBorder}`,
-                 boxShadow: isLive ? `0 0 0 1px ${colors.focusTint}, 0 0 22px ${colors.focusTint}` : "none" }}>
+                 borderRadius: radius.card,
+                 // עומק אמיתי במקום מסגרת: קו פנימי בהיר בקצה העליון
+                 // וצל רחב עם היסט מטה. בשידור חי מתווסף זוהר אדום.
+                 ...depth(1),
+                 ...(isLive ? { boxShadow: `${depth(1).boxShadow}, 0 0 26px ${colors.focusTint}` } : {}),
+                 ...lift }}>
         {isLive && item.thumbnail_url ? (
           // contain ולא cover: לוגו ערוץ חייב להיראות במלואו. הרקע הרדיאלי
           // ממלא את השוליים שנוצרים סביבו כשיחס הלוגו אינו 16:9.

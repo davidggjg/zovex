@@ -1,4 +1,4 @@
-import { colors, radius } from "@/theme/tokens";
+import { colors, radius, depth, lift, glass } from "@/theme/tokens";
 import BottomNav from "./BottomNav";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { t, getLanguage, setLanguage, catName } from '../../i18n';
@@ -51,6 +51,15 @@ export default function HomePage({
   const [showTelegramTip, setShowTelegramTip] = useState(() => !ls("zovex_hide_telegram_tip"));
   const [supportOpen, setSupportOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // הכותרת מתכווצת אחרי גלילה קטנה. 24px ולא 0 כדי שרעידה של פיקסל
+  // אחד במגע לא תגרום להבהוב בין שני המצבים.
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 24);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
   const userMenuRef = useRef(null);
 
   // סגירת התפריט בלחיצה מחוץ לו
@@ -78,10 +87,8 @@ export default function HomePage({
           // היה שטיפה אדומה על כל רוחב המסך — הדבר הראשון שהעין
           // תופסת, לפני התוכן. אותה הודעה, בזכוכית של מערכת העיצוב.
           padding: "8px 14px", fontSize: 12.5, lineHeight: 1.45,
-          color: colors.textSecondary, background: colors.glass,
-          backdropFilter: "blur(14px) saturate(140%)",
-          WebkitBackdropFilter: "blur(14px) saturate(140%)",
-          borderBottom: `1px solid ${colors.glassBorder}`,
+          color: colors.textSecondary, ...glass(20), border: "none",
+          borderBottom: "1px solid rgba(255,255,255,0.12)",
           // AmbientGlow הוא position:fixed עם zIndex:0, וזה מספיק כדי
           // לצייר אותו **מעל** תוכן רגיל. בלי המיקום כאן הפס היה בקוד,
           // נמדד כ"גלוי", ולא נראה על המסך — נתפס רק בצילום מסך.
@@ -116,27 +123,37 @@ export default function HomePage({
         </div>
       )}
 
-      {/* כותרת "זכוכית": חצי־שקופה עם טשטוש של מה שעובר מתחתיה, ודביקה
-          למעלה — כך היא מרחפת מעל התוכן במקום לחתוך אותו בפס אטום. */}
+      {/* כותרת "זכוכית".
+          מה שהיה: כל הגוש היה דביק — הלוגו, הפרופיל, כרטיס ההורדה
+          ובורר הקטגוריות — כלומר בגלילה נשאר על המסך פס בגובה של
+          כמעט שליש מסך, שאינו קשור למה שקוראים.
+          מה שיש: רק השורה העליונה דביקה, והיא מתכווצת בגלילה —
+          הלוגו קטן, הריפוד מתהדק. כרטיס ההורדה והקטגוריות יצאו
+          מהכותרת וגוללים החוצה כמו כל תוכן אחר. */}
       <header style={{
-        padding: "14px 14px 0",
+        padding: scrolled ? "7px 14px 7px" : "14px 14px 10px",
         position: "sticky", top: 0, zIndex: 40,
-        background: "rgba(10,10,10,0.62)",
-        backdropFilter: "blur(20px) saturate(140%)",
-        WebkitBackdropFilter: "blur(20px) saturate(140%)",
-        borderBottom: "1px solid rgba(255,255,255,0.07)",
+        ...glass(30),
+        border: "none",
+        borderBottom: `1px solid ${scrolled ? "rgba(255,255,255,0.14)" : "transparent"}`,
+        boxShadow: scrolled
+          ? "inset 0 1px 0 rgba(255,255,255,0.14), 0 10px 30px -16px rgba(0,0,0,0.8)"
+          : "inset 0 1px 0 rgba(255,255,255,0.10)",
+        transition: "padding 220ms cubic-bezier(0.22,1,0.36,1), border-color 220ms ease, box-shadow 220ms ease",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <h1
             onClick={onLogoClick}
-            style={{ color: "#e50914", fontSize: 26, fontWeight: 900, letterSpacing: 4, margin: 0, flexShrink: 0, cursor: "pointer" }}>ZOVEX</h1>
+            style={{ color: colors.primary, fontSize: scrolled ? 19 : 26, fontWeight: 900,
+                     letterSpacing: scrolled ? 2.5 : 4, margin: 0, flexShrink: 0, cursor: "pointer",
+                     transition: "font-size 220ms cubic-bezier(0.22,1,0.36,1), letter-spacing 220ms ease" }}>ZOVEX</h1>
           {/* החיפוש ירד לסרגל התחתון (BottomNav), כמו באפליקציה: בטלפון
               האגודל מגיע לתחתית המסך, ולא לראש הדף. כשיש חיפוש פעיל
               מוצג כאן שבב שמזכיר מה מסונן ומאפשר לנקות. */}
           {searchTerm ? (
             <button onClick={() => setSearchTerm("")}
               style={{ flex: 1, display: "flex", alignItems: "center", gap: 7, minWidth: 0,
-                       background: colors.glass, border: `1px solid ${colors.glassBorder}`,
+                       ...glass(20),
                        padding: "8px 13px", borderRadius: radius.pill, cursor: "pointer",
                        fontFamily: "inherit", color: colors.textSecondary, fontSize: 13 }}>
               <Search size={14} color={colors.textMuted} />
@@ -257,6 +274,10 @@ export default function HomePage({
             )}
           </div>
         </div>
+      </header>
+
+      {/* מחוץ לכותרת: אלה גוללים החוצה ואינם תופסים מקום קבוע במסך. */}
+      <div style={{ padding: "11px 14px 0" }}>
         {/* כפתור אחד, ובכוונה. זו **אותה אפליקציה** לטלפון ולטלוויזיה — ה-APK
             מזהה לבד על מה הוא רץ (Platform.isTV, ו-isTelevision() בצד
             הנייטיב) ומחליף מסכים ופקדים בהתאם. שני כפתורים היו מטעים:
@@ -274,10 +295,8 @@ export default function HomePage({
             // שהמשתמש ראה תוכן אחד. אותו מידע, שורה אחת, בזכוכית.
             display: "flex", alignItems: "center", gap: 10,
             padding: "9px 12px", marginBottom: 10, borderRadius: radius.card,
-            background: colors.glass,
-            backdropFilter: "blur(14px) saturate(140%)",
-            WebkitBackdropFilter: "blur(14px) saturate(140%)",
-            border: `1px solid ${colors.glassBorder}`,
+            ...glass(22), ...lift,
+            boxShadow: `${glass(22).boxShadow}, ${depth(1).boxShadow}`,
             textDecoration: "none",
           }}
         >
@@ -300,7 +319,7 @@ export default function HomePage({
         <div style={{ paddingBottom: 11 }}>
           <button
             onClick={() => setShowCatModal(true)}
-            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", background: "rgba(255,255,255,0.055)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${colors.glassBorder}`, borderRadius: radius.card, padding: "11px 14px", cursor: "pointer", fontFamily: "inherit" }}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%", ...glass(22), borderRadius: radius.card, padding: "11px 14px", cursor: "pointer", fontFamily: "inherit" }}
           >
             <span style={{ fontSize: 14, fontWeight: 800, color: "#fff", display: "flex", alignItems: "center", gap: 6 }}>
               {selectedCategory === "שידורים חיים" && <Eye size={14} color="#e50914" />}
@@ -309,7 +328,7 @@ export default function HomePage({
             <ChevronDown size={20} color="#e50914" />
           </button>
         </div>
-      </header>
+      </div>
 
       {/* תפריט קטגוריות במסך מלא — נפתח מהכפתור למעלה */}
       {showCatModal && (
@@ -382,9 +401,24 @@ export default function HomePage({
             בצ'אט כל הודעה נושאת את האימייל של השולח. */}
         <button
           onClick={() => setSupportOpen(true)}
-          style={{ background: "#e50914", height: 42, padding: "0 16px", borderRadius: 21, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, color: "#fff", boxShadow: "0 2px 12px rgba(229,9,20,.4)", border: "none", cursor: "pointer", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap" }}>
-          <Send size={16} fill="white" />
-          <span style={{ fontSize: 12, fontWeight: 700 }}>תמיכה</span>
+          style={{
+            // §12: "put color on a solid layer, not the translucent
+            // foreground". הכפתור עצמו זכוכית, והצבע יושב על עיגול
+            // אטום קטן בתוכו — כך הוא נקרא בלי לצעוק על כל המסך.
+            ...glass("panel"), height: 42, padding: "0 15px 0 7px",
+            borderRadius: radius.pill, display: "flex", alignItems: "center",
+            justifyContent: "center", gap: 8, color: colors.text,
+            cursor: "pointer", fontFamily: "inherit", flexShrink: 0,
+            whiteSpace: "nowrap", ...lift,
+          }}>
+          {/* העיגול האטום הוא הנושא את הצבע; הזכוכית נשארת נקייה. */}
+          <span style={{ width: 28, height: 28, borderRadius: "50%",
+                         background: colors.primary, display: "flex",
+                         alignItems: "center", justifyContent: "center",
+                         flexShrink: 0 }}>
+            <Send size={14} fill="white" color="white" />
+          </span>
+          <span style={{ fontSize: 12.5, fontWeight: 700 }}>תמיכה</span>
         </button>
       </div>
       <SupportModal open={supportOpen} onClose={() => setSupportOpen(false)} user={user} loginWithGoogle={loginWithGoogle} />

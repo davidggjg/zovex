@@ -1,3 +1,4 @@
+import { colors, radius, depth, lift } from "@/theme/tokens";
 import { catName } from "../../i18n";
 import { useState, useEffect, useMemo } from "react";
 import { NetflixRow, buildCardHref } from "./NetflixCard";
@@ -325,55 +326,83 @@ function RecentlyAddedBanner({ movies, seriesMap, handleItemClick }) {
   const displayItem = isSer ? (seriesMap[movie.series_name] || movie) : movie;
   const title = movie.series_name || movie.title;
 
+  const year = movie.year || displayItem.year;
+
+  // ── באנר הגיבור, במבנה של האפליקציה ────────────────────────────────
+  //
+  // מה שהיה: פוסטר צר בצד אחד וטקסט בצד השני. זה מה שנראה "שטוח
+  // כמו מדבקה" — שני מלבנים זה לצד זה, בלי שום עומק.
+  //
+  // מה שהאפליקציה עושה (HomeScreen.js, HeroBanner): תמונה ממלאת את
+  // כל הכרטיס, מסך כהה שמתחזק כלפי מטה, והכותרת יושבת **על** התמונה
+  // בתחתית. זה המבנה כאן.
+  //
+  // ל-0 מתוך 26,006 הפריטים בקטלוג אין backdrop_url — התמונה
+  // הרוחבית שהאפליקציה מעדיפה. לכן זהו בדיוק מסלול הנפילה שלה:
+  // אותה תמונה פעמיים, מטושטשת ב-cover מאחור כדי למלא את המסגרת,
+  // ושלמה ב-contain מלפנים. בלי שתיהן פוסטר צר או נמתח או מרחף
+  // קטן במרכז.
+  const bg = movie.backdrop_url || movie.thumbnail_url;
+
   return (
     <a
       href={buildCardHref(displayItem, isSer, false)}
       onClick={e => { e.preventDefault(); handleItemClick(displayItem, isSer); }}
       style={{
-        position: "relative", margin: "6px 14px 16px", borderRadius: 16, overflow: "hidden",
-        cursor: "pointer", height: 186, background: "#111",
-        opacity: visible ? 1 : 0, transition: "opacity .35s ease",
-        display: "block", textDecoration: "none", color: "inherit",
+        position: "relative", display: "block", textDecoration: "none",
+        color: "inherit", margin: "8px 14px 18px", height: 228,
+        borderRadius: radius.hero, overflow: "hidden",
+        background: colors.surface, cursor: "pointer",
+        // §12: משטח גדול נקרא עבה — צל עמוק. הזוהר האדום העדין
+        // מתחתיו הוא אותו פרט שיש ל-hero באפליקציה (shadowColor:
+        // auroraRed).
+        boxShadow: `${depth(3).boxShadow}, 0 18px 46px -24px ${colors.glowRed}`,
+        border: `1px solid ${colors.glassBorder}`,
+        opacity: visible ? 1 : 0,
+        transition: "opacity .35s ease, transform 220ms cubic-bezier(0.22,1,0.36,1)",
       }}
+      onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-3px)"; }}
+      onMouseLeave={e => { e.currentTarget.style.transform = "none"; }}
     >
-      {/* שתי שכבות של אותה תמונה. הגרסה הקודמת מתחה פוסטר לגובה לתוך מלבן
-          רחב ונמוך עם objectFit: cover, כלומר הדפדפן חתך ממנו פס אופקי
-          מהאמצע — הראש והכיתוב נעלמו. עכשיו הפוסטר מוצג בשלמותו ביחס
-          הטבעי שלו, ואותה תמונה מטושטשת ממלאת את הרקע מאחוריו. */}
-      {movie.thumbnail_url && (
-        <img
-          src={movie.thumbnail_url} alt=""
-          aria-hidden="true"
-          style={{
-            position: "absolute", inset: 0, width: "100%", height: "100%",
-            objectFit: "cover", filter: "blur(20px) saturate(130%)",
-            transform: "scale(1.15)",
-          }}
-        />
+      {bg && (
+        <>
+          <img src={bg} alt="" aria-hidden="true"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
+                     objectFit: "cover", filter: "blur(28px) saturate(160%)",
+                     transform: "scale(1.25)" }} />
+          <img src={bg} alt=""  aria-hidden="true"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
+                     objectFit: movie.backdrop_url ? "cover" : "contain" }} />
+        </>
       )}
-      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to left, rgba(0,0,0,.55), rgba(0,0,0,.82))" }} />
 
-      <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 14, height: "100%", padding: 14 }}>
-        {movie.thumbnail_url && (
-          <img
-            src={movie.thumbnail_url} alt={title}
-            style={{
-              height: "100%", width: "auto", flexShrink: 0,
-              objectFit: "contain", borderRadius: 10,
-              boxShadow: "0 6px 20px rgba(0,0,0,.55)",
-            }}
-          />
+      {/* מסך כהה מלמטה — אותה צורה כמו DarkGradient באפליקציה
+          (0.86·t²), כאן בשורת CSS אחת. בלעדיו הכותרת יושבת על תמונה
+          בהירה ונעלמת. */}
+      <div style={{ position: "absolute", inset: 0, background:
+        `linear-gradient(to top, rgba(7,7,12,0.96) 0%, rgba(7,7,12,0.82) 22%, rgba(7,7,12,0.34) 55%, rgba(7,7,12,0.04) 100%)` }} />
+
+      <div style={{ position: "absolute", insetInlineStart: 0, insetInlineEnd: 0, bottom: 0,
+                    padding: "16px 18px 18px", textAlign: "right" }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5,
+                       background: colors.focusTint, color: "#fff",
+                       border: `1px solid ${colors.glowRed}`,
+                       backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)",
+                       fontSize: 11, fontWeight: 800, padding: "4px 11px",
+                       borderRadius: radius.pill, marginBottom: 8 }}>
+          <span style={{ width: 5, height: 5, borderRadius: 3,
+                         background: colors.primaryHi, display: "inline-block" }} />
+          עלה עכשיו
+        </span>
+        {!!year && (
+          <div style={{ color: "rgba(255,255,255,0.75)", fontSize: 13, fontWeight: 700,
+                        marginBottom: 3, textShadow: "0 1px 4px rgba(0,0,0,0.7)" }}>{year}</div>
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <span style={{ display: "inline-block", background: "#e50914", color: "#fff", fontSize: 11, fontWeight: 800, padding: "3px 10px", borderRadius: 20, marginBottom: 8 }}>
-            עלה עכשיו
-          </span>
-          <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
-          {!!movie.description && (
-            <div style={{ color: "#ccc", fontSize: 12, marginTop: 5, lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-              {movie.description}
-            </div>
-          )}
+        {/* §15: טקסט גדול מקבל tracking שלילי ו-leading צמוד. */}
+        <div style={{ color: "#fff", fontSize: 25, fontWeight: 900, lineHeight: 1.1,
+                      letterSpacing: "-0.02em", textShadow: "0 2px 10px rgba(0,0,0,0.85)",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {title}
         </div>
       </div>
     </a>

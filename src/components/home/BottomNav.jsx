@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Home, Search, Heart, User as UserIcon, X } from "lucide-react";
-import { colors, radius } from "@/theme/tokens";
+import { colors, radius, glass, glassFloating } from "@/theme/tokens";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // סרגל ניווט תחתון, כמו באפליקציה.
@@ -22,6 +22,8 @@ const ITEM = {
   borderRadius: radius.pill, background: "none", border: "none",
   cursor: "pointer", fontFamily: "inherit", color: colors.textMuted,
   minWidth: 0,
+  // §1: המשוב הוא על הלחיצה עצמה ולא על השחרור.
+  transition: "transform 100ms ease-out, background 160ms ease",
 };
 const LABEL = { fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
 
@@ -49,14 +51,15 @@ export default function BottomNav({
     <>
       {searchOpen && (
         <div dir="rtl" style={{
-          position: "fixed", inset: 0, zIndex: 998, background: colors.scrim,
-          backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)",
+          position: "fixed", inset: 0, zIndex: 998,
+          background: "rgba(7,7,12,0.55)",
+          backdropFilter: "blur(30px) saturate(180%)",
+          WebkitBackdropFilter: "blur(30px) saturate(180%)",
           padding: "18px 14px", display: "flex", flexDirection: "column", gap: 12,
         }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 9,
-            background: colors.glass, border: `1px solid ${colors.glassBorder}`,
-            borderRadius: radius.pill, padding: "11px 15px",
+            ...glass(22), borderRadius: radius.pill, padding: "11px 15px",
           }}>
             <Search size={17} color={colors.textMuted} />
             <input ref={inputRef} type="text" value={searchTerm}
@@ -80,12 +83,10 @@ export default function BottomNav({
       <nav style={{
         position: "fixed", left: 14, right: 14, bottom: 18, zIndex: 999,
         display: "flex", alignItems: "center", justifyContent: "space-around",
-        background: colors.glass,
-        backdropFilter: "blur(16px) saturate(150%)",
-        WebkitBackdropFilter: "blur(16px) saturate(150%)",
-        border: `1px solid ${colors.glassBorder}`,
+        // זכוכית אמיתית ולא משטח כהה: רקע שקוף, טשטוש חזק ורוויה
+        // מוגברת, כך שהתוכן שעובר מתחת באמת נראה דרכו.
+        ...glassFloating(34, 3),
         borderRadius: 34, padding: 6,
-        boxShadow: "0 10px 30px rgba(0,0,0,0.55)",
       }}>
         {item("home", Home, "בית", onHome)}
         {item("search", Search, "חיפוש", () => setSearchOpen(true))}
