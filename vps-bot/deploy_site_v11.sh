@@ -24,18 +24,18 @@ set -u
 BRANCH="claude/telegram-bots-video-freezing-m8rk0n"
 # ?t= מכריח את המטמון של raw.githubusercontent להתחדש: בלעדיו פריסה
 # מיד אחרי דחיפה מורידה עד חמש דקות את החבילה הקודמת, בשקט.
-TGZ_URL="https://raw.githubusercontent.com/davidggjg/zovex/${BRANCH}/vps-bot/site-v10.tgz?t=$(date +%s)"
+TGZ_URL="https://raw.githubusercontent.com/davidggjg/zovex/${BRANCH}/vps-bot/site-v11.tgz?t=$(date +%s)"
 SITE_DIR="/opt/zovex-site"
 DOMAIN="zovex.duckdns.org"
 CATALOG="http://127.0.0.1:8000/content/lite"
-WORK="/tmp/zovex-site-v10.$$"
+WORK="/tmp/zovex-site-v11.$$"
 TS=$(date +%Y%m%d-%H%M%S)
-BAK="/opt/zovex-site.bak_v10_${TS}"
+BAK="/opt/zovex-site.bak_v11_${TS}"
 
 die() { echo "❌ $*" >&2; exit 1; }
 
 if [ "${1:-}" = "--rollback" ]; then
-  LAST=$(ls -1dt /opt/zovex-site.bak_v10_* 2>/dev/null | head -1)
+  LAST=$(ls -1dt /opt/zovex-site.bak_v11_* 2>/dev/null | head -1)
   [ -n "$LAST" ] || die "אין גיבוי לשחזר"
   rm -rf "$SITE_DIR" && cp -a "$LAST" "$SITE_DIR" || die "השחזור נכשל"
   echo "✅ שוחזר מ-$LAST"

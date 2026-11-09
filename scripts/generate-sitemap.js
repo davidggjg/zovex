@@ -5,6 +5,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { cleanForUrl, slugifyMovie, slugifySeries } from "./slugify.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -25,23 +26,8 @@ const CATALOG_URL = process.env.CATALOG_URL || "https://zovex.duckdns.org/conten
 // ומכערים כתובת שממילא מקודדת — נמדד: 66 כותרים בקטלוג מכילים
 // נקודתיים (‎אקס-מן: אפוקליפסה‎). הם יורדים, ורווחים הופכים למקף
 // יחיד. זו רק רשת ביטחון: היעד הוא slug אנגלי אמיתי מ-seo_fix.py.
-function cleanForUrl(name) {
-  return String(name || "")
-    .replace(/[:\u2013\u2014"'`?#\[\]@!$&()*+,;=.]/g, " ")
-    .trim()
-    .replace(/\s+/g, "-");
-}
 
-function slugifyMovie(movie) {
-  if (movie.custom_slug) return movie.custom_slug;
-  const base = encodeURIComponent(cleanForUrl(movie.title));
-  return `${base}-${(movie.id || "").slice(0, 6)}`;
-}
 
-function slugifySeries(seriesName, customSlug) {
-  if (customSlug) return customSlug;
-  return encodeURIComponent(cleanForUrl(seriesName));
-}
 
 // פריט בלי שם **וגם** בלי custom_slug מייצר כתובת כמו ‎/-a3987a/‎ —
 // המזהה בלבד, בלי שום מילה. נמדד על הקטלוג החי: 10 כאלה, וכולם היו
