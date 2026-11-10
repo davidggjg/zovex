@@ -552,18 +552,35 @@ async function saveItem(){
   const item = editingId
     ? {...e, id:editingId}
     : {...e, id:crypto.randomUUID(), created_date:new Date().toISOString()};
-  if(await mutate({upsert:[item]})){
+  // ── הפצה אוטומטית של שדות ברמת-הסדרה לכל הפרקים ──
+  // פוסטר/תקציר/שנה/קטגוריה/טריילר/slug זהים לכל הסדרה. במקום ללחוץ
+  // "עדכן לכל הסדרה" בנפרד — כל שמירה של פרק ששייך לסדרה מפיצה אותם
+  // לכל שאר הפרקים. רק שדות שמולאו (לא ריקים) מופצים, כדי לא למחוק
+  // מידע קיים בטעות. הכל ב-mutate אחד (אטומי, פנייה אחת).
+  let _ups=[item], _prop=0;
+  if(item.series_name){
+    const META=['thumbnail_url','description','category','trailer_url','year','custom_slug'];
+    const patch={}; META.forEach(k=>{ const v=item[k]; if(v!==undefined&&v!==null&&v!=='') patch[k]=v; });
+    if(Object.keys(patch).length){
+      const sibs=movies.filter(m=>m.series_name===item.series_name && String(m.id)!==String(item.id));
+      _ups=_ups.concat(sibs.map(m=>({id:m.id,...patch})));
+      _prop=sibs.length;
+    }
+  }
+  if(await mutate({upsert:_ups})){
     if(_fromUploadCmid!=null){
       try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({password:PASS, channel_msg_ids:[_fromUploadCmid]})}); }catch{}
       _fromUploadCmid=null;
     }
+    const _note = _prop ? `נשמר ✓ · הופץ אוטומטית ל-${_prop} פרקים נוספים` : 'נשמר ✓';
     if(wasEditing){
       editingId=null;
-      showTab("manage");          // חזרה לרשימה מרועננת — רואים מיד את השינוי
+      $("addMsg").innerHTML=`<span class="ok">${_note}</span>`;
+      setTimeout(()=>showTab("manage"), _prop?1100:0);   // שהות קצרה לראות שהופץ
     } else {
       clearForm();
-      $("addMsg").innerHTML='<span class="ok">נשמר ✓</span>';
+      $("addMsg").innerHTML=`<span class="ok">${_note}</span>`;
     }
   }
 }
@@ -625,10 +642,13 @@ function renderManage(){
   let movs=movies.filter(m=>!m.series_name && m.category!=="שידורים חיים" && (!q||(m.title||"").toLowerCase().includes(q)));
   let html="";
   if(sers.length){ html+='<div class="muted" style="margin:4px 0">סדרות ('+sers.length+')</div>';
-    html+=sers.slice(0,60).map(n=>{ const eps=sm[n].slice().sort((a,b)=>((a.season_number||1)-(b.season_number||1))||((a.episode_number||0)-(b.episode_number||0)));
+    const _shown=sers.slice(0,60); window._sersView=_shown;   // מפתח בטוח-מרכאות לפעולות סדרה
+    html+=_shown.map((n,si)=>{ const eps=sm[n].slice().sort((a,b)=>((a.season_number||1)-(b.season_number||1))||((a.episode_number||0)-(b.episode_number||0)));
       return `<div class="ser"><div class="head" onclick="this.nextElementSibling.classList.toggle('hidden')">
         <img src="${eps[0].thumbnail_url||''}" style="width:32px;height:46px;object-fit:cover;border-radius:5px" onerror="this.style.visibility='hidden'">
         <div class="t">${esc(n)}</div><span class="pill">${eps.length} פרקים</span>
+        <button class="mini" style="background:#5e5ce6" onclick="event.stopPropagation();renameSeries(${si})" title="שנה שם לכל הפרקים">✏️ שם</button>
+        <button class="mini" style="background:#b4532a" onclick="event.stopPropagation();mergeSeries(${si})" title="מזג לתוך סדרה אחרת">🔗 מזג</button>
         <button class="mini gray" onclick="event.stopPropagation();delSeries('${esc(n).replace(/'/g,"")}')">🗑</button></div>
         <div class="hidden" style="padding:4px 8px">${eps.map(e=>`<div class="item">
           <div class="meta"><div class="t">ע${e.season_number||1}פ${e.episode_number||"?"}${e.episode_number_end?"+"+e.episode_number_end:""} — ${esc(e.title||"")}</div></div>
@@ -645,6 +665,45 @@ function renderManage(){
 }
 async function quickDel(id){ if(!confirm("למחוק פריט?")) return; if(await mutate({delete_ids:[id]})){ renderManage(); } }
 async function delSeries(n){ if(!confirm(`למחוק את כל הסדרה «${n}»?`)) return; const ids=movies.filter(m=>m.series_name===n).map(m=>m.id).filter(Boolean); if(await mutate({delete_ids:ids})){ renderManage(); } }
+
+// ── שינוי שם לכל פרקי הסדרה בלחיצה אחת ──
+// לפעמים נקלט שם שגוי לסדרה וצריך לתקן אותו בכל הפרקים. כאן משנים את
+// series_name ואת title (זהה לשם) לכל הפרקים במכה אחת. ה-slug (כתובת ה-URL)
+// נשאר כפי שהוא — כדי לא לשבור קישורים/אינדוקס קיימים. אם צריך לשנות גם
+// אותו, עורכים פרק אחד, משנים slug ושומרים (זה מופץ אוטומטית).
+async function renameSeries(si){
+  const from=(window._sersView||[])[si]; if(!from) return;
+  const to=(prompt(`שם חדש לכל פרקי «${from}»:`, from)||"").trim();
+  if(!to || to===from) return;
+  const eps=movies.filter(m=>m.series_name===from);
+  if(!eps.length){ alert("לא נמצאו פרקים"); return; }
+  if(!confirm(`לשנות את השם של ${eps.length} הפרקים\nמ-«${from}»\nל-«${to}»?`)) return;
+  const ups=eps.map(m=>({id:m.id, series_name:to, title:to}));
+  if(await mutate({upsert:ups})){ renderManage(); $("mq") && ($("mq").value=""); }
+}
+
+// ── מיזוג סדרה שהתפצלה לתוך סדרה אחרת ──
+// לפעמים אותה סדרה נקלטת כשתי רשומות נפרדות (שמות-מקור שונים). כאן בוחרים
+// סדרת-יעד מרשימה ממוספרת, וכל פרקי סדרת-המקור עוברים אליה: מאמצים את
+// שם-היעד, ה-title וה-slug שלה (כדי שבאמת יתאחדו לכרטיס אחד באתר/אפליקציה).
+// מספרי העונה/פרק של כל פרק נשמרים כפי שהם.
+async function mergeSeries(si){
+  const from=(window._sersView||[])[si]; if(!from) return;
+  const names=Object.keys(seriesMap()).filter(x=>x!==from).sort();
+  if(!names.length){ alert("אין סדרה אחרת למזג אליה"); return; }
+  const list=names.map((x,i)=>`${i+1}. ${x}`).join("\n");
+  const pick=prompt(`מזג את «${from}» לתוך — הקלד מספר:\n\n${list}`);
+  const idx=parseInt(pick,10)-1;
+  if(isNaN(idx) || idx<0 || idx>=names.length) return;
+  const to=names[idx];
+  const tgt=(seriesMap()[to]||[])[0]||{};
+  const eps=movies.filter(m=>m.series_name===from);
+  if(!confirm(`להעביר את ${eps.length} הפרקים של «${from}»\nאל «${to}»?\n\n(שים לב: אם יש חפיפה במספרי עונה+פרק ייתכנו כפילויות)`)) return;
+  const ups=eps.map(m=>({ id:m.id, series_name:to, title:to,
+    custom_slug: tgt.custom_slug||m.custom_slug||null,
+    category: tgt.category||m.category }));
+  if(await mutate({upsert:ups})){ renderManage(); }
+}
 
 // ── קטגוריות ──
 function renderCats(){
