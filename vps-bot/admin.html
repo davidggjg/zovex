@@ -32,6 +32,7 @@
   .item .meta { flex:1; min-width:0; }
   .item .meta .t { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .item .meta .s { color:#86868b; font-size:12px; }
+  .uplsel { width:20px; height:20px; flex:none; margin:0; accent-color:#5e5ce6; cursor:pointer; }
   .hidden { display:none; }
   .pill { display:inline-block; background:#f0f0f5; border-radius:20px; padding:2px 9px; font-size:11px; color:#6e6e73; }
   .badge { display:inline-block; background:#ff3b30; color:#fff; border-radius:20px; padding:1px 7px; font-size:11px; font-weight:600; }
@@ -915,7 +916,7 @@ async function loadUploads(){
         <div class="s">${onSite?'✓ הסדרה כבר באתר — יירש פוסטר+תיאור':'סדרה חדשה'}</div></div>
         <button class="mini green" onclick="addSeriesUploads(${gi})">➕ הוסף סדרה שלמה</button></div>`;
       html+=idxs.map(i=>{const u=_uploads[i];
-        return `<div class="item" style="padding:6px 12px"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} style="margin-left:8px;transform:scale(1.4)" title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
+        return `<div class="item" style="padding:6px 12px"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
           <div class="meta"><div class="t">ע${u.season_number||1}פ${u.episode_number||"?"}</div><div class="s">${esc(u.title||"")}</div></div>
           <button class="mini sec" onclick="useUpload(${i})">ערוך</button>
           <button class="mini gray" onclick="removeUpload(${u.channel_msg_id})">הסר</button></div>`;}).join("");
@@ -923,7 +924,7 @@ async function loadUploads(){
     });
     if(singles.length){
       const renderMovie=i=>{const u=_uploads[i];
-        return `<div class="item"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} style="margin-left:8px;transform:scale(1.4)" title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
+        return `<div class="item"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
           <div class="meta"><div class="t">${esc(u.title||"—")} ${u.year?'<span class="pill">'+esc(String(u.year))+'</span>':''}</div>
           <div class="s">${u.tmdb_id?'✓ זוהה ב-TMDB':'🔍 לא זוהה — הקלד שם ידני'}</div></div>
           <button class="mini" onclick="useUpload(${i})">ערוך+הוסף</button>

@@ -23,6 +23,11 @@ import os, shutil, sys
 PATH = os.environ.get("PANEL", "/opt/zovex-bot/admin.html")
 MARKER = "mergeSelectedUploads"
 
+# ── עריכה 0: CSS לצ'קבוקס (יישור נקי, בלי transform ששובר שורה) ───────────────
+A0 = r'''  .item .meta .s { color:#86868b; font-size:12px; }'''
+N0 = r'''  .item .meta .s { color:#86868b; font-size:12px; }
+  .uplsel { width:20px; height:20px; flex:none; margin:0; accent-color:#5e5ce6; cursor:pointer; }'''
+
 # ── עריכה 1: סרגל הבחירה (HTML) ──────────────────────────────────────────────
 A1 = r'''      <div id="mrgMsg" class="muted" style="margin-top:6px"></div>
     </div>
@@ -103,13 +108,13 @@ async function loadUploads(){
 A3 = r'''      html+=idxs.map(i=>{const u=_uploads[i];
         return `<div class="item" style="padding:6px 12px"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">'''
 N3 = r'''      html+=idxs.map(i=>{const u=_uploads[i];
-        return `<div class="item" style="padding:6px 12px"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} style="margin-left:8px;transform:scale(1.4)" title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">'''
+        return `<div class="item" style="padding:6px 12px"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">'''
 
 # ── עריכה 4: צ'קבוקס לכל סרט בודד ────────────────────────────────────────────
 A4 = r'''      const renderMovie=i=>{const u=_uploads[i];
         return `<div class="item"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">'''
 N4 = r'''      const renderMovie=i=>{const u=_uploads[i];
-        return `<div class="item"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} style="margin-left:8px;transform:scale(1.4)" title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">'''
+        return `<div class="item"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">'''
 
 # ── עריכה 5: רענון הסרגל בסוף loadUploads ────────────────────────────────────
 A5 = r'''    }
@@ -123,7 +128,7 @@ N5 = r'''    }
 }
 // הוספת כל פרקי סדרה בכפתור אחד'''
 
-EDITS = [("סרגל בחירה", A1, N1), ("state+פונקציות", A2, N2),
+EDITS = [("CSS", A0, N0), ("סרגל בחירה", A1, N1), ("state+פונקציות", A2, N2),
          ("צ'קבוקס פרק", A3, N3), ("צ'קבוקס סרט", A4, N4),
          ("רענון סרגל", A5, N5)]
 
