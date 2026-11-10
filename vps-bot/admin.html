@@ -193,6 +193,22 @@
       <button onclick="mergeUploads()" style="width:100%;margin-top:8px">🔗 אחד הכל והוסף לאתר</button>
       <div id="mrgMsg" class="muted" style="margin-top:6px"></div>
     </div>
+    <div id="selBar" class="card hidden" style="border:1px solid #5e5ce6;position:sticky;top:0;z-index:5">
+      <h2>🔗 אחד את הנבחרים לסדרה אחת (<span id="selCount">0</span> נבחרו)</h2>
+      <div class="muted">כמה סדרות התפצלו יחד? סמן ✓ רק את הפרקים של סדרה אחת, הקלד שם, ואחד. אח"כ סמן את השאר לסדרה הבאה.</div>
+      <input id="sel_name" placeholder="שם הסדרה (למשל: פאודה)" style="margin-top:8px">
+      <div style="margin-top:8px"><label>קטגוריה</label><select id="sel_cat">
+        <option value="סדרות">סדרות</option>
+        <option value="סדרות לילדים">סדרות לילדים</option>
+        <option value="סדרות ישראליות">סדרות ישראליות</option>
+        <option value="אנימה">אנימה</option>
+      </select></div>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" id="sel_renum" checked> מספר את הפרקים מחדש ע1פ1..ע1פN לפי סדר ההעלאה</label>
+      <div class="row" style="margin-top:8px">
+        <button class="green" style="flex:1" onclick="mergeSelectedUploads()">🔗 אחד את הנבחרים</button>
+        <button class="gray" onclick="clearSelUploads()">נקה בחירה</button></div>
+      <div id="selMsg" class="muted" style="margin-top:6px"></div>
+    </div>
     <div class="card"><div class="toprow"><h2>העלאות שממתינות מהבוט</h2>
       <div class="row"><button class="mini green" onclick="addAllUploads()">✓ הוסף הכל לאתר</button>
         <button class="mini gray" onclick="loadUploads()">↻</button></div></div>
@@ -836,8 +852,47 @@ async function saveLive(){
 // ── העלאות מהבוט ──
 let _uploads=[];
 let _serGroups=[];
+let _selUploads=new Set();   // אינדקסים של פרקים ממתינים שסומנו לאיחוד ידני
+function updateSelBar(){
+  const bar=$("selBar"); if(!bar) return;
+  bar.classList.toggle("hidden", _selUploads.size===0);
+  const c=$("selCount"); if(c) c.textContent=_selUploads.size;
+}
+function toggleSelUpload(i,on){ if(on)_selUploads.add(i); else _selUploads.delete(i); updateSelBar(); }
+function clearSelUploads(){ _selUploads.clear(); document.querySelectorAll(".uplsel").forEach(c=>c.checked=false); updateSelBar(); }
+// אחד רק את הפרקים שסומנו לסדרה אחת (לכמה סדרות שהתפצלו יחד).
+async function mergeSelectedUploads(){
+  const name=$("sel_name").value.trim(), cat=$("sel_cat").value, renum=$("sel_renum").checked;
+  if(!_selUploads.size){ alert("לא נבחרו פרקים"); return; }
+  if(!name){ $("selMsg").innerHTML='<span class="err">הקלד שם סדרה</span>'; return; }
+  let idxs=[..._selUploads].filter(i=>_uploads[i]);
+  if(!idxs.length){ clearSelUploads(); return; }
+  idxs.sort((a,b)=>((_uploads[a].channel_msg_id||0)-(_uploads[b].channel_msg_id||0)));  // סדר העלאה ≈ סדר פרקים
+  if(!confirm(`לאחד ${idxs.length} פרקים נבחרים לסדרה «${name}»?`+(renum?`\nימוספרו ע1פ1..ע1פ${idxs.length}.`:""))) return;
+  const exist=movies.find(m=>m.series_name===name && (m.thumbnail_url||m.description));
+  const inhPoster=exist?exist.thumbnail_url||"":"", inhDesc=exist?exist.description||"":"";
+  const ids=[]; let ep=0;
+  const newItems=idxs.map(i=>{const u=_uploads[i]; const vid=(u.video_url||"").trim(); const info=extractVideoInfo(vid); ep++;
+    if(u.channel_msg_id!=null) ids.push(u.channel_msg_id);
+    return { id:crypto.randomUUID(), created_date:new Date().toISOString(),
+      title:name, year:u.year?parseInt(u.year):(exist?exist.year:null),
+      category:cat||"סדרות", description:u.description||inhDesc,
+      type:info.type, video_id:info.video_id, video_url:vid,
+      thumbnail_url:u.thumbnail_url||inhPoster, custom_slug:exist?exist.custom_slug||null:null,
+      series_name:name, season_number:renum?1:(u.season_number||1),
+      episode_number:renum?ep:(u.episode_number||null), episode_title:"" };
+  });
+  movies=[...newItems, ...movies];
+  if(await persist()){
+    try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:PASS, channel_msg_ids:ids})}); }catch{}
+    _selUploads.clear(); $("sel_name").value=""; $("selMsg").textContent="";
+    refreshDerived(); await loadUploads();
+    alert(`אוחדו ${newItems.length} פרקים → «${name}» ✓`);
+  }
+}
 async function loadUploads(){
-  const el=$("uploadsList"); el.innerHTML="טוען…";
+  const el=$("uploadsList"); el.innerHTML="טוען…"; _selUploads.clear();
   try{ const d=await (await fetch("/uploads/new")).json();
     _uploads=d.items||[];
     if(!_uploads.length){ el.innerHTML='<div class="muted" style="padding:8px">אין העלאות ממתינות.</div>'; return; }
@@ -860,7 +915,7 @@ async function loadUploads(){
         <div class="s">${onSite?'✓ הסדרה כבר באתר — יירש פוסטר+תיאור':'סדרה חדשה'}</div></div>
         <button class="mini green" onclick="addSeriesUploads(${gi})">➕ הוסף סדרה שלמה</button></div>`;
       html+=idxs.map(i=>{const u=_uploads[i];
-        return `<div class="item" style="padding:6px 12px"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
+        return `<div class="item" style="padding:6px 12px"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} style="margin-left:8px;transform:scale(1.4)" title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
           <div class="meta"><div class="t">ע${u.season_number||1}פ${u.episode_number||"?"}</div><div class="s">${esc(u.title||"")}</div></div>
           <button class="mini sec" onclick="useUpload(${i})">ערוך</button>
           <button class="mini gray" onclick="removeUpload(${u.channel_msg_id})">הסר</button></div>`;}).join("");
@@ -868,7 +923,7 @@ async function loadUploads(){
     });
     if(singles.length){
       const renderMovie=i=>{const u=_uploads[i];
-        return `<div class="item"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
+        return `<div class="item"><input type="checkbox" class="uplsel" onchange="toggleSelUpload(${i},this.checked)" ${_selUploads.has(i)?'checked':''} style="margin-left:8px;transform:scale(1.4)" title="סמן לאיחוד ידני"><img src="${u.thumbnail_url||''}" onerror="this.style.visibility='hidden'">
           <div class="meta"><div class="t">${esc(u.title||"—")} ${u.year?'<span class="pill">'+esc(String(u.year))+'</span>':''}</div>
           <div class="s">${u.tmdb_id?'✓ זוהה ב-TMDB':'🔍 לא זוהה — הקלד שם ידני'}</div></div>
           <button class="mini" onclick="useUpload(${i})">ערוך+הוסף</button>
@@ -877,7 +932,7 @@ async function loadUploads(){
       if(rec.length){ html+='<div class="muted" style="margin:8px 0 4px">🎬 סרטים שזוהו ('+rec.length+'):</div>'+rec.map(renderMovie).join(""); }
       if(unrec.length){ html+='<div class="muted" style="margin:10px 0 4px;color:#b26a00">🔍 לא זוהו ב-TMDB — לבדיקה ידנית ('+unrec.length+'):</div>'+unrec.map(renderMovie).join(""); }
     }
-    el.innerHTML=html;
+    el.innerHTML=html; updateSelBar();
   }catch(e){ el.innerHTML='<span class="err">'+e.message+'</span>'; }
 }
 // הוספת כל פרקי סדרה בכפתור אחד — כולל ירושת פוסטר+תיאור+slug מפרק קיים של הסדרה
