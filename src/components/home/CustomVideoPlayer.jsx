@@ -193,6 +193,19 @@ function isHlsUrl(src) {
   return src?.includes(".m3u8") || src?.includes("Manifest.ism");
 }
 
+// זרם MPEG-TS גולמי של שידור חי: נתיב בלי סיומת (פאנלי IPTV מסוג Xtream:
+// ‎/user/pass/12345‎) או ‎.ts‎. דפדפן לא מנגן אותו ב-<video> ו-Shaka לא קורא
+// אותו — mpegts.js מפענח אותו בדפדפן של הצופה. רק לשידור חי: קישורי הסרטים
+// שלנו (‎/stream/<ערוץ>/<הודעה>‎) גם הם בלי סיומת, והם MP4 רגיל.
+export function isRawTsUrl(src) {
+  if (!src || isHlsUrl(src)) return false;
+  let path;
+  try { path = new URL(src, "https://x/").pathname; } catch { return false; }
+  const last = path.split("/").filter(Boolean).pop() || "";
+  if (/\.ts$/i.test(last)) return true;
+  return last !== "" && !last.includes(".");
+}
+
 // ── קבצים שהדפדפן לא יודע לפענח את הקול שלהם ────────────────────────────────
 //
 // חלק מהתוכן מקודד ב-Dolby Digital Plus (ec-3). דפדפנים מסירים בכוונה את
@@ -1482,6 +1495,94 @@ function DirectVideoPlayer({ src, movie, onClose, startTime = 0, onProgress, onN
   );
 }
 
+// ─── MPEG-TS player (שידור חי, פענוח בדפדפן) ─────────────────
+// mpegts.js (Apache-2.0) נטען רק כשצריך, מ-public/vendor כמו Shaka.
+// מגבלת דפדפן שאין לעקוף: דף https לא מורשה למשוך http ("mixed content").
+// לכן קישור http מקבל הודעה ברורה ולא מסך שחור — עבורו יש את ההמרה בשרת.
+function TsPlayer({ src, movie, onClose }) {
+  const containerRef = useRef(null);
+  const videoElRef = useRef(null);
+  const [loading, setLoading] = useState(true);
+  const [videoReady, setVideoReady] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!containerRef.current || !src) return;
+    let destroyed = false, player = null;
+    if (typeof window !== "undefined" && window.location.protocol === "https:" && /^http:\/\//i.test(src)) {
+      setError("הקישור של השידור הוא http, והדפדפן חוסם אותו באתר מאובטח. בפאנל: 'המר לרלֵיי' כדי שהשרת יגיש אותו.");
+      setLoading(false);
+      return;
+    }
+    const video = document.createElement("video");
+    video.setAttribute("playsinline", "");
+    video.setAttribute("autoplay", "");
+    video.muted = false;
+    video.style.cssText = "width:100%;height:100%;position:absolute;inset:0;background:#000;object-fit:contain;";
+    containerRef.current.appendChild(video);
+    videoElRef.current = video;
+    setVideoReady(true);
+    const onPlaying = () => setLoading(false);
+    const onWaiting = () => setLoading(true);
+    video.addEventListener("playing", onPlaying);
+    video.addEventListener("waiting", onWaiting);
+
+    (async () => {
+      try {
+        await loadScripts([VENDOR_BASE + "mpegts.js"]);
+      } catch {
+        if (!destroyed) { setError("טעינת נגן ה-TS נכשלה"); setLoading(false); }
+        return;
+      }
+      if (destroyed) return;
+      const m = window.mpegts;
+      if (!m || !m.getFeatureList().mseLivePlayback) {
+        setError("המכשיר הזה לא תומך בניגון זרם TS בדפדפן (למשל אייפון ישן). נסה דרך האפליקציה, או המרה בשרת.");
+        setLoading(false);
+        return;
+      }
+      player = m.createPlayer(
+        { type: "mpegts", isLive: true, url: src },
+        { enableWorker: true, liveBufferLatencyChasing: true,
+          liveBufferLatencyMaxLatency: 8, liveBufferLatencyMinRemain: 2,
+          lazyLoad: false, autoCleanupSourceBuffer: true });
+      player.on(m.Events.ERROR, (type, detail) => {
+        if (destroyed) return;
+        setError(`השידור לא נטען (${type}${detail ? " · " + detail : ""})`);
+        setLoading(false);
+      });
+      player.attachMediaElement(video);
+      player.load();
+      try { await player.play(); } catch {}
+    })();
+
+    return () => {
+      destroyed = true;
+      video.removeEventListener("playing", onPlaying);
+      video.removeEventListener("waiting", onWaiting);
+      try { player?.pause(); player?.unload(); player?.detachMediaElement(); player?.destroy(); } catch {}
+      if (containerRef.current) containerRef.current.innerHTML = "";
+    };
+  }, [src]);
+
+  return (
+    <div style={{ flex: 1, position: "relative", background: "#000", minHeight: 0 }}>
+      {loading && !error && (
+        <div style={{ position: "absolute", inset: 0, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "center", background: "#000" }}>
+          <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTop: "4px solid #2f7dfb", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+        </div>
+      )}
+      {error && (
+        <div data-ts-error style={{ position: "absolute", inset: 0, zIndex: 6, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center", color: "#ddd", fontFamily: "Arial", fontSize: 15, lineHeight: 1.6, direction: "rtl" }}>
+          {error}
+        </div>
+      )}
+      <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
+      <ControlsLayer videoRef={videoElRef} title={movie.title} episode={null} onClose={onClose} onSkip={() => {}} skipAnim={null} isLive videoReady={videoReady} />
+    </div>
+  );
+}
+
 // ─── HLS player ───────────────────────────────────────────────
 function HlsPlayer({ src, movie, onClose, startTime = 0, onProgress, isLive = false, onNextEpisode, nextEpisodeLabel, knownDuration = 0 }) {
   const containerRef = useRef(null);
@@ -1895,6 +1996,8 @@ export default function CustomVideoPlayer({ movie, onClose, startTime = 0, onPro
           <span style={{ fontSize: 40 }}>🎬</span>
           <p style={{ color: "#888", fontSize: 15, fontFamily: "Arial" }}>אין קישור וידאו זמין</p>
         </div>
+      ) : isLive && isRawTsUrl(src) ? (
+        <TsPlayer key={src} src={src} movie={movie} onClose={onClose} />
       ) : isHlsUrl(src) ? (
         <HlsPlayer key={src} src={src} movie={movie} onClose={onClose} startTime={resumeAt} onProgress={onProgress} isLive={isLive} onNextEpisode={onNextEpisode} nextEpisodeLabel={nextEpisodeLabel} knownDuration={knownDuration} />
       ) : isIframeUrl(src, type) ? (
