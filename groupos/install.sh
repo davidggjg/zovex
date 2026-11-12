@@ -340,10 +340,11 @@ count_keys() {
   printf '%s' "$1" | tr ',' '\n' | grep -c '[^[:space:]]' 2>/dev/null || echo 0
 }
 
+OLD_OWNER=$(env_get GROUPOS_OWNER_ID)
 OLD_API=$(env_get GROUPOS_API_BASE)
 OLD_GEM=$(env_get GROUPOS_GEMINI_KEYS)
 OLD_GRQ=$(env_get GROUPOS_GROQ_KEYS)
-KNOWN="GROUPOS_TOKEN GROUPOS_DB GROUPOS_API_BASE GROUPOS_GEMINI_KEYS GROUPOS_GROQ_KEYS"
+KNOWN="GROUPOS_TOKEN GROUPOS_DB GROUPOS_API_BASE GROUPOS_GEMINI_KEYS GROUPOS_GROQ_KEYS GROUPOS_OWNER_ID"
 EXTRA_LINES=""
 if [ -f "$ENV" ]; then
   mkdir -p "$BACKUPS"
@@ -358,6 +359,11 @@ fi
 cat > "$ENV" <<EOF
 GROUPOS_TOKEN=$TOK
 GROUPOS_DB=$DIR/data/groupos.db
+# מזהה הטלגרם של בעל הבוט. רק הוא רואה את רשימת **כל** הקבוצות
+# שהבוט נמצא בהן ומה נעשה בהן. ריק = אין בעלים, והמסך לא קיים
+# לאיש. כאן ולא במסד, כי מי שמחזיק בשרת הוא הבעלים — ולא מי
+# שהצליח לכתוב שורה בטבלה.
+GROUPOS_OWNER_ID=$OLD_OWNER
 # שרת Bot API מקומי — מחזיר נתיב מקומי לקבצים במקום להוריד אותם.
 # ריק = השרת של טלגרם.
 GROUPOS_API_BASE=$OLD_API
