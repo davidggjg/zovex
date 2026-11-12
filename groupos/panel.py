@@ -387,6 +387,83 @@ SWITCH_KEYS = {k for k, _, _ in SWITCHES}
 SWITCH_DEFAULT = {k: d for k, d, _ in SWITCHES}
 
 
+# ── ההגדרות, לפי נושא ─────────────────────────────────────────────────────
+#
+# "יותר מדי מבולגן, אולי צריך לעשות את זה בקטגוריות."
+#
+# עשרים ושישה מתגים ברשימה אחת הם קיר. אי אפשר לסרוק אותו, אי אפשר
+# לזכור איפה היה מה, וההבדל בין "הגנה" לבין "נוחות" נעלם לגמרי.
+# מי שחיפש את ניקוי הודעות השירות גלל ארבע פעמים.
+#
+# הקבוצות הן לפי **השאלה שהאדם שואל**, לא לפי המנגנון: ממה להגן,
+# על מה לענות, מה לנקות, ומה הבוט אומר לקבוצה.
+SWITCH_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("guard", "swg.guard",
+     ("spamguard", "strict", "flood", "antiraid", "captcha", "lockwarns")),
+    ("smart", "swg.smart", ("ai", "aivision", "aivoice")),
+    ("answer", "swg.answer", ("replies", "askonly", "onlyme")),
+    ("clean", "swg.clean", ("cleanservice", "cleancmds", "silent",
+                            "tellwhy", "ephemeral")),
+    ("people", "swg.people",
+     ("welcome_on", "goodbye_on", "welcome_private", "xp", "levelup",
+      "reports", "privatenotes", "adminpriv", "keepproof")),
+)
+
+
+def switch_groups_screen(chat_id: int, values: dict,
+                         lang: str = i18n.DEFAULT) -> Screen:
+    """תפריט הנושאים, עם כמה דלוק בכל אחד."""
+    rows = []
+    for key, label, members in SWITCH_GROUPS:
+        on = sum(1 for m in members
+                 if values.get(m, SWITCH_DEFAULT.get(m, "0")) == "1")
+        rows.append([(f"{i18n.t(label, lang)} · {on}/{len(members)}",
+                      cb(chat_id, "swg", key))])
+    rows.append([(i18n.t("sw.what", lang), cb(chat_id, "swhelp"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "settings"))])
+    return Screen(head("sw.title", lang) + "\n\n"
+                  + i18n.t("sw.group_hint", lang), rows)
+
+
+def switch_group_screen(chat_id: int, group: str, values: dict,
+                        lang: str = i18n.DEFAULT) -> Optional[Screen]:
+    """נושא אחד. אותה תצוגה כמו קודם, על פחות מתגים."""
+    found = next((g for g in SWITCH_GROUPS if g[0] == group), None)
+    if found is None:
+        return None
+    _key, label, members = found
+    rows = _switch_rows(chat_id, members, values, lang)
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "sws"))])
+    return Screen(f"<b>{i18n.t(label, lang)}</b>\n\n"
+                  + i18n.t("sw.hint", lang), rows)
+
+
+def _switch_rows(chat_id: int, keys, values: dict, lang: str) -> list:
+    """שני מתגים בשורה — **אלא אם הכיתוב ארוך**.
+
+    כיתוב ארוך בחצי שורה נגזר או נשבר, והנורה שבתחילתו — שהיא כל
+    העניין — יורדת מהמסך. מתג שלא רואים את מצבו גרוע ממתג שאינו
+    קיים."""
+    SIDE_BY_SIDE_MAX = 15
+    rows, line = [], []
+    labels = {k: l for k, _d, l in SWITCHES}
+    for key in keys:
+        on = values.get(key, SWITCH_DEFAULT.get(key, "0")) == "1"
+        text = i18n.t(labels.get(key, key), lang)
+        cell = (("🟢 " if on else "⚪ ") + text, cb(chat_id, "sw", key))
+        if len(text) > SIDE_BY_SIDE_MAX:
+            if line:
+                rows.append(line); line = []
+            rows.append([cell])
+            continue
+        line.append(cell)
+        if len(line) == 2:
+            rows.append(line); line = []
+    if line:
+        rows.append(line)
+    return rows
+
+
 def switches_screen(chat_id: int, values: dict,
                     lang: str = i18n.DEFAULT) -> Screen:
     """כל המתגים, כל אחד עם מצבו. לחיצה מחליפה — ורואים את התוצאה."""

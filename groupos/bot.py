@@ -1708,18 +1708,28 @@ async def _deliver(chat_id: int, msg: Message, trigger: str, fid: int, fh,
         return
     if season:
         items = seasons.pick(items, season)
+    # **התשובה הראשונה עונה להודעה ששאלה.**
+    #
+    # בלי זה היא נוחתת כהודעה נפרדת בתוך הזרם, ומי ששאל לא יודע
+    # שזו התשובה שלו — ובקבוצה פעילה היא כבר נדחקה מעלה. רק
+    # הראשונה עונה: שרשור של ארבעים פרקים, כל אחד מהם "בתשובה",
+    # היה הופך את הצ'אט לבלתי קריא.
+    first = msg.message_id if msg.chat.type in GROUP_TYPES else None
     if fh is not None and (fh.content.strip() or fh.media_id):
         await send_content(msg.chat.id,
                            tpl.render_pick(fh.content, _ctx(msg)),
                            fh.media_id or None, fh.media_kind or None,
-                           fh.buttons or "", thread_id=_thread_of(msg))
+                           fh.buttons or "", thread_id=_thread_of(msg),
+                           reply_to=first)
+        first = None
     for extra in items:
         await send_content(msg.chat.id,
                            tpl.render_pick(extra["content"], _ctx(msg)),
                            extra["media_id"] or None,
                            extra["media_kind"] or None,
                            extra["buttons"] or "",
-                           thread_id=_thread_of(msg))
+                           thread_id=_thread_of(msg), reply_to=first)
+        first = None
 
 
 def _name(msg: Message) -> str:
@@ -2196,7 +2206,8 @@ async def send_content(chat_id: int, text: str, media_id: Optional[str],
                        media_kind: Optional[str], buttons: str,
                        *, clean_after: Optional[int] = None,
                        thread_id: Optional[int] = None,
-                       to_user: Optional[int] = None):
+                       to_user: Optional[int] = None,
+                       reply_to: Optional[int] = None):
     """שולח הערה/ברכה/תגובת פילטר — טקסט, מדיה וכפתורים כאחד."""
     rows = parse_buttons(buttons)
     markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -2210,6 +2221,7 @@ async def send_content(chat_id: int, text: str, media_id: Optional[str],
                   "document": bot.send_document, "audio": bot.send_audio,
                   "voice": bot.send_voice}[media_kind]
             kw = {"reply_markup": markup, "message_thread_id": thread_id,
+                  "reply_to_message_id": reply_to,
                   "ephemeral_message_parameters": _ephemeral(chat_id, to_user)}
             if media_kind != "sticker":
                 kw["caption"] = text[:1024] or None
@@ -2218,10 +2230,19 @@ async def send_content(chat_id: int, text: str, media_id: Optional[str],
             m = await bot.send_message(
                 chat_id, text, reply_markup=markup,
                 message_thread_id=thread_id,
+                reply_to_message_id=reply_to,
                 ephemeral_message_parameters=_ephemeral(chat_id, to_user))
     except TelegramAPIError as e:
         if to_user is not None:
             log.info("תוכן אישי בצ'אט %s נדחה (%s) — שולח לכולם", chat_id, e)
+            return await send_content(chat_id, text, media_id, media_kind,
+                                      buttons, clean_after=clean_after,
+                                      thread_id=thread_id, reply_to=reply_to)
+        # ההודעה שאליה עונים נמחקה בינתיים — שולחים בלי קישור אליה,
+        # ולא מוותרים על התשובה.
+        if reply_to is not None:
+            log.info("תשובה להודעה %s נכשלה (%s) — שולח בלעדיה",
+                     reply_to, e)
             return await send_content(chat_id, text, media_id, media_kind,
                                       buttons, clean_after=clean_after,
                                       thread_id=thread_id)
@@ -5994,7 +6015,11 @@ def _screen_for(chat_id: int, name: str, arg: str) -> Optional[panel.Screen]:
         return panel.security_screen(chat_id, emerg.status(db, chat_id),
                                      _sec_numbers(chat_id), lg)
     if name == "sws":
-        return panel.switches_screen(chat_id, _switch_values(chat_id), lg)
+        return panel.switch_groups_screen(chat_id, _switch_values(chat_id),
+                                          lg)
+    if name == "swg":
+        return panel.switch_group_screen(chat_id, arg,
+                                         _switch_values(chat_id), lg)
     if name == "swhelp":
         return panel.switches_help(chat_id, lg)
     if name == "texts":
@@ -6245,10 +6270,18 @@ async def on_callback(q: CallbackQuery):
         if name == "sw":
             # הכפתור הזה יושב בשני מסכים. מי שלחץ עליו במסך ה-AI
             # צריך לראות את מסך ה-AI מתעדכן, לא לקפוץ לרשימת המתגים.
-            back = ("aim" if arg in ("ai", "aivision", "aivoice",
-                                     "ai_titles_ok")
-                    else "svcs" if arg == "cleanservice" else "sws")
-            await _edit(q, _screen_for(chat_id, back, ""))
+            # חוזרים למסך שממנו לחצו, ולא לתפריט הראשי: מי שכיבה
+            # מתג בתוך נושא רוצה להמשיך שם.
+            grp = next((g[0] for g in panel.SWITCH_GROUPS if arg in g[2]), "")
+            if arg in ("ai", "aivision", "aivoice", "ai_titles_ok"):
+                back, barg = "aim", ""
+            elif arg == "cleanservice":
+                back, barg = "svcs", ""
+            elif grp:
+                back, barg = "swg", grp
+            else:
+                back, barg = "sws", ""
+            await _edit(q, _screen_for(chat_id, back, barg))
         else:
             await _edit(q, panel.switch_screen(chat_id, arg, want, lg))
         gap = _switch_gap(chat_id, arg, lg) if want else ""

@@ -3770,6 +3770,40 @@ async def test_menu_refreshes():
         B._menu_sent.pop(ADM, None)
 
 
+async def test_settings_in_topics():
+    """ההגדרות מחולקות לנושאים, וכל שפה מגיעה למסך שלם."""
+    section("הגדרות לפי נושא")
+    import i18n as _i
+    placed = {m for _k, _l, ms in panel.SWITCH_GROUPS for m in ms}
+    allsw = {k for k, _d, _l in panel.SWITCHES}
+    ok("כל מתג שובץ לנושא", placed == allsw,
+       str(allsw ^ placed))
+
+    sc = panel.switch_groups_screen(CHAT, {}, "he")
+    ok("תפריט הנושאים נבנה", len(sc.rows) >= len(panel.SWITCH_GROUPS))
+    ok("ולא מופיע בו המונח ״מתגים״", "מתג" not in sc.text, sc.text[:60])
+
+    for key, _lab, members in panel.SWITCH_GROUPS:
+        g = panel.switch_group_screen(CHAT, key, {}, "he")
+        ok(f"נושא {key} נבנה", g is not None)
+        got = {c.split(":")[3] for c in g.all_callbacks()
+               if ":sw:" in c}
+        ok(f"ומכיל את כל המתגים שלו ({key})", got == set(members),
+           str(set(members) ^ got))
+    ok("נושא לא מוכר מחזיר None",
+       panel.switch_group_screen(CHAT, "אין_כזה", {}, "he") is None)
+
+    # וכל שפה בונה את המסכים האלה בלי ליפול ובלי להציג מפתח גולמי
+    for lg in _i.STRINGS:
+        s1 = panel.switch_groups_screen(CHAT, {}, lg)
+        ok(f"תפריט הנושאים ב-{lg}", bool(s1.rows))
+        for key, _l, _m in panel.SWITCH_GROUPS:
+            s2 = panel.switch_group_screen(CHAT, key, {}, lg)
+            raw = [b[0] for r in s2.rows for b in r
+                   if b[0].count(".") and " " not in b[0]]
+            ok(f"בלי מפתח גולמי ב-{lg}/{key}", not raw, str(raw))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3832,6 +3866,7 @@ async def main() -> int:
     await test_long_upload_stays_open()
     await test_never_punish_an_admin()
     await test_menu_refreshes()
+    await test_settings_in_topics()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
