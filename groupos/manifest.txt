@@ -40,3 +40,13 @@ test_features.py
 vision.py
 voice.py
 zmanim.py
+test_locales.py
+lang_ar.py
+lang_ru.py
+lang_es.py
+lang_pt.py
+lang_fr.py
+lang_de.py
+lang_tr.py
+lang_id.py
+langs.py

@@ -678,7 +678,16 @@ def test_manifest():
     mf = os.path.join(here, "manifest.txt")
     ok("manifest קיים", os.path.exists(mf))
     listed = {l.strip() for l in open(mf, encoding="utf-8") if l.strip()}
-    on_disk = {f for f in os.listdir(here) if f.endswith(".py")}
+    # כולל תת-תיקיות: קבצי השפה יושבים ב-‎lang/‎, והבדיקה השטוחה
+    # חשבה שהם "קבצים שלא קיימים".
+    on_disk = set()
+    for root, _dirs, files in os.walk(here):
+        if "__pycache__" in root:
+            continue
+        for f in files:
+            if f.endswith(".py"):
+                rel = os.path.relpath(os.path.join(root, f), here)
+                on_disk.add(rel.replace(os.sep, "/"))
     missing = on_disk - listed
     ok("כל מודול קיים רשום ב-manifest", not missing, str(missing))
     ghosts = {f for f in listed if f.endswith(".py")} - on_disk
@@ -694,7 +703,7 @@ def test_manifest():
             need |= {a.name.split(".")[0] for a in n.names}
         elif isinstance(n, _ast.ImportFrom) and n.module and n.level == 0:
             need.add(n.module.split(".")[0])
-    local = {f[:-3] for f in on_disk}
+    local = {f[:-3] for f in on_disk if "/" not in f}
     ok("כל ייבוא מקומי של bot.py רשום ב-manifest",
        all(f"{m}.py" in listed for m in (need & local)),
        str([m for m in (need & local) if f"{m}.py" not in listed]))

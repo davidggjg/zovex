@@ -32,7 +32,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import langs as _lang
 from locales import EXTRA
+
+# קבצי השפה המלאים גוברים על הכיסוי החלקי הישן.
+EXTRA = _lang.merge(EXTRA)
 
 RTL_LANGS = {"he", "ar", "fa", "ur", "yi"}
 
