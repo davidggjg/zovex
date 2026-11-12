@@ -99,7 +99,24 @@ log = logging.getLogger("groupos")
 # את עצמו בניסיון ה-12, הוא רק שורף מעבד.
 EX_CONFIG = 78
 
+def _int_env(name: str) -> int:
+    try:
+        return int(os.environ.get(name, "0").strip() or 0)
+    except ValueError:
+        return 0
+
+
 TOKEN = os.environ.get("GROUPOS_TOKEN", "").strip()
+# בעל הבוט — מי שמריץ אותו על השרת שלו.
+#
+# זה אינו תפקיד בקבוצה אלא בעלות על השירות: רק הוא רואה את רשימת
+# **כל** הקבוצות שהבוט נמצא בהן ומה נעשה בהן. בוט שמשרת קבוצות
+# של אנשים אחרים צריך שמי שמפעיל אותו יוכל לראות שלא משתמשים בו
+# לרעה — ושאיש מלבדו לא יוכל.
+#
+# ממשתנה סביבה ולא מהמסד: מי שמחזיק בשרת הוא הבעלים, ולא מי
+# שהצליח לכתוב שורה בטבלה.
+OWNER_ID = _int_env("GROUPOS_OWNER_ID")
 API_BASE = os.environ.get("GROUPOS_API_BASE", "").strip()
 
 db = Db()
@@ -619,6 +636,63 @@ async def bot_is_admin(chat_id: int) -> bool:
     return ok_now
 
 
+# ── מסך הבעלים ────────────────────────────────────────────────────────────
+def is_owner(user_id: int) -> bool:
+    """בעל הבוט, לפי משתנה הסביבה בלבד.
+
+    ‎OWNER_ID‎ ריק פירושו שאין בעלים — ואז המסך פשוט לא קיים לאיש.
+    זה הכיוון הבטוח: בוט שהותקן בלי הגדרה לא נותן לאף אחד לראות
+    את כל הקבוצות."""
+    return bool(OWNER_ID) and user_id == OWNER_ID
+
+
+async def _group_link(chat_id: int, username: Optional[str]) -> str:
+    """קישור לקבוצה. ציבורית — לפי השם; פרטית — הזמנה, אם מותר.
+
+    ההזמנה נוצרת רק אם לבוט יש הרשאה, ולכן אין כאן דרך לייצר
+    גישה לקבוצה שלא נתנה אותה. כישלון מחזיר ריק, והמסך אומר זאת."""
+    if username:
+        return f"https://t.me/{username}"
+    try:
+        link = await bot.create_chat_invite_link(
+            chat_id, name="GroupOS owner", member_limit=1)
+        return link.invite_link or ""
+    except TelegramAPIError:
+        return ""
+
+
+def _owner_rows(page: int, per: int) -> tuple[list[dict], int]:
+    rows = db.q("""SELECT chat_id, title, username FROM chats
+                   WHERE active=1 AND chat_id < 0
+                   ORDER BY title LIMIT ? OFFSET ?""", (per, page * per))
+    tot = db.one("SELECT COUNT(*) c FROM chats WHERE active=1 AND chat_id<0")
+    out = []
+    for r in rows:
+        n = db.one("SELECT COUNT(*) c FROM members WHERE chat_id=?",
+                   (r["chat_id"],))
+        out.append({"chat_id": r["chat_id"], "title": r["title"],
+                    "username": r["username"],
+                    "members": n["c"] if n else 0,
+                    "admin": _me_in_chat.get(r["chat_id"], (0, False))[1]})
+    return out, (tot["c"] if tot else 0)
+
+
+def _owner_actions(chat_id: int) -> list[tuple[str, str, str]]:
+    """מה נעשה בקבוצה לאחרונה — מי, מתי, ומה.
+
+    זה מה שעונה על "לראות שלא עשו לו פקודות זדוניות": פעולות
+    ניהול, מי ביצע אותן, ובאיזו דרך."""
+    out = []
+    for r in db.q("""SELECT ts, action, actor_id, after_val, source
+                     FROM audit_log WHERE chat_id=?
+                     ORDER BY id DESC LIMIT 12""", (chat_id,)):
+        when = time.strftime("%d/%m %H:%M", time.localtime(r["ts"]))
+        who = str(r["actor_id"] or "—")
+        what = r["action"] + (f" · {r['after_val']}" if r["after_val"] else "")
+        out.append((when, who, what[:60]))
+    return out
+
+
 async def my_groups_live(user_id: int) -> list[tuple[int, str]]:
     """הקבוצות שהאדם מנהל **באמת**, אחרי אימות מול טלגרם.
 
@@ -875,9 +949,19 @@ async def apply_action(chat_id: int, user_id: int, kind: str,
     return True
 
 
+# בוטים של טלגרם עצמה, שאינם "בוט אחר בקבוצה":
+#   ‎GroupAnonymousBot‎  — מנהל שכותב אנונימית
+#   ‎Channel_Bot‎         — הודעה שנשלחת בשם ערוץ
+# ההתראה נשלחה עליהם, וזו הייתה אזהרה על התנגשות פקודות עם מנגנון
+# פנימי של טלגרם. מנהל אנונימי אינו מתחרה.
+TG_SYSTEM_BOTS = {ANON_BOT_ID, 136817688}
+
+
 async def _warn_other_bot(msg: Message) -> None:
     """פעם אחת לכל קבוצה, ורק למנהלים, ורק בפרטי."""
     if _me_id is None or msg.from_user.id == _me_id:
+        return
+    if msg.from_user.id in TG_SYSTEM_BOTS:
         return
     if db.get(msg.chat.id, "otherbot_told", "0") == "1":
         return
@@ -885,11 +969,15 @@ async def _warn_other_bot(msg: Message) -> None:
         return          # כבר פתרו את זה — אין על מה להתריע
     db.set(msg.chat.id, "otherbot_told", "1")
     name = msg.from_user.username or msg.from_user.first_name or "bot"
+    # **שם הקבוצה בהתראה.** בלעדיו המנהל מקבל בפרטי הודעה על
+    # "הקבוצה" בלי לדעת איזו מהן, ואין לו דרך לברר.
     await _notify_admins(msg.chat.id,
                          i18n.t("otherbot.found", db.get(msg.chat.id, "lang",
                                                          i18n.DEFAULT),
                                 name=tpl.esc("@" + name if
-                                             msg.from_user.username else name)))
+                                             msg.from_user.username else name),
+                                chat=tpl.esc(msg.chat.title or
+                                             str(msg.chat.id))))
 
 
 # הודעות שירות (הצטרפות, עזיבה) הן הודעות בלי טקסט, ולכן ‎~F.text‎
@@ -2101,7 +2189,8 @@ async def cmd_start(msg: Message):
             sc = panel.welcome_screen()
         else:
             sc = panel.home(await my_groups_live(msg.from_user.id),
-                           lang_of(msg), _bot_username)
+                           lang_of(msg), _bot_username,
+                           owner=is_owner(msg.from_user.id))
         # ‎/start help‎ — כך מגיע מי שלחץ על הכפתור בקבוצה. הוא ביקש
         # עזרה, ולכן הוא יקבל עזרה ולא את מסך הבית.
         payload = ((msg.text or "").split(maxsplit=1) + [""])[1].strip()
@@ -5619,7 +5708,8 @@ async def on_private_text(msg: Message):
         if (msg.text or "").startswith("/"):
             return
         sc = panel.home(await my_groups_live(msg.from_user.id), lg,
-                       _bot_username)
+                   _bot_username,
+                   owner=is_owner(msg.from_user.id))
         await send(msg.chat.id, sc.text, is_group=False, markup=kb(sc))
         return
 
@@ -6152,7 +6242,8 @@ async def on_callback(q: CallbackQuery):
         await q.answer(i18n.t("err.no_access", lg), show_alert=True)
         with contextlib.suppress(TelegramAPIError):
             sc = panel.home(await my_groups_live(q.from_user.id), lg,
-                            _bot_username)
+                            _bot_username,
+                            owner=is_owner(q.from_user.id))
             await _edit(q, sc)
         return
 
@@ -6182,8 +6273,37 @@ async def on_callback(q: CallbackQuery):
         lang.set_chat(q.message.chat.id, arg)
         lg = i18n.normalize(arg)
         await _edit(q, panel.home(await my_groups_live(q.from_user.id), lg,
-                               _bot_username))
+                   _bot_username,
+                   owner=is_owner(q.from_user.id)))
         await q.answer(i18n.t("lang.set", lg))
+        return
+
+    # ── מסכי הבעלים ────────────────────────────────────────────────
+    # נעולים ל-‎OWNER_ID‎ ולא להרשאה: מנהל של קבוצה אחת אינו אמור
+    # לראות את רשימת כל השאר.
+    if name in ("ogrps", "ogrp"):
+        if not is_owner(q.from_user.id):
+            await q.answer(i18n.t("own.only", lg), show_alert=True)
+            return
+        if name == "ogrps":
+            page = max(0, _int(arg, 0))
+            rows, tot = _owner_rows(page, panel.OWNER_PAGE)
+            await _edit(q, panel.owner_groups(rows, page, tot, lg))
+            await q.answer()
+            return
+        gid = _int(arg, 0)
+        row = db.one("SELECT title, username FROM chats WHERE chat_id=?",
+                     (gid,))
+        if row is None:
+            await q.answer(i18n.t("screen.unknown", lg), show_alert=True)
+            return
+        n = db.one("SELECT COUNT(*) c FROM members WHERE chat_id=?", (gid,))
+        info = {"title": row["title"],
+                "members": n["c"] if n else 0,
+                "admin": await bot_is_admin(gid),
+                "link": await _group_link(gid, row["username"])}
+        await _edit(q, panel.owner_group(gid, info, _owner_actions(gid), lg))
+        await q.answer()
         return
 
     if name == "home":
@@ -6192,7 +6312,8 @@ async def on_callback(q: CallbackQuery):
         # נמחקו. פנייה לטלגרם קורית רק כשהרשימה באמת השתנתה.
         await publish_personal_commands(q.from_user.id, lg)
         await _edit(q, panel.home(await my_groups_live(q.from_user.id), lg,
-                                  _bot_username))
+                                  _bot_username,
+                                  owner=is_owner(q.from_user.id)))
         # בלי ‎answer‎ טלגרם משאירה גלגל מסתובב על הכפתור עד שייגמר
         # הזמן, גם כשהמסך כבר התחלף. זה נראה בדיוק כמו כפתור תקוע.
         await q.answer()
@@ -6681,7 +6802,8 @@ async def on_callback(q: CallbackQuery):
             waiting.clear(q.from_user.id)
             await _edit(q, _screen_for(chat_id, "main", "")
                         or panel.home(await my_groups_live(q.from_user.id), lg,
-                               _bot_username))
+                   _bot_username,
+                   owner=is_owner(q.from_user.id)))
             await q.answer(i18n.t("btn.canceled", lg))
             return
         f = prompts.FIELDS.get(arg)

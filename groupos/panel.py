@@ -139,13 +139,18 @@ def add_button(bot_username: str, lang: str = i18n.DEFAULT) -> list:
 
 
 def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT,
-         bot_username: str = "") -> Screen:
-    """רשימת הקבוצות שהמשתמש מנהל."""
+         bot_username: str = "", owner: bool = False) -> Screen:
+    """רשימת הקבוצות שהמשתמש מנהל.
+
+    ‎owner‎ מוסיף כניסה לרשימת **כל** הקבוצות של הבוט. היא מוצגת
+    רק לבעל השירות, ולכן היא לא יושבת בתפריט ההגדרות של קבוצה."""
     title = head("home.title", lang)
     add = add_button(bot_username, lang)
     if not groups:
         # מי שעוד לא הוסיף את הבוט לשום מקום צריך כפתור, לא הוראות.
         rows = [add] if add else []
+        if owner:
+            rows.append([(i18n.t("menu.owner", lang), cb(0, "ogrps", "0"))])
         rows.append(support_button(lang))
         return Screen(f"{title}\n\n" + i18n.t("home.empty", lang), rows)
     rows = [[(f"👥 {name[:28]}", cb(cid, "main"))] for cid, name in groups]
@@ -154,6 +159,8 @@ def home(groups: list[tuple[int, str]], lang: str = i18n.DEFAULT,
     # בחירת השפה האישית הייתה חד-פעמית: מי שבחר פעם אחת לא יכול היה
     # לשנות לעולם, כי הבורר מוצג רק למי שטרם בחר.
     rows.append([(i18n.t("menu.language", lang), "g:0:mylang")])
+    if owner:
+        rows.append([(i18n.t("menu.owner", lang), cb(0, "ogrps", "0"))])
     rows.append(support_button(lang))
     rows.append([(i18n.t("home.donate", lang), "g:0:donate")])
     return Screen(
@@ -1253,6 +1260,70 @@ def waiting_screen(chat_id: int, field: str, current: str,
                                value=(current or "")[:300])
     rows = [[(i18n.t("btn.cancel", lang), cb(chat_id, "cancel"))]]
     return Screen(txt, rows)
+
+
+# ── מסך הבעלים ────────────────────────────────────────────────────────────
+#
+# "אני צריך לראות באילו קבוצות הוא נמצא, קישור להיכנס, ומה עשו בו
+# שם — שלא עשו לו פקודות זדוניות."
+#
+# בוט שמשרת קבוצות של אנשים אחרים צריך שמי שמפעיל אותו על השרת
+# שלו יוכל לראות מה נעשה בשמו. זה **לא** תפקיד בקבוצה: מנהל של
+# קבוצה אחת לא אמור לראות את רשימת כל השאר, ולכן המסכים האלה
+# נעולים לבעלים בלבד ולא להרשאה שאפשר להעניק.
+OWNER_PAGE = 8
+
+
+def owner_groups(rows: list[dict], page: int, total: int,
+                 lang: str = i18n.DEFAULT) -> Screen:
+    """כל הקבוצות שהבוט נמצא בהן, עם מצב וכמות חברים."""
+    btns = []
+    for r in rows:
+        mark = "👑" if r.get("admin") else "👤"
+        title = (r.get("title") or str(r["chat_id"]))[:26]
+        btns.append([(f"{mark} {title} · {r.get('members', 0)}",
+                      cb(0, "ogrp", str(r["chat_id"])))])
+    nav = []
+    if page > 0:
+        nav.append((i18n.t("page.prev", lang), cb(0, "ogrps", str(page - 1))))
+    if (page + 1) * OWNER_PAGE < total:
+        nav.append((i18n.t("page.next", lang), cb(0, "ogrps", str(page + 1))))
+    if nav:
+        btns.append(nav)
+    btns.append([(i18n.t("menu.back", lang), cb(0, "home"))])
+    return Screen(head("own.title", lang) + "\n\n"
+                  + i18n.t("own.count", lang, n=total), btns)
+
+
+def owner_group(chat_id: int, info: dict, actions: list[tuple[str, str, str]],
+                lang: str = i18n.DEFAULT) -> Screen:
+    """קבוצה אחת: מי, כמה, קישור, ומה נעשה בה לאחרונה."""
+    lines = [f"<b>{tpl_esc(info.get('title') or chat_id)}</b>",
+             f"<code>{chat_id}</code>", ""]
+    lines.append(i18n.t("own.members", lang, n=info.get("members", 0)))
+    lines.append(i18n.t("own.isadmin" if info.get("admin")
+                        else "own.notadmin", lang))
+    if info.get("link"):
+        lines.append(i18n.t("own.link", lang, url=info["link"]))
+    else:
+        lines.append(i18n.t("own.nolink", lang))
+    lines.append("")
+    lines.append(i18n.t("own.recent", lang))
+    if actions:
+        for when, who, what in actions[:12]:
+            lines.append(f"• {when} · {tpl_esc(who)} · {tpl_esc(what)}")
+    else:
+        lines.append(i18n.t("own.noactions", lang))
+    rows = [[(i18n.t("own.refresh", lang), cb(0, "ogrp", str(chat_id)))],
+            [(i18n.t("menu.back", lang), cb(0, "ogrps", "0"))]]
+    return Screen("\n".join(lines), rows)
+
+
+def tpl_esc(v) -> str:
+    """בריחה מינימלית ל-HTML. כאן ולא ב-‎templates‎ כדי ש-‎panel‎
+    יישאר בלי תלות במודול שמייבא אותו."""
+    return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
 
 
 # ── יומן האכיפה ───────────────────────────────────────────────────────────

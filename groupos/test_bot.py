@@ -3804,6 +3804,79 @@ async def test_settings_in_topics():
             ok(f"בלי מפתח גולמי ב-{lg}/{key}", not raw, str(raw))
 
 
+async def test_owner_console():
+    """בעל הבוט רואה את כל הקבוצות; אף אחד אחר לא."""
+    section("מסך הבעלים")
+    OWNER, OTHER = 8658294616, 4242
+    real_owner = B.OWNER_ID
+    B.OWNER_ID = OWNER
+    try:
+        ok("הבעלים מזוהה", B.is_owner(OWNER))
+        ok("ומנהל רגיל אינו הבעלים", not B.is_owner(OTHER))
+        ok("ובלי הגדרה אין בעלים כלל",
+           not (lambda: (setattr(B, "OWNER_ID", 0), B.is_owner(OWNER))[1])())
+        B.OWNER_ID = OWNER
+
+        # הכניסה מופיעה רק לבעלים
+        sc = panel.home([(CHAT, "קבוצה")], "he", "TestBot", owner=True)
+        ok("לבעלים יש כניסה לכל הקבוצות",
+           any("ogrps" in c for c in sc.all_callbacks()))
+        sc2 = panel.home([(CHAT, "קבוצה")], "he", "TestBot", owner=False)
+        ok("ולאחר אין", not any("ogrps" in c for c in sc2.all_callbacks()))
+
+        # מי שאינו הבעלים נחסם במטפל עצמו
+        q = FakeQ2(panel.cb(0, "ogrps", "0"), OTHER)
+        await B.on_callback(q)
+        ok("לחיצה של מי שאינו בעלים נדחית",
+           bool(q.answers) and q.answers[-1] in
+           (B.i18n.t("own.only", "he"), B.i18n.t("own.only", "en")),
+           str(q.answers))
+
+        # והבעלים מקבל רשימה
+        q2 = FakeQ2(panel.cb(0, "ogrps", "0"), OWNER)
+        await B.on_callback(q2)
+        ok("הבעלים מקבל את הרשימה", bool(q2.message.markup))
+
+        rows, tot = B._owner_rows(0, 8)
+        ok("הרשימה נשענת על קבוצות פעילות", tot >= 1, str(tot))
+        acts = B._owner_actions(CHAT)
+        ok("ומוצגות פעולות שנעשו בקבוצה", isinstance(acts, list))
+    finally:
+        B.OWNER_ID = real_owner
+
+
+async def test_anon_is_not_another_bot():
+    """מנהל אנונימי אינו ״בוט נוסף״, וההתראה אומרת באיזו קבוצה."""
+    section("בוט נוסף בקבוצה")
+    B.db.set(CHAT, "otherbot_told", "0")
+    before = len(SENT)
+    anon = Message(message_id=9960, date=dt.datetime.now(),
+                   chat=Chat(id=CHAT, type="supergroup", title="הקבוצה שלי"),
+                   from_user=User(id=B.ANON_BOT_ID, is_bot=True,
+                                  first_name="GroupAnonymousBot",
+                                  username="GroupAnonymousBot"),
+                   text="שלום")
+    await B._warn_other_bot(anon)
+    ok("אין התראה על הבוט האנונימי", len(SENT) == before,
+       str([t for _c, t, _m in SENT[before:]])[:60])
+    ok("וגם לא נרשם שהתרענו",
+       B.db.get(CHAT, "otherbot_told", "0") == "0")
+
+    # בוט אמיתי כן מתריע, ואומר באיזו קבוצה
+    B.db.set(CHAT, "otherbot_told", "0")
+    before = len(SENT)
+    other = Message(message_id=9961, date=dt.datetime.now(),
+                    chat=Chat(id=CHAT, type="supergroup", title="הקבוצה שלי"),
+                    from_user=User(id=55555, is_bot=True, first_name="Rose",
+                                   username="MissRose_bot"),
+                    text="שלום")
+    await B._warn_other_bot(other)
+    out = " ".join(t for _c, t, _m in SENT[before:])
+    ok("על בוט ניהול אחר כן מתריעים", "Rose" in out, out[:80])
+    ok("וההתראה נוקבת בשם הקבוצה", "הקבוצה שלי" in out, out[:80])
+    B.db.set(CHAT, "otherbot_told", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3867,6 +3940,8 @@ async def main() -> int:
     await test_never_punish_an_admin()
     await test_menu_refreshes()
     await test_settings_in_topics()
+    await test_owner_console()
+    await test_anon_is_not_another_bot()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
