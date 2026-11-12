@@ -794,10 +794,17 @@ async function relayifyUrl(){
   // מפורש בכתובת. בלי זה ערוץ מ-7070 נשלח לפורט 86 ומחזיר 502.
   const dflt = u.protocol==="https:" ? "443" : "80";
   const seg = (u.port && u.port!==dflt) ? u.hostname+":"+u.port : u.hostname;
-  el.value=location.origin+"/hls-relay/"+seg+u.pathname+(u.search||"");
+  // [fix_relay_ts] קישור בלי סיומת (פאנל Xtream) או ‎.ts‎ הוא זרם TS גולמי:
+  // דפדפן לא מנגן אותו, ולכן מנתבים להמרה ל-HLS בשרת.
+  const _last=u.pathname.split("/").pop();
+  const _isTs = !u.search && (_last.indexOf(".")<0 || /\.ts$/i.test(_last));
+  el.value = _isTs
+    ? location.origin+"/hls-relay/_fix/"+seg+u.pathname.replace(/\/$/,"")+"/__ts.m3u8"
+    : location.origin+"/hls-relay/"+seg+u.pathname+(u.search||"");
   msg.style.color="#8aff9e";
   msg.textContent = seg===u.hostname ? "✓ הומר לרלֵיי דרך השרת שלנו"
                                      : "✓ הומר לרלֵיי, כולל פורט "+u.port;
+  if(_isTs) msg.textContent += " · זרם TS גולמי → מומר ל-HLS בשרת";
 }
 
 function renderLive(){
