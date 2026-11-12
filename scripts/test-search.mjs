@@ -80,6 +80,18 @@ check('הכתובת היא של דף חיפוש', pg.url().includes('/search'), 
 const backBtn = await pg.locator('[aria-label="חזרה"]').count();
 check('יש כפתור חזרה', backBtn > 0);
 
+// לחיצה על תוצאה חייבת להוביל לפריט. רגרסיה אמיתית: הלחיצה דחתה את
+// הפתיחה עד "המשך לצפייה", אבל החלון הזה לא צויר בדף החיפוש — הלחיצה
+// לא עשתה כלום, והמשתמש נאלץ לחזור לדף הבית.
+await pg.locator('input[placeholder*="חפש"]').first().fill('משהו');
+await pg.waitForTimeout(900);
+await pg.getByText('משהו אחר לגמרי', { exact: false }).first().click({ timeout: 5000 });
+await pg.waitForTimeout(500);
+const cont = pg.getByText('המשך לצפייה', { exact: false });
+check('לחיצה על תוצאה מציגה "המשך לצפייה"', await cont.count() > 0);
+if (await cont.count()) { await cont.first().click(); await pg.waitForTimeout(900); }
+check('אחרי "המשך" יצאנו מדף החיפוש', !pg.url().includes('/search'), pg.url());
+
 await br.close(); srv.close();
 console.log(failed ? `\n❌ ${failed} נכשלו` : '\n✅ הכל עבר');
 process.exit(failed ? 1 : 0);

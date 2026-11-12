@@ -182,8 +182,8 @@
   <!-- העלאות -->
   <div id="pane-uploads" class="hidden">
     <div class="card" style="border:1px solid #e50914">
-      <h2>🔗 אחד את כל הממתינים לסדרה אחת</h2>
-      <div class="muted">העלית סדרה והיא התפצלה לכמה חלקים (בגלל שמות מקור שונים)? הזן שם אחד + קטגוריה, לחץ, וכל הפרקים הממתינים ייכנסו כ<b>סדרה אחת</b>.</div>
+      <h2 id="mrgTitle">🔗 אחד את כל הממתינים לסדרה אחת</h2>
+      <div id="mrgDesc" class="muted">העלית סדרה והיא התפצלה לכמה חלקים (בגלל שמות מקור שונים)? הזן שם אחד + קטגוריה, לחץ, וכל הפרקים הממתינים ייכנסו כ<b>סדרה אחת</b>.</div>
       <input id="mrg_name" placeholder="שם הסדרה (למשל: מורשות)" style="margin-top:8px">
       <div style="margin-top:8px"><label>קטגוריה</label><select id="mrg_cat">
         <option value="סדרות">סדרות</option>
@@ -191,24 +191,10 @@
         <option value="סדרות ישראליות">סדרות ישראליות</option>
         <option value="אנימה">אנימה</option>
       </select></div>
-      <button onclick="mergeUploads()" style="width:100%;margin-top:8px">🔗 אחד הכל והוסף לאתר</button>
+      <label id="mrgRenumRow" class="hidden" style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" id="mrg_renum" checked> מספר את הפרקים מחדש ע1פ1..ע1פN לפי סדר ההעלאה</label>
+      <div class="row" style="margin-top:8px"><button id="mrgBtn" onclick="mergeUploads()" style="flex:1">🔗 אחד הכל והוסף לאתר</button>
+        <button id="mrgClear" class="gray hidden" onclick="clearSelUploads()">נקה בחירה</button></div>
       <div id="mrgMsg" class="muted" style="margin-top:6px"></div>
-    </div>
-    <div id="selBar" class="card hidden" style="border:1px solid #5e5ce6;position:sticky;top:0;z-index:5">
-      <h2>🔗 אחד את הנבחרים לסדרה אחת (<span id="selCount">0</span> נבחרו)</h2>
-      <div class="muted">כמה סדרות התפצלו יחד? סמן ✓ רק את הפרקים של סדרה אחת, הקלד שם, ואחד. אח"כ סמן את השאר לסדרה הבאה.</div>
-      <input id="sel_name" placeholder="שם הסדרה (למשל: פאודה)" style="margin-top:8px">
-      <div style="margin-top:8px"><label>קטגוריה</label><select id="sel_cat">
-        <option value="סדרות">סדרות</option>
-        <option value="סדרות לילדים">סדרות לילדים</option>
-        <option value="סדרות ישראליות">סדרות ישראליות</option>
-        <option value="אנימה">אנימה</option>
-      </select></div>
-      <label style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" id="sel_renum" checked> מספר את הפרקים מחדש ע1פ1..ע1פN לפי סדר ההעלאה</label>
-      <div class="row" style="margin-top:8px">
-        <button class="green" style="flex:1" onclick="mergeSelectedUploads()">🔗 אחד את הנבחרים</button>
-        <button class="gray" onclick="clearSelUploads()">נקה בחירה</button></div>
-      <div id="selMsg" class="muted" style="margin-top:6px"></div>
     </div>
     <div class="card"><div class="toprow"><h2>העלאות שממתינות מהבוט</h2>
       <div class="row"><button class="mini green" onclick="addAllUploads()">✓ הוסף הכל לאתר</button>
@@ -855,17 +841,22 @@ let _uploads=[];
 let _serGroups=[];
 let _selUploads=new Set();   // אינדקסים של פרקים ממתינים שסומנו לאיחוד ידני
 function updateSelBar(){
-  const bar=$("selBar"); if(!bar) return;
-  bar.classList.toggle("hidden", _selUploads.size===0);
-  const c=$("selCount"); if(c) c.textContent=_selUploads.size;
+  // טופס אחד: בלי בחירה — "אחד הכל"; עם בחירה — "אחד את N הנבחרים".
+  const n=_selUploads.size, t=$("mrgTitle"), b=$("mrgBtn"), d=$("mrgDesc");
+  if(!t||!b) return;
+  t.textContent = n ? `🔗 אחד את ${n} הנבחרים לסדרה אחת` : "🔗 אחד את כל הממתינים לסדרה אחת";
+  b.textContent = n ? `🔗 אחד את ${n} הנבחרים והוסף לאתר` : "🔗 אחד הכל והוסף לאתר";
+  if(d) d.style.display = n ? "none" : "";
+  $("mrgRenumRow").classList.toggle("hidden", !n);
+  $("mrgClear").classList.toggle("hidden", !n);
 }
 function toggleSelUpload(i,on){ if(on)_selUploads.add(i); else _selUploads.delete(i); updateSelBar(); }
 function clearSelUploads(){ _selUploads.clear(); document.querySelectorAll(".uplsel").forEach(c=>c.checked=false); updateSelBar(); }
 // אחד רק את הפרקים שסומנו לסדרה אחת (לכמה סדרות שהתפצלו יחד).
 async function mergeSelectedUploads(){
-  const name=$("sel_name").value.trim(), cat=$("sel_cat").value, renum=$("sel_renum").checked;
+  const name=$("mrg_name").value.trim(), cat=$("mrg_cat").value, renum=$("mrg_renum").checked;
   if(!_selUploads.size){ alert("לא נבחרו פרקים"); return; }
-  if(!name){ $("selMsg").innerHTML='<span class="err">הקלד שם סדרה</span>'; return; }
+  if(!name){ $("mrgMsg").innerHTML='<span class="err">הקלד שם סדרה</span>'; return; }
   let idxs=[..._selUploads].filter(i=>_uploads[i]);
   if(!idxs.length){ clearSelUploads(); return; }
   idxs.sort((a,b)=>((_uploads[a].channel_msg_id||0)-(_uploads[b].channel_msg_id||0)));  // סדר העלאה ≈ סדר פרקים
@@ -887,7 +878,7 @@ async function mergeSelectedUploads(){
   if(await persist()){
     try{ await fetch("/uploads/clear",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({password:PASS, channel_msg_ids:ids})}); }catch{}
-    _selUploads.clear(); $("sel_name").value=""; $("selMsg").textContent="";
+    _selUploads.clear(); $("mrg_name").value=""; $("mrgMsg").textContent="";
     refreshDerived(); await loadUploads();
     alert(`אוחדו ${newItems.length} פרקים → «${name}» ✓`);
   }
@@ -971,6 +962,7 @@ async function addSeriesUploads(gi){
   }
 }
 async function mergeUploads(){
+  if(_selUploads.size) return mergeSelectedUploads();   // יש בחירה → רק הנבחרים
   const name=$("mrg_name").value.trim(), cat=$("mrg_cat").value;
   if(!name){ $("mrgMsg").innerHTML='<span class="err">חסר שם סדרה</span>'; return; }
   if(!confirm(`לאחד את כל הפרקים הממתינים לסדרה «${name}» ולהוסיף לאתר?`)) return;

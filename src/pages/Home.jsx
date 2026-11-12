@@ -308,6 +308,7 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   // דרך ה-URL כדי שכפתור "חזור" של הדפדפן יעבוד כמצופה.
   if (slug === "search") {
     return (
+      <>
       <SearchPage
         movies={movies}
         seriesMap={seriesMap}
@@ -315,6 +316,13 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
         handleItemClick={handleItemClick}
         onClose={() => navigate(-1)}
       />
+      {/* חלון "המשך" חייב להיות מצויר גם כאן: handleItemClick דוחה את
+          הפתיחה עד הלחיצה עליו, והוא הוגדר רק אחרי ההחזרה המוקדמת הזו —
+          כך שלחיצה על תוצאת חיפוש לא עשתה כלום. */}
+      {showDonation && !showAdmin && (
+        <DonationModalView onContinue={() => { setShowDonation(false); pendingAction && pendingAction(); }} />
+      )}
+      </>
     );
   }
 
