@@ -3732,6 +3732,44 @@ async def test_never_punish_an_admin():
         B.bot.get_chat_member = real
 
 
+async def test_menu_refreshes():
+    """תפריט הפקודות האישי מתרענן, ולא נתקע על היום שבו הורץ /start.
+
+    טלגרם שומרת רשימת פקודות לכל צ'אט לנצח, ורשימה כזאת גוברת על
+    כל ברירת מחדל. הפרסום קרה רק ב-‎/start‎, ולכן פקודות שנמחקו
+    מהקוד המשיכו להופיע בתפריט — "מדי פעם הוא חוזר לפקודות הישנות".
+    """
+    section("תפריט הפקודות")
+    calls = []
+    real = B.bot.set_my_commands
+
+    async def spy(items, scope=None, **kw):
+        calls.append([c.command for c in items])
+        return True
+    B.bot.set_my_commands = spy
+    B._menu_sent.pop(ADM, None)
+    try:
+        await B.publish_personal_commands(ADM, "he")
+        ok("פורסם תפריט", len(calls) == 1, str(len(calls)))
+        await B.publish_personal_commands(ADM, "he")
+        ok("ובלי שינוי לא פונים לטלגרם שוב", len(calls) == 1,
+           str(len(calls)))
+
+        # שינוי אמיתי — למשל שפה — כן מפורסם
+        await B.publish_personal_commands(ADM, "en")
+        ok("שינוי כן מפורסם", len(calls) == 2, str(len(calls)))
+
+        # ופתיחת הפאנל מרעננת
+        B._menu_sent.pop(ADM, None)
+        q = FakeQ2(panel.cb(0, "home"), ADM)
+        await B.on_callback(q)
+        ok("פתיחת הפאנל מרעננת את התפריט", len(calls) == 3,
+           str(len(calls)))
+    finally:
+        B.bot.set_my_commands = real
+        B._menu_sent.pop(ADM, None)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3793,6 +3831,7 @@ async def main() -> int:
     await test_seasons_and_variants()
     await test_long_upload_stays_open()
     await test_never_punish_an_admin()
+    await test_menu_refreshes()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

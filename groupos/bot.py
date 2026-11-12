@@ -6162,6 +6162,10 @@ async def on_callback(q: CallbackQuery):
         return
 
     if name == "home":
+        # רענון התפריט האישי. מי שלא הריץ ‎/start‎ מחדש נשאר עם
+        # רשימת הפקודות של היום שבו הריץ אותו — כולל פקודות שכבר
+        # נמחקו. פנייה לטלגרם קורית רק כשהרשימה באמת השתנתה.
+        await publish_personal_commands(q.from_user.id, lg)
         await _edit(q, panel.home(await my_groups_live(q.from_user.id), lg,
                                   _bot_username))
         # בלי ‎answer‎ טלגרם משאירה גלגל מסתובב על הכפתור עד שייגמר
@@ -6939,16 +6943,31 @@ async def publish_commands() -> None:
                             type(scope).__name__ if scope else "default", e)
 
 
+# מה פורסם לאחרונה לכל אדם, כדי לא לפנות לטלגרם על כלום.
+_menu_sent: dict[int, str] = {}
+
+
 async def publish_personal_commands(user_id: int, lg: str) -> None:
     """הרשימה המדויקת של אדם אחד, בשיחה הפרטית שלו.
 
-    נקרא מ-‎/start‎ בפרטי. בעל קבוצה שמנהל אותה מכאן צריך לראות בתפריט
-    את מה שהוא יכול, ולא את רשימת החברים שנרשמה כברירת מחדל."""
+    בעל קבוצה שמנהל אותה מכאן צריך לראות בתפריט את מה שהוא יכול,
+    ולא את רשימת החברים שנרשמה כברירת מחדל.
+
+    **זה היה נקרא רק מ-‎/start‎**, וטלגרם שומרת רשימה לכל צ'אט
+    לנצח — ורשימה כזאת גוברת על כל ברירת מחדל. כלומר מי שהריץ
+    ‎/start‎ פעם אחת נשאר עם התפריט של אותו יום: פקודות שכבר אינן
+    קיימות המשיכו להופיע, וזה "מדי פעם הוא חוזר לפקודות הישנות".
+    עכשיו זה נקרא גם בכל פתיחה של הפאנל, ופונה לטלגרם רק כשהרשימה
+    באמת השתנתה."""
     allowed = set(panel.member_commands())
     for chat_id, _t in my_groups(user_id):
         allowed |= _allowed_cmds(chat_id, user_id)
     items = [BotCommand(command=n, description=d[:256])
              for n, d in panel.command_list(lg) if n in allowed]
+    mark = f"{lg}|" + ",".join(c.command for c in items)
+    if _menu_sent.get(user_id) == mark:
+        return
+    _menu_sent[user_id] = mark
     # ‎Exception‎ ולא ‎TelegramAPIError‎ בלבד: פרסום תפריט הוא נוחות,
     # ו-‎/start‎ שנכשל בגללו הוא משתמש חדש שלא קיבל שום תשובה.
     try:
