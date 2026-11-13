@@ -2705,6 +2705,30 @@ async def cmd_blocklist(msg: Message):
         f"• <code>{r['pattern']}</code> ({r['kind']})" for r in rows)))
 
 
+@dp.message(Command("here"))
+@needs("settings.write")
+async def cmd_here(msg: Message):
+    """"שלח את זה בנושא שאתה רוצה" — ומשם יוצאות ההכרזות.
+
+    זה הפתרון לקבוצה שמחולקת לנושאים: במקום שננחש לאן שייכת הודעת
+    סגירה, המנהל אומר לנו. פקודה אחת, במקום שבו הוא רוצה אותה,
+    ואנחנו עונים שקלטנו — כך הוא גם רואה מיד שזה נתפס."""
+    touch(msg)
+    lg = lang_of(msg)
+    thread = _thread_of(msg)
+    if thread is None and not await _is_forum(msg.chat.id):
+        # קבוצה רגילה: אין נושאים, ואין מה לבחור.
+        await reply(msg, T(msg, "topic.plain"))
+        return
+    db.set(msg.chat.id, TOPIC_KEY, str(thread or GENERAL_THREAD),
+           msg.from_user.id)
+    audit.log(msg.chat.id, "topic.set", actor_id=msg.from_user.id,
+              after=str(thread or GENERAL_THREAD), severity="info")
+    # התשובה יוצאת **כאן**, בנושא שנבחר: זו ההוכחה שזה עבד.
+    await send(msg.chat.id, i18n.t("topic.saved", lg),
+               thread_id=thread)
+
+
 @dp.message(Command("rules"))
 async def cmd_rules(msg: Message):
     touch(msg)
@@ -4126,6 +4150,7 @@ async def _auto_lock(chat_id: int, close: bool, owner: str, text: str,
     audit.log(chat_id, "autolock." + ("on" if close else "off"),
               actor_kind="bot", after=owner, source="automation",
               severity="medium")
+    await _ask_for_topic(chat_id)
     if field:
         await _state_message(chat_id, field,
                              dict(panel.STATE_DEFAULTS).get(field, ""),
@@ -5084,9 +5109,46 @@ async def _is_forum(chat_id: int) -> bool:
     return val
 
 
+TOPIC_KEY = "notify_topic"
+
+
 async def _general_of(chat_id: int) -> Optional[int]:
-    """מזהה הנושא הראשי, או ‎None‎ בקבוצה רגילה."""
+    """לאן נשלחת הודעה שהיא **על הקבוצה** — סגירה, פתיחה, שבת.
+
+    סדר: הנושא שהמנהל בחר · הנושא הראשי · בלי נושא.
+
+    הנושא הראשי לבדו לא הספיק. בקבוצת נושאים הוא יכול להיות סגור
+    או מוסתר, ואז השליחה נכשלת וההודעה לא מופיעה בשום מקום — "הוא
+    אמור לסגור ולשלוח הודעה, והוא לא עושה כלום". ומעבר לכך, מי
+    שמחלק קבוצה לנושאים יודע בדיוק לאיזה מהם ההכרזות שייכות, ואין
+    סיבה שננחש במקומו."""
+    chosen = _int(db.get(chat_id, TOPIC_KEY, "0"), 0)
+    if chosen:
+        return chosen
     return GENERAL_THREAD if await _is_forum(chat_id) else None
+
+
+async def _ask_for_topic(chat_id: int) -> None:
+    """מבקש מהמנהלים לבחור נושא — פעם אחת לכל קבוצה.
+
+    נקרא ברגע שבו זה באמת משנה: כשהבוט עומד לשלוח הודעה על
+    הקבוצה והיא מחולקת לנושאים. לשאול מראש, ברגע ההוספה, היה
+    להטריד את מי שאין לו נושאים בכלל."""
+    if db.get(chat_id, "topic_asked", "0") == "1":
+        return
+    if _int(db.get(chat_id, TOPIC_KEY, "0"), 0):
+        return
+    if not await _is_forum(chat_id):
+        return
+    db.set(chat_id, "topic_asked", "1")
+    title = ""
+    try:
+        title = (await bot.get_chat(chat_id)).title or ""
+    except TelegramAPIError:
+        pass
+    await _notify_admins(chat_id,
+                         i18n.t("topic.ask", lang.for_chat(chat_id),
+                                chat=tpl.esc(title or str(chat_id))))
 
 
 async def _state_message(chat_id: int, field: str, default_key: str,

@@ -3877,6 +3877,74 @@ async def test_anon_is_not_another_bot():
     B.db.set(CHAT, "otherbot_told", "0")
 
 
+async def test_topic_choice():
+    """בקבוצת נושאים המנהל בוחר לאן נשלחות ההכרזות."""
+    section("בחירת נושא")
+
+    class Forum:
+        is_forum = True
+        title = "קבוצת נושאים"
+
+    class Plain:
+        is_forum = False
+        title = "קבוצה רגילה"
+
+    real = B.bot.get_chat
+    B.perms.set_role(CHAT, ADM, "owner")
+    B.db.set(CHAT, B.TOPIC_KEY, "")
+    B.db.set(CHAT, "topic_asked", "0")
+    B._forum_cache.clear()
+    try:
+        B.bot.get_chat = lambda c: _ret(Forum())
+        # בלי בחירה — נופל לנושא הראשי
+        ok("ברירת מחדל היא הנושא הראשי",
+           await B._general_of(CHAT) == B.GENERAL_THREAD)
+
+        # /here בנושא 77 קובע אותו
+        m = Message(message_id=9980, date=dt.datetime.now(),
+                    chat=Chat(id=CHAT, type="supergroup", title="ק",
+                              is_forum=True),
+                    from_user=User(id=ADM, is_bot=False, first_name="דוד"),
+                    message_thread_id=77, is_topic_message=True,
+                    text="/here")
+        THREADS.clear()
+        before = len(SENT)
+        await B.cmd_here(m)
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("הבוט מאשר שקלט", "קלטתי" in out, out[:60])
+        ok("והאישור נשלח באותו נושא", 77 in THREADS, str(THREADS))
+        ok("והנושא נשמר", await B._general_of(CHAT) == 77)
+
+        # והודעות המצב הולכות לשם
+        B.db.set(CHAT, "lock_msg_close", "נסגר")
+        THREADS.clear()
+        await B._state_message(CHAT, "lockmsg", "", "he")
+        ok("הודעת מצב יוצאת לנושא שנבחר", THREADS and THREADS[-1] == 77,
+           str(THREADS))
+
+        # ובקבוצה רגילה אין מה לבחור
+        B._forum_cache.clear()
+        B.bot.get_chat = lambda c: _ret(Plain())
+        B.db.set(CHAT, B.TOPIC_KEY, "")
+        ok("בקבוצה רגילה אין נושא", await B._general_of(CHAT) is None)
+
+        # ומבקשים מהמנהלים פעם אחת, לא בכל נעילה
+        B._forum_cache.clear()
+        B.bot.get_chat = lambda c: _ret(Forum())
+        B.db.set(CHAT, "topic_asked", "0")
+        before = len(SENT)
+        await B._ask_for_topic(CHAT)
+        first = len(SENT) - before
+        await B._ask_for_topic(CHAT)
+        ok("הבקשה נשלחת פעם אחת בלבד", len(SENT) - before == first,
+           str(len(SENT) - before))
+    finally:
+        B.bot.get_chat = real
+        B._forum_cache.clear()
+        B.db.set(CHAT, B.TOPIC_KEY, "")
+        B.db.set(CHAT, "lock_msg_close", "")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -3942,6 +4010,7 @@ async def main() -> int:
     await test_settings_in_topics()
     await test_owner_console()
     await test_anon_is_not_another_bot()
+    await test_topic_choice()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

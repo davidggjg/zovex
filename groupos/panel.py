@@ -604,6 +604,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("unlock",   "locks.write"),
     ("locks",    "settings.read"),
     ("lockdown", "chat.lockdown"),
+    # "שלח את זה בנושא שאתה רוצה" — בקבוצה שמחולקת לנושאים.
+    ("here",     "settings.write"),
     ("say",      "chat.say"),
     ("del",      "msg.delete"),
     ("pin",      "chat.pin"),
@@ -824,7 +826,7 @@ HELP_CATS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("warns", "⚠️", ("warn", "unwarn", "warns", "dwarn", "swarn",
                      "warnings", "warnlimit", "resetwarns", "setwarnmode")),
     ("locks", "🔒", ("lock", "unlock", "locks", "locktypes", "lockdown",
-                     "silent")),
+                     "silent", "here")),
     ("filters", "🧹", ("filter", "filteradd", "filterbulk", "filteritems",
                        "stop",
                        "stopall", "filters", "addblock",
