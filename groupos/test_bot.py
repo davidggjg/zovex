@@ -3945,6 +3945,56 @@ async def test_topic_choice():
         B.db.set(CHAT, "lock_msg_close", "")
 
 
+async def test_failed_announcement_is_reported():
+    """נעילה שלא הצליחה לשלוח הודעה — המנהלים נודעים, ולמה.
+
+    "זה כן נעל ופתח אבל לא שלח שום הודעה." ההודעה נכשלה, הסיבה
+    נרשמה ללוג, ואיש לא ראה אותה. הקבוצה נסגרה בשקט ואין שום רמז."""
+    section("הודעת מצב שנכשלה")
+    from aiogram.exceptions import TelegramBadRequest
+    real = B.bot.send_message
+    sent_to = []
+
+    async def boom(chat_id, text, **kw):
+        if chat_id == CHAT:
+            raise TelegramBadRequest(method=None,
+                                     message="message thread not found")
+        sent_to.append((chat_id, text))
+        return await real(chat_id, text, **kw)
+
+    B.bot.send_message = boom
+    B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+    B.db.set(CHAT, "lockdown", "0")
+    try:
+        await B._auto_lock(CHAT, True, "shab", "שבת שלום")
+        ok("הקבוצה בכל זאת ננעלה",
+           B.db.get(CHAT, "lockdown", "0") == "1")
+        blob = " ".join(t for _c, t in sent_to)
+        ok("והמנהלים קיבלו הודעה בפרטי", bool(sent_to), str(sent_to)[:60])
+        ok("שאומרת שההודעה לא נשלחה", "לא נשלחה" in blob, blob[:80])
+        ok("ונוקבת בסיבה מטלגרם", "thread" in blob, blob[:120])
+    finally:
+        B.bot.send_message = real
+        B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+        B.db.set(CHAT, "lockdown", "0")
+
+
+async def test_setup_commands_never_silenced():
+    """המתג ״רק פקודות שפונות אליי״ לא נועל את הדלת מבחוץ."""
+    section("פקודות שתמיד שלנו")
+    B._bot_username = "TestBot"
+    B.db.set(CHAT, "onlyme", "1")
+    try:
+        ok("/here עובד גם כשהמתג דלוק",
+           not B._skip_foreign_command(msg("/here", uid=ADM, mid=9991)))
+        ok("וגם /diag",
+           not B._skip_foreign_command(msg("/diag", uid=ADM, mid=9992)))
+        ok("אבל /ban עדיין נעזב לבוט השני",
+           B._skip_foreign_command(msg("/ban", uid=ADM, mid=9993)))
+    finally:
+        B.db.set(CHAT, "onlyme", "0")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4011,6 +4061,8 @@ async def main() -> int:
     await test_owner_console()
     await test_anon_is_not_another_bot()
     await test_topic_choice()
+    await test_failed_announcement_is_reported()
+    await test_setup_commands_never_silenced()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

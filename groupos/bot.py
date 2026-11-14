@@ -205,6 +205,14 @@ def _ephemeral(chat_id: int, user_id: Optional[int]):
     return EphemeralMessageParameters(receiver_user_id=user_id)
 
 
+# למה השליחה האחרונה לכל צ'אט נכשלה.
+#
+# שליחה שנכשלת נרשמה ללוג וזהו. בקבוצה זה נראה כך: הנעילה עבדה,
+# ההודעה לא הופיעה, ואין שום רמז למה — "זה כן נעל ופתח אבל לא שלח
+# שום הודעה". הסיבה קיימת, היא פשוט לא הגיעה לאף אחד.
+_last_send_error: dict[int, str] = {}
+
+
 async def send(chat_id: int, text: str, *, is_group: bool = True,
                markup=None, clean_after: Optional[int] = None,
                thread_id: Optional[int] = None,
@@ -242,6 +250,7 @@ async def send(chat_id: int, text: str, *, is_group: bool = True,
             return await send(chat_id, text, is_group=is_group, markup=markup,
                               clean_after=clean_after)
         log.warning("שליחה נכשלה בצ'אט %s: %s", chat_id, e)
+        _last_send_error[chat_id] = str(e)[:200]
         return None
     if clean_after:
         _schedule_delete(chat_id, m.message_id, clean_after)
@@ -347,6 +356,10 @@ def _addressed_to_me(msg: Message) -> bool:
     return bool(at) and at.lower() == (_bot_username or "").lower()
 
 
+#: פקודות שתמיד שלנו, גם כש-‎onlyme‎ דלוק.
+ALWAYS_MINE = frozenset({"here", "diag", "settings", "groupos"})
+
+
 def _skip_foreign_command(msg: Message) -> bool:
     """‎True‎ = הפקודה אינה שלנו, ואסור לגעת בה בכלל."""
     if msg.chat.type not in GROUP_TYPES:
@@ -357,6 +370,12 @@ def _skip_foreign_command(msg: Message) -> bool:
     if db.get(msg.chat.id, "onlyme", "0") != "1":
         return False
     if _addressed_to_me(msg):
+        return False
+    # פקודות שבלעדיהן אי אפשר להגדיר את הבוט בכלל. מי שהדליק את
+    # המתג ואז גילה ש-‎/here‎ אינו מגיב נשאר תקוע: הפקודה שנועדה
+    # לתקן את ההתנהגות הושתקה בעצמה. מתג אינו אמור לנעול את הדלת
+    # מבחוץ, ואלה גם הפקודות שבוט ניהול אחר אינו מכיר.
+    if name in ALWAYS_MINE:
         return False
     # פקודה ש**המנהל הגדיר כאן** לעולם אינה של הבוט השני: הוא לא
     # מכיר אותה, היא נוצרה בקבוצה הזאת. המתג נועד להתנגשות בשמות
@@ -2341,6 +2360,7 @@ async def send_content(chat_id: int, text: str, media_id: Optional[str],
             return await send_content(chat_id, text, media_id, media_kind,
                                       buttons, clean_after=clean_after)
         log.warning("שליחת תוכן ל-%s נכשלה: %s", chat_id, e)
+        _last_send_error[chat_id] = str(e)[:200]
         return None
     if clean_after:
         _schedule_delete(chat_id, m.message_id, clean_after)
@@ -4156,9 +4176,18 @@ async def _auto_lock(chat_id: int, close: bool, owner: str, text: str,
                              dict(panel.STATE_DEFAULTS).get(field, ""),
                              lang.for_chat(chat_id))
     elif text:
-        # גם הודעת השבת הולכת לנושא הראשי: היא על הקבוצה, לא על
+        # גם הודעת השבת הולכת לנושא שנבחר: היא על הקבוצה, לא על
         # נושא מסוים.
-        await send(chat_id, text, thread_id=await _general_of(chat_id))
+        _last_send_error.pop(chat_id, None)
+        got = await send(chat_id, text, thread_id=await _general_of(chat_id))
+        if got is None:
+            # **לא נעלם.** הקבוצה ננעלה וההודעה לא יצאה — בלי
+            # הדיווח הזה אין שום דרך לדעת שזה קרה, ובוודאי לא למה.
+            await _notify_admins(
+                chat_id,
+                i18n.t("state.send_failed", lang.for_chat(chat_id),
+                       chat=tpl.esc(str(chat_id)),
+                       why=tpl.esc(_last_send_error.get(chat_id, "—"))))
 
 
 async def _tick_shabbat(chat_id: int, now: float) -> bool:
@@ -5172,9 +5201,15 @@ async def _state_message(chat_id: int, field: str, default_key: str,
         # מי כתב את זה ואיפה משנים. הודעה שאיש לא כתב לא אמורה
         # להופיע בשם הקבוצה; מי שרוצה אחת, כותב אותה בלחיצה.
         return
-    await send_content(chat_id, tpl.render_pick(raw, tpl.context(
+    _last_send_error.pop(chat_id, None)
+    got = await send_content(chat_id, tpl.render_pick(raw, tpl.context(
         chat_id=chat_id, language=lg)), media or None, kind or None, "",
         thread_id=await _general_of(chat_id))
+    if got is None:
+        await _notify_admins(
+            chat_id, i18n.t("state.send_failed", lg,
+                            chat=tpl.esc(str(chat_id)),
+                            why=tpl.esc(_last_send_error.get(chat_id, "—"))))
 
 
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
