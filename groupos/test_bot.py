@@ -3995,6 +3995,117 @@ async def test_setup_commands_never_silenced():
         B.db.set(CHAT, "onlyme", "0")
 
 
+async def test_topic_closed_report():
+    """נושא סגור: אומרים בדיוק מה חסר, ולא קוד שגיאה באנגלית."""
+    section("נושא סגור")
+    from aiogram.exceptions import TelegramBadRequest
+
+    class Forum:
+        is_forum = True
+        title = "פורום"
+
+    class Member:
+        def __init__(self, topics):
+            self.status = B.ChatMemberStatus.ADMINISTRATOR
+            self.can_delete_messages = True
+            self.can_restrict_members = True
+            self.can_manage_topics = topics
+
+    real_send, real_chat, real_mem = (B.bot.send_message, B.bot.get_chat,
+                                      B.bot.get_chat_member)
+    pm_got = []
+
+    async def boom(chat_id, text, **kw):
+        if chat_id == CHAT:
+            raise TelegramBadRequest(method=None,
+                                     message="Bad Request: TOPIC_CLOSED")
+        pm_got.append(text)
+        return await real_send(chat_id, text, **kw)
+
+    B.bot.send_message = boom
+    B.bot.get_chat = lambda c: _ret(Forum())
+    B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+    B.db.set(CHAT, "lockdown", "0")
+    B._forum_cache.clear()
+    try:
+        # בלי הרשאת ניהול נושאים — אומרים בדיוק מה להדליק
+        B.bot.get_chat_member = lambda c, u: _ret(Member(False))
+        pm_got.clear()
+        await B._auto_lock(CHAT, True, "shab", "שבת שלום")
+        blob = " ".join(pm_got)
+        ok("מדווח שההודעה לא נשלחה", "לא נשלחה" in blob, blob[:60])
+        ok("ומסביר שחסרה הרשאת ניהול נושאים",
+           "ניהול נושאים" in blob, blob[:120])
+        ok("ולא מציג קוד שגיאה באנגלית",
+           "TOPIC_CLOSED" not in blob, blob[:80])
+
+        # עם ההרשאה — הבעיה אחרת, והניסוח אחר
+        B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+        B.db.set(CHAT, "lockdown", "0")
+        B.bot.get_chat_member = lambda c, u: _ret(Member(True))
+        pm_got.clear()
+        await B._auto_lock(CHAT, True, "shab", "שבת שלום")
+        blob2 = " ".join(pm_got)
+        ok("עם ההרשאה ההודעה שונה", "לא עניין של הרשאות" in blob2,
+           blob2[:120])
+        ok("ומפנה ל-/here", "/here" in blob2, blob2[:120])
+    finally:
+        B.bot.send_message, B.bot.get_chat = real_send, real_chat
+        B.bot.get_chat_member = real_mem
+        B._forum_cache.clear()
+        B.db.set(CHAT, B.AUTOLOCK_KEY, "")
+        B.db.set(CHAT, "lockdown", "0")
+
+
+async def test_anonymous_bot_is_explained():
+    """בוט שהוגדר אנונימי לא עובד — ואומר את זה במקום לשתוק."""
+    section("בוט אנונימי")
+
+    class M:
+        status = B.ChatMemberStatus.ADMINISTRATOR
+        can_delete_messages = True
+        can_restrict_members = True
+        can_manage_topics = True
+        is_anonymous = True
+
+    class Plain:
+        is_forum = False
+        title = "ק"
+
+    real_mem, real_chat = B.bot.get_chat_member, B.bot.get_chat
+    B._forum_cache.clear()
+    try:
+        B.bot.get_chat = lambda c: _ret(Plain())
+        B.bot.get_chat_member = lambda c, u: _ret(M())
+        ok("מזוהה כאנונימי", await B.bot_is_anonymous(CHAT))
+        out = await B.group_status(CHAT, "he")
+        ok("והמצב אומר את זה", "אנונימי" in out, out[:60])
+        ok("ומסביר איפה לכבות", "מנהלים" in out, out[:120])
+
+        M.is_anonymous = False
+        ok("ובלי אנונימיות חוזר למצב רגיל",
+           not await B.bot_is_anonymous(CHAT))
+    finally:
+        B.bot.get_chat_member, B.bot.get_chat = real_mem, real_chat
+        B._forum_cache.clear()
+
+
+async def test_state_defaults_readable():
+    """נוסחי ברירת המחדל הם הודעה אמיתית, והתוויות נשארו תוויות."""
+    section("נוסחי ברירת מחדל")
+    import i18n as _i
+    for _key, tkey in panel.STATE_DEFAULTS:
+        for lg in ("he", "en"):
+            v = _i.t(tkey, lg)
+            ok(f"{tkey}/{lg} קיים ומנוסח", v != tkey and len(v) > 25, v[:40])
+    # התוויות במסך קצרות — הן שם של כפתור, לא הודעה
+    for _key, tkey in panel.STATE_MSGS:
+        v = _i.t(tkey, "he")
+        ok(f"{tkey} היא תווית קצרה", len(v) < 40 and "<b>" not in v, v[:50])
+    first = panel.STATE_MSGS[0][0]
+    ok("פתיחה מופיעה לפני סגירה", first == "openmsg", first)
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4063,6 +4174,9 @@ async def main() -> int:
     await test_topic_choice()
     await test_failed_announcement_is_reported()
     await test_setup_commands_never_silenced()
+    await test_topic_closed_report()
+    await test_anonymous_bot_is_explained()
+    await test_state_defaults_readable()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

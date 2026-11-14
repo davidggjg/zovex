@@ -14,7 +14,7 @@ STRINGS: dict[str, str] = {
     "start.group": "GroupOS está conectado. Envíame /start en privado para gestionarlo.",
     "status.ready": "<b>GroupOS está conectado y listo.</b>\n{n} administradores encontrados.\n\nEnvíame /start en privado para gestionarlo.",
     "status.not_admin": "<b>GroupOS está en el grupo, pero aún no es administrador.</b>\n\nMientras no sea administrador, Telegram no me entrega los mensajes normales, así que no puedo aplicar los bloqueos.\n\nAjustes del grupo → Administradores → Añadir administrador → elígeme.\nNecesito: eliminar mensajes y restringir miembros.\n\n{n} administradores encontrados, y ya puedes abrir el panel: /start en privado.",
-    "status.missing": "<b>GroupOS es administrador, pero le faltan permisos:</b>\n{list}\n\nSin ellos puedo detectar infracciones pero no actuar.",
+    "status.missing": "<b>El bot es administrador, pero le faltan permisos:</b>\n{list}\n\nSin ellos detecta infracciones pero no puede actuar, y en un grupo con temas tampoco puede escribir mientras un tema está cerrado.\n\n<b>Cómo arreglarlo:</b>\nAjustes del grupo → Administradores → el bot → activa los permisos de arriba → guardar.\n\nLuego envía /diag aquí para comprobar que todo está bien.",
     "right.delete": "Eliminar mensajes",
     "right.restrict": "Restringir miembros",
     "right.ban": "Vetar usuarios",

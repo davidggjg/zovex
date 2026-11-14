@@ -1515,11 +1515,15 @@ def collecting_screen(chat_id: int, label: str, count: int,
 #
 # שלוש אפשרויות לכל הודעה ולא שתיים: נוסח משלי · ברירת המחדל · בלי
 # הודעה בכלל. בלי השלישית, מי שרצה שקט היה צריך לכתוב רווח.
+# פתיחה לפני סגירה, בכל זוג.
+#
+# סדר הקריאה הטבעי הוא "מה קורה כשנפתח, ומה כשנסגר", וגם פחות
+# מאיים להתחיל מהפתיחה. קודם זה היה הפוך בלי סיבה.
 STATE_MSGS = (
-    ("lockmsg", "state.lock_close"),
     ("openmsg", "state.lock_open"),
-    ("hclose", "state.hours_close"),
+    ("lockmsg", "state.lock_close"),
     ("hopen", "state.hours_open"),
+    ("hclose", "state.hours_close"),
 )
 
 SILENT = "off"          # הערך שאומר "אל תשלח כלום"

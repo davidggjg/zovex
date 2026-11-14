@@ -583,17 +583,41 @@ _can_read_all: bool = True
 
 
 async def bot_rights(chat_id: int) -> tuple[bool, list[str]]:
-    """‎(האם מנהל, מפתחות ההרשאות החסרות)‎."""
+    """‎(האם מנהל, מפתחות ההרשאות החסרות)‎.
+
+    בקבוצת נושאים נדרשת הרשאה אחת נוספת: **ניהול נושאים**. בלעדיה
+    טלגרם מחזירה ‎TOPIC_CLOSED‎ על כתיבה לנושא סגור — וזה בדיוק מה
+    שקרה בשטח: הקבוצה ננעלה לשבת, הנושא היה סגור, וההודעה נדחתה.
+    היא לא נדרשת בקבוצה רגילה, ולכן היא נבדקת רק כשיש נושאים."""
+    need = list(NEEDED_RIGHTS)
+    if await _is_forum(chat_id):
+        need.append(("can_manage_topics", "right.topics"))
     if _me_id is None:
-        return False, [k for _, k in NEEDED_RIGHTS]
+        return False, [k for _, k in need]
     try:
         m = await bot.get_chat_member(chat_id, _me_id)
     except TelegramAPIError as e:
         log.warning("בדיקת ההרשאות שלי ב-%s נכשלה: %s", chat_id, e)
-        return False, [k for _, k in NEEDED_RIGHTS]
+        return False, [k for _, k in need]
     if m.status != ChatMemberStatus.ADMINISTRATOR:
-        return False, [k for _, k in NEEDED_RIGHTS]
-    return True, [k for attr, k in NEEDED_RIGHTS if not getattr(m, attr, False)]
+        return False, [k for _, k in need]
+    return True, [k for attr, k in need if not getattr(m, attr, False)]
+
+
+async def bot_is_anonymous(chat_id: int) -> bool:
+    """האם הבוט עצמו הוגדר כמנהל **אנונימי**.
+
+    מנהל אנונימי שולח בשם הקבוצה ולא בשמו, וטלגרם מפסיקה למסור
+    לבוט חלק מהמידע שהוא צריך. מבחוץ זה נראה כמו בוט מת: הוא
+    בקבוצה, הוא מנהל, ושום דבר לא עובד. אף אחד לא מנחש את זה
+    לבד, ולכן זה נבדק ונאמר במפורש."""
+    if _me_id is None:
+        return False
+    try:
+        m = await bot.get_chat_member(chat_id, _me_id)
+    except TelegramAPIError:
+        return False
+    return bool(getattr(m, "is_anonymous", False))
 
 
 async def group_status(chat_id: int, lg: str) -> str:
@@ -602,6 +626,10 @@ async def group_status(chat_id: int, lg: str) -> str:
     is_admin, missing = await bot_rights(chat_id)
     if not is_admin:
         return i18n.t("status.not_admin", lg, n=len(admins))
+    # אנונימיות קודמת לכל השאר: כל עוד היא דלוקה, תיקון הרשאות
+    # לא יעזור, והמנהל ירדוף אחרי הבעיה הלא נכונה.
+    if await bot_is_anonymous(chat_id):
+        return i18n.t("status.anonymous", lg)
     if missing:
         return i18n.t("status.missing", lg,
                       list="\n".join("• " + i18n.t(k, lg) for k in missing))
@@ -4183,11 +4211,7 @@ async def _auto_lock(chat_id: int, close: bool, owner: str, text: str,
         if got is None:
             # **לא נעלם.** הקבוצה ננעלה וההודעה לא יצאה — בלי
             # הדיווח הזה אין שום דרך לדעת שזה קרה, ובוודאי לא למה.
-            await _notify_admins(
-                chat_id,
-                i18n.t("state.send_failed", lang.for_chat(chat_id),
-                       chat=tpl.esc(str(chat_id)),
-                       why=tpl.esc(_last_send_error.get(chat_id, "—"))))
+            await _report_send_failure(chat_id)
 
 
 async def _tick_shabbat(chat_id: int, now: float) -> bool:
@@ -5157,6 +5181,27 @@ async def _general_of(chat_id: int) -> Optional[int]:
     return GENERAL_THREAD if await _is_forum(chat_id) else None
 
 
+async def _report_send_failure(chat_id: int) -> None:
+    """אומר למנהלים שההודעה לא יצאה, ומה חסר כדי שתצא.
+
+    ‎TOPIC_CLOSED‎ אינו "תקלה": טלגרם מרשה לכתוב לנושא סגור רק
+    למנהל עם הרשאת **ניהול נושאים**. לכן כאן נבדק בפועל אם ההרשאה
+    הזאת קיימת לבוט — במקום להשאיר את המנהל עם קוד שגיאה באנגלית
+    ולנחש מה הוא אומר."""
+    why = _last_send_error.get(chat_id, "")
+    lg = lang.for_chat(chat_id)
+    if "TOPIC_CLOSED" in why.upper():
+        _is_admin, missing = await bot_rights(chat_id)
+        key = ("state.topic_closed_noright" if "right.topics" in missing
+               else "state.topic_closed")
+        await _notify_admins(chat_id, i18n.t(key, lg))
+        return
+    await _notify_admins(chat_id,
+                         i18n.t("state.send_failed", lg,
+                                chat=tpl.esc(str(chat_id)),
+                                why=tpl.esc(why or "—")))
+
+
 async def _ask_for_topic(chat_id: int) -> None:
     """מבקש מהמנהלים לבחור נושא — פעם אחת לכל קבוצה.
 
@@ -5206,10 +5251,7 @@ async def _state_message(chat_id: int, field: str, default_key: str,
         chat_id=chat_id, language=lg)), media or None, kind or None, "",
         thread_id=await _general_of(chat_id))
     if got is None:
-        await _notify_admins(
-            chat_id, i18n.t("state.send_failed", lg,
-                            chat=tpl.esc(str(chat_id)),
-                            why=tpl.esc(_last_send_error.get(chat_id, "—"))))
+        await _report_send_failure(chat_id)
 
 
 async def set_lockdown(chat_id: int, on: bool, by: Optional[int]) -> bool:
