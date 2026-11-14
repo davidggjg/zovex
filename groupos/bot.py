@@ -5181,6 +5181,20 @@ async def _general_of(chat_id: int) -> Optional[int]:
     return GENERAL_THREAD if await _is_forum(chat_id) else None
 
 
+async def _warn_topics_right(chat_id: int, lg: str) -> None:
+    """מזהיר מראש שההודעה לא תוכל לצאת, ברגע ההדלקה.
+
+    "ברגע שמישהו מנסה להפעיל את זה — שיגיד לו שלא הפעלת את
+    ההרשאה." נכון: לגלות ביום שישי בערב שההודעה לא יצאה זה מאוחר
+    מדי, וזו גם לא תקלה שמנחשים."""
+    if not await _is_forum(chat_id):
+        return
+    _ok, missing = await bot_rights(chat_id)
+    if "right.topics" not in missing:
+        return
+    await _notify_admins(chat_id, i18n.t("shab.no_topics_right", lg))
+
+
 async def _report_send_failure(chat_id: int) -> None:
     """אומר למנהלים שההודעה לא יצאה, ומה חסר כדי שתצא.
 
@@ -6666,7 +6680,7 @@ async def on_callback(q: CallbackQuery):
     # המסכים האלה נבנים ב-‎on_callback‎ ולא ב-‎_screen_for‎ מסיבה אחת:
     # הם צריכים ‎await‎ (משיכת זמנים), ו-‎_screen_for‎ היא סינכרונית.
     if name in ("shab", "shabsw", "shabcity", "setcity", "shabofs",
-                "shabprev", "shabcities", "shabc2",
+                "shabprev", "shabcities", "shabc2", "shabfmt",
                 "hours", "hrday", "hrset", "hrm", "hrs", "hre",
                 "hrh", "hrh2", "hrtype", "zones", "setz"):
         if not perms.check(chat_id, q.from_user.id, "settings.write"):
@@ -6837,8 +6851,23 @@ async def on_callback(q: CallbackQuery):
             await q.answer(i18n.t("shab.preview", lg))
             return
 
+        if name == "shabfmt":
+            # דוגמה חיה מהשבת הקרובה, עם הערים של הקבוצה. רשימת
+            # משתנים בלי דוגמה היא תיעוד; עם דוגמה אפשר להעתיק.
+            cfg = await _shab_panel(chat_id, force=True)
+            w = cfg.get("window")
+            sample = (await _shab_text(chat_id, "lock", w, lg, cfg)
+                      if w is not None else "")
+            await _edit(q, panel.shabbat_format(chat_id, sample, lg))
+            await q.answer()
+            return
+
         cfg = await _shab_panel(chat_id)
         await _edit(q, panel.shabbat_screen(chat_id, cfg, lg))
+        # הדלקת שבת בקבוצת נושאים בלי הרשאת ניהול נושאים: אומרים
+        # **עכשיו**, ולא ביום שישי כשההודעה לא תצא.
+        if name == "shabsw" and db.get(chat_id, "shabbat", "0") == "1":
+            await _warn_topics_right(chat_id, lg)
         await q.answer(i18n.t("saved", lg) if name != "shab" else "")
         return
 

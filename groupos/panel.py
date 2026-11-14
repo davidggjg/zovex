@@ -931,9 +931,45 @@ def shabbat_screen(chat_id: int, cfg: dict,
         [(i18n.t("shab.notice", lang, n=cfg.get("notice", 0)),
           cb(chat_id, "shabofs", "notice"))],
         [(i18n.t("shab.preview", lang), cb(chat_id, "shabprev"))],
+        # עריכת שלוש ההודעות, כאן ולא במסך אחר: מי שמגדיר שבת
+        # רוצה גם לקבוע מה ייכתב, ולחפש את זה במסך "הודעות" הכללי
+        # זה בדיוק מה שאיש לא מצא.
+        [(i18n.t("shab.edit_lock", lang), cb(chat_id, "ask", "shablock")),
+         (i18n.t("shab.edit_open", lang), cb(chat_id, "ask", "shabopen"))],
+        [(i18n.t("shab.edit_notice", lang), cb(chat_id, "ask", "shabnote")),
+         (i18n.t("shab.format", lang), cb(chat_id, "shabfmt"))],
         [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
     ]
     return Screen(txt, rows)
+
+
+# המשתנים שאפשר לשים בהודעת שבת, לפי הסדר שבו אדם חושב עליהם.
+# הרשימה נגזרת ממה ש-‎zmanim.fill‎ באמת מציב, ולכן היא לא יכולה
+# להבטיח משתנה שאינו קיים.
+SHAB_VARS = ("city", "parasha", "candles", "havdalah",
+             "lock", "open", "date", "fulldate", "times")
+
+
+def shabbat_format(chat_id: int, sample: str = "",
+                   lang: str = i18n.DEFAULT) -> Screen:
+    """"תביאי פורמט ולפי זה הם מתאימים את זה איך שהם רוצים."
+
+    כל משתנה, מה הוא נותן, ודוגמה חיה מהשבת הקרובה של הקבוצה —
+    עם הערים שהיא בחרה. רשימת משתנים בלי דוגמה היא תיעוד; עם
+    דוגמה זה משהו שאפשר להעתיק ולערוך."""
+    lines = [head("shab.format_title", lang), "",
+             i18n.t("shab.format_hint", lang), ""]
+    for v in SHAB_VARS:
+        lines.append(f"<code>{{{v}}}</code> — " + i18n.t(f"shabvar.{v}", lang))
+    if sample:
+        lines += ["", i18n.t("shab.format_sample", lang), "", sample]
+    rows = [
+        [(i18n.t("shab.edit_lock", lang), cb(chat_id, "ask", "shablock")),
+         (i18n.t("shab.edit_open", lang), cb(chat_id, "ask", "shabopen"))],
+        [(i18n.t("shab.edit_notice", lang), cb(chat_id, "ask", "shabnote"))],
+        [(i18n.t("menu.back", lang), cb(chat_id, "shab"))],
+    ]
+    return Screen("\n".join(lines), rows)
 
 
 def cities_screen(chat_id: int, current: str, city_list: list[tuple[str, str]],

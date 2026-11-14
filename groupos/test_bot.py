@@ -4106,6 +4106,53 @@ async def test_state_defaults_readable():
     ok("פתיחה מופיעה לפני סגירה", first == "openmsg", first)
 
 
+async def test_shabbat_format_and_warning():
+    """מסך המשתנים, ואזהרה מראש על הרשאת הנושאים."""
+    section("שבת: פורמט ואזהרה")
+
+    class Forum:
+        is_forum = True
+        title = "פורום"
+
+    class Mem:
+        def __init__(self, topics):
+            self.status = B.ChatMemberStatus.ADMINISTRATOR
+            self.can_delete_messages = True
+            self.can_restrict_members = True
+            self.can_manage_topics = topics
+
+    # מסך המשתנים מציג כל משתנה שהמנוע באמת ממלא
+    import zmanim as _z, inspect
+    sc = panel.shabbat_format(CHAT, "דוגמה", "he")
+    for v in panel.SHAB_VARS:
+        ok(f"המשתנה {{{v}}} מתועד", "{" + v + "}" in sc.text)
+    src = inspect.getsource(_z.fill)
+    for v in panel.SHAB_VARS:
+        ok(f"ו-{{{v}}} באמת ממולא", f'"{v}"' in src)
+    ok("ויש דוגמה חיה", "דוגמה" in sc.text)
+
+    real_mem, real_chat = B.bot.get_chat_member, B.bot.get_chat
+    B._forum_cache.clear()
+    try:
+        B.bot.get_chat = lambda c: _ret(Forum())
+        B.bot.get_chat_member = lambda c, u: _ret(Mem(False))
+        before = len(SENT)
+        await B._warn_topics_right(CHAT, "he")
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("בלי ההרשאה מזהירים מראש", "ניהול נושאים" in out, out[:80])
+        ok("ואומרים שהנעילה עצמה כן תעבוד",
+           "הנעילה עצמה תעבוד" in out, out[:160])
+
+        B._forum_cache.clear()
+        B.bot.get_chat_member = lambda c, u: _ret(Mem(True))
+        before = len(SENT)
+        await B._warn_topics_right(CHAT, "he")
+        ok("ועם ההרשאה לא מטרידים", len(SENT) == before)
+    finally:
+        B.bot.get_chat_member, B.bot.get_chat = real_mem, real_chat
+        B._forum_cache.clear()
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4177,6 +4224,7 @@ async def main() -> int:
     await test_topic_closed_report()
     await test_anonymous_bot_is_explained()
     await test_state_defaults_readable()
+    await test_shabbat_format_and_warning()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
