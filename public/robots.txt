@@ -1,4 +1,15 @@
 User-agent: *
 Allow: /
+# קבצי הווידאו עצמם אינם דפים — כל משיכה שלהם מושכת את הסרט מטלגרם דרך
+# הבוטים, כאילו היה צופה. דפי הסרטים נשארים פתוחים לאינדוקס.
+Disallow: /stream/
+Disallow: /cast/
+Disallow: /fs/
+Disallow: /vh/
+Disallow: /vt/
+Disallow: /hls-relay/
+Disallow: /speedtest
+Disallow: /admin
+Disallow: /panel
 
-Sitemap: https://davidggjg.github.io/zovex/sitemap.xml
+Sitemap: https://zovex.duckdns.org/sitemap.xml
