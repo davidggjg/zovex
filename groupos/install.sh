@@ -94,6 +94,7 @@ restore_code() {
   fi
   tar xzf "$f" -C "$DIR" || return 1
   echo "  ✓ הוחזר הקוד מ-$(basename "$f")"
+  systemctl reset-failed groupos 2>/dev/null || true
   systemctl restart groupos 2>/dev/null || true
   return 0
 }
@@ -261,6 +262,7 @@ if [ "$MODE" = "--update" ]; then
     echo "  ✓ הקוד עודכן (אין כאן systemd שמיש — אין שירות להפעיל)"
     exit 0
   fi
+  systemctl reset-failed groupos 2>/dev/null || true
   systemctl restart groupos 2>/dev/null || true
   if alive 25; then
     journalctl -u groupos --since "-2 min" | grep "GroupOS עלה" | tail -1 \
@@ -384,6 +386,17 @@ echo "  ✓ נשמר ב-$ENV (הרשאות $(stat -c%a "$ENV"))"
 
 echo
 echo "════════ 4/5 · שירות ════════"
+
+# ‎RestartSteps‎ ו-‎RestartMaxDelaySec‎ קיימים מ-systemd 254. גרסה
+# ישנה יותר רק תתלונן עליהם ביומן, אבל אין סיבה להכניס שורות שלא
+# עושות דבר — ואם מתישהו גרסה כלשהי כן תקפיד עליהן, השירות של
+# מישהו ייפול בגלל שורה דקורטיבית. נכתבות רק כשהן נתמכות.
+SD_VER=$(systemctl --version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1)
+BACKOFF=""
+if [ -n "$SD_VER" ] && [ "$SD_VER" -ge 254 ] 2>/dev/null; then
+  BACKOFF=$'# המתנה שגדלה עד דקה: נפילה חולפת מתאוששת מיד, ותקלה\n# מתמשכת לא שורפת מעבד.\nRestartSteps=5\nRestartMaxDelaySec=60'
+fi
+
 cat > "$SVC" <<EOF
 [Unit]
 Description=GroupOS — Telegram group management
@@ -397,12 +410,23 @@ EnvironmentFile=$ENV
 ExecStart=/usr/bin/python3 $DIR/bot.py
 Restart=always
 RestartSec=5
+$BACKOFF
 # 78 = EX_CONFIG. טוקן שגוי לא יתקן את עצמו בניסיון ה-12, ולולאת
 # הפעלה-מחדש על שרת שמזרים וידאו שורפת מעבד לחינם. נמדד: 9.35 שניות
 # מעבד ב-11 ניסיונות, לפני שהתקרה הזאת נוספה.
 RestartPreventExitStatus=78
-StartLimitIntervalSec=120
-StartLimitBurst=5
+# **התקרה הזאת היא מה שהשאיר את הבוט מת.**
+#
+# חמישה ניסיונות בשתי דקות, ואז systemd מוותר **לצמיתות** עד
+# שמישהו יפעיל ידנית. בדיוק זה קורה כשהשרת עולה מחדש: הרשת עוד
+# לא מוכנה, הבוט נכשל כמה פעמים בתוך שניות, והתקרה נסגרת — "השרת
+# חוזר אחרי שניות והבוט לא חוזר".
+#
+# הגנה מפני לולאה חמה עדיין נחוצה, אבל טוקן שגוי כבר מטופל
+# ב-‎RestartPreventExitStatus‎ למעלה, ולכן התקרה כאן יכולה להיות
+# סלחנית הרבה יותר: חלון רחב, הרבה ניסיונות, והמתנה שגדלה.
+StartLimitIntervalSec=600
+StartLimitBurst=60
 # תקרות: הבוט הזה חולק שרת עם הזרמת וידאו. אם הוא ידלוף זיכרון או
 # יתחיל לטרוף מעבד, systemd יעצור אותו לפני שהצופים ירגישו.
 MemoryMax=768M
@@ -415,6 +439,10 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable -q groupos
+# מנקה מצב "נכשל" שננעל בעבר. בלי זה שירות שה-systemd ויתר עליו
+# נשאר מת גם אחרי שהמדיניות תוקנה, ו-‎restart‎ לבדו לא מאפס את
+# מונה הניסיונות.
+systemctl reset-failed groupos 2>/dev/null || true
 systemctl restart groupos
 echo "  ✓ groupos.service הותקן והופעל"
 

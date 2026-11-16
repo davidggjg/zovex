@@ -4304,14 +4304,48 @@ async def _tick_hours(chat_id: int, now: float, shabbat_holds: bool) -> None:
         db.set(chat_id, AUTOLOCK_KEY, "")
 
 
+async def _keep_running(loop_fn) -> None:
+    """מריץ לולאת רקע, ומחזיר אותה לחיים אם היא נפלה.
+
+    לולאה שזרקה חריגה שלא נתפסה פשוט נגמרת. התהליך ממשיך לחיות,
+    הבוט עונה להודעות — ורק הנעילה האוטומטית מפסיקה לעבוד, בלי
+    שום סימן. זו התקלה הגרועה ביותר כאן, כי היא לא נראית כמו
+    תקלה: הכול עובד חוץ מדבר אחד.
+
+    המתנה קצרה בין הניסיונות, שתקלה קבועה לא תהפוך ללולאה חמה."""
+    name = getattr(loop_fn, "__name__", "loop")
+    while True:
+        try:
+            await loop_fn()
+            log.warning("לולאת %s הסתיימה מעצמה — מפעיל מחדש", name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                               # noqa: BLE001
+            log.exception("לולאת %s נפלה (%s) — מפעיל מחדש", name, e)
+        await asyncio.sleep(5)
+
+
 async def autolock_loop():
     """לולאת הסגירה האוטומטית. דקה היא הרזולוציה — ושעה היא המדידה.
 
     למה לא תזמון מראש לכל קבוצה: זמני השבת זזים בכל שבוע, מנהל משנה
     עיר באמצע, והשירות מתאתחל. סריקה של דקה היא כמה שאילתות מקומיות,
     והיא **מתאוששת מעצמה** מכל אחד מהמקרים האלה בלי מצב שמור."""
+    # **סבב ראשון מיד, לפני השינה.**
+    #
+    # השרת נפל ב-01:00 וחזר ב-03:00. בזמן הזה שבת נכנסה, לוח השעות
+    # התחלף, ואולי שניהם. הלולאה ישנה דקה לפני הסבב הראשון, ולכן
+    # הקבוצה נשארה במצב הלא נכון עוד דקה — ואם הנפילה קרתה בדיוק
+    # ברגע המעבר, היא נשארה כך עד המעבר הבא.
+    #
+    # הסבב מיישר מול המצב בפועל ולא מול דגל, ולכן "מה פספסנו
+    # בזמן שהיינו כבויים" נענה מעצמו: מה שאמור להיות סגור ייסגר,
+    # ומה שאמור להיות פתוח ייפתח.
+    first = True
     while True:
-        await asyncio.sleep(60)
+        if not first:
+            await asyncio.sleep(60)
+        first = False
         now = time.time()
         try:
             rows = db.q("SELECT chat_id FROM chats WHERE active=1")
@@ -7427,7 +7461,7 @@ async def main() -> int:
             log.info("נוקתה הגדרת שפה גלובלית ישנה")
     await publish_commands()
     for loop_fn in (expire_loop, schedule_loop, upkeep_loop, autolock_loop):
-        _bg.add(asyncio.create_task(loop_fn()))
+        _bg.add(asyncio.create_task(_keep_running(loop_fn)))
     # לפני המשיכה: ביטול webhook ישן והשלכת מה שהצטבר.
     #
     # זה מה שמציל החלפת טוקן. בוט שהוגדר פעם ל-webhook, או שרת שרץ

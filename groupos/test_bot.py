@@ -4153,6 +4153,60 @@ async def test_shabbat_format_and_warning():
         B._forum_cache.clear()
 
 
+async def test_recovers_after_crash():
+    """עלייה מחדש מיישרת מיד, ולולאה שנפלה חוזרת לחיים."""
+    section("התאוששות מנפילה")
+    import asyncio as _a
+
+    # ① הסבב הראשון של הנעילה האוטומטית רץ **לפני** השינה
+    ticked = []
+
+    async def spy(cid, now, holds=None):
+        ticked.append(cid)
+        return False
+
+    real_shab, real_hours = B._tick_shabbat, B._tick_hours
+    B._tick_shabbat = spy
+    B._tick_hours = spy
+    task = _a.create_task(B.autolock_loop())
+    try:
+        await _a.sleep(0.2)          # הרבה פחות מהדקה של הלולאה
+        ok("סבב ראשון רץ מיד בעלייה", bool(ticked), str(ticked[:3]))
+    finally:
+        task.cancel()
+        with __import__("contextlib").suppress(_a.CancelledError):
+            await task
+        B._tick_shabbat, B._tick_hours = real_shab, real_hours
+
+    # ② לולאה שזורקת חריגה מופעלת מחדש ולא נעלמת בשקט
+    runs = []
+
+    async def flaky():
+        runs.append(1)
+        if len(runs) < 3:
+            raise RuntimeError("נפילה מדומה")
+        await _a.sleep(3600)
+
+    real_sleep = _a.sleep
+
+    async def fast(sec):
+        await real_sleep(0 if sec == 5 else sec)
+
+    _a.sleep = fast
+    t2 = _a.create_task(B._keep_running(flaky))
+    try:
+        for _ in range(60):
+            await real_sleep(0.01)
+            if len(runs) >= 3:
+                break
+        ok("לולאה שנפלה מופעלת מחדש", len(runs) >= 3, str(len(runs)))
+    finally:
+        _a.sleep = real_sleep
+        t2.cancel()
+        with __import__("contextlib").suppress(_a.CancelledError):
+            await t2
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4225,6 +4279,7 @@ async def main() -> int:
     await test_anonymous_bot_is_explained()
     await test_state_defaults_readable()
     await test_shabbat_format_and_warning()
+    await test_recovers_after_crash()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
