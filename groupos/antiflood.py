@@ -27,6 +27,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -42,6 +43,23 @@ JOIN_COUNT = 10         # הצטרפויות
 JOIN_WINDOW = 30.0
 
 MAX_TRACKED = 5000      # תקרת משתמשים במעקב, שלא נדלוף זיכרון
+
+
+# משפט נימוס קצר שחוזר אינו הצפה.
+#
+# מי שעוזר בקבוצה שולח שלושים פרקים ואחריהם "צפייה מהנה". זו אותה
+# מחרוזת שוב ושוב, וזיהוי החזרתיות מחק לו אותה — בדיוק את האדם
+# שהקבוצה קיימת בשבילו. חזרתיות מזיקה היא **הודעה שמוכרת משהו**
+# שחוזרת: קישור, תיוג, הזמנה. "תודה" שחוזר עשרים פעם הוא שיחה.
+_RX_ACTIONABLE = re.compile(
+    r"(?:https?://|www\.|t\.me/|@[A-Za-z0-9_]{4,})", re.I)
+HARMLESS_LEN = 40          # תווים. מעבר לזה זו כבר לא "מילה טובה"
+
+
+def _harmless_phrase(text: str) -> bool:
+    """קצר, בלי קישור ובלי תיוג — אין מה לחזור עליו לרעה."""
+    t = (text or "").strip()
+    return len(t) <= HARMLESS_LEN and not _RX_ACTIONABLE.search(t)
 
 
 @dataclass(frozen=True)
@@ -134,7 +152,7 @@ class AntiFlood:
             q.clear()               # אחרי זיהוי מתחילים מדידה מחדש
             return Flood("rate", limit + 1, limit)
 
-        if repeat and text:
+        if repeat and text and not _harmless_phrase(text):
             sig = " ".join(text.lower().split())[:200]
             r = self._texts.setdefault(key, deque())
             r.append((t, sig))

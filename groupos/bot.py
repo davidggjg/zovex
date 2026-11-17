@@ -1442,6 +1442,13 @@ async def _ban_spammer(msg: Message, why: str, lg: str, *,
     לא עובר דרך ‎policy‎ ולא מחכה לצבירת אותות. פרסום תוכן מיני של
     קטינים אינו "סיכון 0.98" שצריך להצטבר עם משהו — הוא הודעה אחת
     שדי בה."""
+    # המחיקה אינה מותנית בכלום — תוכן אסור יורד גם מחשבון מנהל
+    # שנפרץ. **החסימה כן**: לחסום מנהל אמיתי בגלל זיהוי שגוי הוא
+    # נזק שאי אפשר לתקן מהבוט. ‎staff‎ מגיע מדרגה במסד, ולכן הוא
+    # נבדק כאן שוב מול טלגרם — אותה רשת ביטחון כמו בכל ענישה.
+    if not staff and msg.from_user is not None \
+            and await _is_staff_now(msg.chat.id, msg.from_user.id):
+        staff = True
     _keep_proof(msg, "ban" if not staff else "delete", why, 1.0)
     with contextlib.suppress(TelegramAPIError):
         await bot.delete_message(msg.chat.id, msg.message_id)
@@ -1792,6 +1799,17 @@ async def _content_reply(msg: Message, text: str,
 
 
 async def _run_filter(msg: Message, fh, staff: bool = False) -> None:
+    # **אותה רשת ביטחון כמו בכל ענישה אחרת.**
+    #
+    # ‎staff‎ מגיע מדרגה **במסד**, והמסד לא תמיד יודע. מנהל עם תואר
+    # מותאם ("עוזר מנהלים") הוא מנהל לכל דבר בטלגרם, אצלנו הוא היה
+    # רשום נמוך יותר — ולכן הדק מחיקה מחק לו הודעה. ‎_enforce‎ כבר
+    # שואל את טלגרם לפני שהוא נוגע במישהו; כאן זה נשכח, וזו הייתה
+    # הדרך היחידה שנשארה פתוחה למחוק הודעה של מנהל.
+    if (fh.action in ("delete", "delete_reply") and not staff
+            and msg.from_user is not None
+            and await _is_staff_now(msg.chat.id, msg.from_user.id)):
+        staff = True
     if fh.action in ("delete", "delete_reply") and not staff:
         # מחיקה של הדק נרשמת ביומן כמו כל מחיקה אחרת, ונשמרת ראיה.
         # עד כאן היא הייתה המחיקה היחידה שלא הותירה שום עקבות: מנהל

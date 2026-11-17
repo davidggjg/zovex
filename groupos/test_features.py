@@ -419,6 +419,35 @@ def test_switch_rows() -> None:
                if ":sw:" in b[1]))
 
 
+def test_courtesy_is_not_flood() -> None:
+    """"צפייה מהנה" אחרי כל פרק אינו הצפה.
+
+    "אנשים שרוצים לעזור שולחים סדרה של 20-30 פרקים, ואחרי זה
+    צפייה מהנה — הוא לא צריך למחוק את זה." זיהוי החזרתיות ספר את
+    אותה מחרוזת ומחק אותה, כלומר ענש בדיוק את מי שתורם."""
+    section("נימוס אינו הצפה")
+    from antiflood import AntiFlood as AF
+    CH, U = -100777, 9
+
+    def run(text, n=12):
+        a, t, hit = AF(), 100.0, None
+        for i in range(n):
+            r = a.note(CH, U, text, now=t, rate=0, repeat=5)
+            if r and hit is None:
+                hit = i + 1
+            t += 2
+        return hit
+
+    for t in ("צפייה מהנה", "👆 צפייה מהנה", "תודה רבה!", "בכיף 🙂", "👍"):
+        ok(f"נימוס חוזר עובר: {t[:20]}", run(t) is None, str(run(t)))
+
+    # וחזרתיות שמוכרת משהו עדיין נתפסת
+    for t in ("קנו עכשיו בזול https://t.me/spam הצטרפו",
+              "@spamchannel @spamchannel הצטרפו עכשיו",
+              "הודעה ארוכה שחוזרת שוב ושוב ומציפה את כל הקבוצה בלי סוף"):
+        ok(f"חזרתיות מזיקה נתפסת: {t[:24]}", run(t) is not None)
+
+
 def test_prompts() -> None:
     section("עריכה בכפתורים")
     # ‎repcmd‎ ו-‎repword‎ הם שלבי אשף: הם **יוצרים** תגובה ולא
@@ -791,6 +820,7 @@ def main() -> int:
     test_emoji_is_not_evasion()
     test_catalogue_post()
     test_flood_knows_the_room()
+    test_courtesy_is_not_flood()
     test_words_alone_never_punish()
     test_switch_rows()
     test_prompts()

@@ -4207,6 +4207,45 @@ async def test_recovers_after_crash():
             await t2
 
 
+async def test_filter_never_deletes_an_admin():
+    """הדק מחיקה לא נוגע במנהל — גם כשהמסד לא יודע שהוא מנהל.
+
+    "עוזר מנהלים" הוא תואר מותאם של מנהל אמיתי בטלגרם. אצלנו הוא
+    היה רשום נמוך יותר, ולכן הדק מחיקה מחק לו הודעה. ‎_enforce‎ כבר
+    שואל את טלגרם לפני כל ענישה; המסלול הזה נשכח."""
+    section("הדק לא מוחק מנהל")
+    HELPER = 77333
+
+    class M:
+        def __init__(self, st):
+            self.status = st
+
+    real = B.bot.get_chat_member
+    B.perms.set_role(CHAT, HELPER, "member")
+    B.db.set(CHAT, "replies", "1")
+    B.filters.add(CHAT, "מחקאותי", "", action="delete", allow_empty=True)
+    B._staff_now.clear()
+    try:
+        # טלגרם אומרת: מנהל. המסד אומר: חבר רגיל.
+        B.bot.get_chat_member = lambda c, u: _ret(
+            M(B.ChatMemberStatus.ADMINISTRATOR))
+        DELETED.clear()
+        await B.on_group_message(msg("מחקאותי", uid=HELPER, mid=9810))
+        ok("הודעת מנהל לא נמחקת", 9810 not in DELETED, str(DELETED))
+
+        # וחבר רגיל באמת כן
+        B._staff_now.clear()
+        B.bot.get_chat_member = lambda c, u: _ret(
+            M(B.ChatMemberStatus.MEMBER))
+        DELETED.clear()
+        await B.on_group_message(msg("מחקאותי", uid=HELPER, mid=9811))
+        ok("אבל של חבר רגיל כן", 9811 in DELETED, str(DELETED))
+    finally:
+        B.bot.get_chat_member = real
+        B._staff_now.clear()
+        B.filters.remove(CHAT, "מחקאותי")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4280,6 +4319,7 @@ async def main() -> int:
     await test_state_defaults_readable()
     await test_shabbat_format_and_warning()
     await test_recovers_after_crash()
+    await test_filter_never_deletes_an_admin()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

@@ -1103,9 +1103,14 @@ def test_antiflood():
             for i in range(6)]
     ok("הודעות מפוזרות בזמן לא נתפסות", not any(slow))
 
-    # ספאמר שנשאר מתחת לסף הקצב אבל חוזר על עצמו
+    # ספאמר שנשאר מתחת לסף הקצב אבל חוזר על עצמו.
+    #
+    # הטקסט נושא קישור בכוונה: חזרתיות נספרת רק על הודעה שיש בה מה
+    # למכור. "תודה" שחוזר עשרים פעם הוא שיחה, ולא הצפה — וזה נבדק
+    # בנפרד ב-‎test_features‎.
     A3 = AntiFlood()
-    rep = [A3.note(CHAT, U, "אותו טקסט", now=100 + i * 8, rate=50)
+    rep = [A3.note(CHAT, U, "קנו עכשיו https://t.me/spam",
+                   now=100 + i * 8, rate=50)
            for i in range(4)]
     ok("חזרתיות נתפסת גם מתחת לסף הקצב",
        rep[-1] is not None and rep[-1].kind == "repeat", str(rep))
