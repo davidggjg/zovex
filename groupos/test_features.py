@@ -448,6 +448,44 @@ def test_courtesy_is_not_flood() -> None:
         ok(f"חזרתיות מזיקה נתפסת: {t[:24]}", run(t) is not None)
 
 
+def test_movie_is_not_an_episode() -> None:
+    """סרט אינו פרק, ומספר בשם אינו מספר פרק.
+
+    בוט אחר בשטח קרא "Stitch Head 2025 Dd5" והכריז "עונה 1 פרק
+    264". הטעות הזאת קלה מאוד לעשות — שולפים כל מספר מהשם ומניחים
+    עונה 1 — והיא הופכת כל סרט לסדרה. כאן היא נבדקת במפורש, כי
+    הזיהוי הזה מחליט מה נשלח לאנשים."""
+    section("סרט אינו פרק")
+    import seasons as _s
+    movies = (
+        "Stitch Head 2025 Dd5", "Avatar 2 2022 1080p", "Oppenheimer 2023 4K",
+        "Spider-Man 3 2007 BluRay", "Rocky 5 1990", "Se7en 1995",
+        "סרט מצויר 2024 מדובב", "המשימה הבלתי אפשרית 7", "פאסט 9",
+        "Dune Part 2 2024", "Toy Story 4", "300 2006", "1917 2019",
+        "Ocean's 8 2018", "Fantastic 4 2015", "x265 10bit", "WEB-DL 2160p",
+    )
+    for t in movies:
+        ok(f"סרט נשאר סרט: {t[:26]}",
+           (_s.season_of(t), _s.episode_of(t)) == (0, 0),
+           f"{_s.season_of(t)}/{_s.episode_of(t)}")
+
+    # וההודעה המלאה מהשטח, עם תקציר ואיכות — גם היא אינה פרק
+    full = ("פרנקי והמפלצות - Stitch Head\n⭐ מדובב לעברית 🇮🇱\n"
+            "😴 איכות : 1080p WebDL\nילד שנוצר על ידי מדען\n"
+            "Stitch Head 2025 Dd5")
+    ok("ופוסט סרט שלם אינו פרק",
+       (_s.season_of(full), _s.episode_of(full)) == (0, 0))
+
+    for t, want_s, want_e in (("ספיידרז עונה 1 פרק 37", 1, 37),
+                              ("S02E07", 2, 7),
+                              ("Season 3 episode 1", 3, 1),
+                              ("ע3 פ2", 3, 2),
+                              ("The Office S09E12", 9, 12)):
+        ok(f"וסדרה כן מזוהה: {t[:22]}",
+           (_s.season_of(t), _s.episode_of(t)) == (want_s, want_e),
+           f"{_s.season_of(t)}/{_s.episode_of(t)}")
+
+
 def test_prompts() -> None:
     section("עריכה בכפתורים")
     # ‎repcmd‎ ו-‎repword‎ הם שלבי אשף: הם **יוצרים** תגובה ולא
@@ -821,6 +859,7 @@ def main() -> int:
     test_catalogue_post()
     test_flood_knows_the_room()
     test_courtesy_is_not_flood()
+    test_movie_is_not_an_episode()
     test_words_alone_never_punish()
     test_switch_rows()
     test_prompts()
