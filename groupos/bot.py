@@ -507,7 +507,7 @@ async def sync_admins(chat_id: int, force: bool = False) -> dict[int, str]:
     except (TelegramForbiddenError, TelegramNotFound) as e:
         # הקבוצה נמחקה, או שהבוט הוסר ממנה. נפילה חזרה למטמון כאן
         # היא בדיוק מה שהשאיר קבוצות מתות ברשימה לנצח.
-        forget_chat(chat_id, str(e)[:80])
+        _strike(chat_id, str(e)[:80])
         return {}
     except TelegramAPIError as e:
         log.warning("שליפת מנהלים נכשלה ב-%s: %s", chat_id, e)
@@ -640,6 +640,26 @@ async def group_status(chat_id: int, lg: str) -> str:
 _me_in_chat: dict[int, tuple[float, bool]] = {}
 
 
+# כמה כישלונות סופיים ברצף עד שמורידים קבוצה.
+#
+# פעם אחת לא מספיקה. טלגרם מחזירה שגיאות "סופיות" גם ברגעים
+# חולפים, והמחיר של טעות כאן אינו סימטרי: קבוצה שהורדנו בטעות
+# מפסיקה להיסגר ולהיפתח בזמן, ואיש לא ישים לב עד הבוקר. קבוצה
+# מתה שנשארה עוד דקה ברשימה אינה עולה דבר.
+STRIKES_OUT = 3
+_chat_strikes: dict[int, int] = {}
+
+
+def _strike(chat_id: int, why: str) -> None:
+    """סופר כישלון סופי, ומוריד את הקבוצה רק אחרי כמה ברצף."""
+    n = _chat_strikes.get(chat_id, 0) + 1
+    _chat_strikes[chat_id] = n
+    if n < STRIKES_OUT:
+        log.info("כישלון %d/%d בקבוצה %s: %s", n, STRIKES_OUT, chat_id, why)
+        return
+    forget_chat(chat_id, why)
+
+
 def forget_chat(chat_id: int, why: str) -> None:
     """הקבוצה יורדת מהרשימה. לא נמחקת — מסומנת לא פעילה.
 
@@ -666,9 +686,15 @@ async def bot_is_admin(chat_id: int) -> bool:
         return hit[1]
     try:
         m = await bot.get_chat_member(chat_id, _me_id)
-    except (TelegramForbiddenError, TelegramNotFound, TelegramBadRequest) as e:
-        # הוסר, נחסם, או שהקבוצה כבר לא קיימת — כולן סופיות.
-        forget_chat(chat_id, str(e)[:80])
+    except (TelegramForbiddenError, TelegramNotFound) as e:
+        # הוסר, נחסם, או שהקבוצה כבר לא קיימת.
+        #
+        # ‎TelegramBadRequest‎ **אינה** כאן יותר. היא מכסה המון
+        # מקרים חולפים לגמרי, וכל אחד מהם הוריד קבוצה מהרשימה —
+        # ומשם היא נופלת גם מלולאת התזמון ומפסיקה להיסגר ולהיפתח.
+        # קבוצה שנסגרת בשלוש בלילה לא מתאוששת מזה לבד, כי אף אחד
+        # לא כותב בה כדי להחזיר אותה.
+        _strike(chat_id, str(e)[:80])
         return False
     except TelegramAPIError as e:
         # תקלת רשת או הגבלת קצב: לא מסקנה על הקבוצה.
@@ -679,6 +705,7 @@ async def bot_is_admin(chat_id: int) -> bool:
     if m.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
         forget_chat(chat_id, f"status={m.status}")
         return False
+    _chat_strikes.pop(chat_id, None)
     _me_in_chat[chat_id] = (time.time(), ok_now)
     return ok_now
 
@@ -5561,6 +5588,33 @@ async def cmd_diag(msg: Message):
         line("ok" if zone else "warn", i18n.t("tz.title", lg),
              _local_now(chat_id) + (f" · {zone}" if zone
                                     else " · " + i18n.t("tz.unset", lg)))
+
+    # ── למה הקבוצה נסגרה או לא ────────────────────────────────────
+    #
+    # "יש קבוצה שהיה צריך לסגור בשלוש והוא לא סגר." בלי השורות
+    # האלה אין שום דרך לדעת למה: הכול נראה תקין מבחוץ. כאן נאמר
+    # מה הלוח רוצה עכשיו, מה המצב בפועל, ומי מחזיק את הנעילה —
+    # ושלושתם יחד מסבירים כל מקרה.
+    if raw_hours or db.get(chat_id, "shabbat", "0") == "1":
+        act = db.one("SELECT active FROM chats WHERE chat_id=?", (chat_id,))
+        alive = bool(act["active"]) if act else False
+        # קבוצה שאינה "פעילה" **אינה נסרקת בכלל** על ידי לולאת
+        # התזמון. זו הייתה הסיבה בשטח, והיא בלתי נראית לחלוטין.
+        line("ok" if alive else "bad", i18n.t("diag.sched_live", lg),
+             i18n.t("diag.sched_live_yes" if alive
+                    else "diag.sched_live_no", lg))
+        locked = db.get(chat_id, "lockdown", "0") == "1"
+        owner = db.get(chat_id, AUTOLOCK_KEY, "") or "—"
+        if raw_hours:
+            want_open = grouphours.is_open(raw_hours, tz_offset=_tz_of(chat_id))
+            agree = want_open != locked
+            line("ok" if agree else "warn", i18n.t("diag.sched_now", lg),
+                 i18n.t("diag.sched_state", lg,
+                        want=i18n.t("diag.open" if want_open
+                                    else "diag.closed", lg),
+                        real=i18n.t("diag.closed" if locked
+                                    else "diag.open", lg)))
+        line("ok", i18n.t("diag.sched_owner", lg), owner)
     if not _can_read_all:
         line("ok" if is_admin else "bad", i18n.t("diag.privacy", lg),
              i18n.t("diag.privacy_admin" if is_admin
@@ -7477,6 +7531,23 @@ async def main() -> int:
         if db.change("DELETE FROM settings WHERE chat_id=0 AND key='lang'",
                      ()):
             log.info("נוקתה הגדרת שפה גלובלית ישנה")
+    # ── שחזור: קבוצות שהורדו בטעות ────────────────────────────────
+    #
+    # ‎TelegramBadRequest‎ חולפת הורידה קבוצות מהרשימה, ומשם הן נפלו
+    # גם מלולאת התזמון — הפסיקו להיסגר ולהיפתח, ולא התאוששו לבד כי
+    # קבוצה שנסגרת בלילה אין בה מי שיכתוב ויחזיר אותה.
+    #
+    # קבוצה שיש לה לוח שעות או נעילת שבת היא קבוצה שמישהו הגדיר
+    # בכוונה. אם הבוט באמת כבר לא שם, הבדיקה הבאה תוריד אותה שוב —
+    # הפעם רק אחרי כמה כישלונות ברצף.
+    with contextlib.suppress(Exception):
+        back = db.change(
+            """UPDATE chats SET active=1 WHERE active=0 AND chat_id<0
+               AND chat_id IN (SELECT chat_id FROM settings
+                               WHERE key IN ('hours','shabbat')
+                                 AND value NOT IN ('', '0'))""", ())
+        if back:
+            log.info("הוחזרו %d קבוצות עם לוח שעות או שבת", back)
     await publish_commands()
     for loop_fn in (expire_loop, schedule_loop, upkeep_loop, autolock_loop):
         _bg.add(asyncio.create_task(_keep_running(loop_fn)))

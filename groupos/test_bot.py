@@ -3287,15 +3287,20 @@ async def test_dead_groups_drop_out():
            B.db.one("SELECT active FROM chats WHERE chat_id=?",
                     (CHAT,))["active"] == 0)
 
-        # קבוצה שנמחקה: טלגרם עונה בשגיאה סופית
+        # קבוצה שנמחקה: טלגרם עונה בשגיאה סופית, שוב ושוב.
+        # פעם אחת אינה מספיקה בכוונה — ראו ‎STRIKES_OUT‎.
         B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
         B._me_in_chat.clear()
+        B._chat_strikes.pop(CHAT, None)
 
         def boom(c, u):
             raise TelegramForbiddenError(method=None,
                                          message="chat not found")
         B.bot.get_chat_member = boom
-        ok("קבוצה שנמחקה — יורדת", not await B.bot_is_admin(CHAT))
+        for _ in range(B.STRIKES_OUT):
+            B._me_in_chat.clear()
+            ok_down = not await B.bot_is_admin(CHAT)
+        ok("קבוצה שנמחקה — יורדת", ok_down)
         ok("ומסומנת לא פעילה",
            B.db.one("SELECT active FROM chats WHERE chat_id=?",
                     (CHAT,))["active"] == 0)
@@ -4246,6 +4251,61 @@ async def test_filter_never_deletes_an_admin():
         B.filters.remove(CHAT, "מחקאותי")
 
 
+async def test_transient_error_keeps_group():
+    """שגיאה חולפת לא מוציאה קבוצה מלולאת התזמון.
+
+    "יש קבוצה שהיה צריך לסגור בשלוש והוא לא סגר." קבוצה שסומנה
+    לא פעילה נופלת מהסריקה לגמרי — ולא מתאוששת לבד, כי בלילה אין
+    מי שיכתוב בה."""
+    section("קבוצה לא נופלת מהסריקה")
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
+    real = B.bot.get_chat_member
+    B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
+    B._chat_strikes.pop(CHAT, None)
+    B._me_in_chat.clear()
+
+    def alive():
+        r = B.db.one("SELECT active FROM chats WHERE chat_id=?", (CHAT,))
+        return bool(r["active"]) if r else False
+
+    try:
+        # BadRequest חולפת — לא נוגעת בקבוצה בכלל
+        def bad(c, u):
+            raise TelegramBadRequest(method=None, message="Bad Request: oops")
+        B.bot.get_chat_member = bad
+        for _ in range(5):
+            B._me_in_chat.clear()
+            await B.bot_is_admin(CHAT)
+        ok("שגיאה חולפת לא מורידה קבוצה", alive())
+
+        # Forbidden — רק אחרי כמה ברצף
+        def forb(c, u):
+            raise TelegramForbiddenError(method=None, message="kicked")
+        B.bot.get_chat_member = forb
+        B._me_in_chat.clear(); await B.bot_is_admin(CHAT)
+        ok("כישלון סופי אחד עדיין לא מוריד", alive())
+        for _ in range(B.STRIKES_OUT):
+            B._me_in_chat.clear()
+            await B.bot_is_admin(CHAT)
+        ok("אבל כמה ברצף כן", not alive())
+
+        # והצלחה מאפסת את המונה
+        B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
+
+        class M:
+            status = B.ChatMemberStatus.ADMINISTRATOR
+        B.bot.get_chat_member = lambda c, u: _ret(M())
+        B._me_in_chat.clear(); await B.bot_is_admin(CHAT)
+        ok("הצלחה מאפסת את הכישלונות",
+           B._chat_strikes.get(CHAT, 0) == 0)
+    finally:
+        B.bot.get_chat_member = real
+        B._chat_strikes.pop(CHAT, None)
+        B._me_in_chat.clear()
+        B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4320,6 +4380,7 @@ async def main() -> int:
     await test_shabbat_format_and_warning()
     await test_recovers_after_crash()
     await test_filter_never_deletes_an_admin()
+    await test_transient_error_keeps_group()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()
