@@ -16,7 +16,7 @@
 import json, os, re, sys, urllib.request
 from pathlib import Path
 
-DATA = Path(os.environ.get("ZOVEX_DATA", "/opt/zovex-bot/data"))
+DATA = Path(os.environ.get("ZOVEX_DATA", "."))
 BASE = os.environ.get("ZOVEX_BASE", "http://127.0.0.1:8000")
 AUTO = float(os.environ.get("AUTO_MATCH", "0.8"))      # סף התאמה לשיוך אוטומטי
 
@@ -132,6 +132,12 @@ def panel_password():
     return env.get("PANEL_PASSWORD") or os.environ.get("PANEL_PASSWORD") or ""
 
 
+def get(path):
+    req = urllib.request.Request(BASE + path, headers={"Referer": "https://zovex.duckdns.org/"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read() or b"[]")
+
+
 def post(path, body):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
@@ -141,8 +147,12 @@ def post(path, body):
 
 def main():
     apply = "--apply" in sys.argv
-    content = json.loads((DATA / "content.json").read_text(encoding="utf-8"))
-    pending = json.loads((DATA / "new_uploads.json").read_text(encoding="utf-8"))
+    if os.environ.get("ZOVEX_DATA"):          # קבצים מקומיים (לבדיקות)
+        content = json.loads((DATA / "content.json").read_text(encoding="utf-8"))
+        pending = json.loads((DATA / "new_uploads.json").read_text(encoding="utf-8"))
+    else:                                     # מהשרת עצמו — לא תלוי איפה הקבצים שמורים
+        content = get("/content")
+        pending = get("/uploads/new").get("items", [])
     add, dup, manual, movies, series = plan(content, pending)
 
     print(f"ממתינים: {len(pending)}  (סרטים שלא נוגעים בהם: {movies})\n")
