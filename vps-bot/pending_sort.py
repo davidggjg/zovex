@@ -90,6 +90,18 @@ def plan(content, pending):
             if sc > score: best, score = sn, sc
         if not best or score < AUTO:
             manual.append((p, best, score)); continue
+        # אותו שם בעברית ≠ אותה סדרה ("המזח" הישראלית מול El Embarcadero).
+        # אם יש לשני הצדדים מזהה TMDB או שם אנגלי — חייבים להתאים, אחרת ידני.
+        m = series[best]["meta"] or {}
+        pt, st = int(p.get("tmdb_id") or 0), int(m.get("tmdb_id") or 0)
+        pe, se_ = p.get("en_title") or "", m.get("en_title") or ""
+        if (pt and st and pt != st) or (pe and se_ and sim(pe, se_) < 0.6):
+            manual.append((p, best, -1.0)); continue
+        # עונה חדשה (שאין לה אף פרק באתר) — רק אם TMDB מאשר שזו אותה סדרה.
+        # פרק חסר בעונה קיימת — בטוח. עונה חדשה בלי אישור — אולי סדרה אחרת באותו שם.
+        tmdb_ok = bool(pt and st and pt == st)
+        if not tmdb_ok and se not in {s_ for s_, _ in series[best]["eps"]}:
+            manual.append((p, best, -2.0)); continue
         if (se, ep) in series[best]["eps"] or (best, se, ep) in taken:
             dup.append((p, f"ע{se}פ{ep} כבר קיים ב«{best}»")); continue
         taken.add((best, se, ep))
@@ -170,7 +182,9 @@ def main():
     if len(dup) > 40: print(f"   …ועוד {len(dup)-40}")
     print(f"\n❓ נשארים לך בפאנל — לא בטוח / סדרה חדשה ({len(manual)}):")
     for p, best, sc in manual[:40]:
-        hint = f" (הכי קרוב: «{best}», {int(sc*100)}%)" if best and sc >= 0.4 else ""
+        hint = (f" (אותו שם כמו «{best}» באתר — אבל סדרה אחרת לפי TMDB/שם אנגלי)" if sc == -1.0
+                else f" (עונה חדשה ל«{best}» — בלי אישור TMDB שזו אותה סדרה; תבדוק ותוסיף בפאנל)" if sc == -2.0
+                else f" (הכי קרוב: «{best}», {int(sc*100)}%)" if best and sc >= 0.4 else "")
         print(f"   {p.get('series_name') or p.get('title')}  ע{p.get('season_number')}פ{p.get('episode_number')}{hint}")
     if len(manual) > 40: print(f"   …ועוד {len(manual)-40}")
 
