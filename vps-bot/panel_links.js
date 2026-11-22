@@ -2,6 +2,20 @@
    סדרה = שורה אחת, כתובת אחת לכל הפרקים. כלל: a-z, 0-9, מקף (Google: מקפים, לא קו תחתון). */
 (function(){
   if (window.__zvLinks) return; window.__zvLinks = true;
+  // טעינת תוכן עמידה: 3 ניסיונות עם timeout; תשובה שגויה לא מוחקת את הרשימה הקיימת
+  window.loadContent = async function(){
+    let lastErr=null;
+    for (let a=0;a<3;a++){
+      try{
+        const ctl=new AbortController(), to=setTimeout(()=>ctl.abort(),25000);
+        const r=await fetch("/content?t="+Date.now(),{signal:ctl.signal,cache:"no-store"}); clearTimeout(to);
+        if(!r.ok) throw new Error("שגיאה "+r.status);
+        const d=await r.json(); if(!Array.isArray(d)) throw new Error("תשובה לא תקינה");
+        contentVersion=r.headers.get("X-Content-Version"); movies=d; refreshDerived(); return;
+      }catch(e){ lastErr=e; await new Promise(res=>setTimeout(res,800*(a+1))); }
+    }
+    if(!Array.isArray(movies)||!movies.length) alert("טעינת תוכן נכשלה: "+(lastErr&&lastErr.message||"")+" — נסה שוב");
+  };
   const RESERVED = new Set(["search","live","admin","panel","stream","watch","api","content","cast","fs","vh","vt",
     "hls-relay","zovex","sitemap","robots","assets","vendor","uploads","feedback","speedtest","ping","media-auth","debug","index"]);
   const HE = {"א":"a","ב":"b","ג":"g","ד":"d","ה":"h","ו":"v","ז":"z","ח":"ch","ט":"t","י":"y","כ":"k","ך":"k","ל":"l","מ":"m","ם":"m",
@@ -49,11 +63,11 @@
     for(const e of list){ if((e.kind==="live")!==live) continue; const s=normSlug(e.slug); if(!s) continue;
       const cur=t.get(s); if(!cur || (cur.kind!=="series" && e.kind==="series")) t.set(s,e); }
     return t; }
-  function isBad(e, list){
+  function isBad(e, list, maps){
     const live=e.kind==="live", s=e.slug;
     if (!s || e.mixed) return true;
     if (s!==normSlug(s) || /[^a-z0-9-]/.test(s)) return true;
-    const owner=takenMap(list, live).get(s);
+    const owner=(maps?maps[live?1:0]:takenMap(list, live)).get(s);
     if (owner && owner.key!==e.key) return true;          // כפילות — רק מי שאינו הבעלים
     return !!validate(s, e.key, new Map(), live);
   }
@@ -95,11 +109,14 @@
     pane.querySelectorAll(".zvl-chips button[data-f]").forEach(x=>x.classList.toggle("on",x===b)); render(); });
   pane.querySelectorAll(".zvl-chips button[data-s]").forEach(b=>b.onclick=()=>{ scope=b.dataset.s;
     pane.querySelectorAll(".zvl-chips button[data-s]").forEach(x=>x.classList.toggle("on",x===b)); render(); });
-  pane.querySelector("#zvlQ").oninput=()=>render();
+  let qT=0; pane.querySelector("#zvlQ").oninput=()=>{ clearTimeout(qT); qT=setTimeout(render,250); };
 
-  function render(){
+  function render(){ try{ render0(); }catch(err){ console.error(err);
+    const el=document.getElementById("zvlList"); if(el) el.innerHTML='<div class="err" style="padding:14px">שגיאה בטאב הקישורים: '+esc(err.message)+'</div>'; } }
+  function render0(){
     const list=entities(), q=(document.getElementById("zvlQ").value||"").trim().toLowerCase();
-    const badSet=new Set(list.filter(e=>isBad(e,list)).map(e=>e.key));
+    const maps=[takenMap(list,false), takenMap(list,true)];
+    const badSet=new Set(list.filter(e=>isBad(e,list,maps)).map(e=>e.key));
     document.getElementById("zvlCount").textContent=badSet.size;
     let bad=(scope==="bad"?list.filter(e=>badSet.has(e.key)):list.slice().sort((a,b)=>a.name.localeCompare(b.name,"he")))
       .filter(e=>(filter==="all"||e.kind===filter)&&(!q||e.name.toLowerCase().includes(q)||(e.slug||"").includes(q)));
@@ -118,7 +135,7 @@
       const e=list.find(x=>x.key===row.dataset.k), live=e.kind==="live";
       const inp=row.querySelector("input"), msg=row.querySelector(".zvl-msg"), prev=row.querySelector(".zvl-prev"), btn=row.querySelector(".zvl-save");
       const check=()=>{
-        const raw=inp.value, v=normSlug(raw), t=takenMap(list.filter(x=>x!==e),live);
+        const raw=inp.value, v=normSlug(raw), t=maps[live?1:0];
         const r=validate(v,e.key,t,live);
         prev.textContent = v ? `https://zovex.duckdns.org/${live?"live/":""}${v}` : "";
         if (r && r.taken){ const alt=freeSlug(v,e.key,t);
@@ -127,12 +144,12 @@
         if (r){ msg.className="zvl-msg bad"; msg.textContent=r; btn.disabled=true; return null; }
         msg.className="zvl-msg ok"; msg.textContent= v!==raw ? `✓ תקין (נורמל ל-${v})` : "✓ תקין"; btn.disabled=false; return v;
       };
-      inp.oninput=check; check();
+      inp.oninput=check; let checked=false;
       // composedPath ולא target.closest: כפתור שמוחלף תוך כדי הלחיצה (כמו "השתמש ב-x-2") כבר מנותק
       // מהעץ כשהאירוע מגיע לשורה, ו-closest היה חושב שלחצו מחוץ לאזור העריכה וסוגר אותה.
       row.addEventListener("click",ev=>{ if(ev.composedPath().some(n=>n.classList&&n.classList.contains("zvl-body"))) return;
         const open=!row.classList.contains("open"); el.querySelectorAll(".zvl-row.open").forEach(r=>r.classList.remove("open"));
-        if(open){ row.classList.add("open"); inp.focus(); inp.select(); } });
+        if(open){ row.classList.add("open"); if(!checked){ checked=true; check(); } inp.focus(); inp.select(); } });
       const del=row.querySelector(".zvl-del");
       if(del) del.onclick=async()=>{ if(!confirm(`למחוק את הכתובת /${e.slug} מ«${e.name}»${e.count?` (${e.count} פרקים)`:""}?`)) return;
         del.disabled=true; const ok=await mutate({upsert:e.ids.map(id=>({id, custom_slug:null}))}); if(ok) render(); else del.disabled=false; };
