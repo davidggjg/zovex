@@ -70,7 +70,12 @@
   .zvl-msg.bad{color:var(--red,#e2483d)} .zvl-msg.ok{color:var(--green,#2fae6a)}
   .zvl-prev{font-size:12px;color:var(--text-2,#666);direction:ltr;text-align:right;overflow-wrap:anywhere}
   .zvl-chips{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
-  .zvl-chips button.on{background:var(--ink,#18171c)!important;color:#fff!important}`;
+  .zvl-chips button.on{background:var(--ink,#18171c)!important;color:#fff!important}
+  .zvl-row{cursor:pointer} .zvl-row .zvl-body{display:none} .zvl-row.open .zvl-body{display:block}
+  .zvl-row.open{background:rgba(255,255,255,.5);border-radius:16px;cursor:default}
+  .zvl-chev{margin-inline-start:auto;color:var(--text-2,#666);font-size:13px;flex:none}
+  .zvl-row.open .zvl-chev{transform:rotate(180deg)}
+  .zvl-ok{color:var(--green,#2fae6a)} .zvl-warn{color:var(--red,#e2483d)}`;
   document.head.appendChild(st);
 
   // ── טאב + חלונית
@@ -81,28 +86,32 @@
     <div class="muted">כתובת = אותיות באנגלית קטנות, ספרות ומקפים בלבד (לפי Google: מקפים, לא קו תחתון). לסדרה — כתובת אחת לכל הפרקים.
     דוגמה: <code>zovex.duckdns.org/rings-of-power</code></div>
     <div class="zvl-chips"><button class="mini gray on" data-f="all">הכל</button><button class="mini gray" data-f="series">סדרות</button>
-      <button class="mini gray" data-f="movie">סרטים</button><button class="mini gray" data-f="live">ערוצים</button></div>
+      <button class="mini gray" data-f="movie">סרטים</button><button class="mini gray" data-f="live">ערוצים</button>
+      <span style="flex:1"></span><button class="mini gray on" data-s="bad">רק בעייתיים</button><button class="mini gray" data-s="all">הכל</button></div>
     <input id="zvlQ" placeholder="חיפוש לפי שם…"><div id="zvlList"></div></div>`;
   const anyPane=document.querySelector('[id^="pane-"]'); anyPane.parentElement.appendChild(pane);
-  let filter="all";
-  pane.querySelectorAll(".zvl-chips button").forEach(b=>b.onclick=()=>{ filter=b.dataset.f;
-    pane.querySelectorAll(".zvl-chips button").forEach(x=>x.classList.toggle("on",x===b)); render(); });
+  let filter="all", scope="bad";
+  pane.querySelectorAll(".zvl-chips button[data-f]").forEach(b=>b.onclick=()=>{ filter=b.dataset.f;
+    pane.querySelectorAll(".zvl-chips button[data-f]").forEach(x=>x.classList.toggle("on",x===b)); render(); });
+  pane.querySelectorAll(".zvl-chips button[data-s]").forEach(b=>b.onclick=()=>{ scope=b.dataset.s;
+    pane.querySelectorAll(".zvl-chips button[data-s]").forEach(x=>x.classList.toggle("on",x===b)); render(); });
   pane.querySelector("#zvlQ").oninput=()=>render();
 
   function render(){
     const list=entities(), q=(document.getElementById("zvlQ").value||"").trim().toLowerCase();
-    let bad=list.filter(e=>isBad(e,list));
-    document.getElementById("zvlCount").textContent=bad.length;
-    bad=bad.filter(e=>(filter==="all"||e.kind===filter)&&(!q||e.name.toLowerCase().includes(q)));
+    const badSet=new Set(list.filter(e=>isBad(e,list)).map(e=>e.key));
+    document.getElementById("zvlCount").textContent=badSet.size;
+    let bad=(scope==="bad"?list.filter(e=>badSet.has(e.key)):list.slice().sort((a,b)=>a.name.localeCompare(b.name,"he")))
+      .filter(e=>(filter==="all"||e.kind===filter)&&(!q||e.name.toLowerCase().includes(q)||(e.slug||"").includes(q)));
     const KIND={series:"סדרה",movie:"סרט",live:"ערוץ חי"};
     const el=document.getElementById("zvlList");
     el.innerHTML=bad.slice(0,150).map((e,i)=>`<div class="zvl-row" data-k="${esc(e.key)}">
       ${e.poster?`<img src="${esc(e.poster)}" alt="" loading="lazy">`:'<div class="ph"></div>'}
       <div class="zvl-main"><div class="zvl-name">${esc(e.name)} <span class="pill">${KIND[e.kind]}${e.count?` · ${e.count} פרקים`:""}</span></div>
-        <div class="zvl-cur">${e.slug?("עכשיו: "+esc(e.slug)+(e.mixed?" (שונה בין הפרקים)":"")):"עכשיו: אין כתובת"}</div>
-        <div class="zvl-edit"><input value="${esc(normSlug(e.slug)&&!/[^a-z0-9-]/.test(normSlug(e.slug))?normSlug(e.slug):suggest(e.name,e.en))}" spellcheck="false" autocapitalize="off">
-          <button class="mini zvl-save">שמור</button></div>
-        <div class="zvl-prev"></div><div class="zvl-msg"></div></div></div>`).join("")
+        <div class="zvl-cur">${e.slug?((badSet.has(e.key)?'<span class="zvl-warn">⚠ </span>':'<span class="zvl-ok">✓ </span>')+"/"+esc(e.slug)+(e.mixed?" (שונה בין הפרקים)":"")):'<span class="zvl-warn">⚠ אין כתובת</span>'}</div>
+        <div class="zvl-body"><div class="zvl-edit"><input value="${esc(normSlug(e.slug)&&!/[^a-z0-9-]/.test(normSlug(e.slug))?normSlug(e.slug):suggest(e.name,e.en))}" spellcheck="false" autocapitalize="off">
+          <button class="mini zvl-save">שמור</button>${e.slug?'<button class="mini gray zvl-del" title="מחק כתובת">🗑 מחק כתובת</button>':""}</div>
+        <div class="zvl-prev"></div><div class="zvl-msg"></div></div></div><span class="zvl-chev">▾</span></div>`).join("")
       || '<div class="muted" style="padding:14px">✨ כל הקישורים תקינים</div>';
     if (bad.length>150) el.insertAdjacentHTML("beforeend",`<div class="muted" style="padding:8px">מוצגים 150 מתוך ${bad.length} — צמצם בחיפוש</div>`);
     el.querySelectorAll(".zvl-row").forEach(row=>{
@@ -114,11 +123,19 @@
         prev.textContent = v ? `https://zovex.duckdns.org/${live?"live/":""}${v}` : "";
         if (r && r.taken){ const alt=freeSlug(v,e.key,t);
           msg.className="zvl-msg bad"; msg.innerHTML=`הכתובת תפוסה ע״י «${esc(r.taken)}» · <button class="mini sec zvl-alt" type="button">השתמש ב-${esc(alt)}</button>`;
-          msg.querySelector(".zvl-alt").onclick=()=>{ inp.value=alt; check(); }; btn.disabled=true; return null; }
+          msg.querySelector(".zvl-alt").onclick=ev=>{ ev.stopPropagation(); inp.value=alt; check(); }; btn.disabled=true; return null; }
         if (r){ msg.className="zvl-msg bad"; msg.textContent=r; btn.disabled=true; return null; }
         msg.className="zvl-msg ok"; msg.textContent= v!==raw ? `✓ תקין (נורמל ל-${v})` : "✓ תקין"; btn.disabled=false; return v;
       };
       inp.oninput=check; check();
+      // composedPath ולא target.closest: כפתור שמוחלף תוך כדי הלחיצה (כמו "השתמש ב-x-2") כבר מנותק
+      // מהעץ כשהאירוע מגיע לשורה, ו-closest היה חושב שלחצו מחוץ לאזור העריכה וסוגר אותה.
+      row.addEventListener("click",ev=>{ if(ev.composedPath().some(n=>n.classList&&n.classList.contains("zvl-body"))) return;
+        const open=!row.classList.contains("open"); el.querySelectorAll(".zvl-row.open").forEach(r=>r.classList.remove("open"));
+        if(open){ row.classList.add("open"); inp.focus(); inp.select(); } });
+      const del=row.querySelector(".zvl-del");
+      if(del) del.onclick=async()=>{ if(!confirm(`למחוק את הכתובת /${e.slug} מ«${e.name}»${e.count?` (${e.count} פרקים)`:""}?`)) return;
+        del.disabled=true; const ok=await mutate({upsert:e.ids.map(id=>({id, custom_slug:null}))}); if(ok) render(); else del.disabled=false; };
       btn.onclick=async()=>{ const v=check(); if(!v) return; btn.disabled=true; msg.className="zvl-msg"; msg.textContent="שומר…";
         const ok=await mutate({upsert:e.ids.map(id=>({id, custom_slug:v}))});
         if (ok){ render(); } else { btn.disabled=false; msg.className="zvl-msg bad"; msg.textContent="השמירה נכשלה"; } };
