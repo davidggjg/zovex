@@ -30,7 +30,7 @@
   let mem = null, pending = null;
   async function turnstile() {
     try {
-      const cfg = await (await ORIG("/auth/config", { cache: "no-store" })).json();
+      const cfg = await (await ORIG("/api/auth/config", { cache: "no-store" })).json();
       if (!cfg.turnstile_sitekey) return "";
       if (!window.turnstile) await new Promise((res, rej) => { const s = document.createElement("script");
         s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"; s.async = true;
@@ -47,7 +47,7 @@
     const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
     const pub = b64u(await crypto.subtle.exportKey("raw", kp.publicKey));
     const ts = await turnstile();
-    const r = await ORIG("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await ORIG("/api/auth/session", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pub, plat: "web", turnstile: ts }) });
     if (!r.ok) throw new Error("auth " + r.status);
     const d = await r.json();

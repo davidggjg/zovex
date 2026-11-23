@@ -4,7 +4,7 @@
 זרימה:
   1. הלקוח מייצר זוג מפתחות ECDH P-256 שהמפתח הפרטי שלו לא ניתן לייצוא
      (WebCrypto non-extractable / Android Keystore), ושולח את הציבורי
-     ל-POST /auth/session יחד עם הוכחת-אמינות:
+     ל-POST /api/auth/session יחד עם הוכחת-אמינות:
         web     → Cloudflare Turnstile (בדיקת רובוט בלתי נראית)
         android → Google Play Integrity (האפליקציה המקורית, מכשיר אמיתי)
         pc/any  → app_proof = HMAC(סוד-אפליקציה, המפתח הציבורי)
@@ -338,12 +338,12 @@ class AdminReq(BaseModel):
 def install(api, check_panel_password, client_ip, is_local):
     api.add_middleware(_TokenASGI, is_local=is_local)
 
-    @api.get("/auth/config")
+    @api.get("/api/auth/config")
     async def auth_config():
         return {"mode": CFG.get("mode"), "turnstile_sitekey": CFG.get("turnstile_sitekey", ""),
                 "ttl": SESSION_TTL}
 
-    @api.post("/auth/session")
+    @api.post("/api/auth/session")
     async def auth_session(req: SessionReq, request: Request):
         global _dirty
         ip = client_ip(request)

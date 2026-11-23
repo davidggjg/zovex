@@ -30,10 +30,10 @@ echo "④ טאב אבטחה בפאנל"
 PANEL=$DIR/admin.html JS=$T/panel_tokens.js AUTH_JS=$T/zv-auth.js python3 $T/patch_panel_tokens.py || echo "⚠ הפאנל לא עודכן (השרת כן)"
 echo "⑤ הפעלה מחדש"
 systemctl restart zovex-bot
-ok=0; for i in $(seq 1 20); do sleep 2; curl -fsS -m 5 http://127.0.0.1:8000/auth/config >/dev/null 2>&1 && { ok=1; break; }; done
+ok=0; for i in $(seq 1 20); do sleep 2; curl -fsS -m 5 http://127.0.0.1:8000/api/auth/config >/dev/null 2>&1 && { ok=1; break; }; done
 if [ $ok != 1 ]; then
   cp $T/main.before $DIR/main.py; cp $T/admin.before $DIR/admin.html; systemctl restart zovex-bot
   journalctl -u zovex-bot -n 20 --no-pager; die "השרת לא עלה עם האימות — שוחזר הכל"
 fi
-echo "✅ פעיל במצב מעקב: $(curl -s http://127.0.0.1:8000/auth/config)"
+echo "✅ פעיל במצב מעקב: $(curl -s http://127.0.0.1:8000/api/auth/config)"
 echo "   פאנל → 🛡 אבטחה. לא להפעיל אכיפה לפני שהאפליקציות מעודכנות."
