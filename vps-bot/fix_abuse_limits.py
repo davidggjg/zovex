@@ -19,11 +19,10 @@
     python3 fix_abuse_limits.py --check | (ריק) | --revert
 אחרי ההחלה: systemctl restart zovex-bot
 """
-import os, shutil, sys
+import os, re, shutil, sys
 PATH = os.environ.get("MAIN_PY", "/opt/zovex-bot/main.py")
 MARKER = "[fix_abuse_limits]"
 
-A1 = '@api.post("/feedback/send")\nasync def feedback_send(req: FeedbackSendReq):'
 N1 = '''# [fix_abuse_limits] מגבלות קצב לנקודות הציבוריות (תמיכה/התקדמות/היסטוריה)
 _ABUSE_ON = os.environ.get("STREAM_ABUSE", "1") != "0"
 _abuse_hits: dict = {}     # (ip, bucket) -> [timestamps]
@@ -94,9 +93,7 @@ class _AbuseASGI:
         return await self.app(scope, receive, send)
 
 api.add_middleware(_AbuseASGI)
-
-@api.post("/feedback/send")
-async def feedback_send(req: FeedbackSendReq):'''
+'''
 
 A2 = '''    if req.name:  th["name"] = req.name
     if req.email: th["email"] = req.email
@@ -113,23 +110,33 @@ N2 = '''    if not _UID_RE.match(req.user_id or ""):          # [fix_abuse_limit
                            "ts": datetime.utcnow().isoformat(), "kind": _kind})
     th["messages"] = th["messages"][-300:]   # [fix_abuse_limits] גג לשיחה'''
 
-EDITS = [("middleware", A1, N1), ("שדות תמיכה", A2, N2)]
+EDITS = [("שדות תמיכה", A2, N2)]   # אופציונלי — מדלגים אם הקוד בשרת שונה
+
+def _insert_tail(src: str, block: str) -> str:
+    """מוסיף בלוק ברמת המודול: לפני if __name__ אם יש, אחרת בסוף הקובץ."""
+    m = re.search(r"^if __name__ == [\"']__main__[\"']\s*:", src, re.M)
+    if m:
+        return src[:m.start()] + block + "\n\n" + src[m.start():]
+    return src.rstrip("\n") + "\n\n" + block + "\n"
 
 def main():
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     src = open(PATH, encoding="utf-8").read()
     if arg == "--revert":
         if MARKER not in src: print("אין מה לשחזר"); return 0
-        out = src
+        out = src.replace("\n\n" + N1 + "\n", "\n", 1)
+        if N1 in out: out = out.replace(N1, "", 1)
         for _, a, n in EDITS: out = out.replace(n, a, 1)
         compile(out, "main.py", "exec")
         shutil.copy2(PATH, PATH + ".bak_abuse"); open(PATH, "w", encoding="utf-8").write(out)
         print("✓ שוחזר"); return 0
     if MARKER in src: print("✓ כבר מותקן"); return 0
-    out = src
+    for need in ("JSONResponse", "def _client_ip", "Request", "api = FastAPI"):
+        assert need in src, f"חסר {need} ב-main.py — שלח לי: grep -n 'def _client_ip\\|api = FastAPI' main.py"
+    out = _insert_tail(src, N1)
     for name, a, n in EDITS:
-        c = out.count(a); assert c == 1, f"עוגן '{name}': נמצא {c} פעמים"
-        out = out.replace(a, n, 1)
+        if out.count(a) == 1: out = out.replace(a, n, 1)
+        else: print(f"· דילוג על '{name}' (הקוד בשרת שונה — לא קריטי)")
     for need in ("JSONResponse", "def _client_ip", "Request"):
         assert need in out, f"חסר {need} ב-main.py"
     compile(out, "main.py", "exec")
