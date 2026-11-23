@@ -38,7 +38,7 @@ _UID_RE = re.compile(r"^[A-Za-z0-9_\\-.:@]{1,128}$")
 def _abuse_bucket(method: str, path: str):
     if path == "/feedback/send" and method == "POST": return "fb_send"
     if path == "/feedback/mine": return "fb_read"
-    if path.startswith("/api/progress") or path.startswith("/api/history"): return "user"
+    if path.startswith(("/api/progress", "/api/history", "/api/favorites")): return "user"
     return None
 
 def _abuse_check(ip: str, bucket: str) -> bool:
