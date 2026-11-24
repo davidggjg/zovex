@@ -32,7 +32,10 @@ CFG_FILE = os.path.join(DIR, "zv_tokens_cfg.json")
 SES_FILE = os.path.join(DIR, "zv_sessions.json")
 
 SESSION_TTL = 24 * 3600
-SKEW = 120
+# חלון שעון: קופסאות Android TV בלי RTC סוטות דקות. הגנת replay נשענת על ה-nonce
+# (נשמר 2×SKEW), לא על צרות החלון.
+SKEW = int(os.environ.get("ZV_SKEW", "900"))
+NONCE_MAX = int(os.environ.get("ZV_NONCE_MAX", "1000000"))
 PLATS = ("web", "android", "pc")
 ATT_RANK = {"none": 0, "app": 1, "turnstile": 2, "integrity": 3}
 
@@ -272,9 +275,12 @@ def _check_sig(scope, headers) -> tuple:
     if nk in _nonces:
         return "replay", sid, s
     _nonces[nk] = now + SKEW * 2
-    if len(_nonces) > 300000:
+    if len(_nonces) > NONCE_MAX:
         for k in [k for k, e in _nonces.items() if e < now]:
             _nonces.pop(k, None)
+        if len(_nonces) > NONCE_MAX:          # עדיין מלא: דוחים בקשות חדשות עד שיתפנה
+            _nonces.pop(nk, None)
+            return "replay", sid, s
     return "ok", sid, s
 
 
@@ -310,7 +316,9 @@ class _TokenASGI:
         if st != "ok" and CFG.get("mode") == "enforce":
             code = 403 if st == "blocked" else 401
             resp = JSONResponse({"detail": "נדרש אימות אפליקציה" if code == 401 else "הגישה נחסמה",
-                                 "zv": "reauth" if code == 401 else "blocked"}, status_code=code)
+                                 "zv": "reauth" if code == 401 else "blocked",
+                                 "server_time": int(time.time() * 1000), "reason": st},
+                                status_code=code, headers={"X-ZV-Time": str(int(time.time() * 1000))})
             return await resp(scope, receive, send)
         return await self.app(scope, receive, send)
 
@@ -395,7 +403,8 @@ def install(api, check_panel_password, client_ip, is_local):
                         "created": now, "exp": now + SESSION_TTL, "last": now}
         _dirty = True
         _persist()
-        return {"sid": sid, "spub": _b64u(spub), "exp": int(now + SESSION_TTL), "att": att}
+        return {"sid": sid, "spub": _b64u(spub), "exp": int(now + SESSION_TTL), "att": att,
+                "server_time": int(time.time() * 1000)}
 
     @api.post("/admin/tokens")
     async def admin_tokens(req: AdminReq, request: Request):
