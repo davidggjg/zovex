@@ -1277,7 +1277,10 @@ def _handler_map() -> dict:
 
 # ‎/pinned‎ מעביר את ההודעה הנעוצה ב-‎forward_message‎ ואינו שולח טקסט.
 # בבוט המדומה ‎pinned_message‎ הוא אובייקט דמה ולכן תמיד "יש נעיצה".
-SILENT_OK = {"pinned"}
+# ‎announce‎ שותקת למי שאינו בעל הבוט **בכוונה**: תשובה כלשהי
+# הייתה מגלה שהפקודה קיימת. הבדיקה שמריצה את כל הפקודות אינה
+# בעלים, ולכן היא רואה שקט — וזה הדבר הנכון.
+SILENT_OK = {"pinned", "announce"}
 
 
 # פקודות שכל תפקידן להפנות למקום אחר, ולכן הן מדברות על פקודות אחרות
@@ -4306,6 +4309,98 @@ async def test_transient_error_keeps_group():
         B.db.run("UPDATE chats SET active=1 WHERE chat_id=?", (CHAT,))
 
 
+async def test_sweep_is_parallel_and_bounded():
+    """קבוצה איטית אחת לא מעכבת את כל השאר."""
+    section("סבב נעילה")
+    import asyncio as _a
+    seen, slow = [], -1001
+
+    async def shab(cid, now):
+        if cid == slow:
+            await _a.sleep(0.4)      # הקבוצה התקועה
+        seen.append(cid)
+        return False
+
+    async def hours(cid, now, holds):
+        return None
+
+    real_s, real_h = B._tick_shabbat, B._tick_hours
+    B._tick_shabbat, B._tick_hours = shab, hours
+    try:
+        ids = [slow] + [-2000 - i for i in range(12)]
+        t0 = _a.get_event_loop().time()
+        await B._sweep(ids, 0.0)
+        took = _a.get_event_loop().time() - t0
+        ok("כל הקבוצות נבדקו", len(seen) == len(ids), str(len(seen)))
+        ok("והאיטית לא עיכבה את השאר", took < 0.9, f"{took:.2f}s")
+
+        # קבוצה שתלויה לנצח נחתכת ולא מקפיאה את הסבב
+        async def stuck(cid, now):
+            if cid == slow:
+                await _a.sleep(60)
+            seen.append(cid)
+            return False
+        B._tick_shabbat = stuck
+        seen.clear()
+        real_to = B.SWEEP_TIMEOUT
+        B.SWEEP_TIMEOUT = 0.2
+        t0 = _a.get_event_loop().time()
+        await B._sweep(ids, 0.0)
+        took = _a.get_event_loop().time() - t0
+        B.SWEEP_TIMEOUT = real_to
+        ok("קבוצה תקועה נחתכת", took < 1.0, f"{took:.2f}s")
+        ok("והשאר כן נבדקו", len(seen) == len(ids) - 1, str(len(seen)))
+    finally:
+        B._tick_shabbat, B._tick_hours = real_s, real_h
+
+
+async def test_owner_announce():
+    """שידור: בעלים בלבד, תצוגה מקדימה לפני שליחה."""
+    section("שידור לכל המשתמשים")
+    OWNER, OTHER = 8658294616, 4242
+    real_owner = B.OWNER_ID
+    B.OWNER_ID = OWNER
+
+    def pm(text, uid):
+        return Message(message_id=9970, date=dt.datetime.now(),
+                       chat=Chat(id=uid, type="private"),
+                       from_user=User(id=uid, is_bot=False, first_name="x"),
+                       text=text)
+    try:
+        # מי שאינו בעלים לא מקבל שום סימן שהפקודה קיימת
+        before = len(SENT)
+        await B.cmd_announce(pm("/announce שלום", OTHER))
+        ok("לא-בעלים לא מקבל דבר", len(SENT) == before)
+
+        # בעלים: קודם תצוגה מקדימה, בלי לשלוח לאיש
+        before = len(SENT)
+        await B.cmd_announce(pm("/announce הודעה חשובה", OWNER))
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("הבעלים מקבל תצוגה מקדימה",
+           "Preview" in out or "תצוגה מקדימה" in out, out[:60])
+        ok("והטיוטה נשמרה",
+           B.db.get(0, "announce_draft", "") == "הודעה חשובה")
+
+        # ורק send שולח בפועל
+        sent_to = []
+        real_bc = B._owner_broadcast
+
+        async def fake_bc(text, media_id="", media_kind=""):
+            sent_to.append(text)
+            return 7, 2
+        B._owner_broadcast = fake_bc
+        before = len(SENT)
+        await B.cmd_announce(pm("/announce send", OWNER))
+        out = " ".join(t for _c, t, _m in SENT[before:])
+        ok("send משדר את הטיוטה", sent_to == ["הודעה חשובה"], str(sent_to))
+        ok("ומדווח כמה הגיעו", "7" in out and "2" in out, out[:80])
+        ok("והטיוטה נוקתה", not B.db.get(0, "announce_draft", ""))
+        B._owner_broadcast = real_bc
+    finally:
+        B.OWNER_ID = real_owner
+        B.db.set(0, "announce_draft", "")
+
+
 async def main() -> int:
     B.bot = FakeBot()
     B.sync_admins = fake_admins
@@ -4381,6 +4476,8 @@ async def main() -> int:
     await test_recovers_after_crash()
     await test_filter_never_deletes_an_admin()
     await test_transient_error_keeps_group()
+    await test_sweep_is_parallel_and_bounded()
+    await test_owner_announce()
     await test_evidence_flow()
     await test_filter_file()
     await test_ephemeral()

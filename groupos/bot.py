@@ -767,6 +767,39 @@ def _owner_actions(chat_id: int) -> list[tuple[str, str, str]]:
     return out
 
 
+async def _owner_broadcast(text: str, media_id: str = "",
+                           media_kind: str = "") -> tuple[int, int]:
+    """שולח לכל מי שאי פעם פתח שיחה עם הבוט. ‎(הגיע, נכשל)‎.
+
+    למי בדיוק: משתמשים שאינם בוטים שראינו, ולכל אחד **בצ'אט
+    הפרטי שלו**. מי שחסם את הבוט או מחק את השיחה פשוט נכשל ונספר,
+    וזה גם המידע המעניין — כמה באמת מקבלים.
+
+    לאט בכוונה. טלגרם מגבילה שידור, ובוט שמנסה לשלוח לאלף אנשים
+    בבת אחת נחסם זמנית וכל השאר לא מקבלים כלום."""
+    rows = db.q("SELECT user_id FROM users WHERE is_bot=0 ORDER BY user_id")
+    got = bad = 0
+    for i, r in enumerate(rows):
+        uid = r["user_id"]
+        try:
+            if media_id:
+                await send_content(uid, text, media_id, media_kind or "photo",
+                                   "", to_user=None)
+            else:
+                ok_msg = await send(uid, text, is_group=False)
+                if ok_msg is None:
+                    bad += 1
+                    continue
+            got += 1
+        except TelegramAPIError:
+            bad += 1
+        # עשרים בשנייה הוא הקצב שטלגרם מרשה לשידור. חריגה ממנו
+        # אינה "מהר יותר" — היא חסימה זמנית שעוצרת את כל השאר.
+        if i % 20 == 19:
+            await asyncio.sleep(1.0)
+    return got, bad
+
+
 async def my_groups_live(user_id: int) -> list[tuple[int, str]]:
     """הקבוצות שהאדם מנהל **באמת**, אחרי אימות מול טלגרם.
 
@@ -2822,6 +2855,50 @@ async def cmd_here(msg: Message):
                thread_id=thread)
 
 
+@dp.message(Command("announce"))
+async def cmd_announce(msg: Message):
+    """שידור לכל מי שאי פעם פתח את הבוט. בעל הבוט בלבד.
+
+    בצ'אט הפרטי ולא בקבוצה: זו פעולה על **כל** המשתמשים, ואין לה
+    שום קשר לקבוצה מסוימת. שתי מדרגות בכוונה — ‎/announce טקסט‎
+    מראה תצוגה מקדימה וכמה יקבלו, ו-‎/announce send‎ שולח. שידור
+    לאלף אנשים אינו פעולה שעושים בטעות בלחיצה אחת."""
+    touch(msg)
+    if msg.from_user is None or not is_owner(msg.from_user.id):
+        return                      # לא בעלים — אין פקודה כזאת
+    if msg.chat.type != ChatType.PRIVATE:
+        await reply(msg, T(msg, "ann.private_only"))
+        return
+    lg = lang_of(msg)
+    body = (msg.text or "").split(maxsplit=1)
+    rest = body[1].strip() if len(body) > 1 else ""
+    total = db.one("SELECT COUNT(*) c FROM users WHERE is_bot=0")
+    n = total["c"] if total else 0
+
+    if rest.lower() == "send":
+        draft = db.get(0, "announce_draft", "") or ""
+        if not draft:
+            await send(msg.chat.id, i18n.t("ann.nothing", lg), is_group=False)
+            return
+        await send(msg.chat.id, i18n.t("ann.started", lg, n=n),
+                   is_group=False)
+        got, bad = await _owner_broadcast(draft)
+        db.set(0, "announce_draft", "")
+        audit.log(0, "owner.announce", actor_id=msg.from_user.id,
+                  after=f"{got}/{n}", severity="high")
+        await send(msg.chat.id, i18n.t("ann.done", lg, got=got, bad=bad),
+                   is_group=False)
+        return
+
+    if not rest:
+        await send(msg.chat.id, i18n.t("ann.usage", lg, n=n), is_group=False)
+        return
+
+    db.set(0, "announce_draft", rest)
+    await send(msg.chat.id, i18n.t("ann.preview", lg, n=n), is_group=False)
+    await send(msg.chat.id, rest, is_group=False)
+
+
 @dp.message(Command("rules"))
 async def cmd_rules(msg: Message):
     touch(msg)
@@ -4397,15 +4474,46 @@ async def autolock_loop():
         except Exception as e:
             log.warning("שליפת קבוצות לנעילה אוטומטית נכשלה: %s", e)
             continue
-        for row in rows:
-            cid = row["chat_id"]
-            if cid >= 0:            # צ'אט פרטי אינו נסגר
-                continue
+        ids = [r["chat_id"] for r in rows if r["chat_id"] < 0]
+        await _sweep(ids, now)
+
+
+# כמה קבוצות נבדקות במקביל, וכמה זמן מותר לכל אחת.
+#
+# הסריקה רצה קבוצה-אחרי-קבוצה, ולכן **קבוצה אחת איטית עיכבה את
+# כולן**: המתנת קצב מטלגרם, בקשת רשת שנתקעה, נעילה שלוקחת זמן.
+# זה בדיוק "אתמול נעל שעה אחרי, היום חצי שעה" — עיכוב משתנה, כי
+# הוא תלוי במה שקרה לקבוצות שלפניה בתור.
+#
+# הסף על קבוצה בודדת חשוב לא פחות מהמקביליות: בלעדיו קבוצה אחת
+# שתלויה לנצח מקפיאה את הסבב גם כשהוא מקבילי.
+SWEEP_PARALLEL = 8
+SWEEP_TIMEOUT = 20.0
+SWEEP_SLOW = 30.0            # סבב ארוך מזה נרשם, כדי שלא יישאר סמוי
+
+
+async def _sweep(ids: list[int], now: float) -> None:
+    """סבב אחד על כל הקבוצות, במקביל ובזמן חסום."""
+    sem = asyncio.Semaphore(SWEEP_PARALLEL)
+    started = time.monotonic()
+
+    async def one(cid: int) -> None:
+        async with sem:
             try:
-                holds = await _tick_shabbat(cid, now)
-                await _tick_hours(cid, now, holds)
-            except Exception as e:
+                async with asyncio.timeout(SWEEP_TIMEOUT):
+                    holds = await _tick_shabbat(cid, now)
+                    await _tick_hours(cid, now, holds)
+            except asyncio.TimeoutError:
+                log.warning("נעילה אוטומטית בקבוצה %s עברה %.0f שניות — "
+                            "מדלג על הסבב הזה", cid, SWEEP_TIMEOUT)
+            except Exception as e:                           # noqa: BLE001
                 log.warning("נעילה אוטומטית בקבוצה %s נכשלה: %s", cid, e)
+
+    await asyncio.gather(*(one(c) for c in ids))
+    took = time.monotonic() - started
+    if took > SWEEP_SLOW:
+        log.warning("סבב הנעילה על %d קבוצות ארך %.0f שניות — "
+                    "סגירות עלולות לאחר", len(ids), took)
 
 
 # ── הפקודות ───────────────────────────────────────────────────────────────

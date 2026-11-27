@@ -606,6 +606,9 @@ COMMANDS: list[tuple[str, str]] = [
     ("lockdown", "chat.lockdown"),
     # "שלח את זה בנושא שאתה רוצה" — בקבוצה שמחולקת לנושאים.
     ("here",     "settings.write"),
+    # שידור לכל המשתמשים. בעל הבוט בלבד — הפקודה בודקת זאת בעצמה,
+    # והיא אינה מופיעה לאיש אחר.
+    ("announce", "settings.write"),
     ("say",      "chat.say"),
     ("del",      "msg.delete"),
     ("pin",      "chat.pin"),
@@ -826,7 +829,7 @@ HELP_CATS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("warns", "⚠️", ("warn", "unwarn", "warns", "dwarn", "swarn",
                      "warnings", "warnlimit", "resetwarns", "setwarnmode")),
     ("locks", "🔒", ("lock", "unlock", "locks", "locktypes", "lockdown",
-                     "silent", "here")),
+                     "silent", "here", "announce")),
     ("filters", "🧹", ("filter", "filteradd", "filterbulk", "filteritems",
                        "stop",
                        "stopall", "filters", "addblock",
@@ -1266,18 +1269,20 @@ def ai_screen(chat_id: int, state: dict, lang: str = i18n.DEFAULT) -> Screen:
                              value=ctx or i18n.t("aim.no_context", lang)))
     if not state.get("keys"):
         txt += "\n\n" + i18n.t("aim.no_keys", lang)
-    rows = [
-        [(("🟢 " if state.get("ai") else "⚪ ") + i18n.t("sec.ai", lang),
-          cb(chat_id, "sw", "ai")),
-         (("🟢 " if state.get("aivision") else "⚪ ")
-          + i18n.t("sw.aivision", lang), cb(chat_id, "sw", "aivision"))],
-        [(("🟢 " if state.get("aivoice") else "⚪ ")
-          + i18n.t("sw.aivoice", lang), cb(chat_id, "sw", "aivoice")),
-         (("🟢 " if state.get("titles") else "⚪ ")
-          + i18n.t("sw.titles_ok", lang), cb(chat_id, "sw", "ai_titles_ok"))],
-        [("✏️ " + i18n.t("field.aictx", lang), cb(chat_id, "ask", "aictx"))],
-        [(i18n.t("menu.back", lang), cb(chat_id, "main"))],
-    ]
+    # **שורה לכל מתג.** הכיתובים כאן ארוכים ("שמות של סרטים
+    # מותרים", "בדיקה חכמה של טקסט"), ובחצי שורה הם נגזרים —
+    # והנורה שבתחילתם יורדת מהמסך. מתג שלא רואים את מצבו גרוע
+    # ממתג שאינו קיים.
+    rows = [[(("🟢 " if state.get(key) else "⚪ ") + i18n.t(label, lang),
+              cb(chat_id, "sw", sw))]
+            for key, sw, label in (
+                ("ai", "ai", "sec.ai"),
+                ("aivision", "aivision", "sw.aivision"),
+                ("aivoice", "aivoice", "sw.aivoice"),
+                ("titles", "ai_titles_ok", "sw.titles_ok"))]
+    rows.append([("✏️ " + i18n.t("field.aictx", lang),
+                  cb(chat_id, "ask", "aictx"))])
+    rows.append([(i18n.t("menu.back", lang), cb(chat_id, "main"))])
     return Screen(txt, rows)
 
 
