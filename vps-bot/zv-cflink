@@ -1,0 +1,40 @@
+#!/bin/bash
+# ZOVEX · קישור https חתום דרך ה-Cloudflare Worker
+#   zv-cflink setup https://<שם>.workers.dev   ← פעם אחת: יוצר סוד ומדפיס אותו להדבקה ב-Cloudflare
+#   zv-cflink "http://...index.m3u8"           ← מדפיס קישור https להדבקה בפאנל
+CFG=${ZV_CF_CFG:-/opt/zovex-bot/cf_relay.env}
+if [ "${1:-}" = "setup" ]; then
+  [ -n "${2:-}" ] || { echo "שימוש: zv-cflink setup https://<שם>.workers.dev"; exit 1; }
+  BASE="${2%/}"
+  [ -f "$CFG" ] && . "$CFG"
+  SEC="${CF_RELAY_SECRET:-$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')}"
+  umask 077; printf 'CF_RELAY_BASE=%s\nCF_RELAY_SECRET=%s\n' "$BASE" "$SEC" > "$CFG"
+  echo "✅ נשמר. עכשיו ב-Cloudflare: Worker → Settings → Variables and Secrets → Add"
+  echo "   Type: Secret · Name: SECRET · Value:"
+  echo
+  echo "   $SEC"
+  echo
+  echo "ואז Deploy. בדיקה:  zv-cflink \"<קישור http>\""
+  exit 0
+fi
+[ -f "$CFG" ] || { echo "קודם: zv-cflink setup https://<שם>.workers.dev"; exit 1; }
+. "$CFG"
+URL="${1:-}"; [ -n "$URL" ] || { echo "שימוש: zv-cflink \"http://...m3u8\""; exit 1; }
+LINK=$(CF_RELAY_SECRET="$CF_RELAY_SECRET" python3 - "$URL" "$CF_RELAY_BASE" <<'PY'
+import base64,hmac,hashlib,os,sys
+url,base=sys.argv[1],sys.argv[2]; sec=os.environ["CF_RELAY_SECRET"]
+b=lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+sig=b(hmac.new(sec.encode(),url.encode(),hashlib.sha256).digest())[:22]
+name="i.m3u8" if ".m3u8" in url.lower() else "s.ts"
+print(f"{base}/r/{b(url.encode())}/{sig}/{name}")
+PY
+)
+echo "$LINK"
+echo
+R=$(curl -s -m 25 "$LINK"); C=$(curl -s -m 25 -o /dev/null -w "%{http_code}" "$LINK")
+echo "בדיקת רשימה: $C"
+if [ "$C" = "200" ]; then
+  SEG=$(echo "$R" | grep "^https" | head -1)
+  [ -n "$SEG" ] && curl -s -m 30 -o /dev/null -w "בדיקת קטע וידאו: %{http_code} · %{size_download} בייטים · %{time_total}ש\n" "$SEG"
+fi
+echo "↑ אם שניהם 200 והקטע מאות KB — הדבק את הקישור העליון בפאנל (שידורים חיים) כקישור הערוץ."
