@@ -83,13 +83,15 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
   }
 
   // ── state ──
-  const { movies, loading, liveChannels, loadMovies } = useMovieLibrary();
+  const { movies, loading, complete, liveChannels, loadMovies } = useMovieLibrary();
   const [categories, saveCats] = useCategories(movies);
   const isDesktop = useIsDesktop();
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("הכל");
-  const [selectedMovie, setSelectedMovie] = useState(() => lsJson("zovex_movie"));
-  const [selectedSeries, setSelectedSeries] = useState(() => ls("zovex_series"));
+  // כניסה דרך קישור: מה שבכתובת קובע, לא מה שנשאר בזיכרון מהביקור הקודם
+  // (אחרת סרט ישן מופיע עד שהקישור מזוהה).
+  const [selectedMovie, setSelectedMovie] = useState(() => (slug ? null : lsJson("zovex_movie")));
+  const [selectedSeries, setSelectedSeries] = useState(() => (slug ? null : ls("zovex_series")));
   const [showDonation, setShowDonation] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
 
@@ -367,7 +369,14 @@ function HomeMain({ user, onLogout, isGuest, loginWithGoogle }) {
     />
   );
 
-  if (loading) return (
+  // כניסה ישירה לקישור (מגוגל / וואטסאפ): ה-800 הראשונים הם רק החדשים, וסרט
+  // ישן לא נמצא בהם. בלי ההמתנה הזו הצופה ראה את מסך הבית, ולפעמים — תלוי
+  // מתי הגיע הקטלוג המלא — הסרט נפתח מאוחר יותר. עכשיו: "טוען" עד שהפריט
+  // נמצא, או עד שהקטלוג המלא הגיע.
+  const waitingForDeepLink = !!slug && !["search", "api", "live"].includes(slug)
+    && !complete && !selectedMovie && !selectedSeries && !playerMovie;
+
+  if (loading || waitingForDeepLink) return (
     <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100vh", background: "#0a0a0a" }}>
       <style>{SPIN}</style>
       <div style={{ textAlign: "center" }}>

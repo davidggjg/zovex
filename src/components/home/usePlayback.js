@@ -21,7 +21,14 @@ const BASE = import.meta.env.BASE_URL.endsWith("/")
 
 // פתיחת נגן הווידאו — כולל שמירת היסטוריה/המשך צפייה, עדכון ה-URL, ורענון קישורי Kaltura
 export function usePlayback({ user, loadProgress, saveHistory }) {
-  const [playerMovie, setPlayerMovie] = useState(() => lsJson("zovex_player"));
+  // כניסה דרך קישור לסרט אחר — לא משחזרים נגן ישן מהזיכרון
+  const [playerMovie, setPlayerMovie] = useState(() => {
+    try {
+      const p = window.location.pathname.slice((import.meta.env.BASE_URL || "/").length).replace(/\/+$/, "");
+      if (p && p !== "search") return null;
+    } catch (_) {}
+    return lsJson("zovex_player");
+  });
   const [resumeSeconds, setResumeSeconds] = useState(0);
   const [kalturaRefreshing, setKalturaRefreshing] = useState(false);
 

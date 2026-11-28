@@ -23,6 +23,9 @@ function mergeLiveChannels(prev, fresh) {
 export function useMovieLibrary() {
   const [movies, setMovies] = useState([]);
   const [loading, setLoading] = useState(true);
+  // complete: הקטלוג המלא נטען (או שהטעינה נכשלה סופית). כניסה ישירה
+  // לקישור של סרט ישן ממתינה לזה — ב-800 הראשונים הוא לא נמצא.
+  const [complete, setComplete] = useState(false);
   const [liveChannels, setLiveChannels] = useState([]);
 
   // ── טעינת הקטלוג בשני שלבים ────────────────────────────────────────────
@@ -77,6 +80,7 @@ export function useMovieLibrary() {
       } catch {}
     }
     setLoading(false);
+    setComplete(true);
   };
 
   // קריאה מ-raw.githubusercontent.com — מתעדכן מיד אחרי שמירה בלי לחכות ל-build
@@ -110,5 +114,5 @@ export function useMovieLibrary() {
     return () => clearInterval(interval);
   }, [liveChannels.length]);
 
-  return { movies, loading, liveChannels, loadMovies };
+  return { movies, loading, complete, liveChannels, loadMovies };
 }

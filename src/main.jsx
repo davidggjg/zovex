@@ -21,7 +21,14 @@ try {
   }
 } catch (_) {}
 
-ReactDOM.createRoot(document.getElementById('root')).render(
+// ── דפי SEO מרונדרים מראש ────────────────────────────────────────────────
+// prerender-routes.js שם על ‎#root‎ עיצוב מוטבע (padding, גופן, רקע) כדי
+// שהתוכן הסטטי ייראה סביר לבוטים. React מחליף את התוכן אבל לא את המאפיינים
+// של הקונטיינר — והאתר כולו נשאר "מעוות" אחרי שעוברים לדף הבית.
+const rootEl = document.getElementById('root');
+rootEl.removeAttribute('style');
+
+ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
